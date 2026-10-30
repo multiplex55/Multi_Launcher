@@ -1,0 +1,31 @@
+{
+  "phase": "G05-M1-A fixture correction focused preparation",
+  "command": "cargo nextest list -p multi_launcher --lib --cargo-profile fast-dev --offline --locked --color never -E \"test(hotfolder_condition_metadata_) | test(=hotfolder::model::tests::metadata_conditions_use_inclusive_bounds_and_one_captured_time) | test(=hotfolder::model::tests::modified_age_bounds_preserve_subsecond_precision) | test(=hotfolder::model::tests::file_conditions_validate_ranges_bound_utf8_and_defer_content) | test(=hotfolder::model::tests::condition_bearing_v2_json_rejects_negative_and_overflow_unsigned_bounds) | test(=hotfolder::capability::tests::enabled_condition_rules_fail_closed_until_the_shared_evaluator_is_installed) | test(=hotfolder::store::tests::legacy_v1_load_is_read_only_and_intentional_save_upgrades_without_changing_untouched_rules) | test(=hotfolder::store::tests::legacy_condition_rows_and_malformed_v2_literals_are_quarantined_without_diagnostics_leaking) | test(=hotfolder::runtime::tests::settled_observation_leases_transfer_without_success_and_recheck_evidence) | test(=hotfolder::execution::tests::m10c_fake_ready_execution_dedupes_partial_outputs_and_caps_runs) | test(=hotfolder::execution::tests::external_terminal_is_correlated_and_finalized_once_by_c)\" --message-format json",
+  "head": "c009b533059acb9404f453484b053363dd1d51af",
+  "source_git_blobs": {
+    "src/hotfolder/model.rs": "b82c6849e03f90fdcd8762843ddf438c4b737f0d",
+    "src/hotfolder/execution.rs": "4de797b4626218d13dcc1e080c24276f8350d7f3",
+    "src/hotfolder/mod.rs": "1f07ab0ea5f6e3760b736d2cb412e4b4eea4c0ed",
+    "src/hotfolder/runtime.rs": "3da1790f8eccf15d69446e1428b2d3c73865dd6c",
+    "src/hotfolder/capability.rs": "2e6dbe8a41e6ac5f7aaba5c7ecc13257d441e02c",
+    "src/hotfolder/store.rs": "3ec58d0d5f5337228ebeaa54e99bce665481e2fb",
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380"
+  },
+  "toolchain": [
+    "cargo-nextest 0.9.135 (610eefb88 2026-05-14)",
+    "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "x86_64-pc-windows-msvc"
+  ],
+  "start": "2026-10-29T22:09:13.3523413-04:00",
+  "cap_seconds": 600,
+  "aggregate_incremental_seconds_before": 0,
+  "timed_out": false,
+  "raw_stdout_path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g05-m1a-20261029-r01\\correction-list.stdout.json",
+  "pid": 5448,
+  "end": "2026-10-29T22:10:42.1803694-04:00",
+  "elapsed_seconds": 88.824,
+  "exit_code": 0,
+  "output_drained": true
+}

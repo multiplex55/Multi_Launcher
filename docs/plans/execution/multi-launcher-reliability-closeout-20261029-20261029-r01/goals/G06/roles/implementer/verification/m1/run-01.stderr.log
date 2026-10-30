@@ -1,0 +1,236 @@
+warning: variant `Unknown` is never constructed
+   --> vendor\epaint\src\text\font.rs:361:5
+    |
+357 | pub(crate) enum ShapeBufferProvenance {
+    |                 --------------------- variant in this enum
+...
+361 |     Unknown,
+    |     ^^^^^^^
+    |
+    = note: `ShapeBufferProvenance` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `epaint` (lib) generated 1 warning
+warning: use of deprecated constant `std::f32::EPSILON`: replaced by the `EPSILON` associated constant on `f32`
+  --> vendor\egui\src\containers\scene.rs:79:42
+   |
+79 |             zoom_range: Rangef::new(f32::EPSILON, 1.0),
+   |                                          ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `egui` (lib) generated 1 warning
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:720:19
+    |
+720 |     pub fn pixels(&self) -> Pixels<P> {
+    |                   ^^^^^     ^^^^^^^^^ the same lifetime is hidden here
+    |                   |
+    |                   the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+720 |     pub fn pixels(&self) -> Pixels<'_, P> {
+    |                                    +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:733:17
+    |
+733 |     pub fn rows(&self) -> Rows<P> {
+    |                 ^^^^^     ^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+733 |     pub fn rows(&self) -> Rows<'_, P> {
+    |                                +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:742:29
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<P> {
+    |                             ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                             |
+    |                             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<'_, P> {
+    |                                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:754:27
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<P> {
+    |                           ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                           |
+    |                           the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<'_, P> {
+    |                                                   +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:898:23
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<P> {
+    |                       ^^^^^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<'_, P> {
+    |                                               +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:911:21
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<P> {
+    |                     ^^^^^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                     |
+    |                     the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<'_, P> {
+    |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:918:33
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<P> {
+    |                                 ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                 |
+    |                                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<'_, P> {
+    |                                                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:931:31
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<P> {
+    |                               ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                               |
+    |                               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<'_, P> {
+    |                                                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\image.rs:932:15
+    |
+932 |     fn pixels(&self) -> Pixels<Self>
+    |               ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |               |
+    |               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+932 |     fn pixels(&self) -> Pixels<'_, Self>
+    |                                +++
+
+warning: `image` (lib) generated 9 warnings (run `cargo fix --lib -p image` to apply 9 suggestions)
+warning: constant `SCANNER_CANCELLATION_INTERVAL` is never used
+  --> crates\multi_launcher_table_core\src\lib.rs:53:7
+   |
+53 | const SCANNER_CANCELLATION_INTERVAL: usize = 4096;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scanner_cancellation_checkpoint` is never used
+    --> crates\multi_launcher_table_core\src\lib.rs:1031:4
+     |
+1031 | fn scanner_cancellation_checkpoint(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `end_offset` is never read
+  --> crates\multi_launcher_table_core\src\stream_scan.rs:25:9
+   |
+22 | pub(crate) struct StreamRecord {
+   |                   ------------ field in this struct
+...
+25 |     pub end_offset: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `multi_launcher_table_core` (lib) generated 3 warnings
+warning: unused variable: `replaced_scan_job`
+    --> src\table_utility_session.rs:3521:13
+     |
+3521 |         let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+     |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_replaced_scan_job`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi_launcher` (lib test) generated 1 warning (run `cargo fix --lib -p multi_launcher --tests` to apply 1 suggestion)
+    Finished `fast-dev` profile [unoptimized + debuginfo] target(s) in 1.59s
+────────────
+ Nextest run ID af6c988d-2c01-4e88-aa5d-73ae9faf9ac7 with nextest profile: default
+    Starting 25 tests across 1 binary (6435 tests skipped)
+        PASS [   0.028s] ( 1/25) multi_launcher gui::jump_mode::config::tests::jump_configuration_chord_validates_supported_key_and_canonical_modifiers
+        PASS [   0.040s] ( 2/25) multi_launcher gui::jump_mode::config::tests::jump_configuration_alphabet_rejects_invalid_shapes
+        PASS [   0.053s] ( 3/25) multi_launcher gui::jump_mode::config::tests::jump_configuration_preferences_serialize_canonically_and_recover_by_field
+        PASS [   0.060s] ( 4/25) multi_launcher gui::jump_mode::config::tests::jump_configuration_chord_rejects_malformed_ambiguous_and_reserved_input
+        PASS [   0.067s] ( 5/25) multi_launcher gui::jump_mode::config::tests::jump_configuration_alphabet_normalizes_case_and_preserves_order
+        PASS [   0.068s] ( 6/25) multi_launcher gui::jump_mode::ui::tests::entering_settings_surrenders_only_the_background_query_focus
+        PASS [   0.098s] ( 7/25) multi_launcher gui::jump_mode::ui::tests::disabling_after_configuration_change_keeps_release_fence_without_blocking_ordinary_input
+        PASS [   0.106s] ( 8/25) multi_launcher gui::jump_mode::ui::tests::committed_configuration_change_retires_prefix_and_fences_held_leader
+        PASS [   0.042s] ( 9/25) multi_launcher hotkey::validation::tests::g06_jump_checks_active_radial_and_macro_reservations
+        PASS [   0.076s] (10/25) multi_launcher gui::jump_mode::ui::tests::settings_does_not_take_foreign_focused_window_and_stale_layers_are_ignored
+        PASS [   0.042s] (11/25) multi_launcher settings::model::tests::jump_preferences_default_round_trip_and_recover_independently
+        PASS [   0.046s] (12/25) multi_launcher hotkey::validation::tests::g06_jump_routes_reject_exact_local_cofire_without_registering_jump
+        PASS [   0.061s] (13/25) multi_launcher settings_editor::mapping::tests::g06_jump_draft_conflicts_respect_enabled_routes_and_modifier_subsets
+        PASS [   0.071s] (14/25) multi_launcher settings_editor::mapping::tests::g06_jump_drafts_validate_canonicalize_and_reset_without_changing_baseline
+        PASS [   0.050s] (15/25) multi_launcher settings_editor::mapping::tests::jump_preferences_survive_unrelated_settings_editor_save
+        PASS [   0.066s] (16/25) multi_launcher settings_editor::mapping::tests::g06_jump_sample_uses_stable_allocator_and_catalog_control_ids
+        PASS [   0.099s] (17/25) multi_launcher settings_save::tests::g06_jump_final_merged_candidate_is_rejected_by_preparation_before_persistence
+        FAIL [   0.123s] (18/25) multi_launcher settings_save::tests::g06_jump_stale_prepared_draft_cannot_overwrite_concurrent_preferences
+  stdout ───
+
+    running 1 test
+    test settings_save::tests::g06_jump_stale_prepared_draft_cannot_overwrite_concurrent_preferences ... FAILED
+
+    failures:
+
+    failures:
+        settings_save::tests::g06_jump_stale_prepared_draft_cannot_overwrite_concurrent_preferences
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6459 filtered out; finished in 0.05s
+
+  stderr ───
+
+    thread 'settings_save::tests::g06_jump_stale_prepared_draft_cannot_overwrite_concurrent_preferences' (2504) panicked at src\settings_save.rs:1819:34:
+    called `Result::unwrap()` on an `Err` value: Disconnected
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.067s] (19/25) multi_launcher settings_save::tests::jump_mode_general_save_acknowledges_and_rolls_back_owned_setting
+        PASS [   0.829s] (20/25) multi_launcher settings_save::tests::g06_jump_acknowledgment_publishes_committed_values_and_keeps_newer_draft
+        PASS [   1.184s] (21/25) multi_launcher settings_editor::save::tests::jump_mode_configuration_tracks_startup_and_committed_settings
+        PASS [   1.516s] (22/25) multi_launcher gui::render::tests::notes_query_activation_hint_completion_needs_release_before_fresh_enter
+        PASS [   1.744s] (23/25) multi_launcher settings_editor::render::settings_shell_tests::jump_mode_focuses_real_settings_controls_and_later_egui_keys_activate_them
+        PASS [   2.002s] (24/25) multi_launcher settings_save::tests::g06_jump_failed_preparation_and_apply_preserve_live_baseline_and_draft
+        PASS [   3.488s] (25/25) multi_launcher gui::render::tests::launcher_show_focus_requests_actual_query_for_empty_and_nonempty_queries_in_both_jump_modes
+────────────
+     Summary [   3.560s] 25 tests run: 24 passed, 1 failed, 6435 skipped
+        FAIL [   0.123s] (18/25) multi_launcher settings_save::tests::g06_jump_stale_prepared_draft_cannot_overwrite_concurrent_preferences
+error: test run failed

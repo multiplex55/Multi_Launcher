@@ -1,0 +1,10 @@
+{
+  "utc": "2026-10-30T06:27:58.9753114Z",
+  "matching_build_or_test_processes": [],
+  "owned_exec_sessions": "All completed and output drained",
+  "forced_termination": "NONE",
+  "temporary_source_wrappers": "NONE",
+  "fixture_lifetime": "Scoped TempDir and inert runtime owners; test subprocesses exited",
+  "retained_evidence": "Ignored target/closeout-g08-m1-20261030-r01 plus selected repository receipts",
+  "source_changes_after_final_run": "NONE"
+}

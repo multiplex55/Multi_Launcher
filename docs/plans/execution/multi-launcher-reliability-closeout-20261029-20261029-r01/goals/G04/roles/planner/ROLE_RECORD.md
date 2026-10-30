@@ -1,0 +1,7 @@
+# G04 planner role record
+
+Read-only /root/g00_planner. Requested gpt-6-astra/max; local configured gpt-6.1-sol/high unchanged; actual backend UNVERIFIED. Branch codex/closeout-g04-screenshot-native-redaction-20261029-r01, baseline06d23fc8a520d91f71d02cd1cc2fb95cc08500b4; authoritative integrationdf94f192290ff14bdd6cc083f8aa0a62644f09ae. Parent persists returned content.
+
+Read complete G04 pair and own NATIVE_CAPABILITY/SOURCE_REVALIDATION. Inspected current editor gestures/history/controls/composition/Save/Copy and relevant raster/editor tests plus immediate capture-delivery/editor-construction callers, no capture audit/rewrite. Primary Redact creates captured-effect history operations, secondary crop separate; Undo/Redo markup only. Save/Copy share apply_edits, Solid opaque replacement. Protocol uses Marker-selected secondary crop explicit press-origin branch. No source defect established.
+
+Native evidence is parent's documented inspection; planner no native calls/independent driver exercise. Held secondary drag unavailable in inspected API; binary provenance/controlled clipboard proof unestablished. Returned one documentation-only packet and complete native-gesture-output-proof Goal/Kickstart. Recommended NATIVE_PROOF_DEFERRED; source OBSERVED, current Cargo/unit/native/output NOT_RUN. No edits/builds/tests/fixtures/launch/clipboard/Git/dispatch. NO_ACTION distinct additional findings; existing acceptance gap preserved without production defect allegation or UNIT_VERIFIED claim.

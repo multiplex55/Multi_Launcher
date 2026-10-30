@@ -1,0 +1,37 @@
+{
+  "checked_utc": "2026-10-30T07:38:11.215682+00:00",
+  "diff_check_exit": 0,
+  "markdown_links_checked": 22,
+  "all_links_resolve": true,
+  "changed_paths": [
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/PROGRESS.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/RISKS.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/SOURCE_REVALIDATION.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/VERIFICATION.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/orchestrator/ROLE_RECORD.md",
+    "docs/plans/reliability-feature-closeout-20261029/goals/G09-activity-center-retirement/GOAL.md",
+    "src/duplicate_finder/tests.rs",
+    "src/gui/screenshot_capture.rs",
+    "src/thread_reaper.rs"
+  ],
+  "untracked_owned_paths": [
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/ROLE_RECORD.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/cleanup.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/filter.txt",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/final-source-parity.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/initial-list.receipt.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/initial-list.started.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/initial-list.stderr.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/initial-run.receipt.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/initial-run.started.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/initial-run.stderr.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/initial-run.stdout.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/native-handle.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/production-parity.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/implementer/verification/selected-tests.json"
+  ],
+  "preserved_parent_path": "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/roles/orchestrator/ROLE_RECORD.md",
+  "source_scope_exact": true,
+  "all_input_blobs_match_successful_run": true,
+  "raw_inventory_ignored": true
+}

@@ -1,0 +1,9 @@
+# G04 native capability receipt — 2026-10-30
+
+Parent applied computer-use skill at C:/Users/Jay/.codex/plugins/cache/openai-bundled/computer-use/26.928.20755/skills/computer-use/SKILL.md and read complete docs/guidance.md, api.md, confirmations.md relative to its package. Documented @oai/sky initialization through node_repl succeeded. sky.list_apps succeeded:40 apps; matching displayName Multi Launcher / id MultiLauncher.MultiLnchr / isRunning false / windows empty. No app launch or target input attempted. No unrelated app metadata persisted.
+
+Exact documented DragInput fields: from_x, from_y, screenshotId(optional), to_x, to_y, window. No mouse_button/button/down/up option. ClickInput does expose mouse_button left/right/middle, but discrete clicks cannot demonstrate a held secondary drag. perform_secondary_action invokes an accessibility action and is not physical secondary drag. Do not invent unsupported API fields or custom SendInput helper. CUA surface separately documents native APIs disabled; not used to substitute.
+
+Missing required native operation: actual secondary crop-button held drag. End-to-end native proof NOT_RUN/NATIVE_NOT_PROVEN. This is a supported-interface limit, not a claim the application is defective or Windows cannot perform it. App inventory says no current target window; installed binary source/version identity not established. Even a primary-only attempt would not close the exact gate, so no app launch, private screen capture, clipboard alteration or unnecessary build undertaken.
+
+Future proof needs documented secondary-button drag plus verified current-source app, task-owned synthetic image/output and controllable clipboard observation/restoration. Planner must tie protocol to current editor controls/source; no permission to import old candidate or label unit-only pass native acceptance.

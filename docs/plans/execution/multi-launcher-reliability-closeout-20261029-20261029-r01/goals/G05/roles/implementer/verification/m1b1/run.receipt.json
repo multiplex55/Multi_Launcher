@@ -1,0 +1,41 @@
+{
+  "phase": "G05-M1-B1 focused execution",
+  "command": "cargo nextest run -p multi_launcher --lib --cargo-profile fast-dev --offline --locked --color never -E \"test(hotfolder_condition_literal_) | test(hotfolder_condition_metadata_) | test(=hotfolder::model::tests::metadata_conditions_use_inclusive_bounds_and_one_captured_time) | test(=hotfolder::model::tests::modified_age_bounds_preserve_subsecond_precision) | test(=hotfolder::model::tests::file_conditions_validate_ranges_bound_utf8_and_defer_content) | test(=hotfolder::capability::tests::enabled_condition_rules_fail_closed_until_the_shared_evaluator_is_installed)\" --retries 0 --no-fail-fast --status-level pass --final-status-level fail",
+  "head": "1c5b3b88acc2c285a08b00d3aeb6406bbe08c045",
+  "source_git_blobs": {
+    "src/hotfolder/conditions.rs": "507beafd2b79df82c5a2bd1923fe179938cf70e0",
+    "src/hotfolder/model.rs": "306d2cb9b4295e0e0a26cd38a9f782113294df76",
+    "src/hotfolder/mod.rs": "1bac86b002a8b90eaf0ec9855b757006ad43f38d",
+    "src/hotfolder/execution.rs": "4de797b4626218d13dcc1e080c24276f8350d7f3",
+    "src/hotfolder/runtime.rs": "3da1790f8eccf15d69446e1428b2d3c73865dd6c",
+    "src/hotfolder/capability.rs": "2e6dbe8a41e6ac5f7aaba5c7ecc13257d441e02c",
+    "src/hotfolder/store.rs": "3ec58d0d5f5337228ebeaa54e99bce665481e2fb",
+    "src/file_operations.rs": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+    "src/gui/hotfolder_dialog.rs": "b35d8f511fae44c8fa32e714f605393ad67e9070",
+    "src/gui/hotfolder_runtime.rs": "5ed3ec4f5a1a56362a4d5c8efc9a404357b80945",
+    "src/gui/hotfolder_dispatch.rs": "954abb1a5a5b0422129b38071c0fa8f6998b933a",
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380"
+  },
+  "toolchain": [
+    [
+      "cargo-nextest 0.9.135 (610eefb88 2026-05-14)",
+      "release: 0.9.135",
+      "commit-hash: 610eefb88762529a316373f4a50f5fd9194c3c35",
+      "commit-date: 2026-05-14",
+      "host: x86_64-pc-windows-msvc"
+    ],
+    "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "x86_64-pc-windows-msvc"
+  ],
+  "start": "2026-10-29T22:49:14.3154679-04:00",
+  "cap_seconds": 180,
+  "selected_count": 20,
+  "timed_out": false,
+  "pid": 40924,
+  "end": "2026-10-29T22:49:17.9523701-04:00",
+  "elapsed_seconds": 3.633,
+  "exit_code": 0,
+  "output_drained": true
+}

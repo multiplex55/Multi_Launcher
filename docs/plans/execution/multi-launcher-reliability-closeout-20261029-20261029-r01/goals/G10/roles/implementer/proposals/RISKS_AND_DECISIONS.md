@@ -1,0 +1,58 @@
+# Risks and decisions
+
+## Current unresolved boundaries — G10 reconciliation
+
+Accepted integration baseline `ea3a7007e23090c1c2b13ea9018b29754579e4ef` contains only reviewed G01, gated G05, corrected G06 and G09 test-only source scopes. [Manifest](INTEGRATION_MANIFEST.md) records exact accepted/excluded bytes. All other prototype code remains excluded, and G10 acceptance/publication remains pending.
+
+- G02 native parent admission fails OS5 before staging; ancestor/cause unknown. All lifecycle/native/publication/cancel/cleanup/recovery acceptance remains necessary before G03. No guard weakening or environment theory is adopted.
+- G04 lacks the supported secondary-drag, binary and actual clipboard/output observations needed for its native protocol. No defect or unit/native pass is inferred. G06 separately lacks supported owned-window discovery; its exact build and29 tests do not establish native editor/focus proof.
+- G05 conditions remain refused. Accepted descriptive metadata and pure literal-stream evidence do not prove pending native read retirement, retained source/effect ownership or actual queued-start binding. No enablement until the complete continuation passes.
+- G07 final10/12 leaves guarded publication OS32 and an UNKNOWN source/alias deletion endpoint. Weaker-directory control success is diagnostic, not authority. G08 old14/14 predates the actual toolbar privacy issue; corrected preparation timed out32s and drained101.880s with late0, no R1 tests. Both prototypes remain excluded.
+- G09 accepts only the selected actual owner ordering and controlled pre-read file-handle proof. Terminal status, local transfer and capacity reclamation are not universally successful joins. Screenshot shutdown `Unavailable` remains truthful. Initial preparation exit null is preserved beside the matching12/12 run exit0.
+- Original queue04/05 user stops are distinct from07/08/13 historical proof stops and10/17 dependencies. Missing historical local receipts stay absent; Planner's pinned remote matrix is historical evidence, not a recreated local run.
+- AUD-F001 remains already fixed/merged; Diff H0/native authority and search admission limits remain closed decisions. No new query/ranker/UI, generic framework or runtime defect initiative is authorized.
+- Provenance coverage correction: the original baseline excluded11 `src` entries omitted two G02 crate files from its table. The supplemental parent receipt proves those files baseline-identical; the complete manifest now records13 per-goal entries/12 physical paths. No imported-source issue or new initiative was found.
+- Final cumulative review/PR/head/push/check facts remain PENDING. No source-overlap or manifest drift is shown by the parent baseline; no new Cargo is justified solely by documentation. Parent alone resolves a concrete later conflict and verifies materialized source/config parity.
+
+[Dependencies](DEPENDENCY_MAP.md), [canonical continuations](FOLLOW_ON_CATALOG.md) and [single final checklist](MANUAL_REVIEW_CHECKLIST.md) are current. G10 distinct new finding: **NO_ACTION**.
+
+## Historical decisions and intermediate states — preserved
+
+The following original entries are retained verbatim in order. Formerly pending, next-goal and rejected-source statements describe their recorded stage; the current section above supersedes them for resumption. No historical failure or author-stage limitation was deleted.
+
+
+- No full suites/build campaigns, config changes, historical rewrite, or automatic master merge.
+- Native proof remains separate from deterministic/source evidence.
+- Role configuration drift is recorded; explicit user-requested Astra dispatch overrides without editing configuration.
+- Missing historical files are limitations, not permission to fabricate receipts.
+
+- G01 original monolithic domain target could not compile untouched file_search_e2e sender call (E0308). One approved exact temporary target ran7unchanged Diff cases with23library, then a source-supported R1 correction required one fresh32-case batch. No unrelated source fixed; no full suite; original target failure retained and proposed P1 pair cataloged.
+- G01 reviewer caught premature mutation-gate release during rescan; one correction proved pending cancellation exclusion. No native worker-join guarantee added. Only final corrected cumulative source imported, with donor-blob equality verified.
+
+- G02 M0-A selects new-file-only publication, refusing occupied/same-source targets. Narrow additive adapters at existing temp-resource and native file_operations ownership boundaries are authorized; no duplicate FFI, table-engine refactor, whole-output buffers or compact-workflow change. Contract is design evidence only; G03 cannot proceed on it.
+
+## G02 stop decision
+
+Final donor011af0c4 preserves unaccepted sourcef879a2a8; only safe reviewed documentation imported. CreateFileW OS error5 occurs in existing native parent admission before staging. No claimed root cause/ACL/environment theory, no successful native publication, no weakened guard or fallback. Both runs15/19, correction320.148/600; bounded stop honored. M1-B not started. G03 hard dependency remains unsatisfied. Independent G04 onward continue. Exact canonical P1 future pair/stall records preserved; publication of plans grants no future execution/budget renewal.
+
+G03: dependency hard stop independently reviewed. No algorithm/source/test fixture work. Bootstrap docs branch is not future implementation base. Require G02 complete accepted integration and new source revalidation; original conditional Goal/Kickstart retained. G04 independent next.
+
+G04 closed documentation-only NATIVE_PROOF_DEFERRED. Computer-use documented DragInput lacks secondary-button selection; no right-click/accessibility substitution/custom helper. No app launch/private screen/clipboard effect. No source defect/unit/native output claim. Future native protocol uses task-owned320x240 fixture, actual capture baseline, Solid/Marker-secondary crop/Undo-Redo, independently compared288x208 Save+actual clipboard pixels. Native source identity/isolation/restoration gates required; no old excluded candidate. Manual alternative reserved for single G10 checklist.
+
+G05 planning: NativeHotFolderInput is copied evidence, not retained native ownership; built-ins reopen/verify SHA256 and queued external start needs condition binding. Parent authorizes later necessary narrow existing file_operations HotFolder-owner/actual GUI-dispatch adapters, no duplicated reader/FFI/authority redesign. M1-A model/execution semantics and evidence boundary only, all condition gates retained. Source/native proof still pending; no blanket inference from G02 access denial.
+
+G05 M1-A independently accepted/integrated as a safe gated foundation only.19/19 corrected proof; old failures preserved; no whole-goal/through-effect native claim. Fresh M1-B packet must solve existing source ownership and actual queued-start binding plus bounded read cancellation/retirement before enablement. All FILE_CONDITIONS_NOT_EVALUATED refusals remain.
+
+G05 M1-B ordered split: B1 feeds chunks to bounded literal-set scan/common outcome composition only, no filesystem read. Current AtomicBool/synchronous hash checks lack blocked-read cancellation proof; B2 must address existing native guarded-source ownership, in-flight cancellation/resource retirement and actual queued launcher/MkMacro start binding. No impossibility or blanket deferral established; all condition guards retained.
+
+G05 B1 review R1/P2: feed can refuse a supplied final chunk before accounting it; genuineEOF unchanged length then falsely Changed instead of Unavailable. Source bab30968 withheld despite20/20 initial tests. Role complete contingency pair at G05 donor6cbb6e43 roles/reviewer/follow-on/terminal-byte-accounting. One scanner-owner correction with EOF/resource/cancel/deadline and genuineChanged controls; no B2 or gate removal. Accepted source remains8f6befe7.
+
+G05 B1 R1 RESOLVED_IN_G05 at944f9d0e, confirmed independently; received bytes distinct from parser progress, true Changed precedence preserved. Corrected cumulative B1 accepted/imported4999a47c, standalonebad source not independently accepted. Role contingency retained closed, no future queue. Native acquisition/retirement/guarded source transfer/actual queued-start remain active B2, not proved by parser22/22.
+- G05 B2 exact gap: no current controlled admitted regular-file pending-read cancellation/retirement proof. AtomicBool synchronous reader checks only between reads; pipe-only/cached/pre-cancel substitution insufficient. No native runtime attempt or API impossibility claim. No unsafe adapter imported; foundation source unchanged4999a47c.
+- G06 reviewerR1 resolved: final effective Paste Start/custom Next/Cancel conflicts checked against local Jump before default omission. Closed contingency not future queue. NativeM3 still unproven. Necessary normal-bin build distinguished from prepared lib/bin test executables; scoped600s cap for exact-source UI proof, not ceremonial rebuild or renewed source-test budget.
+- G06 native: exactsource executable available/exesha5e2a6be7, but sky returned noownedwindow; recoverylog desktopcheck0x80070005 causeunknown. No inference from earliergoals, no UIinput/screenshot successclaim. Onefixturebindingcorrection/recoveryonly; bothownedprocessesexited. Staticdocumentationindependentlyaccepted; sourceacceptanceunchanged.
+- G07 bounded materialstop: native guarded publicationOS32, weakerpolicytestcontrolOk notauthority; source/aliasdeleteassertionfailed withspellingUNKNOWN/no postbindingproof. Allsourceexcluded. Eightblobs/76links independentlycorroborated, fixturesrootempty/processesretired. Existingperf-harness feature onlyfixtureIO capability, no manifest/dependency change/performancecampaign. Verifiedownedtaskkilldenialrecorded; processdrainedbeforeedit, no user/otherPID targeted. Originalreadonlycatalog/planner unchangedinPR.
+
+G08 decision: no source acceptance. Initialhistory14/14 did not cover sharedtoolbar; independentreview caughtP2privacyR1. Proposedcorrection unverified afterremaining32s prepdeadline; OSdenied ownedtree termination, processdrained101.880s/late0; no test or renewal, no remainingownedprocess. This is a scoped verification limit, not a native/UI impossibility claim. Preserve exactdonorbb8c5720/e505f961 and completecanonicalrestart; integrationdocs-only/sourceparityb9 unchanged. Recipes separatelydeferredwithpolicy. IndependentG09 next.
+
+G09 selected proof accepted with no productioncorrection. RetainedDuplicateFinder and cancellableScreenshot owner tests distinguishcancel/terminal/localtransferfromactualjoin. Nativeproof only acquired syntheticfilehandle beforeReadFile; no global/pending-I/O/capture/apartment claim. Initialcapacityerror resolved by single samerole retry, no model/configfallback. Preparationnumericexitnull retained; exact12/12runexit0 suffices withoutredundantbuild. No newfutureinitiative. G10 next fromaccepted integrationtip, notbootstrap.

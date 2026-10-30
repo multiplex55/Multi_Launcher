@@ -2480,6 +2480,19 @@ fn validate_paste_sequence_hotkey_routes(
             .map(|hotkey| ("Screen Draw emergency".to_owned(), hotkey)),
     );
     for (index, route) in sequence_routes.iter().enumerate() {
+        if settings.experimental_jump_mode_enabled {
+            let name = match route.action {
+                PasteSequenceHotkeyAction::Next => "Paste Sequence Next",
+                PasteSequenceHotkeyAction::Cancel => "Paste Sequence Cancel",
+                PasteSequenceHotkeyAction::Start(_) => "Paste Sequence Start",
+            };
+            if let Some(message) = multi_launcher::hotkey::validation::jump_chord_conflict(
+                settings.jump_mode_activation_chord,
+                [(name, route.hotkey)],
+            ) {
+                issues.push(message);
+            }
+        }
         for (name, hotkey) in &protected {
             if hotkeys_can_cofire(route.hotkey, *hotkey) {
                 issues.push(format!("Paste Sequence shortcut can co-fire with {name}"));
@@ -8077,6 +8090,142 @@ mod tests {
             })
             .unwrap();
         snapshot
+    }
+
+    #[test]
+    fn g06_jump_r1_final_resolver_rejects_custom_paste_controls_and_respects_disables() {
+        let document = RadialDocument::starter();
+        for next in [false, true] {
+            let mut settings = Settings::default();
+            settings.radial.enabled = false;
+            settings.experimental_jump_mode_enabled = true;
+            settings.jump_mode_activation_chord =
+                multi_launcher::settings::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+            settings.paste_sequence.next_hotkey = next.then(|| "Ctrl+F8".into());
+            settings.paste_sequence.cancel_hotkey = (!next).then(|| "Ctrl+F8".into());
+            let resolve = |settings: &Settings| {
+                resolve_hotkey_route_candidate_with_macro(settings, &document, None, Some(&[]))
+            };
+            let error = resolve(&settings)
+                .err()
+                .expect("effective custom control must conflict")
+                .to_string();
+            assert!(error.contains(if next {
+                "Paste Sequence Next"
+            } else {
+                "Paste Sequence Cancel"
+            }));
+            assert!(error.contains("Jump activation chord"));
+            settings.experimental_jump_mode_enabled = false;
+            assert_eq!(resolve(&settings).unwrap().sequences.len(), 1);
+            settings.experimental_jump_mode_enabled = true;
+            settings.enabled_plugins = Some(std::collections::HashSet::new());
+            assert!(resolve(&settings).unwrap().sequences.is_empty());
+            settings.enabled_plugins =
+                Some(std::collections::HashSet::from(["paste_sequence".into()]));
+            assert!(resolve(&settings).is_err());
+            if next {
+                settings.paste_sequence.next_hotkey = Some("Alt+F8".into());
+            } else {
+                settings.paste_sequence.cancel_hotkey = Some("Alt+F8".into());
+            }
+            let distinct = resolve(&settings).unwrap();
+            assert_eq!(distinct.sequences.len(), 1);
+            assert!(distinct.omissions.is_empty());
+            settings.paste_sequence.next_hotkey = None;
+            settings.paste_sequence.cancel_hotkey = Some("  ".into());
+            assert!(resolve(&settings).unwrap().sequences.is_empty());
+        }
+    }
+
+    #[test]
+    fn g06_jump_r1_final_resolver_rejects_saved_start_and_preserves_distinct_route() {
+        let mut settings = Settings::default();
+        settings.radial.enabled = false;
+        settings.experimental_jump_mode_enabled = true;
+        settings.jump_mode_activation_chord =
+            multi_launcher::settings::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        let document = RadialDocument::starter();
+        let bindings = paste_route_test_snapshot("Ctrl+F8").hotkey_bindings();
+        let resolve = |settings: &Settings| {
+            resolve_hotkey_route_candidate_with_macro(settings, &document, None, Some(&bindings))
+        };
+        assert!(
+            resolve(&settings)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Jump activation chord conflicts with Paste Sequence Start")
+        );
+        settings.experimental_jump_mode_enabled = false;
+        assert_eq!(
+            resolve(&settings).unwrap().sequences[0].action,
+            PasteSequenceHotkeyAction::Start(bindings[0].id())
+        );
+        settings.experimental_jump_mode_enabled = true;
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        assert!(resolve(&settings).unwrap().sequences.is_empty());
+        settings.enabled_plugins = None;
+        let distinct = paste_route_test_snapshot("Alt+F8").hotkey_bindings();
+        let resolved =
+            resolve_hotkey_route_candidate_with_macro(&settings, &document, None, Some(&distinct))
+                .unwrap();
+        assert_eq!(resolved.sequences.len(), 1);
+        assert_eq!(
+            resolved.sequences[0].action,
+            PasteSequenceHotkeyAction::Start(distinct[0].id())
+        );
+        assert!(resolved.omissions.is_empty());
+        assert!(
+            !resolved
+                .base
+                .legacy_triggers
+                .iter()
+                .any(|hotkey| *hotkey == parse_hotkey("Ctrl+Shift+F8").unwrap())
+        );
+    }
+
+    #[test]
+    fn g06_jump_r1_final_resolver_retains_optional_default_omission() {
+        let mut settings = Settings {
+            hotkey: Some("Shift+Alt+Win+End".into()),
+            ..Settings::default()
+        };
+        settings.radial.enabled = false;
+        settings.experimental_jump_mode_enabled = true;
+        settings.jump_mode_activation_chord =
+            multi_launcher::settings::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        let before = settings.paste_sequence.clone();
+        let bindings = paste_route_test_snapshot("Ctrl+F9").hotkey_bindings();
+        let resolved = resolve_hotkey_route_candidate_with_macro(
+            &settings,
+            &RadialDocument::starter(),
+            None,
+            Some(&bindings),
+        )
+        .unwrap();
+        assert_eq!(resolved.sequences.len(), 2);
+        assert!(
+            resolved
+                .sequences
+                .iter()
+                .any(|route| route.action == PasteSequenceHotkeyAction::Next)
+        );
+        assert!(
+            resolved
+                .sequences
+                .iter()
+                .any(|route| route.action == PasteSequenceHotkeyAction::Start(bindings[0].id()))
+        );
+        assert_eq!(resolved.omissions.len(), 1);
+        assert_eq!(
+            resolved.omissions[0].action,
+            PasteSequenceHotkeyAction::Cancel
+        );
+        assert!(resolved.omissions[0].reason.contains("launcher"));
+        assert_eq!(settings.paste_sequence, before);
     }
 
     #[test]

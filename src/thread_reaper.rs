@@ -322,6 +322,15 @@ pub(crate) fn reserve() -> Result<ReapPermit, &'static str> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    struct ReleaseOnDrop(mpsc::SyncSender<()>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.try_send(());
+        }
+    }
 
     fn test_reaper() -> Arc<JoinReaper> {
         JoinReaper::new(Arc::new(|owner| {
@@ -333,9 +342,11 @@ mod tests {
     }
 
     fn wait_until_reclaimed(reaper: &JoinReaper) {
+        let deadline = Instant::now() + Duration::from_secs(3);
         while reaper.outstanding.load(Ordering::Acquire) != 0
             || reaper.state.lock().unwrap().supervisor_active
         {
+            assert!(Instant::now() < deadline, "reaper did not reclaim its slot");
             thread::yield_now();
         }
     }
@@ -414,7 +425,10 @@ mod tests {
             Err("injected supervisor failure".into())
         }));
         let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let _release = ReleaseOnDrop(release_tx.clone());
         let permit = reaper.reserve().unwrap();
+        let reaped = permit.reaped_probe();
+        let (receipt_tx, receipt_rx) = mpsc::sync_channel(1);
         let completed = permit.completion_notifier();
         let join = thread::spawn(move || {
             let _ = release_rx.recv();
@@ -422,12 +436,16 @@ mod tests {
         });
 
         assert_eq!(
-            permit.reap(join),
+            permit.reap_with_callback(join, move |panicked| {
+                receipt_tx.send(panicked).unwrap();
+            }),
             Err(ReapError::SupervisorSpawn(
                 "injected supervisor failure".into()
             ))
         );
         assert_eq!(spawn_attempts.load(Ordering::Acquire), 1);
+        assert!(!reaped.is_reaped());
+        assert_eq!(receipt_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
         assert_eq!(reaper.outstanding.load(Ordering::Acquire), 1);
         let mut held = Vec::new();
         for _ in 1..REAPER_CAPACITY {
@@ -436,28 +454,45 @@ mod tests {
         assert!(reaper.reserve().is_none());
         drop(held);
         release_tx.send(()).unwrap();
-        while reaper.outstanding.load(Ordering::Acquire) != 0 {
-            thread::yield_now();
-        }
+        wait_until_reclaimed(&reaper);
+        assert!(!reaped.is_reaped(), "detachment is not a successful join");
+        assert_eq!(receipt_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
     }
 
     #[test]
     fn completion_before_reap_is_latched_even_while_join_is_not_finished() {
         let reaper = test_reaper();
         let permit = reaper.reserve().unwrap();
+        let reaped = permit.reaped_probe();
         let notifier = permit.completion_notifier();
         let (latched_tx, latched_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let _release = ReleaseOnDrop(release_tx.clone());
         let join = thread::spawn(move || {
             drop(notifier);
             latched_tx.send(()).unwrap();
             let _ = release_rx.recv();
         });
-        latched_rx.recv().unwrap();
+        latched_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert!(!join.is_finished());
 
-        permit.reap(join).unwrap();
+        let (receipt_tx, receipt_rx) = mpsc::sync_channel(1);
+        let callback_reaper = Arc::clone(&reaper);
+        permit
+            .reap_with_callback(join, move |panicked| {
+                let outside_lock = callback_reaper.state.try_lock().is_ok();
+                receipt_tx.send((panicked, outside_lock)).unwrap();
+            })
+            .unwrap();
+        assert!(!reaped.is_reaped(), "notifier drop does not prove join");
+        assert_eq!(receipt_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
         release_tx.send(()).unwrap();
+        assert_eq!(
+            receipt_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            (false, true),
+            "successful after-join receipt runs outside the reaper lock"
+        );
+        assert!(reaped.is_reaped());
         wait_until_reclaimed(&reaper);
     }
 

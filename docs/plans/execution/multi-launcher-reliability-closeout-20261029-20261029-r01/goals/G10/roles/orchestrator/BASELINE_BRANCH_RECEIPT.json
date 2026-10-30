@@ -1,0 +1,81 @@
+{
+  "utc": "2026-10-30T07:46:39.1610151Z",
+  "snapshot_head": "535993a4fa32a5646e0ade6076c6941a71d47230",
+  "master": "4a1283e6edd2c245f562a07dbe3dcc6a61061eed",
+  "origin_master": "4a1283e6edd2c245f562a07dbe3dcc6a61061eed",
+  "branches": [
+    {
+      "branch": "codex/closeout-g00-baseline-and-continuation-20261029-r01",
+      "local_tip": "7e53f4d28ca5b66a21e30e41545692cce5fa6b6a",
+      "remote_tracking_tip": "7e53f4d28ca5b66a21e30e41545692cce5fa6b6a",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g01-diff-failure-information-20261029-r01",
+      "local_tip": "13243515329ce4010bd6db981f1fd3bcc26f2dec",
+      "remote_tracking_tip": "13243515329ce4010bd6db981f1fd3bcc26f2dec",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g02-table-publication-safety-20261029-r01",
+      "local_tip": "011af0c448dfdcdc0eb747083f909d3bfa6c1ab2",
+      "remote_tracking_tip": "011af0c448dfdcdc0eb747083f909d3bfa6c1ab2",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g03-table-full-file-operations-20261029-r01",
+      "local_tip": "e0f556cd8041c502d63479d89d0e68301cceb3b2",
+      "remote_tracking_tip": "e0f556cd8041c502d63479d89d0e68301cceb3b2",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g04-screenshot-native-redaction-20261029-r01",
+      "local_tip": "ea27ce749318ab2c261384385fd03ef05f882b4f",
+      "remote_tracking_tip": "ea27ce749318ab2c261384385fd03ef05f882b4f",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01",
+      "local_tip": "a78895c63f31c9f48ae579e3203c14fa3faa8c35",
+      "remote_tracking_tip": "a78895c63f31c9f48ae579e3203c14fa3faa8c35",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g06-jump-settings-and-focus-20261029-r01",
+      "local_tip": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "remote_tracking_tip": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g07-zip-extraction-20261029-r01",
+      "local_tip": "5d4d3054c5b52510a38d96faf201c6c0ca2e07f7",
+      "remote_tracking_tip": "5d4d3054c5b52510a38d96faf201c6c0ca2e07f7",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g08-mkmacro-run-history-20261029-r01",
+      "local_tip": "e505f961849475ecf3affda40064b96a60243f9d",
+      "remote_tracking_tip": "e505f961849475ecf3affda40064b96a60243f9d",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g09-activity-center-retirement-20261029-r01",
+      "local_tip": "174b6fff5eba1a28de6fb8b73d3a5ea77c91187a",
+      "remote_tracking_tip": "174b6fff5eba1a28de6fb8b73d3a5ea77c91187a",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-g10-residual-defect-triage-integration-20261029-r01",
+      "local_tip": "535993a4fa32a5646e0ade6076c6941a71d47230",
+      "remote_tracking_tip": "535993a4fa32a5646e0ade6076c6941a71d47230",
+      "equal": true
+    },
+    {
+      "branch": "codex/closeout-integration-20261029-r01",
+      "local_tip": "ea3a7007e23090c1c2b13ea9018b29754579e4ef",
+      "remote_tracking_tip": "ea3a7007e23090c1c2b13ea9018b29754579e4ef",
+      "equal": true
+    }
+  ],
+  "note": "Remote-tracking refs reflect normal push receipts; current master fetched at G10 baseline. G10 baseline snapshot, not final head."
+}

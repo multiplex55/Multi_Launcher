@@ -13,7 +13,7 @@ pub(super) enum PreviewPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OperationPreview {
-    pub view_id: u64,
+    pub context: crate::diff::folder_runtime::FolderOperationContext,
     pub plan: PreviewPlan,
     pub planning_error: Option<String>,
 }
@@ -28,7 +28,7 @@ impl OperationPreview {
         #[cfg(test)]
         let mut footer_observation = None;
         let window_output = egui::Window::new("Confirm folder operation")
-            .id(egui::Id::new(("folder-operation-preview", self.view_id)))
+            .id(egui::Id::new(("folder-operation-preview", self.context.comparison.view_id)))
             .collapsible(false)
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
@@ -151,7 +151,10 @@ impl OperationPreview {
         {
             ctx.data_mut(|data| {
                 data.insert_temp(
-                    egui::Id::new(("folder-operation-preview-test", self.view_id)),
+                    egui::Id::new((
+                        "folder-operation-preview-test",
+                        self.context.comparison.view_id,
+                    )),
                     PreviewChromeObservation {
                         window_rect: window.response.rect,
                         body_id: body.0,
@@ -325,7 +328,14 @@ mod tests {
         );
         let expected_status = format!("Blocked: {error}");
         let mut preview = OperationPreview {
-            view_id: 41,
+            context: crate::diff::folder_runtime::FolderOperationContext {
+                comparison: crate::diff::folder_runtime::FolderComparisonIdentity {
+                    view_id: 41,
+                    left_root: crate::diff::folder_scan::RootIdentity::new(source.clone()),
+                    right_root: crate::diff::folder_scan::RootIdentity::new(destination.clone()),
+                },
+                generation: 17,
+            },
             plan: PreviewPlan::Copy(plan),
             planning_error: Some(error.clone()),
         };
@@ -335,7 +345,10 @@ mod tests {
         context.enable_accesskit();
         context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
         let size = egui::vec2(640.0, 360.0);
-        let observation_id = egui::Id::new(("folder-operation-preview-test", preview.view_id));
+        let observation_id = egui::Id::new((
+            "folder-operation-preview-test",
+            preview.context.comparison.view_id,
+        ));
         let mut first_layout = None;
         let mut initial_status_visible = false;
         let mut buttons_accessible = false;

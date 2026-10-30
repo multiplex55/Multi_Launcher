@@ -1,0 +1,187 @@
+warning: variant `Unknown` is never constructed
+   --> vendor\epaint\src\text\font.rs:361:5
+    |
+357 | pub(crate) enum ShapeBufferProvenance {
+    |                 --------------------- variant in this enum
+...
+361 |     Unknown,
+    |     ^^^^^^^
+    |
+    = note: `ShapeBufferProvenance` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `epaint` (lib) generated 1 warning
+warning: use of deprecated constant `std::f32::EPSILON`: replaced by the `EPSILON` associated constant on `f32`
+  --> vendor\egui\src\containers\scene.rs:79:42
+   |
+79 |             zoom_range: Rangef::new(f32::EPSILON, 1.0),
+   |                                          ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `egui` (lib) generated 1 warning
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:720:19
+    |
+720 |     pub fn pixels(&self) -> Pixels<P> {
+    |                   ^^^^^     ^^^^^^^^^ the same lifetime is hidden here
+    |                   |
+    |                   the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+720 |     pub fn pixels(&self) -> Pixels<'_, P> {
+    |                                    +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:733:17
+    |
+733 |     pub fn rows(&self) -> Rows<P> {
+    |                 ^^^^^     ^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+733 |     pub fn rows(&self) -> Rows<'_, P> {
+    |                                +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:742:29
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<P> {
+    |                             ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                             |
+    |                             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<'_, P> {
+    |                                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:754:27
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<P> {
+    |                           ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                           |
+    |                           the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<'_, P> {
+    |                                                   +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:898:23
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<P> {
+    |                       ^^^^^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<'_, P> {
+    |                                               +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:911:21
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<P> {
+    |                     ^^^^^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                     |
+    |                     the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<'_, P> {
+    |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:918:33
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<P> {
+    |                                 ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                 |
+    |                                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<'_, P> {
+    |                                                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:931:31
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<P> {
+    |                               ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                               |
+    |                               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<'_, P> {
+    |                                                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\image.rs:932:15
+    |
+932 |     fn pixels(&self) -> Pixels<Self>
+    |               ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |               |
+    |               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+932 |     fn pixels(&self) -> Pixels<'_, Self>
+    |                                +++
+
+warning: `image` (lib) generated 9 warnings (run `cargo fix --lib -p image` to apply 9 suggestions)
+warning: constant `SCANNER_CANCELLATION_INTERVAL` is never used
+  --> crates\multi_launcher_table_core\src\lib.rs:53:7
+   |
+53 | const SCANNER_CANCELLATION_INTERVAL: usize = 4096;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scanner_cancellation_checkpoint` is never used
+    --> crates\multi_launcher_table_core\src\lib.rs:1031:4
+     |
+1031 | fn scanner_cancellation_checkpoint(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `end_offset` is never read
+  --> crates\multi_launcher_table_core\src\stream_scan.rs:25:9
+   |
+22 | pub(crate) struct StreamRecord {
+   |                   ------------ field in this struct
+...
+25 |     pub end_offset: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `multi_launcher_table_core` (lib) generated 3 warnings
+   Compiling multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher)
+warning: unused variable: `replaced_scan_job`
+    --> src\table_utility_session.rs:3521:13
+     |
+3521 |         let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+     |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_replaced_scan_job`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi_launcher` (lib test) generated 1 warning (run `cargo fix --lib -p multi_launcher --tests` to apply 1 suggestion)
+    Finished `fast-dev` profile [unoptimized + debuginfo] target(s) in 3m 23s

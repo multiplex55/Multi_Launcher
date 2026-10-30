@@ -1,0 +1,169 @@
+{
+  "selected_count": 32,
+  "library_count": 25,
+  "domain_count": 7,
+  "destination_count": 6,
+  "folder_operation_count": 13,
+  "tests": [
+    {
+      "binary": "multi_launcher",
+      "name": "diff::file_ops::tests::destination_changed_identity_prevents_overwrite",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "diff::file_ops::tests::destination_matching_identity_allows_overwrite",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "diff::file_ops::tests::destination_missing_after_preview_prevents_overwrite",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "diff::file_ops::tests::destination_not_found_allows_new_copy",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "diff::file_ops::tests::destination_read_errors_prevent_new_copy",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "diff::file_ops::tests::destination_read_errors_prevent_overwrite",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "diff::folder_runtime::tests::prepare_rescan_cancels_work_clears_progress_and_increments_generation",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::back_restores_retained_state_and_its_independent_runtime",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_cancellation_counts_only_delivered_successes",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_changed_retained_parent_rejects_queued_completion_before_reconciliation",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_discard_and_same_id_side_swap_clear_feedback",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_feedback_survives_rescan_preview_cancel_and_unchanged_parent",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_full_success_uses_neutral_completed_summary",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_mixed_results_keep_exact_counts_and_bounded_failures",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_new_dispatch_clears_previous_feedback_and_replaces_it_on_completion",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_reconciliation_drops_changed_retained_comparison",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_rejects_wrong_generation_view_and_ordered_roots",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_rescan_holds_busy_gate_until_matching_terminal_acknowledgement",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_retained_parent_swap_clears_feedback_while_child_is_open",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_stale_preview_cannot_dispatch_after_root_change",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::folder_operation_wrong_terminal_cannot_release_a_newer_active_dispatch",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::gui_delete_planning_is_recycle_only",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::principal_folder_workflow_uses_injected_controller_boundaries",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::replacing_comparison_removes_obsolete_runtime",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "gui::diff_dialog::tests::valid_rescan_applies_draft_clears_scan_data_and_retains_view_controls",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher::closeout_g01_diff_ops",
+      "name": "diff_file_ops::copies_file_and_plans_overwrite",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher::closeout_g01_diff_ops",
+      "name": "diff_file_ops::delete_normalizes_parent_child_and_dirty_descendant_blocks_parent",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher::closeout_g01_diff_ops",
+      "name": "diff_file_ops::gui_spawn_boundary_rejects_permanent_deletion",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher::closeout_g01_diff_ops",
+      "name": "diff_file_ops::recursive_copy_deduplicates_nested_selection",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher::closeout_g01_diff_ops",
+      "name": "diff_file_ops::recycle_failure_never_falls_back_to_permanent_delete",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher::closeout_g01_diff_ops",
+      "name": "diff_file_ops::rejects_escape_spellings_and_destination_conflict",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher::closeout_g01_diff_ops",
+      "name": "diff_file_ops::right_to_left_plan_retains_direction_and_executes_previewed_object",
+      "ignored": false
+    }
+  ]
+}

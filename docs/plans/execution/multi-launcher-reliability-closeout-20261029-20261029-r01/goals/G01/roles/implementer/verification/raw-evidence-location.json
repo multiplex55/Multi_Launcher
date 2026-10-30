@@ -1,0 +1,18 @@
+{
+  "reason": "Keep selected inventory and one pass line per executed test in tracked evidence; retain full unselected inventory and duplicate/final skip status output under ignored target",
+  "raw_files": [
+    {
+      "name": "recovery-list.stdout.json",
+      "bytes": 1187066,
+      "sha256": "405873326AA52DE750025E8C7D436F18DA9651DB37AD97FE8EC786F2525B7DEE",
+      "retained_raw_path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g01-m2a-20261029-r01\\recovery-list.stdout.json"
+    },
+    {
+      "name": "run.stderr.log",
+      "bytes": 972184,
+      "sha256": "7FFC163A0981C8A1F12F158CBCC57FE76FF45CBF2F9681F1FB48DB7891389223",
+      "retained_raw_path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g01-m2a-20261029-r01\\run.stderr.log"
+    }
+  ],
+  "run_selected_prefix_lines": 242
+}

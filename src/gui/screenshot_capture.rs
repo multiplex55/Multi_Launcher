@@ -595,6 +595,14 @@ impl Drop for ScreenshotCaptureOwner {
 
 #[cfg(test)]
 mod tests {
+    struct ReleaseOnDrop(std::sync::mpsc::SyncSender<()>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.try_send(());
+        }
+    }
+
     use super::*;
     use crate::actions::Action;
     use crate::commands::{ActivationSource, Command, ScreenshotCommand};
@@ -869,8 +877,13 @@ mod tests {
         let started = Instant::now();
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let _release = ReleaseOnDrop(release_tx.clone());
         let release_rx = std::sync::Mutex::new(release_rx);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let center = ActivityCenter::new();
         let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
+            worker_calls.fetch_add(1, Ordering::AcqRel);
             started_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
             Ok(Some(RgbaImage::from_pixel(
@@ -879,6 +892,7 @@ mod tests {
                 image::Rgba([4, 5, 6, 255]),
             )))
         }));
+        owner.attach_activity_center(center.clone());
         let (mode, destination, markup) = options();
         let id = owner
             .schedule(
@@ -893,6 +907,7 @@ mod tests {
                 &ctx,
             )
             .unwrap();
+        let key = center.snapshot().rows[0].key;
         owner.tick(started + Duration::from_secs(3), &ctx);
         owner
             .grant_presentation(id, started + Duration::from_secs(3), &ctx)
@@ -904,6 +919,29 @@ mod tests {
             ScreenshotCapturePhase::Draining
         );
         assert!(owner.is_busy());
+        let cancelled_generation = owner.generation;
+        assert!(
+            owner
+                .schedule(
+                    ScreenshotDelay::ThreeSeconds,
+                    mode,
+                    destination,
+                    markup,
+                    &invocation(),
+                    "",
+                    RootLauncherPolicy::Legacy,
+                    started,
+                    &ctx
+                )
+                .is_err()
+        );
+        assert_eq!(owner.generation, cancelled_generation);
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(!owner.reaper_probe_for_test().unwrap().is_reaped());
+        assert_ne!(
+            center.snapshot().rows[0].retirement,
+            ActivityRetirement::Confirmed
+        );
         release_tx.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while owner.is_busy() && Instant::now() < deadline {
@@ -912,6 +950,18 @@ mod tests {
         }
         assert!(!owner.is_busy(), "cancelled worker must drain");
         assert!(owner.tick(Instant::now(), &ctx).is_none());
+        let joined = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key == key)
+            .unwrap();
+        assert_eq!(
+            joined.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(joined.retirement, ActivityRetirement::Confirmed);
+        assert_eq!(calls.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -1045,9 +1095,11 @@ mod tests {
         let started = Instant::now();
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let _release = ReleaseOnDrop(release_tx.clone());
         let release_rx = std::sync::Mutex::new(release_rx);
         let worker_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished_from_worker = Arc::clone(&worker_finished);
+        let center = ActivityCenter::new();
         let mut owner = ScreenshotCaptureOwner::with_capture(Arc::new(move |_, _, _| {
             started_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
@@ -1058,6 +1110,7 @@ mod tests {
                 image::Rgba([13, 14, 15, 255]),
             )))
         }));
+        owner.attach_activity_center(center.clone());
         let (mode, destination, markup) = options();
         let id = owner
             .schedule(
@@ -1072,6 +1125,7 @@ mod tests {
                 &ctx,
             )
             .unwrap();
+        let key = center.snapshot().rows[0].key;
         owner.tick(started + Duration::from_secs(3), &ctx);
         owner
             .grant_presentation(id, started + Duration::from_secs(3), &ctx)
@@ -1084,6 +1138,30 @@ mod tests {
         owner.shutdown();
         assert!(!owner.is_busy());
         assert!(!reaped.is_reaped());
+        let shutdown_generation = owner.generation;
+        for _ in 0..3 {
+            assert!(
+                owner
+                    .schedule(
+                        ScreenshotDelay::ThreeSeconds,
+                        mode,
+                        destination,
+                        markup,
+                        &invocation(),
+                        "",
+                        RootLauncherPolicy::Legacy,
+                        started,
+                        &ctx
+                    )
+                    .is_err()
+            );
+            assert_eq!(owner.generation, shutdown_generation);
+            assert!(!reaped.is_reaped());
+        }
+        assert_ne!(
+            center.snapshot().rows[0].retirement,
+            ActivityRetirement::Confirmed
+        );
         drop(owner);
         assert!(!worker_finished.load(Ordering::Acquire));
         release_tx.send(()).unwrap();
@@ -1095,6 +1173,21 @@ mod tests {
         assert!(
             reaped.is_reaped(),
             "the bounded reaper joins the transferred worker"
+        );
+        let terminal = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key == key)
+            .unwrap();
+        assert_eq!(
+            terminal.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
+        assert_eq!(
+            terminal.retirement,
+            ActivityRetirement::Unavailable,
+            "shutdown has no Activity after-join callback; the probe is separate evidence"
         );
     }
 

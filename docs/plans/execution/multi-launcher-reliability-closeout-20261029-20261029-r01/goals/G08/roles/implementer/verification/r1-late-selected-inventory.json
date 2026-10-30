@@ -1,0 +1,34 @@
+{
+  "status": "AFTER_DEADLINE_DIAGNOSTIC_ONLY_NOT_QUALIFYING_PREPARATION",
+  "count": 5,
+  "tests_executed": 0,
+  "raw_inventory": "target\\closeout-g08-m1-20261030-r01\\r1-prepare.all-tests.json",
+  "raw_sha256": "754c6b31404ebedbe143036182a9a09e4f9ef2e65a5848d3eb96343eeb5bc628",
+  "selected": [
+    {
+      "suite": "multi_launcher",
+      "name": "gui::mkmacro_dialog::history::tests::g08_history_actual_controls_visible_lifecycle_and_document_preservation",
+      "ignored": false
+    },
+    {
+      "suite": "multi_launcher",
+      "name": "gui::mkmacro_dialog::history::tests::g08_history_r1_real_toolbar_composition_preserves_editor_diagnostics_and_controls",
+      "ignored": false
+    },
+    {
+      "suite": "multi_launcher",
+      "name": "gui::mkmacro_dialog::history::tests::g08_history_render_safe_labels_fallback_expiry_and_payload_exclusion",
+      "ignored": false
+    },
+    {
+      "suite": "multi_launcher",
+      "name": "gui::mkmacro_dialog::tests::minimum_size_main_layout_keeps_toolbar_and_steps_reachable_without_mutation",
+      "ignored": false
+    },
+    {
+      "suite": "multi_launcher",
+      "name": "gui::mkmacro_dialog::toolbar::tests::running_and_paused_controls_are_deterministic",
+      "ignored": false
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "scenario_cap_seconds": 180,
+  "cleanup_reserve_seconds": 60,
+  "exe": "G:\\Repos\\rust\\Multi_Launcher\\target\\fast-dev\\multi_launcher.exe",
+  "pid": 41248,
+  "launch_method": "owned process launch with explicit cwd; all native UI input/observation through sky",
+  "exe_sha256": "5e2a6be71538b017666ba9e1078e48adbce44573bfdb69f27afecb45bcde519d",
+  "working_directory": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g06-native-20261029-r01\\profile",
+  "user_profile_used": false,
+  "start_utc": "2026-10-30T04:40:45.8174837Z"
+}

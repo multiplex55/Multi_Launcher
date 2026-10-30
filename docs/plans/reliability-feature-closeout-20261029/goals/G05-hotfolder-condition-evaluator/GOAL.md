@@ -141,20 +141,20 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED`; M1-A and corrected B1 accepted, remaining feature blocked.
+- **Run ID and branch:** 20261029-r01 / codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01.
+- **Actual master/source base:** fetched master4a1283e6; bootstrap02d0ac64; accepted integration source4999a47c, receipt93029e71.
+- **Current milestone:** B2 proof-first continuation; no B2 source or native probe.
+- **Active role and requested/configured/resolved model:** parent checkpoint; implementer requested Astra xhigh/configured Luna max/backend UNVERIFIED.
+- **Last known commit / push:** named confirmation37512cb9 pushed; cumulative accepted integration4999a47c and receipt93029e71 pushed. Closing donor recorded by parent integration receipt.
+- **Next action:** independent documentation closure review, then G06. Future G05 requires canonical native-read-retirement pair; all condition gates retained.
+- **Blocker and scope:** actual pending regular-file read cancellation and terminal retirement proof not established. Native ownership, queued start, editor/Test Rule and enablement remain required.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Safety contract and existing-state check |
-| `M1-A` | PENDING | — | Metadata predicates and stale evidence |
-| `M1-B` | PENDING | — | Bounded literal scan |
+| `M0-A` | ACCEPTED_COMPLETE | safety contract c009b533; source-only design | Preserve binding/gates |
+| `M1-A` | ACCEPTED_COMPLETE | independently reviewed8b4d01a4; corrected19/19 | Foundation only, all guards retained |
+| `M1-B` | PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED | corrected B1 22/22 independently accepted; B2 not implemented | Canonical native-read-retirement proof-first continuation |
 | `M1-C` | PENDING | — | Rule editor and Test Rule |
 | `M2-A` | PENDING | — | Narrow tests and final admission review |
 | `M3-A` | PENDING | — | Controlled enablement and closure |
@@ -162,3 +162,21 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+- Runtime2026-10-30: prior goals dispositions closed sequentially throughG04; G05 independent frombootstrap. Master4a1283e6 unchanged after fetch, integration5873cb8a authoritative. Conditions fail-closed safety remains until actual evidence. Planner next; no source/test/native work at baseline.
+
+- Scope clarification2026-10-29session/2026-10-30UTC: necessary later narrow existing file_operations HotFolder ownership handoff and actual GUI dispatch binding are authorized by parent to avoid copied-evidence/path-reopen mismatch. No duplicate FFI/reader/framework/externalauthority redesign. M1-A constrained to existing model/execution/minimalvisibility/shared semantics, all condition gates retained. Planner safety contract/packet persisted; source implementation pending.
+
+- Runtime M1-A2026-10-30: corrected19/19 focused tests; two approved source modules only. All configured conditions still refused. Initial4fixture failures preserved; representable subsecond timestamps/real WrongServiceLease correction, no production weakening. Prep381.358s, incremental88.824s, finalrun4.742s within caps; cleanup complete. Parent source checkpoint then independent review, no M1-B work yet.
+
+- Independent M1-A review2026-10-30: no substantive findings, metadata/binding foundation accepted at8b4d01a4 only. Parent records/integrates reviewed checkpoint and requests fresh M1-B packet. Whole G05 remains IN_PROGRESS; no native lifetime/reader/queued effect/editor/TestRule acceptance.
+
+- M1-B ordered scope amendment2026-10-30UTC: first B1 pure bounded streaming literal evidence/composition; no filesystem reader or condition enablement. Next native owner/cancellation/retirement/source-to-effect/actual queued-start packet remains required. All guards stay closed. This split follows existing ownership, not a deferral or whole-feature acceptance.
+
+- M1-B1 source checkpoint2026-10-30: exact20/20 first focused batch, pure scan/composition only; native acquisition/effect/GUI unchanged. No errors/corrections,183.339s/3.633s within caps; cleanup complete. Parent independent review next, all B2 proof obligations and configured-condition gates retained.
+
+- B1 R1 correction2026-10-30: supplied-byte accounting fixes false Changed at unchanged-length EOF while preserving true source/length changes and sticky refusal. Corrected22/22,95.941s/3.909s within caps; source conditions0559e8f9 only. R1-only confirmation pending; B1 standalonebab not accepted/imported, M1-A unaffected, no B2.
+
+- B1 named confirmation2026-10-30: R1 resolved, corrected cumulative B1 accepted at944f9d0e only; standalonebab not independently accepted. Contingency closed/do not schedule. Parent cumulative accepted import then native B2 planning; whole G05 still IN_PROGRESS/gates closed.
+
+- B2 bounded closure2026-10-30: no existing supported regular-file pending-read retirement proof established; no probe attempted/no impossibility claim. PARTIAL_ACCEPTED/NATIVE_PROOF_DEFERRED; accepted M1-A/corrected B1 preserved and gates closed. Complete proof-first continuation under execution goals/G05/follow-on/g05-native-read-retirement. Independent documentation review next; continue G06 afterward.

@@ -1,0 +1,16 @@
+{
+  "command": "cargo build -p multi_launcher --bin multi_launcher --profile fast-dev --offline --locked",
+  "source_head": "5c1bf6805c0b111fec93a1909238b45bf66d8dc2",
+  "source_tree": "71714f4dd4d1cdc2c6b3229612c91bbd16e0b286",
+  "start_utc": "2026-10-30T04:37:04.8545570Z",
+  "cap_seconds": 600,
+  "purpose": "Normal application executable required for native M3; existing lib/bin test executables cannot launch application",
+  "timed_out": false,
+  "pid": 41424,
+  "end_utc": "2026-10-30T04:39:40.5924138Z",
+  "elapsed_seconds": 155.734,
+  "exit_code": 0,
+  "output_drained": true,
+  "exe_sha256": "5e2a6be71538b017666ba9e1078e48adbce44573bfdb69f27afecb45bcde519d",
+  "exe_length": 119126016
+}

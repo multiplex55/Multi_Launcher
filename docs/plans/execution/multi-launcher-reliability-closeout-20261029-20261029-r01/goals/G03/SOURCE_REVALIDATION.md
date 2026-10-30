@@ -1,0 +1,7 @@
+# G03 source and dependency baseline
+
+Run20261029-r01; branch codex/closeout-g03-table-full-file-operations-20261029-r01. Master/fetched origin/master4a1283e6edd2c245f562a07dbe3dcc6a61061eed unchanged; fetched2026-10-30. Clean sole worktree. Branch starts bootstrap02d0ac64d51655f43d6e958ea551f5bf658ee48d because G02 accepted source does not exist. Documentation-only branch; never base on failed donor. No source edit, test execution or G03 implementation permitted.
+
+Authoritative integration78dd134b044820cb8dbed2856d5830271d72bc70 records G02 DEFERRED_WITH_DESIGN/NATIVE_NOT_PROVEN; source checkpointf879a2a880d59e941486241e652299dabc002365 UNACCEPTED; donor closure011af0c448dfdcdc0eb747083f909d3bfa6c1ab2 pushed. Both native batches19 selected15pass4fail; CreateFileW OS error5 before stage creation; exact ancestor/cause unproven. M1-B lifecycle unstarted. Reviewer accepts safe documentation only. Integration source stillfd300ff748e54cee167a038337220e33beba2322 through G01.
+
+G03 hard gate requires G02 ACCEPTED_COMPLETE and accepted source integration, neither exists. Therefore DEFERRED_DEPENDENCY, no full-file worker/UI/large fixture/compact-limit changes. Sibling global ledger is bootstrap snapshot; use integration ref for authoritative state. This receipt preserves precise dependency facts without importing failed G02 source.

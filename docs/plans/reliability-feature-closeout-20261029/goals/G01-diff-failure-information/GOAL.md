@@ -134,23 +134,27 @@ Both information losses are fixed at their existing owners, selective tests pass
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
+- **Current state:** `ACCEPTED_COMPLETE` / 20261029-r01, bounded correction.
+- **Run ID and branch:** 20261029-r01; codex/closeout-g01-diff-failure-information-20261029-r01.
+- **Actual master/source base:** master 4a1283e6edd2c245f562a07dbe3dcc6a61061eed; program bootstrap 02d0ac64d51655f43d6e958ea551f5bf658ee48d.
+- **Current milestone:** M0-A through M3-A closed after focused proof and independent R1 confirmation.
+- **Active role and requested/configured/resolved model:** closed; explicit Astra roles, configuration drift/backend UNVERIFIED in role records.
+- **Last known commit / push:** tested correction6c6812f0 pushed; final docs/import receipts follow in authoritative parent ledger.
+- **Next action:** parent import accepted source with provenance, then begin G02.
 - **Blocker and scope:** none reported.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Revalidate exact owner and historical handoff |
-| `M1-A` | PENDING | — | Preserve destination observation errors |
-| `M1-B` | PENDING | — | Preserve current-operation feedback |
-| `M2-A` | PENDING | — | Focus tests and review |
-| `M3-A` | PENDING | — | Publish accepted correction |
+| `M0-A` | ACCEPTED_COMPLETE |269508d4 revalidated | closed |
+| `M1-A` | ACCEPTED_COMPLETE |4d21b035 | closed |
+| `M1-B` | ACCEPTED_COMPLETE corrected cumulative |8d183f66+6c6812f0 | standalone8d rejected |
+| `M2-A` | ACCEPTED_COMPLETE |32/32, reviewer R1 closed | no broad/native claim |
+| `M3-A` | ACCEPTED_COMPLETE | source pushed; parent import ledger owns closing SHAs | G02 next |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+- Runtime 2026-10-29: M0-A 269508d4 pushed. Planner /root/g00_planner (Astra/max requested, backend UNVERIFIED) revalidated both information losses and returned separate owner-specific packets. M1-A implementer active; no tests yet; pending source checkpoint cannot be integrated until focused proof and review.
+
+- Final20261029-r01 event:32/32 focused tests passed for corrected source6c6812f0; independent reviewer confirmed R1 closed2026-10-30 00:15:14UTC. Accept M1-A plus corrected cumulative M1-B, never standalone rejected8d183f66. FileSearch fixture domain compilation follow-on remains proposed/unexecuted; native NOT_RUN. Parent accepted import receipt is authoritative.

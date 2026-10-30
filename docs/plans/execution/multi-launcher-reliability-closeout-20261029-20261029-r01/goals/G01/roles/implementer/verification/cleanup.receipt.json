@@ -1,0 +1,15 @@
+{
+  "checked_at": "2026-10-29T19:55:30.8415397-04:00",
+  "wrapper_absolute_path": "G:\\Repos\\rust\\Multi_Launcher\\tests\\closeout_g01_diff_ops.rs",
+  "wrapper_git_blob_before_removal": "30d4db3c9e908d5a875c616c443932f35d438365",
+  "wrapper_removed": true,
+  "saved_wrapper_git_blob": "30d4db3c9e908d5a875c616c443932f35d438365",
+  "domain_fixture_git_blob": "a6b2049cc249cc99921e8b293cba11facbba0dcd",
+  "owned_processes_remaining": [],
+  "compiler_runner_fixture_processes_observed": [],
+  "source_diff": [],
+  "raw_evidence_ignore_rule": [
+    "target/closeout-g01-m2a-20261029-r01/recovery-list.stdout.json",
+    "target/closeout-g01-m2a-20261029-r01/run.stderr.log"
+  ]
+}

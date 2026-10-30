@@ -130,23 +130,32 @@ The exact chosen full-file capability works with accepted publisher, scoped test
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `DEFERRED_DEPENDENCY`.
+- **Run ID and branch:** `20261029-r01` / `codex/closeout-g03-table-full-file-operations-20261029-r01`.
+- **Actual master:** `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`. Authoritative run: [PROGRAM_STATUS](../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md).
+- **Source base:** bootstrap `02d0ac64d51655f43d6e958ea551f5bf658ee48d` was a documentation-only exception because accepted G02 ancestry did not exist. It is not a valid future implementation base.
+- **Last known closing donor/import:** `e0f556cd8041c502d63479d89d0e68301cceb3b2` → `d326679d536008167a294880e5bd9b16b502e732`, normal pushes and independent documentation acceptance recorded.
+- **Current milestone:** dependency-only closure; implementation and tests unexecuted.
+- **Active role/model:** none for G03; historical role attribution preserved. G10 only reconciles mutable status.
+- **Next action:** await ALL G02 accepted safety/native/lifecycle/cancel/cleanup/recovery, reviewed integration, valid new G03 base and fresh full-contract/current-source M0. OS5 resolution alone is insufficient.
+- **Blocker/scope:** G02 implementation remains unaccepted. No source, Cargo, native or large-file fixtures. Original complete Goal/Kickstart remains the conditional future pair.
 
-| Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
-|---|---|---|---|
-| `M0-A` | PENDING | — | Hard readiness gate and user-facing scope |
-| `M1-A` | PENDING | — | Bounded full-file worker |
-| `M1-B` | PENDING | — | Unambiguous UI and progress |
-| `M2-A` | PENDING | — | Focused proof and decision |
-| `M3-A` | PENDING | — | Close or defer |
+| Milestone | State | Evidence / next action |
+|---|---|---|
+| M0-A | DEFERRED_DEPENDENCY | Dependency receipt independently accepted; feature scope selection unexecuted. |
+| M1-A | DEFERRED_DEPENDENCY | Worker unexecuted; await accepted G02 and fresh M0. |
+| M1-B | DEFERRED_DEPENDENCY | UI/progress unexecuted; same gate. |
+| M2-A | DEFERRED_DEPENDENCY | Tests/native/large-source proof NOT_RUN. |
+| M3-A | DEFERRED_DEPENDENCY | Safe documentation closure accepted; no feature acceptance or further automatic dispatch. |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+- Runtime2026-10-30: G02 lacks ACCEPTED_COMPLETE/native/lifecycle proof. Integration78dd134b accepted safe docs only; failed donor sourcef879a2a8 excluded. G03 fresh bootstrap branch documentation only; no accepted dependency base exists. No source work or large fixture authorized.
+
+- 2026-10-30 01:15:07 UTC: planner dependency packet executed as documentation only; [stall](../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G03/stalls/M0-A-20261030T011507Z.md) recorded. Both G02 batches were 15 passed / 4 failed / 19 selected before staging at CreateFileW OS error 5; ancestor/cause unknown, M1-B unstarted. Last accepted integration source fd300ff7. No fallback because hard gate requires skip; no G03 implementation/tests/resources. Original complete Goal/Kickstart retained as conditional future contract; NO_ACTION for distinct follow-ons.
+
+- Closure2026-10-30: reviewer01:20:19UTC accepts documentation only at36fd12a9, no substantive defects. G03 remains DEFERRED_DEPENDENCY; all implementation/native/large proof unexecuted. Parent imports safe docs, proceeds independent G04. Original complete Goal/Kickstart retained as future contract.
+
+- 2026-10-30 G10 documentation reconciliation: current G03 mutable fields aligned with existing receipts and preserved contracts/events; no new feature/source/test acceptance. Authoritative current action remains parent G10 review/import/publication.

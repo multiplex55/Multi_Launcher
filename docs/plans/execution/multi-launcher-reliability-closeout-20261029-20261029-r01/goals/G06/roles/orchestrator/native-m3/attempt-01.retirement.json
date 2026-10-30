@@ -1,0 +1,8 @@
+{
+  "reason": "fixture launcher Ctrl+Alt+F12 can cofire with Screen Draw Ctrl+Shift+F12; tool discovery returned no target",
+  "retired": true,
+  "method": "Stop-Process after no targetable returned window; no UI input",
+  "pid": 41248,
+  "attempt": 1,
+  "retired_utc": "2026-10-30T04:41:51.3653097Z"
+}

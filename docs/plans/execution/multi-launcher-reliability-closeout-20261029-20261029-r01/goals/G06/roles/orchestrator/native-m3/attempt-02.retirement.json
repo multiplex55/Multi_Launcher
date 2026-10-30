@@ -1,0 +1,8 @@
+{
+  "pid": 41660,
+  "method": "Stop-Process after one recovery still lacked supported target window",
+  "retired": true,
+  "no_other_processes_targeted": true,
+  "native_acceptance": "NATIVE_PROOF_DEFERRED",
+  "retired_utc": "2026-10-30T04:42:21.2229591Z"
+}

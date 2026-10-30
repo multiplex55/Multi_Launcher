@@ -1,0 +1,11 @@
+# G07 risks
+
+Preserve readonlycatalog/planner; physicalentry/localheader/revision bound; traversal/reparse/link/overwrite/quota/CRC/EOF/cancel and cleanup must be proved before writes/UI enabled. No convenienceunzip/newframework/processspawn/networkarchives. Roles requestedAstraplanner/reviewermax/implementerxhigh; configuredSolhigh/Lunamax unchanged/backendUNVERIFIED. Onechild/onewriter, parentGit/ledger. No manualuser test midprogram.
+
+M1-A stopped with two actual native proof failures. `SetFileInformationByHandle(FileRenameInfo, no replace)` returnsOS32 for ordinary guarded publication. A zero-byte control stage with identical exclusive creation rights/sharing under the existing weaker directory policy renames successfully. This is diagnostic evidence, not authority to weaken archive guards or claim an exact kernel mechanism. The existing helper's source already records ERROR87 for the relative RootDirectory attempt; it was not retried.
+
+The source/alias removal loop observed a successful remove_file while the admitted source was held. Which spelling failed the assertion is UNKNOWN; later identity/path/byte checks and source-parent mutation checks were not reached. Do not generalize this to all source holding: ordinary admission, existing-writer refusal, an unguarded same-object reparse conversion control and preexisting-reparse refusal were observed before the failing assertion.
+
+Collision publication, final identity/content, explicit delete-pending stage receipt and later stage retirement assertions occur after the failed ordinary publication and are **NOT_REACHED** in the native stage test. The preparation test did prove cancellation after one stage and injected second-creation failure clean their stages and preserve an existing sentinel. Empty fixture root and retired test processes are observed cleanup evidence, not a substitute for the unreachable native lifecycle assertions.
+
+All source remains UNACCEPTED. Continue only through the [complete remaining G07 package](roles/implementer/follow-on/native-guard-publication-compatibility/GOAL.md). Payload CRC/actual byte accounting/EOF/cancellation/partial-publication receipts and UI remain unimplemented and unproved.

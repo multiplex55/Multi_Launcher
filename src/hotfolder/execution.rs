@@ -8,8 +8,9 @@ use super::capability::{
     ActionCapability, ActionEnablement, HotFolderCapabilityContext, evaluate_action_capability,
 };
 use super::model::{
-    ConfigurationFingerprint, HotFolderEventKind, HotFolderRule, MAX_RULES, RuleAction, RuleId,
-    RuleTrigger, evaluate_rule_conditions,
+    ConditionBinding, ConditionEvaluation, ConfigurationFingerprint, FileMetadata,
+    HotFolderEventKind, HotFolderRule, MAX_RULES, RuleAction, RuleId, RuleTrigger,
+    evaluate_rule_conditions, evaluate_rule_metadata,
 };
 use super::runtime::{
     HotFolderCandidateId, HotFolderFileEvidence, HotFolderLeaseDisposition,
@@ -509,7 +510,8 @@ impl HotFolderExecutionControl {
     }
 
     fn begin_operation(&self, rule_id: RuleId) -> Option<ExecutionControlLease> {
-        if self.admission_blocked() {
+        let generation = self.gate_snapshot();
+        if generation & 1 != 0 {
             return None;
         }
         let operation = self
@@ -545,6 +547,7 @@ impl HotFolderExecutionControl {
         Some(ExecutionControlLease {
             control: self.clone(),
             operation,
+            generation,
             cancellation,
         })
     }
@@ -553,7 +556,136 @@ impl HotFolderExecutionControl {
 struct ExecutionControlLease {
     control: HotFolderExecutionControl,
     operation: u64,
+    generation: u64,
     cancellation: ScanCancellation,
+}
+
+/// Execution-local evidence. Neither a preview result nor copied native
+/// metadata can replace the watcher's actual lease transfer or native guard.
+struct CandidateConditionEvaluation<'a> {
+    candidate: &'a HotFolderReadyCandidate,
+    control: &'a ExecutionControlLease,
+    captured_now: SystemTime,
+}
+
+impl CandidateConditionEvaluation<'_> {
+    fn invalid_configuration(
+        &self,
+        observed: Option<&HotFolderReadyCandidate>,
+        rules: &HotFolderRulesSnapshot,
+    ) -> Option<ConditionEvaluation> {
+        let current = rules
+            .rules
+            .iter()
+            .find(|rule| rule.id == self.candidate.rule.id);
+        std::iter::once(&self.candidate.rule)
+            .chain(observed.map(|candidate| &candidate.rule))
+            .chain(current)
+            .find_map(|rule| rule.validate().err())
+            .map(|reason| ConditionEvaluation::Invalid { reason })
+    }
+
+    fn evaluate_transfer(
+        &self,
+        transferred: Result<Option<HotFolderReadyCandidate>, HotFolderRuntimeError>,
+        rules: &HotFolderRulesSnapshot,
+        root: &NativeWatchRoot,
+        input: &NativeHotFolderInput,
+    ) -> ConditionEvaluation {
+        if let Some(invalid) = self.invalid_configuration(
+            transferred
+                .as_ref()
+                .ok()
+                .and_then(|candidate| candidate.as_ref()),
+            rules,
+        ) {
+            return invalid;
+        }
+        match transferred {
+            Ok(Some(candidate)) => self.evaluate(&candidate, rules, root, input),
+            _ => ConditionEvaluation::Changed {
+                reason: "ready candidate lease did not transfer",
+            },
+        }
+    }
+
+    fn evaluate(
+        &self,
+        observed: &HotFolderReadyCandidate,
+        rules: &HotFolderRulesSnapshot,
+        root: &NativeWatchRoot,
+        input: &NativeHotFolderInput,
+    ) -> ConditionEvaluation {
+        let expected = self.candidate;
+        // Configuration errors outrank simultaneous stale/evidence failures.
+        if let Some(invalid) = self.invalid_configuration(Some(observed), rules) {
+            return invalid;
+        }
+        let current_rule = rules.rules.iter().find(|rule| rule.id == expected.rule.id);
+        let Some(relative) =
+            super::runtime::relative_path_beneath(root.canonical_root(), &expected.path)
+        else {
+            return ConditionEvaluation::Changed {
+                reason: "candidate is outside the admitted root",
+            };
+        };
+        let configured = expected.rule.conditions.is_configured();
+        let current = current_rule.is_some_and(|rule| {
+            rule.enabled
+                && ConfigurationFingerprint::of_serializable(rule)
+                    .is_ok_and(|fingerprint| fingerprint == expected.rule_fingerprint)
+        });
+        let binding = if !current
+            || !ConfigurationFingerprint::of_serializable(&expected.rule)
+                .is_ok_and(|fingerprint| fingerprint == expected.rule_fingerprint)
+            || !ConfigurationFingerprint::of_serializable(&observed.rule)
+                .is_ok_and(|fingerprint| fingerprint == expected.rule_fingerprint)
+            || observed.rule_fingerprint != expected.rule_fingerprint
+            || observed.correlation != expected.correlation
+            || observed.epoch != expected.epoch
+            || observed.store_revision != expected.store_revision
+            || !paths_equivalent(&observed.path, &expected.path)
+            || observed.evidence != expected.evidence
+            || root.identity() != expected.evidence.root_identity
+            || input.root_identity != expected.evidence.root_identity
+            || input.parent_identity != expected.evidence.parent_identity
+            || input.file_identity != expected.evidence.file_identity
+            || input.length != expected.evidence.length
+            || input.modified != expected.evidence.modified
+            || (configured
+                && (rules.revision != expected.store_revision
+                    || self.control.control.gate_snapshot() != self.control.generation
+                    || self
+                        .control
+                        .control
+                        .inner
+                        .active_operation
+                        .load(Ordering::Acquire)
+                        != self.control.operation
+                    || self.control.cancellation.is_cancelled()))
+        {
+            ConditionBinding::Changed {
+                reason: "candidate, rule, source or execution control changed",
+            }
+        } else {
+            ConditionBinding::Current
+        };
+        let event = match expected.rule.trigger {
+            RuleTrigger::NewFile => HotFolderEventKind::Created,
+            RuleTrigger::ModifiedFile => HotFolderEventKind::Modified,
+        };
+        evaluate_rule_metadata(
+            &expected.rule,
+            event,
+            &relative,
+            Some(FileMetadata {
+                size_bytes: input.length,
+                modified_at: Some(input.modified),
+            }),
+            self.captured_now,
+            binding,
+        )
+    }
 }
 
 struct HotFolderActivityCompletion {
@@ -960,6 +1092,7 @@ impl HotFolderExecutionEngine {
         rule: &HotFolderRule,
         fingerprint: &ConfigurationFingerprint,
         cancellation: &ScanCancellation,
+        started_wall: SystemTime,
         error: NativeHotFolderError,
     ) -> Result<HotFolderRunDisposition, HotFolderExecutionError> {
         if watcher
@@ -970,7 +1103,6 @@ impl HotFolderExecutionEngine {
         }
         let key = ExecutionKey::from_candidate(candidate, None);
         let now = self.clock.now();
-        let started_wall = self.clock.wall_now();
         let started = now;
         let operation_id = rand::random::<u128>();
         {
@@ -1118,6 +1250,11 @@ impl HotFolderExecutionEngine {
             return Ok(None);
         };
         let cancellation = control_lease.cancellation.clone();
+        let condition_evaluation = CandidateConditionEvaluation {
+            candidate: &candidate,
+            control: &control_lease,
+            captured_now: self.clock.wall_now(),
+        };
         let rules = store.snapshot();
 
         // A disable/edit/delete is rejected against the store's current
@@ -1191,11 +1328,18 @@ impl HotFolderExecutionEngine {
                         current_rule,
                         &current_fingerprint,
                         &cancellation,
+                        condition_evaluation.captured_now,
                         error,
                     )
                     .map(Some);
             }
         };
+        if condition_evaluation.evaluate(&candidate, &store.snapshot(), &root, &input)
+            != ConditionEvaluation::Match
+        {
+            watcher.finish_lease(lease, HotFolderLeaseDisposition::RejectStale)?;
+            return Ok(Some(HotFolderRunDisposition::StaleCandidate));
+        }
         let key = ExecutionKey::from_candidate(&candidate, Some(input.sha256));
         let plan = self.plan_action(current_rule, &candidate, &root);
         let (action, destination, target_leaf, target_path) = match plan {
@@ -1221,7 +1365,7 @@ impl HotFolderExecutionEngine {
         if let Some(path) = stage_path {
             active_paths.push(path);
         }
-        let started_wall = self.clock.wall_now();
+        let started_wall = condition_evaluation.captured_now;
         let started = self.clock.now();
         let action_kind = execution_action(current_rule.action.kind_name());
         let mut journal_row = JournalRow::pending(
@@ -1363,30 +1507,16 @@ impl HotFolderExecutionEngine {
 
         // The lease transfer verifies B still owns this exact active epoch and
         // enable authorization. No file mutation has happened yet.
-        if watcher
-            .finish_lease(lease, HotFolderLeaseDisposition::TransferToConsumer)
-            .is_err()
-        {
-            cancellation.cancel();
-            if let Ok(mut state) = self.state.lock() {
-                state.active = None;
-            }
-            if let Some(activity) = activity.take() {
-                activity.finish(ActivityOutcome::Cancelled, None);
-            }
-            return Ok(Some(HotFolderRunDisposition::StaleCandidate));
-        }
+        let transferred =
+            watcher.finish_lease(lease, HotFolderLeaseDisposition::TransferToConsumer);
 
         // Catch store edits that raced the initial read and lease transfer.
         // Lifecycle callers also call reconcile_rules on transitions so an
         // already-running cancellable operation is stopped promptly.
         let latest_rules = store.snapshot();
-        let latest_rule_is_current = latest_rules.rules.iter().any(|rule| {
-            rule.id == current_rule.id
-                && rule.enabled
-                && ConfigurationFingerprint::of_serializable(rule)
-                    .is_ok_and(|fingerprint| fingerprint == current_fingerprint)
-        });
+        let latest_rule_is_current =
+            condition_evaluation.evaluate_transfer(transferred, &latest_rules, &root, &input)
+                == ConditionEvaluation::Match;
         if !latest_rule_is_current {
             if let Ok(mut state) = self.state.lock() {
                 state.active = None;
@@ -2972,6 +3102,520 @@ mod tests {
         engine
             .run_next_ready(&watcher, store, context)
             .expect("run candidate")
+    }
+
+    struct MetadataFixture {
+        _directory: tempfile::TempDir,
+        store: Arc<HotFolderRulesStore>,
+        snapshot: HotFolderRulesSnapshot,
+        candidate: HotFolderReadyCandidate,
+        root: NativeWatchRoot,
+        input: NativeHotFolderInput,
+    }
+
+    fn metadata_fixture(configured: bool) -> MetadataFixture {
+        let directory = tempfile::tempdir().expect("owned metadata fixture");
+        let store = Arc::new(HotFolderRulesStore::new(&AppDataRoot::from_path(
+            directory.path().join("data"),
+        )));
+        store.load();
+        let watched = directory.path().join("incoming");
+        let mut rule = HotFolderRule::new(
+            "metadata",
+            &watched,
+            RuleAction::Copy {
+                destination: directory.path().join("output"),
+            },
+        );
+        if configured {
+            rule.conditions.size_bytes = Some(super::super::model::InclusiveU64Range {
+                min: Some(5),
+                max: Some(5),
+            });
+        }
+        let snapshot = store.add_rule(0, rule).expect("fixture rule");
+        let id = snapshot.rules[0].id.clone();
+        let snapshot = enable_rule(&store, snapshot, &id);
+        let root = test_native_watch_root(&watched, 7, test_native_identity(1).file_id());
+        let candidate = ready_candidate(
+            &snapshot.rules[0],
+            watched.join("source.bin"),
+            root.identity(),
+            root.identity(),
+            10,
+            5,
+            snapshot.revision,
+            1,
+        );
+        let input = NativeHotFolderInput {
+            root_identity: candidate.evidence.root_identity,
+            parent_identity: candidate.evidence.parent_identity,
+            file_identity: candidate.evidence.file_identity,
+            length: candidate.evidence.length,
+            modified: candidate.evidence.modified,
+            sha256: [0x42; 32],
+        };
+        MetadataFixture {
+            _directory: directory,
+            store,
+            snapshot,
+            candidate,
+            root,
+            input,
+        }
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_binding_refuses_every_stale_evidence_field() {
+        let fixture = metadata_fixture(true);
+        let control = HotFolderExecutionControl::default();
+        let lease = control
+            .begin_operation(fixture.candidate.rule.id.clone())
+            .unwrap();
+        let evaluation = CandidateConditionEvaluation {
+            candidate: &fixture.candidate,
+            control: &lease,
+            captured_now: UNIX_EPOCH + Duration::from_secs(100),
+        };
+        assert_eq!(
+            evaluation.evaluate(
+                &fixture.candidate,
+                &fixture.snapshot,
+                &fixture.root,
+                &fixture.input
+            ),
+            ConditionEvaluation::Match
+        );
+        for field in 0..11 {
+            let mut observed = fixture.candidate.clone();
+            match field {
+                0 => observed.correlation = HotFolderCandidateId::from_persisted(999),
+                1 => observed.epoch += 1,
+                2 => observed.store_revision += 1,
+                3 => observed.path.set_file_name("changed.bin"),
+                4 => observed.rule.name.push_str(" edited"),
+                5 => {
+                    observed.rule_fingerprint =
+                        ConfigurationFingerprint::of_serializable(&"different").unwrap()
+                }
+                6 => observed.evidence.root_identity = test_native_identity(91),
+                7 => observed.evidence.parent_identity = test_native_identity(92),
+                8 => observed.evidence.file_identity = test_native_identity(93),
+                9 => observed.evidence.length += 1,
+                _ => {
+                    observed.evidence.modified += Duration::from_micros(1);
+                    assert_ne!(
+                        observed.evidence.modified,
+                        fixture.candidate.evidence.modified
+                    );
+                }
+            }
+            assert!(
+                matches!(
+                    evaluation.evaluate(
+                        &observed,
+                        &fixture.snapshot,
+                        &fixture.root,
+                        &fixture.input
+                    ),
+                    ConditionEvaluation::Changed { .. }
+                ),
+                "candidate field {field}"
+            );
+        }
+        for field in 0..5 {
+            let mut input = fixture.input;
+            match field {
+                0 => input.root_identity = test_native_identity(91),
+                1 => input.parent_identity = test_native_identity(92),
+                2 => input.file_identity = test_native_identity(93),
+                3 => input.length += 1,
+                _ => {
+                    input.modified += Duration::from_micros(1);
+                    assert_ne!(input.modified, fixture.input.modified);
+                }
+            }
+            assert!(
+                matches!(
+                    evaluation.evaluate(
+                        &fixture.candidate,
+                        &fixture.snapshot,
+                        &fixture.root,
+                        &input
+                    ),
+                    ConditionEvaluation::Changed { .. }
+                ),
+                "native field {field}"
+            );
+        }
+        let changed_root = test_native_watch_root(
+            fixture.root.canonical_root(),
+            7,
+            test_native_identity(99).file_id(),
+        );
+        assert!(matches!(
+            evaluation.evaluate(
+                &fixture.candidate,
+                &fixture.snapshot,
+                &changed_root,
+                &fixture.input
+            ),
+            ConditionEvaluation::Changed { .. }
+        ));
+        for field in 0..3 {
+            let mut rules = fixture.snapshot.clone();
+            match field {
+                0 => rules.revision += 1,
+                1 => rules.rules[0].enabled = false,
+                _ => rules.rules[0].name.push_str(" edited"),
+            }
+            assert!(matches!(
+                evaluation.evaluate(&fixture.candidate, &rules, &fixture.root, &fixture.input),
+                ConditionEvaluation::Changed { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_binding_preserves_invalid_priority_and_control_generation() {
+        let fixture = metadata_fixture(true);
+        let control = HotFolderExecutionControl::default();
+        let lease = control
+            .begin_operation(fixture.candidate.rule.id.clone())
+            .unwrap();
+        let evaluation = CandidateConditionEvaluation {
+            candidate: &fixture.candidate,
+            control: &lease,
+            captured_now: UNIX_EPOCH,
+        };
+        control.block_admission();
+        control.allow_admission();
+        assert!(!control.admission_blocked());
+        assert_ne!(control.gate_snapshot(), lease.generation);
+        assert!(matches!(
+            evaluation.evaluate(
+                &fixture.candidate,
+                &fixture.snapshot,
+                &fixture.root,
+                &fixture.input
+            ),
+            ConditionEvaluation::Changed { .. }
+        ));
+        let mut invalid = fixture.snapshot.clone();
+        invalid.revision += 1;
+        invalid.rules[0].conditions.modified_age_seconds =
+            Some(super::super::model::InclusiveU64Range {
+                min: Some(2),
+                max: Some(1),
+            });
+        let mut input = fixture.input;
+        input.length = 0;
+        assert!(matches!(
+            evaluation.evaluate(&fixture.candidate, &invalid, &fixture.root, &input),
+            ConditionEvaluation::Invalid { .. }
+        ));
+        assert!(matches!(
+            evaluation.evaluate_transfer(
+                Err(HotFolderRuntimeError::StaleLease),
+                &invalid,
+                &fixture.root,
+                &input
+            ),
+            ConditionEvaluation::Invalid { .. }
+        ));
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_actual_lease_transfer_cannot_reuse_old_match() {
+        let fixture = metadata_fixture(true);
+        let control = HotFolderExecutionControl::default();
+        let control_lease = control
+            .begin_operation(fixture.candidate.rule.id.clone())
+            .unwrap();
+        let evaluation = CandidateConditionEvaluation {
+            candidate: &fixture.candidate,
+            control: &control_lease,
+            captured_now: UNIX_EPOCH + Duration::from_secs(100),
+        };
+        let watcher = HotFolderWatchService::with_test_ready_candidate(fixture.candidate.clone());
+        let lease = watcher.try_lease_ready().unwrap();
+        assert_eq!(
+            evaluation.evaluate_transfer(
+                watcher.finish_lease(lease, HotFolderLeaseDisposition::TransferToConsumer),
+                &fixture.snapshot,
+                &fixture.root,
+                &fixture.input
+            ),
+            ConditionEvaluation::Match
+        );
+        let watcher = HotFolderWatchService::with_test_ready_candidate(fixture.candidate.clone());
+        let lease = watcher.try_lease_ready().unwrap();
+        let other_service = HotFolderWatchService::new();
+        let rejected_transfer =
+            other_service.finish_lease(lease, HotFolderLeaseDisposition::TransferToConsumer);
+        assert!(matches!(
+            &rejected_transfer,
+            Err(HotFolderRuntimeError::WrongServiceLease)
+        ));
+        assert!(matches!(
+            evaluation.evaluate_transfer(
+                rejected_transfer,
+                &fixture.snapshot,
+                &fixture.root,
+                &fixture.input
+            ),
+            ConditionEvaluation::Changed { .. }
+        ));
+        assert!(matches!(
+            evaluation.evaluate_transfer(
+                Ok(None),
+                &fixture.snapshot,
+                &fixture.root,
+                &fixture.input
+            ),
+            ConditionEvaluation::Changed { .. }
+        ));
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum MetadataProbePoint {
+        Fingerprint,
+        Destination,
+    }
+
+    struct MetadataOperationPort {
+        source: NativeWatchRoot,
+        destination: NativeWatchRoot,
+        input: NativeHotFolderInput,
+        hook: Box<dyn Fn(MetadataProbePoint) + Send + Sync>,
+        fingerprint_calls: AtomicUsize,
+        execute_calls: AtomicUsize,
+    }
+
+    impl HotFolderOperationPort for MetadataOperationPort {
+        fn admit_root(&self, path: &Path) -> Result<NativeWatchRoot, NativeHotFolderError> {
+            if paths_equivalent(path, self.source.canonical_root()) {
+                Ok(self.source.clone())
+            } else {
+                (self.hook)(MetadataProbePoint::Destination);
+                Ok(self.destination.clone())
+            }
+        }
+        fn fingerprint(
+            &self,
+            _: &NativeWatchRoot,
+            _: &Path,
+            _: HotFolderFileEvidence,
+            _: &ScanCancellation,
+        ) -> Result<NativeHotFolderInput, NativeHotFolderError> {
+            self.fingerprint_calls.fetch_add(1, Ordering::SeqCst);
+            (self.hook)(MetadataProbePoint::Fingerprint);
+            Ok(self.input)
+        }
+        fn execute(
+            &self,
+            _: &NativeWatchRoot,
+            _: &Path,
+            _: NativeHotFolderInput,
+            _: NativeHotFolderAction,
+            _: Option<&NativeWatchRoot>,
+            _: &OsStr,
+            _: u128,
+            _: &mut dyn FnMut(NativeHotFolderProgress) -> io::Result<()>,
+            _: &ScanCancellation,
+        ) -> Result<NativeHotFolderResult, NativeHotFolderError> {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+            Err(native_execution_error(
+                NativeHotFolderFailureKind::Io,
+                "fixture effect refused",
+                Vec::new(),
+            ))
+        }
+    }
+
+    struct CountingMetadataClock {
+        now: Instant,
+        reads: AtomicUsize,
+    }
+    impl ExecutionClock for CountingMetadataClock {
+        fn now(&self) -> Instant {
+            self.now
+        }
+        fn wall_now(&self) -> SystemTime {
+            UNIX_EPOCH + Duration::from_secs(100 + self.reads.fetch_add(1, Ordering::SeqCst) as u64)
+        }
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_execution_rechecks_before_effect_and_captures_time_once() {
+        // Normal unconditioned execution, native mismatch, store edit after
+        // fingerprint, disable after that check, then cancellation before transfer.
+        for scenario in 0..5 {
+            let fixture = metadata_fixture(false);
+            let control = HotFolderExecutionControl::default();
+            let store_for_hook = Arc::clone(&fixture.store);
+            let control_for_hook = control.clone();
+            let mut input = fixture.input;
+            if scenario == 1 {
+                input.length += 1;
+            }
+            let destination_path = match &fixture.candidate.rule.action {
+                RuleAction::Copy { destination } => destination.clone(),
+                _ => unreachable!(),
+            };
+            let port = Arc::new(MetadataOperationPort {
+                source: fixture.root.clone(),
+                destination: test_native_watch_root(
+                    &destination_path,
+                    7,
+                    test_native_identity(2).file_id(),
+                ),
+                input,
+                hook: Box::new(move |point| {
+                    if (scenario == 2 && point == MetadataProbePoint::Fingerprint)
+                        || (scenario == 3 && point == MetadataProbePoint::Destination)
+                    {
+                        let snapshot = store_for_hook.snapshot();
+                        let mut rule = snapshot.rules[0].clone();
+                        if scenario == 2 {
+                            rule.name.push_str(" edited");
+                        } else {
+                            rule.enabled = false;
+                        }
+                        store_for_hook
+                            .replace_rule(snapshot.revision, rule)
+                            .unwrap();
+                    }
+                    if scenario == 4 && point == MetadataProbePoint::Destination {
+                        control_for_hook.block_admission();
+                    }
+                }),
+                fingerprint_calls: AtomicUsize::new(0),
+                execute_calls: AtomicUsize::new(0),
+            });
+            let clock = Arc::new(CountingMetadataClock {
+                now: Instant::now(),
+                reads: AtomicUsize::new(0),
+            });
+            let engine = HotFolderExecutionEngine::new_with_dependencies(
+                &fixture.store,
+                port.clone(),
+                clock.clone(),
+                control,
+            )
+            .unwrap();
+            let availability = HashMap::from([
+                (
+                    fixture.candidate.rule.watched_root.clone(),
+                    crate::hotfolder::RootAvailability::ExistingDirectory,
+                ),
+                (
+                    destination_path,
+                    crate::hotfolder::RootAvailability::ExistingDirectory,
+                ),
+            ]);
+            let macros = crate::mkmacro::MkMacroDocument::default();
+            let context = HotFolderCapabilityContext::new(
+                &[],
+                ActionResolutionContext::new(ActionSurface::LauncherList, ""),
+                &macros,
+                &availability,
+            );
+            let result =
+                run_candidate(&engine, &fixture.store, &context, fixture.candidate.clone());
+            assert_eq!(
+                port.fingerprint_calls.load(Ordering::SeqCst),
+                1,
+                "scenario {scenario}"
+            );
+            assert_eq!(
+                port.execute_calls.load(Ordering::SeqCst),
+                usize::from(scenario == 0),
+                "scenario {scenario}"
+            );
+            assert_eq!(clock.reads.load(Ordering::SeqCst), 1);
+            if scenario == 4 {
+                assert_eq!(result, None);
+            } else if scenario != 0 {
+                assert_eq!(result, Some(HotFolderRunDisposition::StaleCandidate));
+            } else {
+                // Unrelated store revisions retain legacy eligibility.
+                let lease = engine
+                    .control
+                    .begin_operation(fixture.candidate.rule.id.clone())
+                    .unwrap();
+                let evaluation = CandidateConditionEvaluation {
+                    candidate: &fixture.candidate,
+                    control: &lease,
+                    captured_now: UNIX_EPOCH,
+                };
+                let mut changed_revision = fixture.snapshot.clone();
+                changed_revision.revision += 1;
+                assert_eq!(
+                    evaluation.evaluate(
+                        &fixture.candidate,
+                        &changed_revision,
+                        &fixture.root,
+                        &fixture.input
+                    ),
+                    ConditionEvaluation::Match
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_conditioned_execution_stays_refused() {
+        let fixture = metadata_fixture(true);
+        let destination_path = match &fixture.candidate.rule.action {
+            RuleAction::Copy { destination } => destination.clone(),
+            _ => unreachable!(),
+        };
+        let port = Arc::new(MetadataOperationPort {
+            source: fixture.root.clone(),
+            destination: test_native_watch_root(
+                &destination_path,
+                7,
+                test_native_identity(2).file_id(),
+            ),
+            input: fixture.input,
+            hook: Box::new(|_| {}),
+            fingerprint_calls: AtomicUsize::new(0),
+            execute_calls: AtomicUsize::new(0),
+        });
+        let engine = HotFolderExecutionEngine::new_with_dependencies(
+            &fixture.store,
+            port.clone(),
+            Arc::new(FixedClock {
+                now: Instant::now(),
+                wall_now: UNIX_EPOCH + Duration::from_secs(100),
+            }),
+            HotFolderExecutionControl::default(),
+        )
+        .unwrap();
+        let availability = HashMap::from([
+            (
+                fixture.candidate.rule.watched_root.clone(),
+                crate::hotfolder::RootAvailability::ExistingDirectory,
+            ),
+            (
+                destination_path,
+                crate::hotfolder::RootAvailability::ExistingDirectory,
+            ),
+        ]);
+        let macros = crate::mkmacro::MkMacroDocument::default();
+        let context = HotFolderCapabilityContext::new(
+            &[],
+            ActionResolutionContext::new(ActionSurface::LauncherList, ""),
+            &macros,
+            &availability,
+        );
+        assert_eq!(
+            run_candidate(&engine, &fixture.store, &context, fixture.candidate),
+            Some(HotFolderRunDisposition::StaleCandidate)
+        );
+        assert_eq!(port.fingerprint_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(port.execute_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -140,24 +140,26 @@ A safe, bounded extraction subset is explicitly proven and only that subset enab
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `DEFERRED_WITH_DESIGN / FAILED_VERIFICATION / WRITER_DEFERRED`; all M1-A source UNACCEPTED.
+- **Run ID and branch:** `20261029-r01`, `codex/closeout-g07-zip-extraction-20261029-r01`.
+- **Actual master/source base:** master `4a1283e6`, independent bootstrap `02d0ac64`; accepted integration `92c7076a` remains separate.
+- **Current milestone:** M1-A stopped after corrected10/12 result with two native gate failures; no later milestone started.
+- **Active role and requested/configured/resolved model:** independent documentation reviewer requested Astra/max, configured Sol/high, actual backend UNVERIFIED; no config change.
+- **Last known commit / push:** parent preservation donor `e4e74ec8675c070e165849477fd33d9f490b63d2` normally pushed; all source UNACCEPTED, no source integration.
+- **Next action:** independent documentation closure review then G08; canonical remaining pair in execution `goals/G07/follow-on/native-guard-publication-compatibility/`.
+- **Blocker and scope:** guarded no-replace publication OS32; one source/alias deletion assertion failed with exact spelling UNKNOWN. No guard relaxation, path fallback or unsafe writer/UI enabled.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Security and format decision record |
-| `M1-A` | PENDING | — | Physical-entry validation and output reservation |
-| `M1-B` | PENDING | — | Quota-bound streaming writer |
-| `M2-A` | PENDING | — | Focused adversarial archive proof |
-| `M2-B` | PENDING | — | Minimal UI gated by writer acceptance |
-| `M3-A` | PENDING | — | Close or defer |
+| `M0-A` | COMMITTED_HANDOFF | Parent security/format decision and explicit packet at3f6408d6 | Preserve original binding contract |
+| `M1-A` | FAILED_VERIFICATION / UNACCEPTED | Final10/12; two mandatory native failures; complete source/receipt/stop package | Independent disposition, then exact remaining native proof |
+| `M1-B` | NOT_STARTED | No streaming writer | Requires accepted M1-A and fresh packet |
+| `M2-A` | NOT_STARTED | No accepted writer proof | Actual CRC/EOF/quota/cancel/cleanup/partial receipts |
+| `M2-B` | NOT_STARTED / WRITER_GATED | No UI/source changes | Requires accepted writer |
+| `M3-A` | DEFERRED_WITH_DESIGN | Implementer stop and complete future pair authored | Parent reviewer/canonical closure |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+- Runtime2026-10-30 M0-A IN_PROGRESS: branch codex/closeout-g07-zip-extraction-20261029-r01 frombootstrap02d0ac64, fetched master4a1283e6unchanged, integration92c7076a authoritative. Planner security/format/firstwriterpacket next; no code/test/nativeZIPyet.
+- 2026-10-30 M1-A bounded stop: initial8/12, corrected10/12; all source UNACCEPTED. Native ordinary guarded publicationOS32 and successful removal in source/alias loop (spellingUNKNOWN) remain. Initial preparation170.815s; aggregate correction411.306/600s; runs3.378s/3.492s. Material-gate stop with188.694s unused, no further source/probe. Exact owned fixture root empty and processes retired. Complete continuation retains all original native/writer/UI gates; parent owns review, canonicalization, Git and any docs-only integration.

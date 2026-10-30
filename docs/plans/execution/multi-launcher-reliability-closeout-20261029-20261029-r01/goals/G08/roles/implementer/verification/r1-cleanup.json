@@ -1,0 +1,23 @@
+{
+  "utc": "2026-10-30T06:56:29.5638513Z",
+  "recorded_process_ids": [
+    32752,
+    5272,
+    35012,
+    21420,
+    39636
+  ],
+  "remaining_recorded_processes": [],
+  "matching_build_or_test_processes": [],
+  "owned_session": "32954 completed and output drained",
+  "termination_attempt": "taskkill /PID 32752 /T /F: exit 1, ERROR: Access denied",
+  "read_only_cim_query": "Access denied; no escalation",
+  "final_check": "Get-Process by recorded IDs and relevant build/test names",
+  "late_exit_code": 0,
+  "timed_out": true,
+  "actual_drain_lifetime_seconds": 101.88,
+  "test_execution": "NOT_RUN",
+  "temporary_source_or_native_fixtures": "NONE",
+  "source_changes_after_preparation_started": "NONE",
+  "ignored_evidence": "target/closeout-g08-m1-20261030-r01 retained"
+}

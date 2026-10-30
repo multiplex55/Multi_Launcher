@@ -231,6 +231,8 @@ pub struct SettingsEditor {
     pub(crate) show_launcher_icon: bool,
     pub(crate) show_launcher_title: bool,
     pub(crate) experimental_jump_mode_enabled: bool,
+    pub(crate) jump_mode_activation_chord: String,
+    pub(crate) jump_mode_hint_alphabet: String,
     pub(crate) timer_refresh: f32,
     pub(crate) disable_timer_updates: bool,
     pub(crate) preserve_command: bool,
@@ -368,6 +370,112 @@ impl SettingsEditor {
         footer_reserved_height: f32,
     ) -> f32 {
         (available_height - footer_reserved_height).max(0.0)
+    }
+
+    pub(crate) fn jump_preferences(
+        &self,
+    ) -> Result<
+        (
+            crate::settings::JumpModeChord,
+            crate::settings::HintAlphabet,
+        ),
+        String,
+    > {
+        let chord = crate::settings::JumpModeChord::parse(&self.jump_mode_activation_chord)
+            .map_err(|error| format!("Jump activation chord: {error}"))?;
+        let alphabet = crate::settings::HintAlphabet::parse(&self.jump_mode_hint_alphabet)
+            .map_err(|error| format!("Jump hint alphabet: {error}"))?;
+        if self.experimental_jump_mode_enabled {
+            let bindings = [
+                ("launcher hotkey", Some(self.hotkey.as_str())),
+                (
+                    "quit hotkey",
+                    self.quit_hotkey_enabled
+                        .then_some(self.quit_hotkey.as_str()),
+                ),
+                (
+                    "help hotkey",
+                    self.help_hotkey_enabled
+                        .then_some(self.help_hotkey.as_str()),
+                ),
+            ];
+            if let Some(message) = crate::hotkey::validation::jump_chord_conflict(
+                chord,
+                bindings.into_iter().filter_map(|(name, text)| {
+                    text.and_then(parse_hotkey).map(|hotkey| (name, hotkey))
+                }),
+            ) {
+                return Err(message);
+            }
+            if !self
+                .baseline_settings
+                .enabled_plugins
+                .as_ref()
+                .is_some_and(|plugins| !plugins.contains("paste_sequence"))
+            {
+                let preferences = self.paste_sequence_preferences();
+                let defaults = crate::settings::PasteSequencePreferences::default();
+                // The final resolver may omit optional defaults on conflict;
+                // custom controls must be refused. Saved Starts are resolved
+                // there from the current store, not from this editor draft.
+                let controls = [
+                    (
+                        "Paste Sequence Next",
+                        preferences.next_hotkey.as_deref(),
+                        defaults.next_hotkey.as_deref(),
+                    ),
+                    (
+                        "Paste Sequence Cancel",
+                        preferences.cancel_hotkey.as_deref(),
+                        defaults.cancel_hotkey.as_deref(),
+                    ),
+                ];
+                if let Some(message) = crate::hotkey::validation::jump_chord_conflict(
+                    chord,
+                    controls
+                        .into_iter()
+                        .filter_map(|(name, configured, default)| {
+                            let hotkey = configured.and_then(parse_hotkey)?;
+                            (Some(hotkey) != default.and_then(parse_hotkey))
+                                .then_some((name, hotkey))
+                        }),
+                ) {
+                    return Err(message);
+                }
+            }
+        }
+        Ok((chord, alphabet))
+    }
+
+    pub(crate) fn reset_jump_preferences(&mut self) {
+        self.experimental_jump_mode_enabled = false;
+        self.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::default().canonical_text();
+        self.jump_mode_hint_alphabet = crate::settings::HintAlphabet::default().canonical_text();
+    }
+
+    pub(crate) fn jump_hint_sample(&self) -> Result<Vec<String>, String> {
+        use crate::gui::jump_mode::{
+            HintMap, TargetGeneration, TargetId, TargetKind, TargetMetadata,
+        };
+        let alphabet = crate::settings::HintAlphabet::parse(&self.jump_mode_hint_alphabet)
+            .map_err(|error| format!("Jump hint alphabet: {error}"))?;
+        let targets = (0..5).map(|index| {
+            TargetMetadata::new(
+                TargetId::root_result(TargetGeneration(0), index),
+                format!("Sample {}", index + 1),
+                TargetKind::Button,
+                index as u64,
+            )
+        });
+        HintMap::assign_with_alphabet(targets, &alphabet)
+            .map(|map| {
+                map.assignments()
+                    .iter()
+                    .map(|assignment| assignment.hint().to_string())
+                    .collect()
+            })
+            .map_err(|_| "Jump hint sample could not be assigned".to_owned())
     }
 
     pub(crate) fn validate_before_save(&mut self) -> Result<(), &'static str> {

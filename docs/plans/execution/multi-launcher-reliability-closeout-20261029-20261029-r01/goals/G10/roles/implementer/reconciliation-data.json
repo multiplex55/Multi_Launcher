@@ -1,0 +1,146 @@
+{
+  "supplied_head": "874065dbe21f227c4c3189dc859ba5521b210eb5",
+  "integration_baseline": "ea3a7007e23090c1c2b13ea9018b29754579e4ef",
+  "latest_production": "b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7",
+  "latest_tests": "fc9e5c7cbb509397b47c4d7f2902899c9d04dd43",
+  "goals": [
+    {
+      "goal": "G00",
+      "status": "ACCEPTED_COMPLETE",
+      "scope": "Documentation only; continuation and baseline accepted.",
+      "evidence": "Static checks/review; Cargo and native NOT_RUN.",
+      "next_action": "No restart; read current status.",
+      "branch": "codex/closeout-g00-baseline-and-continuation-20261029-r01",
+      "local_tip": "7e53f4d28ca5b66a21e30e41545692cce5fa6b6a",
+      "remote_tracking_tip": "7e53f4d28ca5b66a21e30e41545692cce5fa6b6a",
+      "equal": true,
+      "current_supplied_head": "7e53f4d28ca5b66a21e30e41545692cce5fa6b6a"
+    },
+    {
+      "goal": "G01",
+      "status": "ACCEPTED_COMPLETE",
+      "scope": "Destination read failures preserved; comparison-bound operation feedback and mutation gate corrected.",
+      "evidence": "Corrected 32/32: 25 library + 7 unchanged Diff cases. Original domain File Search E0308 retained; native NOT_RUN.",
+      "next_action": "Keep accepted scope; independent File Search fixture pair remains proposed.",
+      "branch": "codex/closeout-g01-diff-failure-information-20261029-r01",
+      "local_tip": "13243515329ce4010bd6db981f1fd3bcc26f2dec",
+      "remote_tracking_tip": "13243515329ce4010bd6db981f1fd3bcc26f2dec",
+      "equal": true,
+      "current_supplied_head": "13243515329ce4010bd6db981f1fd3bcc26f2dec"
+    },
+    {
+      "goal": "G02",
+      "status": "DEFERRED_WITH_DESIGN / NATIVE_NOT_PROVEN",
+      "scope": "Only reviewed documentation imported; all publication prototype source excluded.",
+      "evidence": "Both 19-case runs: 15 pass / 4 fail, OS5 in native parent admission before staging; cause/ancestor unknown. M1-B unstarted.",
+      "next_action": "Complete native admission and all lifecycle/recovery gates before G03.",
+      "branch": "codex/closeout-g02-table-publication-safety-20261029-r01",
+      "local_tip": "011af0c448dfdcdc0eb747083f909d3bfa6c1ab2",
+      "remote_tracking_tip": "011af0c448dfdcdc0eb747083f909d3bfa6c1ab2",
+      "equal": true,
+      "current_supplied_head": "011af0c448dfdcdc0eb747083f909d3bfa6c1ab2"
+    },
+    {
+      "goal": "G03",
+      "status": "DEFERRED_DEPENDENCY",
+      "scope": "Documentation only; original conditional contract retained.",
+      "evidence": "No source, Cargo, native or large-file fixtures executed.",
+      "next_action": "Require fully accepted G02, reviewed integration ancestry and fresh G03 M0.",
+      "branch": "codex/closeout-g03-table-full-file-operations-20261029-r01",
+      "local_tip": "e0f556cd8041c502d63479d89d0e68301cceb3b2",
+      "remote_tracking_tip": "e0f556cd8041c502d63479d89d0e68301cceb3b2",
+      "equal": true,
+      "current_supplied_head": "e0f556cd8041c502d63479d89d0e68301cceb3b2"
+    },
+    {
+      "goal": "G04",
+      "status": "NATIVE_PROOF_DEFERRED",
+      "scope": "Source/protocol documentation only; no defect inferred.",
+      "evidence": "No Cargo/unit/native gesture/output execution; held-secondary drag, exact binary and actual clipboard proof unavailable.",
+      "next_action": "Establish supported capability/isolation, then existing pixel protocol.",
+      "branch": "codex/closeout-g04-screenshot-native-redaction-20261029-r01",
+      "local_tip": "ea27ce749318ab2c261384385fd03ef05f882b4f",
+      "remote_tracking_tip": "ea27ce749318ab2c261384385fd03ef05f882b4f",
+      "equal": true,
+      "current_supplied_head": "ea27ce749318ab2c261384385fd03ef05f882b4f"
+    },
+    {
+      "goal": "G05",
+      "status": "PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED",
+      "scope": "Accepted metadata/binding and corrected pure literal-stream foundations; all condition refusal gates retained.",
+      "evidence": "M1-A 19/19; corrected B1 22/22. No native pending-read retirement or actual queued-start/effect proof.",
+      "next_action": "Complete B2 native ownership/retirement, effect and queued-start binding, editor/Test Rule and review before activation.",
+      "branch": "codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01",
+      "local_tip": "a78895c63f31c9f48ae579e3203c14fa3faa8c35",
+      "remote_tracking_tip": "a78895c63f31c9f48ae579e3203c14fa3faa8c35",
+      "equal": true,
+      "current_supplied_head": "a78895c63f31c9f48ae579e3203c14fa3faa8c35"
+    },
+    {
+      "goal": "G06",
+      "status": "PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED",
+      "scope": "Corrected Jump settings editor and acknowledged validated transaction accepted.",
+      "evidence": "Corrected 29/29: 26 library + 3 real main-resolver tests. Exact app build passed; owned-window discovery failed, no native input/focus/Save proof.",
+      "next_action": "Obtain supported owned window for exact-source isolated app, then native protocol.",
+      "branch": "codex/closeout-g06-jump-settings-and-focus-20261029-r01",
+      "local_tip": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "remote_tracking_tip": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "equal": true,
+      "current_supplied_head": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436"
+    },
+    {
+      "goal": "G07",
+      "status": "DEFERRED_WITH_DESIGN / FAILED_VERIFICATION / WRITER_DEFERRED",
+      "scope": "Reviewed documentation only; all archive prototype source excluded.",
+      "evidence": "Final 10/12. Guarded publication OS32; source/alias deletion endpoint UNKNOWN, no post-delete binding claim.",
+      "next_action": "Resolve exact endpoint and guarded no-replace proof before Stored writer and later UI.",
+      "branch": "codex/closeout-g07-zip-extraction-20261029-r01",
+      "local_tip": "5d4d3054c5b52510a38d96faf201c6c0ca2e07f7",
+      "remote_tracking_tip": "5d4d3054c5b52510a38d96faf201c6c0ca2e07f7",
+      "equal": true,
+      "current_supplied_head": "5d4d3054c5b52510a38d96faf201c6c0ca2e07f7"
+    },
+    {
+      "goal": "G08",
+      "status": "DEFERRED_WITH_DESIGN / VERIFICATION_DEFERRED",
+      "scope": "History prototype and toolbar privacy correction excluded; recipes unimplemented.",
+      "evidence": "Initial 14/14 applies to old blobs only. R1 preparation timed out at 32s, drained101.880s/late exit0; R1 tests NOT_RUN.",
+      "next_action": "Fresh source packet and explicit finite verification budget; privacy R1 review before history acceptance, then separately selected recipe policy.",
+      "branch": "codex/closeout-g08-mkmacro-run-history-20261029-r01",
+      "local_tip": "e505f961849475ecf3affda40064b96a60243f9d",
+      "remote_tracking_tip": "e505f961849475ecf3affda40064b96a60243f9d",
+      "equal": true,
+      "current_supplied_head": "e505f961849475ecf3affda40064b96a60243f9d"
+    },
+    {
+      "goal": "G09",
+      "status": "NO_CHANGE_REVALIDATED / TEST_STRENGTHENING_ACCEPTED",
+      "scope": "Selected retained/cancellable owner production logic unchanged; tests accepted.",
+      "evidence": "12/12 serial run exit0. Native pre-read acquired file handle: held OS32, post-join exclusive success, warm restart/cleanup. Preparation numeric exit null retained.",
+      "next_action": "No broader native or global retirement claim; no new initiative.",
+      "branch": "codex/closeout-g09-activity-center-retirement-20261029-r01",
+      "local_tip": "174b6fff5eba1a28de6fb8b73d3a5ea77c91187a",
+      "remote_tracking_tip": "174b6fff5eba1a28de6fb8b73d3a5ea77c91187a",
+      "equal": true,
+      "current_supplied_head": "174b6fff5eba1a28de6fb8b73d3a5ea77c91187a"
+    },
+    {
+      "goal": "G10",
+      "status": "IN_PROGRESS",
+      "scope": "Documentation reconciliation proposals only; final materialization/review/import/publication pending.",
+      "evidence": "Parent baseline receipts reused; bounded static checks only. No Cargo/build/native/CI.",
+      "next_action": "Parent materializes, independently reviews cumulative scope, imports accepted docs, then records actual PR/head/check facts.",
+      "branch": "codex/closeout-g10-residual-defect-triage-integration-20261029-r01",
+      "local_tip": "535993a4fa32a5646e0ade6076c6941a71d47230",
+      "remote_tracking_tip": "535993a4fa32a5646e0ade6076c6941a71d47230",
+      "equal": true,
+      "current_supplied_head": "874065dbe21f227c4c3189dc859ba5521b210eb5"
+    }
+  ],
+  "accepted_imports": {
+    "G01": "fd300ff748e54cee167a038337220e33beba2322",
+    "G05": "4999a47c68a9e4e5b8531cf31e018eda3eefda4f",
+    "G06": "b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7",
+    "G09": "fc9e5c7cbb509397b47c4d7f2902899c9d04dd43"
+  }
+}

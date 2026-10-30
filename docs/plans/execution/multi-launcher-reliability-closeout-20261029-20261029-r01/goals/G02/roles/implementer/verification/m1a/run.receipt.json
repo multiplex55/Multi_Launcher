@@ -1,0 +1,24 @@
+{
+  "phase": "G02-M1-A focused execution",
+  "command": "cargo nextest run -p multi_launcher -p multi_launcher_table_core --cargo-profile fast-dev --lib --offline --locked --color never -E \"test(table_publication_) | test(resource_pool_leases_share_usage_and_release_on_last_owner) | test(partial_temp_append_failure_keeps_charge_until_owned_file_is_removed) | test(failed_temp_deletion_keeps_a_retryable_charge_until_removed) | test(cloned_snapshot_handles_keep_each_allocation_charged_after_session_drop) | test(pending_job_releases_its_resource_leases_before_confirmed_activity_retirement) | test(file_page_failure_and_cancellation_preserve_the_last_good_page) | test(file_page_completion_from_closed_lifetime_is_ignored_after_reopen) | test(table_session_draft_edits_revoke_queued_export_receipts) | test(table_file_save_refuses_to_replace_the_opened_source) | test(table_file_save_requires_confirmation_and_publishes_the_captured_output)\" --retries 0 --no-fail-fast --status-level pass --final-status-level fail",
+  "head": "24f3c13f812a8e1654c490c15729142c721e469b",
+  "source_git_blobs": {
+    "src/table_utility_session.rs": "f0f9c6b5deb3fbbd39b079600b3efdd2ee508f07",
+    "src/table_utility_session/publication.rs": "8c5de16370cf0bfc5168cdb1df8d1e2277dc9695",
+    "src/file_operations.rs": "6796cb0d0937ef6b5478b09ea19bbea0b3c1d0b0",
+    "crates/multi_launcher_table_core/src/resource.rs": "7adf7f8cf557b12eb6220c85b9341937e0954ec4",
+    "crates/multi_launcher_table_core/src/lib.rs": "0e4dccc43056ac0a4e29b4329dac5626cf784d5b",
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380"
+  },
+  "selected_count": 19,
+  "new_test_count": 9,
+  "start": "2026-10-29T20:52:25.8894000-04:00",
+  "cap_seconds": 180,
+  "timed_out": false,
+  "pid": 22880,
+  "end": "2026-10-29T20:52:28.9000188-04:00",
+  "elapsed_seconds": 3.008,
+  "exit_code": 100,
+  "output_drained": true
+}

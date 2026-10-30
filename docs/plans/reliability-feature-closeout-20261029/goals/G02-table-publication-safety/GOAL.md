@@ -134,23 +134,31 @@ A source-bound, recovery-safe publication foundation with focused test receipts 
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `DEFERRED_WITH_DESIGN / NATIVE_NOT_PROVEN` / 20261029-r01.
+- **Run ID and branch:** 20261029-r01; codex/closeout-g02-table-publication-safety-20261029-r01.
+- **Actual master/source base:** master 4a1283e6edd2c245f562a07dbe3dcc6a61061eed; bootstrap 02d0ac64d51655f43d6e958ea551f5bf658ee48d.
+- **Current milestone:** M3-A documentation decision complete; source UNACCEPTED.
+- **Active role and requested/configured/resolved model:** NONE; planner/reviewer Astra max and implementer Astra xhigh requested; configured Sol high/Luna max; backend UNVERIFIED.
+- **Last known commit / push:** donor f879a2a880d59e941486241e652299dabc002365, normal push succeeded; closure docs next.
+- **Next action:** import only reviewed safe documentation; G03 dependency deferral then independent G04. Future native-parent-admission-proof pair requires new dispatch.
+- **Blocker and scope:** native parent admission CreateFileW OS error5 before staging; denied ancestor/cause unknown; source donor-only; G03 blocked.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Reconfirm precise gap and finalize safety contract |
-| `M1-A` | PENDING | — | Build smallest safe output reservation/publishing seam |
-| `M1-B` | PENDING | — | Handle cancellation, partial writes and recovery |
-| `M2-A` | PENDING | — | Focused deterministic proof |
-| `M3-A` | PENDING | — | Safety gate outcome |
+| `M0-A` | ACCEPTED_COMPLETE | safety contract24f3c13f | Documentation only |
+| `M1-A` | FAILED_VERIFICATION | two runs15/19; private source unaccepted | Exact native admission follow-on |
+| `M1-B` | DEFERRED_DEPENDENCY | no caller added | Requires proved M1-A |
+| `M2-A` | NATIVE_PROOF_DEFERRED | deterministic subset passes; native gate fails | Future exact proof package |
+| `M3-A` | ACCEPTED_COMPLETE | independent documentation review2026-10-30 01:05:51UTC | Decision only; no source import |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+- Runtime event, 2026-10-29 / 20261029-r01: G00 and G01 accepted before G02. Integration receipt b96d67f3 records accepted source through fd300ff7. G02 independent branch begins at bootstrap; source safety contract and exact native proof gate remain pending. G03 is not authorized by documentation-only progress.
+
+- Dated runtime scope clarification, 2026-10-29: necessary additive resource-owner and existing file_operations native adapters are permitted solely to connect quota/cleanup ownership to guarded staged publication. This does not authorize a table-engine refactor, a new generic framework, duplicated native effects, or UI enablement. The safety contract must name exact paths and native proof before implementation. A proven no-clobber-only foundation may support a minimal G03 export; unsupported replacement remains refused.
+
+- Runtime stop, 2026-10-29: both selected batches15 passed/4 failed; first responsible native parent admission CreateFileW returns OS error5 before stage creation. Denied ancestor and root cause unproven. Incremental preparation320.148s/600s, affected correction rerun consumed. Source remains UNACCEPTED on goal branch; complete implementer future pair recorded. M1-B not entered; G03 blocked. Parent checkpoints then requests documentation-only disposition review.
+
+- Closure2026-10-30: reviewer accepted documentation/deferral only with no substantive defects; donor f879a2a8 source remains UNACCEPTED. Stop report and canonical complete pair preserved. G03 gate remains closed; proceed independent program goals.

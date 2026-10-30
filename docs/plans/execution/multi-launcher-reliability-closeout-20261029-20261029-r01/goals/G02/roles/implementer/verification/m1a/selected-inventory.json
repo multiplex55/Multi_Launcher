@@ -1,0 +1,97 @@
+[
+  {
+    "package": "multi_launcher",
+    "name": "gui::table_utility_dialog::tests::table_file_save_refuses_to_replace_the_opened_source",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "gui::table_utility_dialog::tests::table_file_save_requires_confirmation_and_publishes_the_captured_output",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::publication::tests::table_publication_manifest_revisions_and_bounded_chunks_refuse_without_output",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::publication::tests::table_publication_native_new_file_preserves_source_and_transfers_exact_identity",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::publication::tests::table_publication_native_occupied_same_source_and_appeared_outputs_are_untouched",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::publication::tests::table_publication_native_preexisting_writer_and_wrong_source_identity_refuse",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::publication::tests::table_publication_native_source_parent_and_stage_cannot_be_substituted",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::publication::tests::table_publication_native_unsupported_paths_refuse_before_stage_creation",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::tests::cloned_snapshot_handles_keep_each_allocation_charged_after_session_drop",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::tests::file_page_completion_from_closed_lifetime_is_ignored_after_reopen",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::tests::file_page_failure_and_cancellation_preserve_the_last_good_page",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::tests::pending_job_releases_its_resource_leases_before_confirmed_activity_retirement",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher",
+    "name": "table_utility_session::tests::table_session_draft_edits_revoke_queued_export_receipts",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher_table_core",
+    "name": "resource::resource_tests::failed_temp_deletion_keeps_a_retryable_charge_until_removed",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher_table_core",
+    "name": "resource::resource_tests::partial_temp_append_failure_keeps_charge_until_owned_file_is_removed",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher_table_core",
+    "name": "resource::resource_tests::resource_pool_leases_share_usage_and_release_on_last_owner",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher_table_core",
+    "name": "resource::resource_tests::table_publication_failed_cleanup_retains_capability_not_a_replacement_path",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher_table_core",
+    "name": "resource::resource_tests::table_publication_owned_quota_edge_and_partial_write_keep_exact_charges",
+    "ignored": false
+  },
+  {
+    "package": "multi_launcher_table_core",
+    "name": "resource::resource_tests::table_publication_seal_and_publish_errors_keep_cleanup_owned",
+    "ignored": false
+  }
+]

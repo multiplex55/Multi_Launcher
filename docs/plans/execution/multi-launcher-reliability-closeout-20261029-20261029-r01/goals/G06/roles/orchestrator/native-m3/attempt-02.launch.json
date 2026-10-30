@@ -1,0 +1,8 @@
+{
+  "working_directory": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g06-native-20261029-r01\\profile",
+  "pid": 41660,
+  "attempt": 2,
+  "start_utc": "2026-10-30T04:41:51.4609257Z",
+  "exe_sha256": "5e2a6be71538b017666ba9e1078e48adbce44573bfdb69f27afecb45bcde519d",
+  "purpose": "one bounded recovery: corrected owned fixture, interactive native test window"
+}

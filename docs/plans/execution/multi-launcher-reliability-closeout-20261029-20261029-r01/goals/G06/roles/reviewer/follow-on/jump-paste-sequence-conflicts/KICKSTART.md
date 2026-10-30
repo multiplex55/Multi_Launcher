@@ -1,0 +1,14 @@
+# G06 R1 Kickstart — final-resolver Jump conflict check
+
+State: **RESOLVED_IN_G06** at `7cb16df951cb2eac1642fb428dbce84559f77562`; [confirmation](../../R1_CONFIRMATION.md). The steps below preserve the historical correction handoff. Do not dispatch them or add this pair to a future queue.
+
+Read the complete [Goal](GOAL.md) and [review record](../../ROLE_RECORD.md). Begin only under the parent's explicit G06 correction dispatch, or a future dispatch that adopts this unresolved pair. A resolved pair must not create duplicate work.
+
+1. Verify current branch, HEAD and working-tree ownership. Original reviewed source is `b708e38adc47ef17e5598a771fd7e194c888166e` on `codex/closeout-g06-jump-settings-and-focus-20261029-r01`. The parent owns Git and integration; do not switch branches, discard work or import the rejected checkpoint as accepted source.
+2. Read the actual `jump_chord_conflict`, final route resolver, sequence route construction/validation and the directly relevant existing resolver tests. Confirm the precise gap using enabled Jump `Ctrl+Shift+F8` plus an effective custom Paste Sequence `Ctrl+F8` route. Stop exploration once the admission boundary is understood.
+3. As sole writer, add the narrow shared comparison at the effective-route boundary and any necessary editor reuse. Preserve default omission/disabled-route decisions and Jump's local-only execution. Do not modify playback, focus, hooks, native lifecycle or settings transaction architecture.
+4. Add deterministic final-resolver tests for custom Next/Cancel and saved Start collisions plus compact negative controls. Reuse explicit sequence bindings and existing snapshots. For any test constructing an app, disable Paste Sequences Next/Cancel before construction as required by AGENTS; pure route tests may supply explicit bindings without constructing an app.
+5. Before Cargo, agree the exact filter/target, inventory and finite preparation/run caps with the parent. Execute only that approved set, preserve failure receipts and source hashes, drain outputs and account for owned processes. Do not run native input or the full suite. Do not reinterpret the original 25 library passes as final-resolver proof.
+6. Return the actual diff, test names/results, compatibility limits and any remaining counterexample. The parent checkpoints the result and requests one R1-only reviewer confirmation. If confirmed, mark this contingency **RESOLVED_IN_G06** and continue to the separate M3 provenance/isolation assessment. If unresolved after the permitted correction, keep source unaccepted and report the stop; do not begin a second implementation loop.
+
+Required handoff: one corrected source boundary, direct failing-before/passing-after resolver cases, truthful scoped verification, retained global route/transaction invariants, and no native or whole-G06 completion claim.

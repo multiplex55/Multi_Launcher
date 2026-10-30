@@ -1,0 +1,16 @@
+{
+  "phase": "single focused run after confirmed 30-test inventory",
+  "command": "cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --test closeout_g01_diff_ops --offline --locked --color never -E \"test(diff_file_ops::) | test(diff::file_ops::tests::) | test(gui::diff_dialog::tests::folder_operation_) | test(=gui::diff_dialog::tests::principal_folder_workflow_uses_injected_controller_boundaries) | test(=gui::diff_dialog::tests::back_restores_retained_state_and_its_independent_runtime) | test(=gui::diff_dialog::tests::valid_rescan_applies_draft_clears_scan_data_and_retains_view_controls) | test(=gui::diff_dialog::tests::replacing_comparison_removes_obsolete_runtime) | test(=gui::diff_dialog::tests::gui_delete_planning_is_recycle_only) | test(=diff::folder_runtime::tests::prepare_rescan_cancels_work_clears_progress_and_increments_generation)\" --retries 0 --no-fail-fast --status-level pass --final-status-level all",
+  "head": "8d183f663b212f8a707ac16a4c056eef5fe641ff",
+  "wrapper_path": "tests/closeout_g01_diff_ops.rs",
+  "wrapper_git_blob": "30d4db3c9e908d5a875c616c443932f35d438365",
+  "unchanged_domain_fixture_git_blob": "a6b2049cc249cc99921e8b293cba11facbba0dcd",
+  "start": "2026-10-29T19:54:16.6192299-04:00",
+  "cap_seconds": 180,
+  "timed_out": false,
+  "pid": 36836,
+  "end": "2026-10-29T19:54:19.8441131-04:00",
+  "elapsed_seconds": 3.221,
+  "exit_code": 0,
+  "output_drained": true
+}

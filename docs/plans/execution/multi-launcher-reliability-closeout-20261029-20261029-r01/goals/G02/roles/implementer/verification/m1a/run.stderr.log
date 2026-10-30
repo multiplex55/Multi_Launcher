@@ -1,0 +1,300 @@
+warning: variant `Unknown` is never constructed
+   --> vendor\epaint\src\text\font.rs:361:5
+    |
+357 | pub(crate) enum ShapeBufferProvenance {
+    |                 --------------------- variant in this enum
+...
+361 |     Unknown,
+    |     ^^^^^^^
+    |
+    = note: `ShapeBufferProvenance` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `epaint` (lib) generated 1 warning
+warning: use of deprecated constant `std::f32::EPSILON`: replaced by the `EPSILON` associated constant on `f32`
+  --> vendor\egui\src\containers\scene.rs:79:42
+   |
+79 |             zoom_range: Rangef::new(f32::EPSILON, 1.0),
+   |                                          ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `egui` (lib) generated 1 warning
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:720:19
+    |
+720 |     pub fn pixels(&self) -> Pixels<P> {
+    |                   ^^^^^     ^^^^^^^^^ the same lifetime is hidden here
+    |                   |
+    |                   the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+720 |     pub fn pixels(&self) -> Pixels<'_, P> {
+    |                                    +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:733:17
+    |
+733 |     pub fn rows(&self) -> Rows<P> {
+    |                 ^^^^^     ^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+733 |     pub fn rows(&self) -> Rows<'_, P> {
+    |                                +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:742:29
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<P> {
+    |                             ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                             |
+    |                             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<'_, P> {
+    |                                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:754:27
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<P> {
+    |                           ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                           |
+    |                           the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<'_, P> {
+    |                                                   +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:898:23
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<P> {
+    |                       ^^^^^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<'_, P> {
+    |                                               +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:911:21
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<P> {
+    |                     ^^^^^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                     |
+    |                     the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<'_, P> {
+    |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:918:33
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<P> {
+    |                                 ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                 |
+    |                                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<'_, P> {
+    |                                                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:931:31
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<P> {
+    |                               ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                               |
+    |                               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<'_, P> {
+    |                                                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\image.rs:932:15
+    |
+932 |     fn pixels(&self) -> Pixels<Self>
+    |               ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |               |
+    |               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+932 |     fn pixels(&self) -> Pixels<'_, Self>
+    |                                +++
+
+warning: `image` (lib) generated 9 warnings (run `cargo fix --lib -p image` to apply 9 suggestions)
+warning: constant `SCANNER_CANCELLATION_INTERVAL` is never used
+  --> crates\multi_launcher_table_core\src\lib.rs:53:7
+   |
+53 | const SCANNER_CANCELLATION_INTERVAL: usize = 4096;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scanner_cancellation_checkpoint` is never used
+    --> crates\multi_launcher_table_core\src\lib.rs:1031:4
+     |
+1031 | fn scanner_cancellation_checkpoint(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `end_offset` is never read
+  --> crates\multi_launcher_table_core\src\stream_scan.rs:25:9
+   |
+22 | pub(crate) struct StreamRecord {
+   |                   ------------ field in this struct
+...
+25 |     pub end_offset: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `multi_launcher_table_core` (lib) generated 3 warnings
+warning: field `end_offset` is never read
+  --> crates\multi_launcher_table_core\src\stream_scan.rs:25:9
+   |
+22 | pub(crate) struct StreamRecord {
+   |                   ------------ field in this struct
+...
+25 |     pub end_offset: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi_launcher_table_core` (lib test) generated 1 warning
+warning: unused variable: `replaced_scan_job`
+    --> src\table_utility_session.rs:3526:13
+     |
+3526 |         let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+     |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_replaced_scan_job`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi_launcher` (lib test) generated 1 warning (run `cargo fix --lib -p multi_launcher --tests` to apply 1 suggestion)
+    Finished `fast-dev` profile [unoptimized + debuginfo] target(s) in 1.54s
+────────────
+ Nextest run ID 11354d35-bae8-4ee1-b949-62a1cb43caeb with nextest profile: default
+    Starting 19 tests across 2 binaries (6491 tests skipped)
+        PASS [   0.068s] ( 1/19) multi_launcher gui::table_utility_dialog::tests::table_file_save_refuses_to_replace_the_opened_source
+        PASS [   0.072s] ( 2/19) multi_launcher table_utility_session::publication::tests::table_publication_native_unsupported_paths_refuse_before_stage_creation
+        FAIL [   0.089s] ( 3/19) multi_launcher table_utility_session::publication::tests::table_publication_manifest_revisions_and_bounded_chunks_refuse_without_output
+  stdout ───
+
+    running 1 test
+    test table_utility_session::publication::tests::table_publication_manifest_revisions_and_bounded_chunks_refuse_without_output ... FAILED
+
+    failures:
+
+    failures:
+        table_utility_session::publication::tests::table_publication_manifest_revisions_and_bounded_chunks_refuse_without_output
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6456 filtered out; finished in 0.03s
+
+  stderr ───
+
+    thread 'table_utility_session::publication::tests::table_publication_manifest_revisions_and_bounded_chunks_refuse_without_output' (18996) panicked at src\table_utility_session\publication.rs:365:78:
+    called `Result::unwrap()` on an `Err` value: "the reported file could not be inspected"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.071s] ( 4/19) multi_launcher table_utility_session::publication::tests::table_publication_native_occupied_same_source_and_appeared_outputs_are_untouched
+  stdout ───
+
+    running 1 test
+    test table_utility_session::publication::tests::table_publication_native_occupied_same_source_and_appeared_outputs_are_untouched ... FAILED
+
+    failures:
+
+    failures:
+        table_utility_session::publication::tests::table_publication_native_occupied_same_source_and_appeared_outputs_are_untouched
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6456 filtered out; finished in 0.03s
+
+  stderr ───
+
+    thread 'table_utility_session::publication::tests::table_publication_native_occupied_same_source_and_appeared_outputs_are_untouched' (15128) panicked at src\table_utility_session\publication.rs:277:74:
+    called `Result::unwrap()` on an `Err` value: "the reported file could not be inspected"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.071s] ( 5/19) multi_launcher table_utility_session::publication::tests::table_publication_native_new_file_preserves_source_and_transfers_exact_identity
+  stdout ───
+
+    running 1 test
+    test table_utility_session::publication::tests::table_publication_native_new_file_preserves_source_and_transfers_exact_identity ... FAILED
+
+    failures:
+
+    failures:
+        table_utility_session::publication::tests::table_publication_native_new_file_preserves_source_and_transfers_exact_identity
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6456 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'table_utility_session::publication::tests::table_publication_native_new_file_preserves_source_and_transfers_exact_identity' (39760) panicked at src\table_utility_session\publication.rs:241:74:
+    called `Result::unwrap()` on an `Err` value: "the reported file could not be inspected"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.096s] ( 6/19) multi_launcher table_utility_session::publication::tests::table_publication_native_preexisting_writer_and_wrong_source_identity_refuse
+        FAIL [   0.096s] ( 7/19) multi_launcher table_utility_session::publication::tests::table_publication_native_source_parent_and_stage_cannot_be_substituted
+  stdout ───
+
+    running 1 test
+    test table_utility_session::publication::tests::table_publication_native_source_parent_and_stage_cannot_be_substituted ... FAILED
+
+    failures:
+
+    failures:
+        table_utility_session::publication::tests::table_publication_native_source_parent_and_stage_cannot_be_substituted
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6456 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'table_utility_session::publication::tests::table_publication_native_source_parent_and_stage_cannot_be_substituted' (20560) panicked at src\table_utility_session\publication.rs:292:70:
+    called `Result::unwrap()` on an `Err` value: "the reported file could not be inspected"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.033s] ( 8/19) multi_launcher table_utility_session::tests::cloned_snapshot_handles_keep_each_allocation_charged_after_session_drop
+        PASS [   0.105s] ( 9/19) multi_launcher gui::table_utility_dialog::tests::table_file_save_requires_confirmation_and_publishes_the_captured_output
+        PASS [   0.046s] (10/19) multi_launcher table_utility_session::tests::file_page_completion_from_closed_lifetime_is_ignored_after_reopen
+        PASS [   0.028s] (11/19) multi_launcher table_utility_session::tests::pending_job_releases_its_resource_leases_before_confirmed_activity_retirement
+        PASS [   0.032s] (12/19) multi_launcher_table_core resource::resource_tests::failed_temp_deletion_keeps_a_retryable_charge_until_removed
+        PASS [   0.037s] (13/19) multi_launcher_table_core resource::resource_tests::partial_temp_append_failure_keeps_charge_until_owned_file_is_removed
+        PASS [   0.037s] (14/19) multi_launcher_table_core resource::resource_tests::resource_pool_leases_share_usage_and_release_on_last_owner
+        PASS [   0.042s] (15/19) multi_launcher table_utility_session::tests::table_session_draft_edits_revoke_queued_export_receipts
+        PASS [   0.046s] (16/19) multi_launcher_table_core resource::resource_tests::table_publication_owned_quota_edge_and_partial_write_keep_exact_charges
+        PASS [   0.054s] (17/19) multi_launcher_table_core resource::resource_tests::table_publication_failed_cleanup_retains_capability_not_a_replacement_path
+        PASS [   0.030s] (18/19) multi_launcher_table_core resource::resource_tests::table_publication_seal_and_publish_errors_keep_cleanup_owned
+        PASS [   0.079s] (19/19) multi_launcher table_utility_session::tests::file_page_failure_and_cancellation_preserve_the_last_good_page
+────────────
+     Summary [   0.256s] 19 tests run: 15 passed, 4 failed, 6491 skipped
+        FAIL [   0.089s] ( 3/19) multi_launcher table_utility_session::publication::tests::table_publication_manifest_revisions_and_bounded_chunks_refuse_without_output
+        FAIL [   0.071s] ( 4/19) multi_launcher table_utility_session::publication::tests::table_publication_native_occupied_same_source_and_appeared_outputs_are_untouched
+        FAIL [   0.071s] ( 5/19) multi_launcher table_utility_session::publication::tests::table_publication_native_new_file_preserves_source_and_transfers_exact_identity
+        FAIL [   0.096s] ( 7/19) multi_launcher table_utility_session::publication::tests::table_publication_native_source_parent_and_stage_cannot_be_substituted
+error: test run failed

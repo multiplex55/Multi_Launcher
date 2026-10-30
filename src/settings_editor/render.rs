@@ -3253,10 +3253,48 @@ impl SettingsEditor {
             &mut self.experimental_jump_mode_enabled,
             setting_ids::LAUNCHER_JUMP_MODE,
             "Experimental Jump Mode",
-        )
-        .on_hover_text(
-            "Shift+Space displays hints; typing a hint selects, Enter activates. Available in supported screens only.",
         );
+        crate::gui::theme::widgets::labeled_form_row(ui, "Jump activation chord", |ui| {
+            targets.text_edit_singleline(
+                ui,
+                &mut self.jump_mode_activation_chord,
+                setting_ids::LAUNCHER_JUMP_CHORD,
+                "Jump activation chord",
+            )
+        });
+        crate::gui::theme::widgets::labeled_form_row(ui, "Jump hint alphabet", |ui| {
+            targets.text_edit_singleline(
+                ui,
+                &mut self.jump_mode_hint_alphabet,
+                setting_ids::LAUNCHER_JUMP_ALPHABET,
+                "Jump hint alphabet",
+            )
+        });
+        match self.jump_preferences() {
+            Ok((chord, _)) => {
+                ui.label(format!(
+                    "{} displays hints; typing a full hint focuses a control. A fresh Enter activates it. Available in supported screens only.",
+                    chord.canonical_text()
+                ));
+            }
+            Err(message) => {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+        }
+        if let Ok(hints) = self.jump_hint_sample() {
+            ui.label(format!("Sample hints: {}", hints.join("  ")));
+        }
+        let reset = ui.button("Reset Jump preferences");
+        targets.response(
+            ui,
+            &reset,
+            setting_ids::LAUNCHER_JUMP_RESET,
+            "Reset Jump preferences",
+            TargetKind::Button,
+        );
+        if reset.clicked() {
+            self.reset_jump_preferences();
+        }
         crate::gui::theme::widgets::labeled_form_row(ui, "Off-screen position", |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("X");
@@ -4865,6 +4903,7 @@ mod settings_shell_tests {
         assert!(
             app.settings_editor
                 .to_settings(&settings)
+                .unwrap()
                 .paste_sequence
                 .cancel_hotkey
                 .is_none()
@@ -4873,6 +4912,7 @@ mod settings_shell_tests {
         assert_eq!(
             app.settings_editor
                 .to_settings(&settings)
+                .unwrap()
                 .paste_sequence
                 .cancel_hotkey
                 .as_deref(),
@@ -6280,6 +6320,84 @@ mod settings_shell_tests {
         assert!(!app.settings_editor.experimental_jump_mode_enabled);
         assert!(app.jump_mode_enabled(), "draft edits do not change runtime");
 
+        for label in ["Jump activation chord", "Jump hint alphabet"] {
+            targets = settings_scroll_until_target(
+                &ctx,
+                &mut app,
+                &mut jump,
+                targets,
+                label,
+                SettingsScrollDirection::Later,
+            );
+            let target = target_by_label(&targets, label).clone();
+            assert_eq!(target.metadata().kind(), TargetKind::TextEntry);
+            settings_jump_frame(
+                &ctx,
+                &mut app,
+                &mut jump,
+                Vec::new(),
+                Some(target.id().clone()),
+                true,
+            );
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                Some(target.response_id())
+            );
+            targets = settings_jump_frame(
+                &ctx,
+                &mut app,
+                &mut jump,
+                vec![egui::Event::Text("q".into())],
+                None,
+                true,
+            );
+            let text = if label == "Jump activation chord" {
+                &app.settings_editor.jump_mode_activation_chord
+            } else {
+                &app.settings_editor.jump_mode_hint_alphabet
+            };
+            assert!(
+                text.contains('q'),
+                "the actual text response receives the keystroke"
+            );
+            assert!(!app.settings_save_pending());
+            assert!(app.jump_mode_enabled());
+        }
+        targets = settings_scroll_until_target(
+            &ctx,
+            &mut app,
+            &mut jump,
+            targets,
+            "Reset Jump preferences",
+            SettingsScrollDirection::Later,
+        );
+        let reset = target_by_label(&targets, "Reset Jump preferences").clone();
+        let raw_before_focus = app.settings_editor.jump_mode_activation_chord.clone();
+        settings_jump_frame(
+            &ctx,
+            &mut app,
+            &mut jump,
+            Vec::new(),
+            Some(reset.id().clone()),
+            true,
+        );
+        assert_eq!(
+            app.settings_editor.jump_mode_activation_chord, raw_before_focus,
+            "hint focus does not activate Reset"
+        );
+        targets = settings_jump_frame(&ctx, &mut app, &mut jump, vec![enter.clone()], None, true);
+        assert_eq!(
+            app.settings_editor.jump_mode_activation_chord,
+            crate::settings::JumpModeChord::default().canonical_text()
+        );
+        assert_eq!(
+            app.settings_editor.jump_mode_hint_alphabet,
+            crate::settings::HintAlphabet::default().canonical_text()
+        );
+        assert!(app.jump_mode_enabled(), "Reset is draft-only");
+        app.settings_editor.jump_mode_activation_chord = "Ctrl+F8".into();
+        app.settings_editor.jump_mode_hint_alphabet = "ZY".into();
+
         let cancel = target_by_label(&targets, "Cancel").clone();
         settings_jump_frame(
             &ctx,
@@ -6296,6 +6414,14 @@ mod settings_shell_tests {
             "Cancel keeps the committed runtime flag"
         );
         assert!(app.settings_editor.experimental_jump_mode_enabled);
+        assert_eq!(
+            app.settings_editor.jump_mode_activation_chord,
+            crate::settings::JumpModeChord::default().canonical_text()
+        );
+        assert_eq!(
+            app.settings_editor.jump_mode_hint_alphabet,
+            crate::settings::HintAlphabet::default().canonical_text()
+        );
     }
 
     #[test]

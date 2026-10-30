@@ -1,0 +1,21 @@
+{
+  "utc": "2026-10-30T08:10:13.3087040Z",
+  "head": "874065dbe21f227c4c3189dc859ba5521b210eb5",
+  "note": "Supplement: BASELINE_SOURCE_PARITY excluded table covered 11 src entries only. G02 additionally changed these two crate files; all 13 per-goal prototype source entries are covered jointly. No accepted crate/config/manifest delta exists.",
+  "excluded": [
+    {
+      "goal": "G02",
+      "path": "crates/multi_launcher_table_core/src/lib.rs",
+      "baseline_blob": "0cba07df6636a0922ac7ad815c80918f54ce10d5",
+      "current_blob": "0cba07df6636a0922ac7ad815c80918f54ce10d5",
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G02",
+      "path": "crates/multi_launcher_table_core/src/resource.rs",
+      "baseline_blob": "74def7e006cffddff576bab08563bd284c52374b",
+      "current_blob": "74def7e006cffddff576bab08563bd284c52374b",
+      "unchanged_or_absent": true
+    }
+  ]
+}

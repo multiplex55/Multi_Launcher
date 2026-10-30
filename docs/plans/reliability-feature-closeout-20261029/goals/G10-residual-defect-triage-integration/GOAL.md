@@ -138,26 +138,32 @@ Final integration branch contains only accepted work; a truthful PR and dependen
 
 **Required closure record:** real branch/base, all milestone dispositions, exact changed files, accepted and rejected interfaces, focused test counts and command receipts, actual native proof or `NOT_RUN`, model/role provenance, reviewer disposition, commits/pushes, output/follow-on paths, source safety constraints, and exact next action. No PR merge/CI success may be claimed without host-confirmed evidence.
 
-## 10. Execution progress — mutable (Codex updates here)
+## 10. Execution progress - mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `ACCEPTED_COMPLETE` for program closeout; feature partial/deferred dispositions remain explicit.
+- **Run ID/branch:** `20261029-r01`, `codex/closeout-g10-residual-defect-triage-integration-20261029-r01`; dependent base accepted integrationea3a7007.
+- **Master:** `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`, unchanged. Closing donor `792b1a531a4b5a392be977de94afee4d745b8685` imported as `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`; publication head `b128db10b0cb1652c4f28c96570ef282014c18c9`.
+- **Current milestone:** M3-A final source-of-truth reconciliation complete. Actual final documentation receipt SHA is reported by live integration/PR ref and orchestrator response, not guessed here.
+- **Active role:** NONE. Requested/configured/backend distinctions preserved; actual serving backend UNVERIFIED.
+- **PR:** [https://github.com/multiplex55/Multi_Launcher/pull/1459](https://github.com/multiplex55/Multi_Launcher/pull/1459), OPEN/ready-for-review/attached/UNMERGED. Internal cumulative review accepted; host reviews/workflows empty as observed, not approval/CI success.
+- **Next action:** human review using the single checklist; explicitly select future pairs. No automatic merge/restart.
+- **Scope:**21Rustpaths (20src+oneexternalfixture),13excludedprototypeentries, unchanged manifests/config. No G10 source/Cargo/native/CI campaign; no distinct new finding.
 
-| Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
-|---|---|---|---|
-| `M0-A` | PENDING | — | Reconcile end-to-end progress and dependencies |
-| `M1-A` | PENDING | — | Evidence-based narrow defect disposition |
-| `M1-B` | PENDING | — | Integrate only accepted checkpoints |
-| `M2-A` | PENDING | — | Bounded combined review and readiness |
-| `M2-B` | PENDING | — | PR and final handoff |
-| `M3-A` | PENDING | — | Final source-of-truth reconciliation |
+| Milestone | State | Evidence |
+|---|---|---|
+| M0-A | ACCEPTED_COMPLETE | All eleven dispositions, branches, source and dependencies reconciled. |
+| M1-A | ACCEPTED_COMPLETE | Residual authority/gates and complete canonical pairs; NO_ACTION distinct defect. |
+| M1-B | ACCEPTED_COMPLETE | Accepted-only G10 docs imported through2234ed89; source unchanged. |
+| M2-A | ACCEPTED_COMPLETE | Cumulative review7318e862 and externalfixture coverage amendment accepted; no new tests. |
+| M2-B | ACCEPTED_COMPLETE | PR1459 open ready for review and attached; actual host snapshot recorded. |
+| M3-A | ACCEPTED_COMPLETE | Final handoff/checklist and current source-of-truth reconciliation; no merge. |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+- Runtime2026-10-30 M0-A IN_PROGRESS: dependentbranch codex/closeout-g10-residual-defect-triage-integration-20261029-r01 fromaccepted integrationea3a7007; unchangedfetchedmaster4a. Allpriorgoaldispositionspresent. Boundedreconciliationplanner next; no newproductionfeature/testcampaign.
+
+- 2026-10-30 G10 documentation reconciliation: current G10 mutable fields aligned with existing receipts and preserved contracts/events; no new feature/source/test acceptance. Authoritative current action remains parent G10 review/import/publication.
+
+- 2026-10-30 final publication: PR1459 open/attached/unmerged; cumulative and namedprovenance review accepted, source21paths/13exclusions exact. Finalhost facts recorded with first-pageworkflow limits; all deferred gates remain.

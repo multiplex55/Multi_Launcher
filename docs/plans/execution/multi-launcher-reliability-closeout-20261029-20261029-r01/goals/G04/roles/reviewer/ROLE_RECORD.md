@@ -1,0 +1,9 @@
+# G04 reviewer role record
+
+Independent /root/reviewer sequential context. Requested Astra/max; configured Sol/high unchanged; actual serving model/effort UNVERIFIED. Branch codex/closeout-g04-screenshot-native-redaction-20261029-r01; checkpointf9e0fc3e1c9823e9b50f2e8184aecefd7590721e; baseline06d23fc8a520d91f71d02cd1cc2fb95cc08500b4. Parent persists returned content2026-10-30.
+
+Read complete original pair, execution/role/stall records and planner future pair. Narrow source corroboration only; no edits/Git mutations/builds/tests/native calls/fixtures/dispatch. Twelve documentation paths only, no source/tests/config/manifests, clean tree, cumulative diff--check passes;23 links/13docs all resolve. Original contract/Kickstart intact outside mutable progress.
+
+Source confirms primary Redact/history, Marker secondary explicit crop origin, markup Undo/Redo crop separate, layers before crop, shared Save/Copy composition, direct arboard output, baseline/final Save flow, opaque Solid clipped half-open replacement. Parent capability receipt attributed correctly, not reviewer-exercised native evidence. No current unit results/binary/gesture/output pixels claimed.
+
+No substantive findings. ACCEPT DOCUMENTATION ONLY; NATIVE_PROOF_DEFERRED. Future pair complete: documented held-secondary input, identified binary, isolated owned profile/fixture, calibrated actual baseline capture, physical gestures/history, independent all-pixel oracle, real Save/Copy observation, supported clipboard restoration.320x240 fixture/crop/translated redaction correctly yields288x208. Missing capability/provenance/isolation/output proof stops. Cargo/unit/native/output NOT_RUN; no UNIT_VERIFIED claim. Parent canonicalizes/closes/integrates before G05. NO_ACTION distinct follow-on; preserve existing planner pair.

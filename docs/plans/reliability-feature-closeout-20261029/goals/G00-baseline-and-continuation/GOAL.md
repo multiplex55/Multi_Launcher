@@ -122,22 +122,33 @@ The new run has a verified source/role baseline, a safe current continuation poi
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `ACCEPTED_COMPLETE`.
+- **Run ID and branch:** `20261029-r01` / `codex/closeout-g00-baseline-and-continuation-20261029-r01`.
+- **Actual master:** `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`. Authoritative run: [PROGRAM_STATUS](../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/PROGRAM_STATUS.md).
+- **Source base:** bootstrap `02d0ac64d51655f43d6e958ea551f5bf658ee48d`; closing donor `7e53f4d28ca5b66a21e30e41545692cce5fa6b6a`, imported as `41cc682e` (full original provenance in run ledger); normal pushes recorded.
+- **Current milestone:** all M0-A through M3-A accepted, documentation only after independent review.
+- **Active role/model:** none for G00; historical requested/configured/backend distinctions retained in role records.
+- **Next action:** do not restart G00; read final run handoff and review PR1459.
+- **Blocker/scope:** missing old local historical reports remain an evidence limitation. No source/config changes; Cargo/native NOT_RUN. Existing continuation's two live links are correct.
 
-| Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
-|---|---|---|---|
-| `M0-A` | PENDING | — | Source verification and safe bootstrap |
-| `M1-A` | PENDING | — | Retire outdated auto-resume wording |
-| `M2-A` | PENDING | — | Create truthful cross-goal ledger |
-| `M3-A` | PENDING | — | Docs-only review and checkpoint |
+| Milestone | State | Evidence / next action |
+|---|---|---|
+| M0-A | ACCEPTED_COMPLETE | Verified baseline and safe bootstrap; preserved receipt. |
+| M1-A | ACCEPTED_COMPLETE | Stale live queue command retired; committed contract/status links resolve. |
+| M2-A | ACCEPTED_COMPLETE | Current run ledger established. |
+| M3-A | ACCEPTED_COMPLETE | Independent documentation review accepted; no re-execution. |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+### Runtime event — 2026-10-29 / 20261029-r01
+
+- M0-A ACCEPTED_COMPLETE (bootstrap scope): actual fetched master 4a1283e6edd2c245f562a07dbe3dcc6a61061eed; integration bootstrap 02d0ac64d51655f43d6e958ea551f5bf658ee48d; G00 baseline 76eae87c7a0e40bb5ce4aca1fb62c9823fbcf2b2, both pushed.
+- Goal IN_PROGRESS; M1-A implementer active; M2-A ledger initialized; M3-A independent review pending. No production acceptance claimed.
+- Actual role config differs from historical assertions; explicit Astra dispatch selected per user. See allocated execution root SOURCE_BASELINE.md.
+- Actual run root: ../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/ (repository path docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/).
+
+- Closure event: G00 docs independently reviewed with no substantive findings; all four milestones accepted. Final source/import SHAs and current next action are recorded in the authoritative run ledger. Cargo/native NOT_RUN; no new actionable finding.
+
+- 2026-10-30 G10 documentation reconciliation: current G00 mutable fields aligned with existing receipts and preserved contracts/events; no new feature/source/test acceptance. Authoritative current action remains parent G10 review/import/publication.

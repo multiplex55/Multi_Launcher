@@ -133,23 +133,27 @@ Settings UI, committed-state behavior and focused keyboard/viewport regressions 
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED`.
+- **Run ID and branch:** `20261029-r01`; `codex/closeout-g06-jump-settings-and-focus-20261029-r01`.
+- **Actual master/source base:** master4a1283e6; bootstrap02d0ac64; corrected source7cb16df951cb2eac1642fb428dbce84559f77562 confirmed5c1bf680/integratedb9f5fa4b.
+- **Current milestone:** M1-A/M1-B and focused M2 accepted; M3 native proof deferred.
+- **Active role and requested/configured/resolved model:** parent closure; requestedAstra/xhigh/configuredSol/medium/backendUNVERIFIED; role pins unchanged.
+- **Last known commit / push:** corrected source/confirmation and integration normally pushed; closing donor/import recorded by parent receipt after commit.
+- **Next action:** documentation closure review then G07; future M3 canonical native-jump-focus-proof Goal/Kickstart.
+- **Blocker and scope:** sky did not return owned native window after one recovery; app desktop check0x80070005, rootcauseunknown. Exact-source build passed; no native input/screenshots. Source acceptance retained.
 
-| Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
+| Milestone | State | Real evidence | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Source and UX contract |
-| `M1-A` | PENDING | — | Editor and validation |
-| `M1-B` | PENDING | — | Commit and live application |
-| `M2-A` | PENDING | — | Focused navigation tests |
-| `M3-A` | PENDING | — | Close with precise UI evidence |
+| M0-A | ACCEPTED_COMPLETE | source contractd88f00b2 | Preserve ownership |
+| M1-A | ACCEPTED_COMPLETE | real validated draft controls/sample/catalog | Native observation pending |
+| M1-B | ACCEPTED_COMPLETE | acknowledged transaction/rollback/pendingdraft | Preserve source |
+| M2-A | ACCEPTED_COMPLETE | corrected29/29, R1independentlyresolved | No further source tests |
+| M3-A | NATIVE_PROOF_DEFERRED | normalbin155.734s passed; native discovery failed; processes retired | Complete canonical continuation |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+- Runtime2026-10-30: M0-A IN_PROGRESS; branch codex/closeout-g06-jump-settings-and-focus-20261029-r01 from bootstrap02d0ac64; fetched actual master4a1283e6 unchanged; integrationcda36e81 authoritative. Read-only planner next; no source/tests/native yet.
+- 2026-10-30 implementer: coherent editor/transaction checkpoint and focused M2 proof ready. Final 25/25 PASS; source remains unaccepted until parent review. Exact evidence in execution G06 `VERIFICATION.md`; no Git/native/bin action, distinct follow-on NO_ACTION.
+- 2026-10-30 R1 correction: parent explicitly authorized actual main-owned effective Paste Sequences conflict validation and focused binary tests after reviewer R1. Final29/29 PASS (26 library+3 direct resolver),261.429s preparation,6.908s run wall; cumulative incremental349.032s of600s. Current correction base `5c00e367`; source remains pending parent checkpoint/R1-only confirmation. Native M3 NOT_RUN; existing reviewer contingency is unchanged for parent disposition.
+- Native M3 closure2026-10-30: corrected7cb16df9 accepted5c1bf680/integratedb9f5fa4b; scopednormalbin155.734s passed. Owned native discovery failed afterone recovery; desktop-check0x80070005 causeunknown, noUIinput/capture proof. Processes retired. WholeG06 PARTIAL_ACCEPTED/NATIVE_PROOF_DEFERRED; canonicalnative-jump-focus-proof pair retainsrequiredM3. R1resolvednotqueued.

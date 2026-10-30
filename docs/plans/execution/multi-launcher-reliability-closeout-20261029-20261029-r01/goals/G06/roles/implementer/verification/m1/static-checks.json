@@ -1,0 +1,26 @@
+{
+  "checked_utc": "2026-10-30T04:14:02.8696194Z",
+  "diff_check_exit": 0,
+  "relative_links_checked": 17,
+  "broken_links": [],
+  "changed_paths": [
+    " M docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G06/PROGRESS.md",
+    " M docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G06/RISKS.md",
+    " M docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G06/SOURCE_REVALIDATION.md",
+    " M docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G06/VERIFICATION.md",
+    " M docs/plans/reliability-feature-closeout-20261029/goals/G06-jump-settings-and-focus/GOAL.md",
+    " M src/hotkey/validation.rs",
+    " M src/settings_editor.rs",
+    " M src/settings_editor/catalog.rs",
+    " M src/settings_editor/mapping.rs",
+    " M src/settings_editor/render.rs",
+    " M src/settings_editor/save.rs",
+    " M src/settings_editor/state.rs",
+    " M src/settings_save.rs",
+    " M tests/settings_editor.rs",
+    "?? docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G06/roles/implementer/",
+    "?? docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G06/roles/orchestrator/"
+  ],
+  "parent_owned_exclusion": "roles/orchestrator existing record, preserved",
+  "source_scope": "Nine approved source/test paths only; no source changes after final receipt"
+}

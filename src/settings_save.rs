@@ -113,6 +113,8 @@ define_general_settings_fields!(
     show_launcher_icon,
     show_launcher_title,
     experimental_jump_mode_enabled,
+    jump_mode_activation_chord,
+    jump_mode_hint_alphabet,
     timer_refresh,
     disable_timer_updates,
     preserve_command,
@@ -142,6 +144,9 @@ enum SaveOwnership {
 
 #[derive(Clone, Debug, PartialEq)]
 struct InvocationSettingsBaseline {
+    jump_enabled: bool,
+    jump_chord: crate::settings::JumpModeChord,
+    jump_alphabet: crate::settings::HintAlphabet,
     paste_sequence: crate::settings::PasteSequencePreferences,
     hotkey: Option<String>,
     quit_hotkey: Option<String>,
@@ -182,6 +187,9 @@ impl InvocationSettingsBaseline {
             }
         };
         Self {
+            jump_enabled: settings.experimental_jump_mode_enabled,
+            jump_chord: settings.jump_mode_activation_chord,
+            jump_alphabet: settings.jump_mode_hint_alphabet.clone(),
             hotkey: settings.hotkey.clone(),
             paste_sequence: settings.paste_sequence.clone(),
             quit_hotkey: settings.quit_hotkey.clone(),
@@ -272,7 +280,7 @@ impl SettingsSaveIntent {
             .is_some_and(|expected| *expected != InvocationSettingsBaseline::from_settings(latest))
         {
             anyhow::bail!(
-                "launcher, radial, Screen Draw, or Paste Sequence settings changed since this editor was opened"
+                "launcher, Jump, radial, Screen Draw, or Paste Sequence settings changed since this editor was opened"
             );
         }
         Ok(())
@@ -359,6 +367,9 @@ impl SettingsSaveIntent {
 }
 
 fn overlay_acknowledged_invocation(latest: &mut Settings, committed: &Settings) {
+    latest.experimental_jump_mode_enabled = committed.experimental_jump_mode_enabled;
+    latest.jump_mode_activation_chord = committed.jump_mode_activation_chord;
+    latest.jump_mode_hint_alphabet = committed.jump_mode_hint_alphabet.clone();
     latest.paste_sequence = committed.paste_sequence.clone();
     latest.hotkey = committed.hotkey.clone();
     latest.quit_hotkey = committed.quit_hotkey.clone();
@@ -419,6 +430,15 @@ fn append_invocation_route_changes(
 ) {
     let latest = InvocationSettingsBaseline::from_settings(latest);
     let committed = InvocationSettingsBaseline::from_settings(committed);
+    if latest.jump_enabled != committed.jump_enabled {
+        push_changed_field(changed, "experimental_jump_mode_enabled".into());
+    }
+    if latest.jump_chord != committed.jump_chord {
+        push_changed_field(changed, "jump_mode_activation_chord".into());
+    }
+    if latest.jump_alphabet != committed.jump_alphabet {
+        push_changed_field(changed, "jump_mode_hint_alphabet".into());
+    }
     if latest.paste_sequence != committed.paste_sequence {
         push_changed_field(changed, "paste_sequence".into());
     }
@@ -1371,7 +1391,9 @@ mod tests {
         SettingsSaveIntent::general(desired, baseline)
     }
 
-    fn test_app(root: &Path, settings: Settings) -> (egui::Context, LauncherApp) {
+    fn test_app(root: &Path, mut settings: Settings) -> (egui::Context, LauncherApp) {
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         let context = egui::Context::default();
         let settings_path = save_path(root);
         let app = LauncherApp::new(
@@ -1455,16 +1477,40 @@ mod tests {
 
         let mut desired = before.clone();
         desired.experimental_jump_mode_enabled = true;
+        desired.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::parse("Ctrl+F8").unwrap();
+        desired.jump_mode_hint_alphabet = crate::settings::HintAlphabet::parse("ZY").unwrap();
         let intent = SettingsSaveIntent::general(desired, &before);
 
         let mut written = before.clone();
         intent.apply(&mut written);
         assert!(written.experimental_jump_mode_enabled);
+        assert_eq!(
+            written.jump_mode_activation_chord.canonical_text(),
+            "Ctrl+F8"
+        );
+        assert_eq!(written.jump_mode_hint_alphabet.canonical_text(), "ZY");
+        let changed = intent.changed_owned_fields(&written, &before);
+        for field in [
+            "experimental_jump_mode_enabled",
+            "jump_mode_activation_chord",
+            "jump_mode_hint_alphabet",
+        ] {
+            assert!(changed.iter().any(|changed| changed == field));
+        }
 
         let mut published = before.clone();
         published.theme.mode = crate::settings::ThemeMode::Dark;
         intent.overlay_applied(&mut published, &written);
         assert!(published.experimental_jump_mode_enabled);
+        assert_eq!(
+            published.jump_mode_activation_chord,
+            written.jump_mode_activation_chord
+        );
+        assert_eq!(
+            published.jump_mode_hint_alphabet,
+            written.jump_mode_hint_alphabet
+        );
         assert_eq!(published.theme.mode, crate::settings::ThemeMode::Dark);
 
         let mut rolled_back = written.clone();
@@ -1472,7 +1518,306 @@ mod tests {
         let conflicts = intent.rollback_owned(&mut rolled_back, &before, &written);
         assert!(conflicts.is_empty());
         assert!(!rolled_back.experimental_jump_mode_enabled);
+        assert_eq!(
+            rolled_back.jump_mode_activation_chord,
+            before.jump_mode_activation_chord
+        );
+        assert_eq!(
+            rolled_back.jump_mode_hint_alphabet,
+            before.jump_mode_hint_alphabet
+        );
         assert_eq!(rolled_back.theme.mode, crate::settings::ThemeMode::Dark);
+
+        let mut concurrent = written.clone();
+        concurrent.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::parse("Alt+F9").unwrap();
+        concurrent.jump_mode_hint_alphabet = crate::settings::HintAlphabet::parse("AB").unwrap();
+        assert_eq!(
+            intent.rollback_owned(&mut concurrent, &before, &written),
+            vec!["jump_mode_activation_chord", "jump_mode_hint_alphabet"]
+        );
+        assert_eq!(
+            concurrent.jump_mode_activation_chord.canonical_text(),
+            "Alt+F9"
+        );
+        assert_eq!(concurrent.jump_mode_hint_alphabet.canonical_text(), "AB");
+        assert!(intent.verify_invocation_baseline(&concurrent).is_err());
+
+        let selection = SettingsSaveIntent::plugin_selection(None, None);
+        selection.apply(&mut concurrent);
+        assert_eq!(
+            concurrent.jump_mode_activation_chord.canonical_text(),
+            "Alt+F9"
+        );
+        assert_eq!(concurrent.jump_mode_hint_alphabet.canonical_text(), "AB");
+        assert!(!concurrent.experimental_jump_mode_enabled);
+    }
+
+    #[test]
+    fn g06_jump_acknowledgment_publishes_committed_values_and_keeps_newer_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let mut baseline = Settings::default();
+        baseline.paste_sequence.next_hotkey = None;
+        baseline.paste_sequence.cancel_hotkey = None;
+        baseline.save(&path).unwrap();
+        let (context, mut app) = test_app(directory.path(), baseline.clone());
+        app.settings_editor.experimental_jump_mode_enabled = true;
+        app.settings_editor.jump_mode_activation_chord = "control + f8".into();
+        app.settings_editor.jump_mode_hint_alphabet = "zyx".into();
+        let desired = app.settings_editor.to_settings(&baseline).unwrap();
+        let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
+        app.begin_settings_save_with_prepare(
+            &context,
+            SettingsSaveIntent::general(desired.clone(), &baseline),
+            move |candidate| client.prepare(candidate),
+        );
+        let HotkeyRuntimeMessage::Prepare(request) = next_runtime_message(&owner) else {
+            panic!("expected prepare")
+        };
+        assert!(!app.jump_mode_enabled());
+        assert_eq!(
+            app.jump_mode_configuration(),
+            (
+                baseline.jump_mode_activation_chord,
+                baseline.jump_mode_hint_alphabet.clone()
+            )
+        );
+        complete_prepare(request, 106);
+        let HotkeyRuntimeMessage::Apply(application) = next_runtime_message(&owner) else {
+            panic!("expected apply")
+        };
+        assert_eq!(
+            Settings::load(&path).unwrap().jump_mode_activation_chord,
+            desired.jump_mode_activation_chord
+        );
+        assert!(
+            !app.jump_mode_enabled(),
+            "persistence is not runtime acknowledgment"
+        );
+        assert_eq!(
+            app.settings_editor
+                .baseline_settings
+                .jump_mode_activation_chord,
+            baseline.jump_mode_activation_chord
+        );
+        app.settings_editor.jump_mode_activation_chord = "not a chord".into();
+        app.settings_editor.jump_mode_hint_alphabet = "AA".into();
+        app.settings_editor.experimental_jump_mode_enabled = false;
+        Settings::update(&path, |latest| {
+            latest.theme.mode = crate::settings::ThemeMode::Dark;
+            Ok(())
+        })
+        .unwrap();
+        let applied = AppliedHotkeyReconfiguration {
+            request_id: application.request_id(),
+            generation: application.generation(),
+        };
+        application.complete_applied(applied).unwrap();
+        drain_until_complete(&mut app, &context);
+        assert!(app.jump_mode_enabled());
+        assert_eq!(
+            app.jump_mode_configuration(),
+            (
+                desired.jump_mode_activation_chord,
+                desired.jump_mode_hint_alphabet.clone()
+            )
+        );
+        assert_eq!(
+            app.settings_editor
+                .baseline_settings
+                .jump_mode_activation_chord,
+            desired.jump_mode_activation_chord
+        );
+        assert_eq!(
+            app.settings_editor.jump_mode_activation_chord,
+            "not a chord"
+        );
+        assert_eq!(app.settings_editor.jump_mode_hint_alphabet, "AA");
+        assert!(!app.settings_editor.experimental_jump_mode_enabled);
+        assert_eq!(
+            Settings::load(&path).unwrap().theme.mode,
+            crate::settings::ThemeMode::Dark
+        );
+        app.show_settings = false;
+        app.open_paste_sequence_settings_dialog();
+        assert_eq!(app.settings_editor.jump_mode_activation_chord, "Ctrl+F8");
+        assert_eq!(app.settings_editor.jump_mode_hint_alphabet, "ZYX");
+        assert!(app.settings_editor.experimental_jump_mode_enabled);
+    }
+
+    #[test]
+    fn g06_jump_failed_preparation_and_apply_preserve_live_baseline_and_draft() {
+        for fail_apply in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = save_path(directory.path());
+            let mut baseline = Settings::default();
+            baseline.paste_sequence.next_hotkey = None;
+            baseline.paste_sequence.cancel_hotkey = None;
+            baseline.save(&path).unwrap();
+            let (context, mut app) = test_app(directory.path(), baseline.clone());
+            app.settings_editor.experimental_jump_mode_enabled = true;
+            app.settings_editor.jump_mode_activation_chord = "Ctrl+F8".into();
+            app.settings_editor.jump_mode_hint_alphabet = "ZY".into();
+            let desired = app.settings_editor.to_settings(&baseline).unwrap();
+            let (client, owner, _wake) =
+                crate::hotkey::reconfiguration::test_reconfiguration_runtime();
+            app.begin_settings_save_with_prepare(
+                &context,
+                SettingsSaveIntent::general(desired, &baseline),
+                move |candidate| client.prepare(candidate),
+            );
+            let HotkeyRuntimeMessage::Prepare(request) = next_runtime_message(&owner) else {
+                panic!("expected prepare")
+            };
+            if fail_apply {
+                complete_prepare(request, 107);
+                let HotkeyRuntimeMessage::Apply(application) = next_runtime_message(&owner) else {
+                    panic!("expected apply")
+                };
+                application
+                    .complete_restored(HotkeyReconfigurationError::RuntimeTransition(
+                        "g06 injected apply failure".into(),
+                    ))
+                    .unwrap();
+            } else {
+                request
+                    .complete(Err(HotkeyReconfigurationError::Validation(
+                        "g06 injected preparation failure".into(),
+                    )))
+                    .unwrap();
+            }
+            drain_until_complete(&mut app, &context);
+            assert!(!app.jump_mode_enabled());
+            assert_eq!(
+                app.jump_mode_configuration(),
+                (
+                    baseline.jump_mode_activation_chord,
+                    baseline.jump_mode_hint_alphabet.clone()
+                )
+            );
+            assert_eq!(
+                app.settings_editor
+                    .baseline_settings
+                    .jump_mode_activation_chord,
+                baseline.jump_mode_activation_chord
+            );
+            assert_eq!(app.settings_editor.jump_mode_activation_chord, "Ctrl+F8");
+            assert_eq!(app.settings_editor.jump_mode_hint_alphabet, "ZY");
+            assert!(app.settings_editor.experimental_jump_mode_enabled);
+            let persisted = Settings::load(&path).unwrap();
+            assert_eq!(
+                persisted.jump_mode_activation_chord,
+                baseline.jump_mode_activation_chord
+            );
+            assert_eq!(
+                persisted.jump_mode_hint_alphabet,
+                baseline.jump_mode_hint_alphabet
+            );
+            assert!(!persisted.experimental_jump_mode_enabled);
+        }
+    }
+
+    #[test]
+    fn g06_jump_final_merged_candidate_is_rejected_by_preparation_before_persistence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let mut latest = Settings::default();
+        latest.experimental_jump_mode_enabled = true;
+        latest.jump_mode_activation_chord = crate::settings::JumpModeChord::parse("F2").unwrap();
+        latest.save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // Plugin selection does not own Jump: preparation must check the
+        // current merged preferences, not just this intent's default fields.
+        let intent = SettingsSaveIntent::plugin_selection(Some(HashSet::new()), None);
+        let (worker, _messages) = spawn_save(
+            path.clone(),
+            intent,
+            SettingsSaveSource::PluginSelection,
+            |candidate| {
+                assert!(candidate.experimental_jump_mode_enabled);
+                assert_eq!(candidate.jump_mode_activation_chord.canonical_text(), "F2");
+                let issues = crate::hotkey::validation::validate_hotkey_routes(
+                    &candidate,
+                    &crate::radial::model::RadialDocument::starter(),
+                    None,
+                )
+                .unwrap_err();
+                assert!(
+                    issues
+                        .iter()
+                        .any(|issue| issue.field == "jump_mode_activation_chord")
+                );
+                Err(HotkeyReconfigurationError::Validation(
+                    issues
+                        .into_iter()
+                        .map(|issue| issue.message)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ))
+            },
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+        let (result, reconciliation) = worker.join().unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Jump activation chord conflicts with launcher")
+        );
+        assert!(!reconciliation);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn g06_jump_stale_prepared_draft_cannot_overwrite_concurrent_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let baseline = Settings::default();
+        baseline.save(&path).unwrap();
+        let mut desired = baseline.clone();
+        desired.jump_mode_hint_alphabet = crate::settings::HintAlphabet::parse("ZY").unwrap();
+        let intent = SettingsSaveIntent::general(desired, &baseline);
+        let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
+        let client_for_worker = client.clone();
+        let (worker, _messages) = spawn_save(
+            path.clone(),
+            intent,
+            SettingsSaveSource::General,
+            move |candidate| client_for_worker.prepare(candidate),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+        let HotkeyRuntimeMessage::Prepare(request) = next_runtime_message(&owner) else {
+            panic!("expected prepare")
+        };
+        Settings::update(&path, |latest| {
+            latest.jump_mode_hint_alphabet = crate::settings::HintAlphabet::parse("AB").unwrap();
+            Ok(())
+        })
+        .unwrap();
+        complete_prepare(request, 108);
+        let HotkeyRuntimeMessage::Cancel(cancellation) = next_runtime_message(&owner) else {
+            panic!("stale Jump must cancel before apply")
+        };
+        cancellation
+            .complete_restored(HotkeyReconfigurationError::TransactionCancelled)
+            .unwrap();
+        let (result, reconciliation) = worker.join().unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .contains("changed since this editor was opened")
+        );
+        assert!(!reconciliation);
+        assert_eq!(
+            Settings::load(&path)
+                .unwrap()
+                .jump_mode_hint_alphabet
+                .canonical_text(),
+            "AB"
+        );
+        assert!(owner.try_recv().unwrap().is_none());
     }
 
     #[test]
@@ -1530,7 +1875,7 @@ mod tests {
         app.settings_editor
             .paste_sequence
             .keep_dialog_visible_during_playback = true;
-        let desired = app.settings_editor.to_settings(&baseline);
+        let desired = app.settings_editor.to_settings(&baseline).unwrap();
         let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
         app.begin_settings_save_with_prepare(
             &context,
@@ -2249,7 +2594,7 @@ mod tests {
         app.settings_editor.hotkey = "F8".into();
         app.settings_editor.show_launcher_icon = true;
         app.settings_editor.show_launcher_title = true;
-        let second_desired = app.settings_editor.to_settings(&second_baseline);
+        let second_desired = app.settings_editor.to_settings(&second_baseline).unwrap();
         let second_client = client.clone();
         app.begin_settings_save_with_prepare(
             &context,

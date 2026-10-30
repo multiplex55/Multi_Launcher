@@ -155,6 +155,32 @@ pub fn validate_hotkey_routes(
         }
     }
 
+    if settings.experimental_jump_mode_enabled {
+        // These are validation-only reservations. Jump is local and must never
+        // enter process_bindings (and thus legacy/global registration).
+        if let Some(document) = macro_document {
+            for macro_definition in document.macros.iter().filter(|item| item.enabled) {
+                if let Some(hotkey) = &macro_definition.hotkey {
+                    reservations.push((
+                        format!("macro {} hotkey", macro_definition.id),
+                        crate::mkmacro::hotkeys::canonical_hotkey(hotkey),
+                    ));
+                }
+            }
+        }
+        if let Some(message) = jump_chord_conflict(
+            settings.jump_mode_activation_chord,
+            reservations.iter().filter_map(|(name, text)| {
+                parse_hotkey(text).map(|hotkey| (name.as_str(), hotkey))
+            }),
+        ) {
+            issues.push(HotkeyRouteIssue {
+                field: "jump_mode_activation_chord",
+                message,
+            });
+        }
+    }
+
     if issues.is_empty() {
         let legacy_triggers = if shared_invocation {
             Vec::new()
@@ -173,6 +199,25 @@ pub fn validate_hotkey_routes(
     } else {
         Err(issues)
     }
+}
+
+/// Local Jump requires exactly its modifiers; invocation routes accept a
+/// superset of their required modifiers. A different main key or an additional
+/// modifier required only by the global route cannot fire on the local chord.
+pub fn jump_chord_conflict<'a>(
+    chord: crate::settings::JumpModeChord,
+    routes: impl IntoIterator<Item = (&'a str, Hotkey)>,
+) -> Option<String> {
+    let local = parse_hotkey(&chord.canonical_text())?;
+    routes.into_iter().find_map(|(name, route)| {
+        (local.key == route.key
+            && (!route.ctrl || local.ctrl)
+            && (!route.shift || local.shift)
+            && (!route.alt || local.alt)
+            && !route.alt_gr
+            && !route.win)
+            .then(|| format!("Jump activation chord conflicts with {name}"))
+    })
 }
 
 /// Same subset-modifier matching rule used by `HotkeyTrigger`, including the
@@ -383,6 +428,98 @@ mod tests {
 
     fn empty_macro() -> MkMacroDocument {
         MkMacroDocument::default()
+    }
+
+    #[test]
+    fn g06_jump_routes_reject_exact_local_cofire_without_registering_jump() {
+        let radial = RadialDocument::starter();
+        let mut settings = Settings::default();
+        settings.radial.enabled = false;
+        let before = validate_hotkey_routes(&settings, &radial, None).unwrap();
+        settings.experimental_jump_mode_enabled = true;
+        settings.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        let enabled = validate_hotkey_routes(&settings, &radial, None).unwrap();
+        assert_eq!(enabled.legacy_triggers, before.legacy_triggers);
+        for field in ["launcher", "quit", "help"] {
+            let mut candidate = settings.clone();
+            match field {
+                "launcher" => candidate.hotkey = Some("F8".into()),
+                "quit" => candidate.quit_hotkey = Some("Ctrl+F8".into()),
+                _ => candidate.help_hotkey = Some("Shift+F8".into()),
+            }
+            assert!(
+                validate_hotkey_routes(&candidate, &radial, None)
+                    .unwrap_err()
+                    .iter()
+                    .any(|issue| issue.field == "jump_mode_activation_chord"
+                        && issue.message.contains(field))
+            );
+            candidate.experimental_jump_mode_enabled = false;
+            assert!(validate_hotkey_routes(&candidate, &radial, None).is_ok());
+        }
+        for distinct in ["Alt+F8", "Win+F8", "Ctrl+F9"] {
+            settings.hotkey = Some(distinct.into());
+            assert!(
+                validate_hotkey_routes(&settings, &radial, None).is_ok(),
+                "{distinct}"
+            );
+        }
+        settings.jump_mode_activation_chord = crate::settings::JumpModeChord::parse("F8").unwrap();
+        settings.hotkey = Some("Ctrl+F8".into());
+        assert!(validate_hotkey_routes(&settings, &radial, None).is_ok());
+    }
+
+    #[test]
+    fn g06_jump_checks_active_radial_and_macro_reservations() {
+        let mut settings = Settings::default();
+        settings.experimental_jump_mode_enabled = true;
+        settings.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        settings.radial.enabled = true;
+        let mut radial = RadialDocument::starter();
+        radial.custom_triggers.push(TriggerDefinition {
+            id: TriggerId::new("g06"),
+            chord: "Ctrl+F8".into(),
+            menu_id: radial.default_menu_id.clone(),
+            scope: TriggerScope::Global,
+        });
+        assert!(
+            validate_hotkey_routes(&settings, &radial, None)
+                .unwrap_err()
+                .iter()
+                .any(|issue| issue.field == "jump_mode_activation_chord"
+                    && issue.message.contains("radial"))
+        );
+        settings.radial.enabled = false;
+        assert!(validate_hotkey_routes(&settings, &radial, None).is_ok());
+        let mut macros = MkMacroDocument {
+            macros: vec![MkMacro {
+                signature: Default::default(),
+                id: 1,
+                name: "fixture".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: Some(MkHotkey {
+                    key: MkKey::Function(8),
+                    modifiers: vec![MkKey::Control],
+                }),
+                hotkey_scope: MkHotkeyScope::AnyWindow,
+                folder_id: None,
+                playback: Default::default(),
+                steps: vec![],
+            }],
+            ..Default::default()
+        };
+        assert!(
+            validate_hotkey_routes(&settings, &radial, Some(&macros))
+                .unwrap_err()
+                .iter()
+                .any(|issue| issue.field == "jump_mode_activation_chord"
+                    && issue.message.contains("macro"))
+        );
+        macros.macros[0].enabled = false;
+        assert!(validate_hotkey_routes(&settings, &radial, Some(&macros)).is_ok());
     }
 
     #[test]

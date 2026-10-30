@@ -1,3 +1,6 @@
+use crate::diff::folder_runtime::{
+    FolderComparisonIdentity, FolderOperationContext, FolderOperationFeedback,
+};
 use crate::diff::model::{DiffView, DiffWorkspace};
 use crate::diff::query::DiffOpenPayload;
 use crate::gui::theme::widgets::{StatusTone, semantic_status};
@@ -182,6 +185,14 @@ impl DiffDialogState {
         if matches!(self.workspace.current_view.view, DiffView::FolderCompare(_)) {
             self.folder_runtimes.remove(&id);
         }
+        if (matches!(&self.workspace.current_view.view, DiffView::TextCompare(state) if state.relative_path.is_some())
+            || matches!(&self.workspace.current_view.view, DiffView::BinaryCompare(state) if state.relative_path.is_some()))
+            && let Some(parent) = self.workspace.navigation_stack.last()
+        {
+            self.folder_runtimes.remove(&parent.id);
+            self.watch_views.remove(&parent.id);
+        }
+        self.reconcile_runtime_resources();
     }
 
     fn reload_files(&mut self) {
@@ -486,10 +497,30 @@ impl DiffDialogState {
 
     fn reconcile_runtime_resources(&mut self) {
         let retained = self.retained_view_ids();
+        let comparisons: HashMap<_, _> = std::iter::once(&self.workspace.current_view)
+            .chain(&self.workspace.navigation_stack)
+            .filter_map(|view| match &view.view {
+                DiffView::FolderCompare(state) => {
+                    Some((view.id, folder_comparison_identity(view.id, state)))
+                }
+                _ => None,
+            })
+            .collect();
         self.text_views.retain(|id, _| retained.contains(id));
-        self.folder_runtimes.retain(|id, _| retained.contains(id));
+        self.folder_runtimes.retain(|id, runtime| {
+            comparisons
+                .get(id)
+                .is_some_and(|comparison| runtime.belongs_to(comparison))
+        });
         self.binary_views.retain(|id, _| retained.contains(id));
         self.watch_views.retain(|id, _| retained.contains(id));
+        if self
+            .operation_preview
+            .as_ref()
+            .is_some_and(|preview| !self.operation_preview_is_current(preview))
+        {
+            self.operation_preview = None;
+        }
     }
 
     fn clear_runtime_resources(&mut self) {
@@ -497,6 +528,7 @@ impl DiffDialogState {
         self.folder_runtimes.clear();
         self.binary_views.clear();
         self.watch_views.clear();
+        self.operation_preview = None;
     }
     pub fn ui(&mut self, ctx: &egui::Context, activity_center: &crate::activity::ActivityCenter) {
         if !self.open {
@@ -910,7 +942,7 @@ impl DiffDialogState {
             DiffView::FolderCompare(s) => {
                 let runtime = self.folder_runtimes.entry(view_id).or_default();
                 runtime.attach_activity_center(activity_center.clone());
-                poll_folder_runtime(s, runtime);
+                poll_folder_runtime(view_id, s, runtime);
                 let tag = crate::diff::watch::WatchTag {
                     workspace: workspace_id,
                     view: view_id,
@@ -960,6 +992,9 @@ impl DiffDialogState {
                         &format!("Scan failures — left: {left}; right: {right}"),
                         48.0,
                     );
+                }
+                if let Some(feedback) = &runtime.operation_feedback {
+                    show_folder_operation_feedback(ui, view_id, feedback);
                 }
                 action = render_retained_folder(s, |state| folder_view::show(ui, state, runtime));
                 let sort = crate::diff::settings::FolderSortStateV1 {
@@ -1110,7 +1145,10 @@ impl DiffDialogState {
                         .collect(),
                 };
                 self.operation_preview = Some(operation_preview::OperationPreview {
-                    view_id,
+                    context: FolderOperationContext {
+                        comparison: folder_comparison_identity(view_id, state),
+                        generation,
+                    },
                     plan,
                     planning_error: (!conflicts.is_empty()).then(|| {
                         format!(
@@ -1144,17 +1182,53 @@ impl DiffDialogState {
     }
 
     fn show_operation_preview(&mut self, ctx: &egui::Context) {
+        if self
+            .operation_preview
+            .as_ref()
+            .is_some_and(|preview| !self.operation_preview_is_current(preview))
+        {
+            self.operation_preview = None;
+        }
         let active = self
             .operation_preview
             .as_ref()
-            .and_then(|p| self.folder_runtimes.get(&p.view_id))
+            .and_then(|p| self.folder_runtimes.get(&p.context.comparison.view_id))
             .is_some_and(|runtime| runtime.mutation_active());
         let response = self.operation_preview.as_mut().map(|p| p.show(ctx, active));
+        if let Some(response) = response {
+            self.apply_operation_preview_response(response);
+        }
+    }
+
+    fn operation_preview_is_current(&self, preview: &operation_preview::OperationPreview) -> bool {
+        let view_id = self.workspace.current_view.id;
+        let DiffView::FolderCompare(state) = &self.workspace.current_view.view else {
+            return false;
+        };
+        let comparison = folder_comparison_identity(view_id, state);
+        preview.context.comparison == comparison
+            && self.folder_runtimes.get(&view_id).is_some_and(|runtime| {
+                runtime.generation == preview.context.generation && runtime.belongs_to(&comparison)
+            })
+    }
+
+    fn apply_operation_preview_response(&mut self, response: operation_preview::PreviewResponse) {
         match response {
-            Some(operation_preview::PreviewResponse::Cancel) => self.operation_preview = None,
-            Some(operation_preview::PreviewResponse::Execute) => {
+            operation_preview::PreviewResponse::Cancel => self.operation_preview = None,
+            operation_preview::PreviewResponse::Execute => {
+                let Some(preview) = self.operation_preview.take() else {
+                    return;
+                };
+                if !self.operation_preview_is_current(&preview)
+                    || preview.planning_error.is_some()
+                    || self
+                        .folder_runtimes
+                        .get(&preview.context.comparison.view_id)
+                        .is_some_and(|runtime| runtime.mutation_active())
+                {
+                    return;
+                }
                 let dirty = self.dirty_paths();
-                let preview = self.operation_preview.take().expect("preview exists");
                 let handle = match preview.plan {
                     operation_preview::PreviewPlan::Copy(plan) => {
                         Ok(crate::diff::file_ops::spawn_copy(plan, dirty))
@@ -1169,8 +1243,11 @@ impl DiffDialogState {
                 };
                 match handle {
                     Ok(handle) => {
-                        if let Some(runtime) = self.folder_runtimes.get_mut(&preview.view_id) {
-                            runtime.active_operation = Some(handle);
+                        if let Some(runtime) = self
+                            .folder_runtimes
+                            .get_mut(&preview.context.comparison.view_id)
+                        {
+                            runtime.start_operation(preview.context, handle);
                         }
                     }
                     Err(error) => self.workspace.error = Some(error),
@@ -1246,25 +1323,99 @@ fn parse_folder_filter(value: &str) -> crate::diff::model::FolderDisplayFilter {
     }
 }
 
+fn folder_comparison_identity(
+    view_id: u64,
+    state: &crate::diff::model::FolderCompareState,
+) -> FolderComparisonIdentity {
+    FolderComparisonIdentity {
+        view_id,
+        left_root: crate::diff::folder_scan::RootIdentity::new(state.left_root.clone()),
+        right_root: crate::diff::folder_scan::RootIdentity::new(state.right_root.clone()),
+    }
+}
+
+fn folder_operation_summary(feedback: &FolderOperationFeedback) -> String {
+    format!(
+        "Folder operation{}: {} completed, {} failed.",
+        if feedback.cancelled { " cancelled" } else { "" },
+        feedback.completed,
+        feedback.failed,
+    )
+}
+
+fn show_folder_operation_feedback(
+    ui: &mut egui::Ui,
+    view_id: u64,
+    feedback: &FolderOperationFeedback,
+) {
+    let tone = if feedback.failed > 0 {
+        StatusTone::Error
+    } else if feedback.cancelled {
+        StatusTone::Warning
+    } else {
+        StatusTone::Success
+    };
+    ui.horizontal_wrapped(|ui| {
+        semantic_status(ui, tone, &folder_operation_summary(feedback), None);
+    });
+    if !feedback.failures.is_empty() {
+        egui::CollapsingHeader::new("Operation failures")
+            .id_salt(("folder-operation-failures", view_id))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        for failure in &feedback.failures {
+                            ui.label(format!(
+                                "{}: {}",
+                                failure.relative.display(),
+                                failure.message
+                            ));
+                        }
+                        if feedback.omitted_failures > 0 {
+                            ui.label(format!(
+                                "{} additional failure details omitted.",
+                                feedback.omitted_failures
+                            ));
+                        }
+                    });
+            });
+    }
+}
+
+/// Production and tests use the same adoption boundary. Validate the receiving
+/// comparison before accepting feedback or requesting a completion rescan.
+fn process_operation_events(
+    view_id: u64,
+    state: &mut crate::diff::model::FolderCompareState,
+    runtime: &mut crate::diff::folder_runtime::FolderRuntime,
+    context: &FolderOperationContext,
+    events: impl IntoIterator<Item = crate::diff::file_ops::OperationEvent>,
+) {
+    let comparison = folder_comparison_identity(view_id, state);
+    runtime.reconcile_comparison(comparison.clone());
+    if context.comparison != comparison {
+        return;
+    }
+    for event in events {
+        if let crate::diff::file_ops::OperationEvent::Completed(report) = event
+            && runtime.finish_operation(context, &report)
+        {
+            refresh_after_mutation(state, runtime, report.affected_subtree);
+            break;
+        }
+    }
+}
+
 fn poll_folder_runtime(
+    view_id: u64,
     state: &mut crate::diff::model::FolderCompareState,
     runtime: &mut crate::diff::folder_runtime::FolderRuntime,
 ) {
-    use crate::diff::folder_scan::RootIdentity;
-
-    let completed = runtime.active_operation.as_ref().and_then(|operation| {
-        operation.receiver.try_iter().find_map(|event| match event {
-            crate::diff::file_ops::OperationEvent::Completed(report)
-                if report.generation == runtime.generation =>
-            {
-                Some(report)
-            }
-            _ => None,
-        })
-    });
-    if let Some(report) = completed {
-        runtime.active_operation = None;
-        refresh_after_mutation(state, runtime, report.affected_subtree);
+    let comparison = folder_comparison_identity(view_id, state);
+    runtime.reconcile_comparison(comparison.clone());
+    if let Some((context, events)) = runtime.operation_events() {
+        process_operation_events(view_id, state, runtime, &context, events);
     }
 
     // A child editor can invalidate one row. Refresh it directly instead of
@@ -1304,8 +1455,8 @@ fn poll_folder_runtime(
         }
     }
 
-    let left_identity = RootIdentity::new(state.left_root.clone());
-    let right_identity = RootIdentity::new(state.right_root.clone());
+    let left_identity = comparison.left_root;
+    let right_identity = comparison.right_root;
     if runtime.left_root.as_ref() != Some(&left_identity)
         || runtime.right_root.as_ref() != Some(&right_identity)
     {
@@ -1479,6 +1630,7 @@ fn picker_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::file_ops::{ExecutionReport, ItemOutcome, ItemResult, OperationEvent};
     use crate::diff::model::{DiffView, FolderCompareState, RetainedView};
 
     fn folder_dialog(id: u64) -> DiffDialogState {
@@ -1984,9 +2136,14 @@ mod tests {
         }
         dialog.plan_mutation(folder_view::MutationKind::CopyRight);
         let preview = dialog.operation_preview.take().expect("copy preview");
+        let operation_context = preview.context;
         let operation_preview::PreviewPlan::Copy(plan) = preview.plan else {
             unreachable!()
         };
+        let _pending = pending_operation(
+            dialog.folder_runtimes.get_mut(&folder_id).unwrap(),
+            &operation_context,
+        );
         let execute = |plan| execute_copy(plan, &HashSet::new(), &AtomicBool::new(false));
         let report = execute(&plan);
         assert!(matches!(report.items[0].outcome, ItemOutcome::Copied));
@@ -2004,7 +2161,14 @@ mod tests {
             unreachable!()
         };
         let runtime = folder_runtimes.get_mut(&folder_id).unwrap();
-        refresh_after_mutation(state, runtime, report.affected_subtree);
+        process_operation_events(
+            folder_id,
+            state,
+            runtime,
+            &operation_context,
+            [crate::diff::file_ops::OperationEvent::Completed(report)],
+        );
+        assert_eq!(runtime.operation_feedback.as_ref().unwrap().completed, 1);
         assert!(state.model.entries.is_empty());
         assert!(
             state
@@ -2060,6 +2224,555 @@ mod tests {
             unreachable!()
         };
         assert_eq!(plan.mode, crate::diff::file_ops::DeleteMode::Recycle);
+    }
+
+    fn operation_fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DiffDialogState,
+        FolderOperationContext,
+    ) {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("item.txt"), b"copyable source").unwrap();
+        let mut dialog = folder_dialog(950);
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        state.left_root = left.path().into();
+        state.right_root = right.path().into();
+        let context = FolderOperationContext {
+            comparison: folder_comparison_identity(950, state),
+            generation: 42,
+        };
+        let runtime = dialog.folder_runtimes.entry(950).or_default();
+        runtime.generation = context.generation;
+        runtime.reconcile_comparison(context.comparison.clone());
+        select_operation_item(&mut dialog);
+        (left, right, dialog, context)
+    }
+
+    fn pending_operation(
+        runtime: &mut crate::diff::folder_runtime::FolderRuntime,
+        context: &FolderOperationContext,
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::mpsc::Sender<OperationEvent>,
+    ) {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        runtime.start_operation(
+            context.clone(),
+            crate::diff::file_ops::OperationHandle::with_test_channel(receiver, cancel.clone()),
+        );
+        (cancel, sender)
+    }
+
+    fn pending_operation_fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DiffDialogState,
+        FolderOperationContext,
+    ) {
+        let (left, right, mut dialog, context) = operation_fixture();
+        pending_operation(dialog.folder_runtimes.get_mut(&950).unwrap(), &context);
+        (left, right, dialog, context)
+    }
+
+    fn consume_operation_events(dialog: &mut DiffDialogState) {
+        let view_id = dialog.workspace.current_view.id;
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        let runtime = dialog.folder_runtimes.get_mut(&view_id).unwrap();
+        let (context, events) = runtime.operation_events().expect("pending operation");
+        process_operation_events(view_id, state, runtime, &context, events);
+    }
+
+    fn select_operation_item(dialog: &mut DiffDialogState) {
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        state
+            .model
+            .upsert(
+                std::path::Path::new("item.txt"),
+                crate::diff::folder_compare::EntrySide {
+                    path: state.left_root.join("item.txt"),
+                    metadata: None,
+                    error: None,
+                },
+                true,
+                crate::diff::folder_compare::PathKeyPolicy::Platform,
+                state.timestamp_tolerance,
+            )
+            .unwrap();
+        state.selected_paths.insert("item.txt".into());
+        state.primary_selection = Some("item.txt".into());
+    }
+
+    fn operation_report(
+        context: &FolderOperationContext,
+        outcomes: Vec<ItemOutcome>,
+        cancelled: bool,
+    ) -> ExecutionReport {
+        ExecutionReport {
+            generation: context.generation,
+            items: outcomes
+                .into_iter()
+                .enumerate()
+                .map(|(index, outcome)| ItemResult {
+                    relative: format!("entry-{index}.txt").into(),
+                    outcome,
+                })
+                .collect(),
+            affected_subtree: None,
+            cancelled,
+        }
+    }
+
+    fn deliver_operation_report(
+        dialog: &mut DiffDialogState,
+        context: &FolderOperationContext,
+        report: ExecutionReport,
+    ) {
+        let view_id = dialog.workspace.current_view.id;
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        let runtime = dialog.folder_runtimes.entry(view_id).or_default();
+        process_operation_events(
+            view_id,
+            state,
+            runtime,
+            context,
+            [OperationEvent::Completed(report)],
+        );
+    }
+
+    #[test]
+    fn folder_operation_mixed_results_keep_exact_counts_and_bounded_failures() {
+        let (_left, _right, mut dialog, context) = pending_operation_fixture();
+        dialog.workspace.error = Some("unrelated existing error".into());
+        let mut outcomes = vec![
+            ItemOutcome::CreatedDirectory,
+            ItemOutcome::Copied,
+            ItemOutcome::Overwritten,
+        ];
+        let limit = crate::diff::folder_runtime::MAX_OPERATION_FAILURE_DETAILS;
+        outcomes.extend(
+            (0..limit + 3).map(|index| ItemOutcome::Failed(format!("read failure {index}"))),
+        );
+        let report = operation_report(&context, outcomes, false);
+        deliver_operation_report(&mut dialog, &context, report.clone());
+        let runtime = &dialog.folder_runtimes[&950];
+        let feedback = runtime.operation_feedback.as_ref().unwrap().clone();
+        assert_eq!((feedback.completed, feedback.failed), (3, limit + 3));
+        assert_eq!(feedback.failures.len(), limit);
+        assert_eq!(feedback.omitted_failures, 3);
+        assert_eq!(
+            feedback.failures[0].relative,
+            std::path::PathBuf::from("entry-3.txt")
+        );
+        assert_eq!(feedback.failures[0].message, "read failure 0");
+        assert!(!feedback.cancelled);
+        assert_eq!(
+            dialog.workspace.error.as_deref(),
+            Some("unrelated existing error")
+        );
+        assert!(
+            matches!(&dialog.workspace.current_view.view, DiffView::FolderCompare(state) if state.model.entries.is_empty())
+        );
+        let generation = runtime.generation;
+        deliver_operation_report(&mut dialog, &context, report);
+        assert_eq!(dialog.folder_runtimes[&950].generation, generation);
+        assert_eq!(
+            dialog.folder_runtimes[&950].operation_feedback.as_ref(),
+            Some(&feedback)
+        );
+    }
+
+    #[test]
+    fn folder_operation_cancellation_counts_only_delivered_successes() {
+        for (outcomes, cancelled, completed) in [
+            (vec![], true, 0),
+            (vec![ItemOutcome::Copied], true, 1),
+            (vec![ItemOutcome::Copied, ItemOutcome::Cancelled], true, 1),
+            (vec![ItemOutcome::Cancelled], false, 0),
+        ] {
+            let (_left, _right, mut dialog, context) = pending_operation_fixture();
+            deliver_operation_report(
+                &mut dialog,
+                &context,
+                operation_report(&context, outcomes, cancelled),
+            );
+            let feedback = dialog.folder_runtimes[&950]
+                .operation_feedback
+                .as_ref()
+                .unwrap();
+            assert!(feedback.cancelled);
+            assert_eq!((feedback.completed, feedback.failed), (completed, 0));
+            assert_eq!(
+                folder_operation_summary(feedback),
+                format!("Folder operation cancelled: {completed} completed, 0 failed.")
+            );
+        }
+    }
+
+    #[test]
+    fn folder_operation_full_success_uses_neutral_completed_summary() {
+        let (_left, _right, mut dialog, context) = pending_operation_fixture();
+        deliver_operation_report(
+            &mut dialog,
+            &context,
+            operation_report(
+                &context,
+                vec![ItemOutcome::Copied, ItemOutcome::Overwritten],
+                false,
+            ),
+        );
+        let feedback = dialog.folder_runtimes[&950]
+            .operation_feedback
+            .as_ref()
+            .unwrap();
+        assert!(!feedback.cancelled);
+        assert!(feedback.failures.is_empty());
+        assert_eq!(
+            folder_operation_summary(feedback),
+            "Folder operation: 2 completed, 0 failed."
+        );
+    }
+
+    #[test]
+    fn folder_operation_rejects_wrong_generation_view_and_ordered_roots() {
+        for mismatch in 0..5 {
+            let (_left, _right, mut dialog, context) = pending_operation_fixture();
+            let mut received_context = context.clone();
+            let mut report =
+                operation_report(&context, vec![ItemOutcome::Failed("stale".into())], false);
+            match mismatch {
+                0 => report.generation += 1,
+                1 => received_context.generation += 1,
+                2 => received_context.comparison.view_id += 1,
+                3 => std::mem::swap(
+                    &mut received_context.comparison.left_root,
+                    &mut received_context.comparison.right_root,
+                ),
+                _ => received_context.comparison.right_root.token = Some((u64::MAX, u64::MAX)),
+            }
+            deliver_operation_report(&mut dialog, &received_context, report);
+            let runtime = &dialog.folder_runtimes[&950];
+            assert!(runtime.operation_feedback.is_none(), "mismatch {mismatch}");
+            assert!(
+                runtime.mutation_active(),
+                "mismatch must not release the gate"
+            );
+            assert_eq!(
+                runtime.generation, context.generation,
+                "must not trigger completion rescan"
+            );
+            assert!(
+                matches!(&dialog.workspace.current_view.view, DiffView::FolderCompare(state) if state.model.entries.contains_key("item.txt"))
+            );
+        }
+    }
+
+    #[test]
+    fn folder_operation_feedback_survives_rescan_preview_cancel_and_unchanged_parent() {
+        let (left, _right, mut dialog, context) = pending_operation_fixture();
+        deliver_operation_report(
+            &mut dialog,
+            &context,
+            operation_report(
+                &context,
+                vec![ItemOutcome::Failed("preserved".into())],
+                false,
+            ),
+        );
+        let feedback = dialog.folder_runtimes[&950].operation_feedback.clone();
+        dialog.apply_folder_action(folder_view::FolderViewAction::RequestRescan);
+        assert!(dialog.folder_runtimes[&950].left_root.is_none());
+        assert_eq!(dialog.folder_runtimes[&950].operation_feedback, feedback);
+        select_operation_item(&mut dialog);
+        dialog.plan_mutation(folder_view::MutationKind::CopyRight);
+        assert!(dialog.operation_preview.is_some());
+        assert_eq!(dialog.folder_runtimes[&950].operation_feedback, feedback);
+        dialog.apply_operation_preview_response(operation_preview::PreviewResponse::Cancel);
+        assert!(dialog.operation_preview.is_none());
+        assert_eq!(dialog.folder_runtimes[&950].operation_feedback, feedback);
+        dialog.apply_folder_action(folder_view::FolderViewAction::OpenChild {
+            relative_path: "item.txt".into(),
+            left: Some(left.path().join("item.txt")),
+            right: None,
+        });
+        assert_eq!(dialog.folder_runtimes[&950].operation_feedback, feedback);
+        assert!(dialog.navigate_back());
+        assert_eq!(dialog.folder_runtimes[&950].operation_feedback, feedback);
+    }
+
+    #[test]
+    fn folder_operation_new_dispatch_clears_previous_feedback_and_replaces_it_on_completion() {
+        let (_left, right, mut dialog, context) = pending_operation_fixture();
+        deliver_operation_report(
+            &mut dialog,
+            &context,
+            operation_report(
+                &context,
+                vec![ItemOutcome::Failed("old failure".into())],
+                false,
+            ),
+        );
+        select_operation_item(&mut dialog);
+        dialog.plan_mutation(folder_view::MutationKind::CopyRight);
+        let dispatched = dialog.operation_preview.as_ref().unwrap().context.clone();
+        dialog.apply_operation_preview_response(operation_preview::PreviewResponse::Execute);
+        let runtime = &dialog.folder_runtimes[&950];
+        assert!(runtime.mutation_active());
+        assert!(runtime.operation_feedback.is_none());
+        // Observe the small real copy before temp-directory cleanup; other report
+        // cases inject events directly through the production adoption seam.
+        let event = runtime.wait_for_operation_event();
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        let runtime = dialog.folder_runtimes.get_mut(&950).unwrap();
+        process_operation_events(950, state, runtime, &dispatched, [event]);
+        assert!(!runtime.mutation_active());
+        let feedback = runtime.operation_feedback.as_ref().unwrap();
+        assert_eq!((feedback.completed, feedback.failed), (1, 0));
+        assert_eq!(
+            std::fs::read(right.path().join("item.txt")).unwrap(),
+            b"copyable source"
+        );
+    }
+
+    #[test]
+    fn folder_operation_rescan_holds_busy_gate_until_matching_terminal_acknowledgement() {
+        let (_left, right, mut dialog, context) = operation_fixture();
+        dialog.plan_mutation(folder_view::MutationKind::CopyRight);
+        let mut preview = dialog.operation_preview.take().unwrap();
+        let (cancel, sender) =
+            pending_operation(dialog.folder_runtimes.get_mut(&950).unwrap(), &context);
+
+        dialog.refresh_folder();
+        let generation = dialog.folder_runtimes[&950].generation;
+        assert!(generation > context.generation);
+        assert!(cancel.load(std::sync::atomic::Ordering::Acquire));
+        assert!(dialog.folder_runtimes[&950].mutation_active());
+        assert!(dialog.folder_runtimes[&950].is_active());
+        select_operation_item(&mut dialog);
+        dialog.plan_mutation(folder_view::MutationKind::CopyRight);
+        assert!(
+            dialog.operation_preview.is_none(),
+            "planning remains blocked"
+        );
+
+        // A current preview at the dispatch boundary must also respect the gate,
+        // independently of the stale-preview generation check.
+        preview.context.generation = generation;
+        let operation_preview::PreviewPlan::Copy(plan) = &mut preview.plan else {
+            unreachable!()
+        };
+        plan.generation = generation;
+        assert!(dialog.operation_preview_is_current(&preview));
+        dialog.operation_preview = Some(preview);
+        dialog.apply_operation_preview_response(operation_preview::PreviewResponse::Execute);
+        assert!(dialog.folder_runtimes[&950].mutation_active());
+        assert_eq!(
+            dialog.folder_runtimes[&950].operation_events().unwrap().0,
+            context,
+            "dispatch must not replace the pending operation"
+        );
+        assert!(!right.path().join("item.txt").exists());
+
+        sender
+            .send(OperationEvent::Progress {
+                generation: context.generation,
+                completed: 1,
+                total: 2,
+            })
+            .unwrap();
+        consume_operation_events(&mut dialog);
+        assert!(dialog.folder_runtimes[&950].mutation_active());
+        sender
+            .send(OperationEvent::Completed(operation_report(
+                &context,
+                vec![ItemOutcome::Copied],
+                true,
+            )))
+            .unwrap();
+        consume_operation_events(&mut dialog);
+        let runtime = &dialog.folder_runtimes[&950];
+        assert!(!runtime.mutation_active());
+        assert!(
+            runtime.operation_feedback.is_none(),
+            "stale result not adopted"
+        );
+        assert_eq!(runtime.generation, generation, "no completion rescan");
+        assert!(
+            matches!(&dialog.workspace.current_view.view, DiffView::FolderCompare(state) if state.model.entries.contains_key("item.txt"))
+        );
+        dialog.plan_mutation(folder_view::MutationKind::CopyRight);
+        assert!(
+            dialog.operation_preview.is_some(),
+            "acknowledgement releases gate"
+        );
+        dialog.apply_operation_preview_response(operation_preview::PreviewResponse::Cancel);
+    }
+
+    #[test]
+    fn folder_operation_wrong_terminal_cannot_release_a_newer_active_dispatch() {
+        let (_left, _right, mut dialog, old_context) = operation_fixture();
+        let (_old_cancel, old_sender) =
+            pending_operation(dialog.folder_runtimes.get_mut(&950).unwrap(), &old_context);
+        dialog.refresh_folder();
+        old_sender
+            .send(OperationEvent::Completed(operation_report(
+                &old_context,
+                vec![],
+                true,
+            )))
+            .unwrap();
+        consume_operation_events(&mut dialog);
+        assert!(!dialog.folder_runtimes[&950].mutation_active());
+
+        let mut context = old_context.clone();
+        context.generation = dialog.folder_runtimes[&950].generation;
+        let (_cancel, sender) =
+            pending_operation(dialog.folder_runtimes.get_mut(&950).unwrap(), &context);
+        deliver_operation_report(
+            &mut dialog,
+            &old_context,
+            operation_report(&old_context, vec![ItemOutcome::Copied], true),
+        );
+        assert!(dialog.folder_runtimes[&950].mutation_active());
+        let mut wrong_report = operation_report(&context, vec![ItemOutcome::Copied], false);
+        wrong_report.generation = old_context.generation;
+        sender
+            .send(OperationEvent::Completed(wrong_report))
+            .unwrap();
+        consume_operation_events(&mut dialog);
+        let runtime = &dialog.folder_runtimes[&950];
+        assert!(runtime.mutation_active());
+        assert_eq!(runtime.generation, context.generation);
+        assert!(runtime.operation_feedback.is_none());
+        sender
+            .send(OperationEvent::Completed(operation_report(
+                &context,
+                vec![ItemOutcome::Copied],
+                false,
+            )))
+            .unwrap();
+        consume_operation_events(&mut dialog);
+        let runtime = &dialog.folder_runtimes[&950];
+        assert!(!runtime.mutation_active());
+        assert_eq!(runtime.operation_feedback.as_ref().unwrap().completed, 1);
+        assert!(runtime.generation > context.generation);
+    }
+
+    #[test]
+    fn folder_operation_stale_preview_cannot_dispatch_after_root_change() {
+        let (_left, right, mut dialog, _context) = operation_fixture();
+        dialog.plan_mutation(folder_view::MutationKind::CopyRight);
+        let replacement = tempfile::tempdir().unwrap();
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        state.right_root = replacement.path().into();
+        dialog.apply_operation_preview_response(operation_preview::PreviewResponse::Execute);
+        assert!(!dialog.folder_runtimes[&950].mutation_active());
+        assert!(!right.path().join("item.txt").exists());
+        assert!(!replacement.path().join("item.txt").exists());
+    }
+
+    #[test]
+    fn folder_operation_discard_and_same_id_side_swap_clear_feedback() {
+        for discard in [false, true] {
+            let (_left, _right, mut dialog, context) = pending_operation_fixture();
+            deliver_operation_report(
+                &mut dialog,
+                &context,
+                operation_report(&context, vec![ItemOutcome::Copied], false),
+            );
+            if discard {
+                dialog.workspace.current_view.view = DiffView::Start;
+                dialog.reconcile_runtime_resources();
+            } else {
+                dialog.swap_sides();
+                assert_eq!(dialog.workspace.current_view.id, 950);
+            }
+            assert!(!dialog.folder_runtimes.contains_key(&950));
+        }
+    }
+
+    #[test]
+    fn folder_operation_retained_parent_swap_clears_feedback_while_child_is_open() {
+        let (left, _right, mut dialog, context) = pending_operation_fixture();
+        deliver_operation_report(
+            &mut dialog,
+            &context,
+            operation_report(&context, vec![ItemOutcome::Copied], false),
+        );
+        dialog.apply_folder_action(folder_view::FolderViewAction::OpenChild {
+            relative_path: "item.txt".into(),
+            left: Some(left.path().join("item.txt")),
+            right: None,
+        });
+        assert!(dialog.folder_runtimes.contains_key(&950));
+        dialog.swap_sides();
+        assert!(!dialog.folder_runtimes.contains_key(&950));
+    }
+
+    #[test]
+    fn folder_operation_changed_retained_parent_rejects_queued_completion_before_reconciliation() {
+        let (left, _right, mut dialog, context) = pending_operation_fixture();
+        let queued = operation_report(
+            &context,
+            vec![ItemOutcome::Failed("old roots".into())],
+            false,
+        );
+        dialog.apply_folder_action(folder_view::FolderViewAction::OpenChild {
+            relative_path: "item.txt".into(),
+            left: Some(left.path().join("item.txt")),
+            right: None,
+        });
+        let replacement = tempfile::tempdir().unwrap();
+        let DiffView::FolderCompare(parent) =
+            &mut dialog.workspace.navigation_stack.last_mut().unwrap().view
+        else {
+            unreachable!()
+        };
+        parent.right_root = replacement.path().into();
+        assert!(dialog.workspace.back()); // deliberately before dialog reconciliation
+        deliver_operation_report(&mut dialog, &context, queued);
+        assert!(dialog.folder_runtimes[&950].operation_feedback.is_none());
+        assert!(
+            matches!(&dialog.workspace.current_view.view, DiffView::FolderCompare(state) if state.model.entries.contains_key("item.txt"))
+        );
+    }
+
+    #[test]
+    fn folder_operation_reconciliation_drops_changed_retained_comparison() {
+        let (left, _right, mut dialog, context) = pending_operation_fixture();
+        deliver_operation_report(
+            &mut dialog,
+            &context,
+            operation_report(&context, vec![ItemOutcome::Copied], false),
+        );
+        dialog.apply_folder_action(folder_view::FolderViewAction::OpenChild {
+            relative_path: "item.txt".into(),
+            left: Some(left.path().join("item.txt")),
+            right: None,
+        });
+        let replacement = tempfile::tempdir().unwrap();
+        let DiffView::FolderCompare(parent) =
+            &mut dialog.workspace.navigation_stack.last_mut().unwrap().view
+        else {
+            unreachable!()
+        };
+        parent.left_root = replacement.path().into();
+        dialog.reconcile_runtime_resources();
+        assert!(!dialog.folder_runtimes.contains_key(&950));
     }
 
     enum ProductionFixture {

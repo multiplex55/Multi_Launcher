@@ -1,0 +1,313 @@
+warning: variant `Unknown` is never constructed
+   --> vendor\epaint\src\text\font.rs:361:5
+    |
+357 | pub(crate) enum ShapeBufferProvenance {
+    |                 --------------------- variant in this enum
+...
+361 |     Unknown,
+    |     ^^^^^^^
+    |
+    = note: `ShapeBufferProvenance` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `epaint` (lib) generated 1 warning
+warning: use of deprecated constant `std::f32::EPSILON`: replaced by the `EPSILON` associated constant on `f32`
+  --> vendor\egui\src\containers\scene.rs:79:42
+   |
+79 |             zoom_range: Rangef::new(f32::EPSILON, 1.0),
+   |                                          ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `egui` (lib) generated 1 warning
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:720:19
+    |
+720 |     pub fn pixels(&self) -> Pixels<P> {
+    |                   ^^^^^     ^^^^^^^^^ the same lifetime is hidden here
+    |                   |
+    |                   the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+720 |     pub fn pixels(&self) -> Pixels<'_, P> {
+    |                                    +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:733:17
+    |
+733 |     pub fn rows(&self) -> Rows<P> {
+    |                 ^^^^^     ^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+733 |     pub fn rows(&self) -> Rows<'_, P> {
+    |                                +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:742:29
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<P> {
+    |                             ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                             |
+    |                             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<'_, P> {
+    |                                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:754:27
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<P> {
+    |                           ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                           |
+    |                           the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<'_, P> {
+    |                                                   +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:898:23
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<P> {
+    |                       ^^^^^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<'_, P> {
+    |                                               +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:911:21
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<P> {
+    |                     ^^^^^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                     |
+    |                     the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<'_, P> {
+    |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:918:33
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<P> {
+    |                                 ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                 |
+    |                                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<'_, P> {
+    |                                                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:931:31
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<P> {
+    |                               ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                               |
+    |                               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<'_, P> {
+    |                                                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\image.rs:932:15
+    |
+932 |     fn pixels(&self) -> Pixels<Self>
+    |               ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |               |
+    |               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+932 |     fn pixels(&self) -> Pixels<'_, Self>
+    |                                +++
+
+warning: `image` (lib) generated 9 warnings (run `cargo fix --lib -p image` to apply 9 suggestions)
+warning: constant `SCANNER_CANCELLATION_INTERVAL` is never used
+  --> crates\multi_launcher_table_core\src\lib.rs:53:7
+   |
+53 | const SCANNER_CANCELLATION_INTERVAL: usize = 4096;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scanner_cancellation_checkpoint` is never used
+    --> crates\multi_launcher_table_core\src\lib.rs:1031:4
+     |
+1031 | fn scanner_cancellation_checkpoint(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `end_offset` is never read
+  --> crates\multi_launcher_table_core\src\stream_scan.rs:25:9
+   |
+22 | pub(crate) struct StreamRecord {
+   |                   ------------ field in this struct
+...
+25 |     pub end_offset: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `multi_launcher_table_core` (lib) generated 3 warnings
+warning: unused variable: `replaced_scan_job`
+    --> src\table_utility_session.rs:3521:13
+     |
+3521 |         let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+     |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_replaced_scan_job`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi_launcher` (lib test) generated 1 warning (run `cargo fix --lib -p multi_launcher --tests` to apply 1 suggestion)
+    Finished `fast-dev` profile [unoptimized + debuginfo] target(s) in 1.59s
+────────────
+ Nextest run ID 5a737a79-fdb0-4496-9fdf-d6841db2f559 with nextest profile: default
+    Starting 12 tests across 1 binary (6439 tests skipped)
+        PASS [   0.023s] ( 1/12) multi_launcher activity::tests::cancel_requires_the_exact_current_owner_capability
+        PASS [   0.023s] ( 2/12) multi_launcher activity::tests::history_is_capped_and_clear_fences_late_retirement
+        PASS [   0.386s] ( 3/12) multi_launcher duplicate_finder::tests::activity_baseline_native_file_scan_cancel_and_warm_reopen
+        PASS [   0.023s] ( 4/12) multi_launcher duplicate_finder::tests::dff_lifecycle_cancel_invalidates_publication_while_io_drains
+        PASS [   0.023s] ( 5/12) multi_launcher duplicate_finder::tests::dff_lifecycle_coalesces_pending_scans_and_reopens_only_after_retirement
+        PASS [   0.022s] ( 6/12) multi_launcher gui::activity_dialog::tests::copied_text_contains_only_safe_owner_activity_metadata
+        PASS [   0.020s] ( 7/12) multi_launcher gui::activity_dialog::tests::process_memory_sampler_obeys_visible_open_250ms_refresh_gate
+        PASS [   0.024s] ( 8/12) multi_launcher gui::screenshot_capture::tests::screenshot_activity_publishes_actual_capture_before_gui_join
+        PASS [   0.024s] ( 9/12) multi_launcher gui::screenshot_capture::tests::screenshot_delay_active_cancel_drains_and_discards_late_image
+        PASS [   0.023s] (10/12) multi_launcher gui::screenshot_capture::tests::screenshot_delay_shutdown_hands_blocked_worker_to_reaper_without_waiting
+        PASS [   0.022s] (11/12) multi_launcher thread_reaper::tests::completion_before_reap_is_latched_even_while_join_is_not_finished
+        PASS [   0.021s] (12/12) multi_launcher thread_reaper::tests::supervisor_spawn_failure_detaches_without_panicking_and_retains_capacity_until_exit
+────────────
+     Summary [   0.732s] 12 tests run: 12 passed, 6439 skipped
+        PASS [   0.023s] ( 1/12) multi_launcher activity::tests::cancel_requires_the_exact_current_owner_capability
+  stdout ───
+
+    running 1 test
+    test activity::tests::cancel_requires_the_exact_current_owner_capability ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.023s] ( 2/12) multi_launcher activity::tests::history_is_capped_and_clear_fences_late_retirement
+  stdout ───
+
+    running 1 test
+    test activity::tests::history_is_capped_and_clear_fences_late_retirement ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.386s] ( 3/12) multi_launcher duplicate_finder::tests::activity_baseline_native_file_scan_cancel_and_warm_reopen
+  stdout ───
+
+    running 1 test
+    test duplicate_finder::tests::activity_baseline_native_file_scan_cancel_and_warm_reopen ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.37s
+
+  stderr ───
+    G09_NATIVE_HANDLE {"baseline_exclusive_opens":8,"cancel_close_still_held":true,"capture_apartment":"NOT_RUN","cleanup":"fixture directory removed","fixture_bytes":1048576,"fixture_files":8,"gate":"native source acquired; before first file.read","held_raw_os_error":32,"held_source_indices":[0],"in_flight_ReadFile":"NOT_RUN","owner":"DuplicateFinderSession","post_join_exclusive_opens":8,"successful_reaper_join":true,"warm_duplicate_groups":1,"warm_worker_joined":true}
+
+        PASS [   0.023s] ( 4/12) multi_launcher duplicate_finder::tests::dff_lifecycle_cancel_invalidates_publication_while_io_drains
+  stdout ───
+
+    running 1 test
+    test duplicate_finder::tests::dff_lifecycle_cancel_invalidates_publication_while_io_drains ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.023s] ( 5/12) multi_launcher duplicate_finder::tests::dff_lifecycle_coalesces_pending_scans_and_reopens_only_after_retirement
+  stdout ───
+
+    running 1 test
+    test duplicate_finder::tests::dff_lifecycle_coalesces_pending_scans_and_reopens_only_after_retirement ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.022s] ( 6/12) multi_launcher gui::activity_dialog::tests::copied_text_contains_only_safe_owner_activity_metadata
+  stdout ───
+
+    running 1 test
+    test gui::activity_dialog::tests::copied_text_contains_only_safe_owner_activity_metadata ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.020s] ( 7/12) multi_launcher gui::activity_dialog::tests::process_memory_sampler_obeys_visible_open_250ms_refresh_gate
+  stdout ───
+
+    running 1 test
+    test gui::activity_dialog::tests::process_memory_sampler_obeys_visible_open_250ms_refresh_gate ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.024s] ( 8/12) multi_launcher gui::screenshot_capture::tests::screenshot_activity_publishes_actual_capture_before_gui_join
+  stdout ───
+
+    running 1 test
+    test gui::screenshot_capture::tests::screenshot_activity_publishes_actual_capture_before_gui_join ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.024s] ( 9/12) multi_launcher gui::screenshot_capture::tests::screenshot_delay_active_cancel_drains_and_discards_late_image
+  stdout ───
+
+    running 1 test
+    test gui::screenshot_capture::tests::screenshot_delay_active_cancel_drains_and_discards_late_image ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.023s] (10/12) multi_launcher gui::screenshot_capture::tests::screenshot_delay_shutdown_hands_blocked_worker_to_reaper_without_waiting
+  stdout ───
+
+    running 1 test
+    test gui::screenshot_capture::tests::screenshot_delay_shutdown_hands_blocked_worker_to_reaper_without_waiting ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.022s] (11/12) multi_launcher thread_reaper::tests::completion_before_reap_is_latched_even_while_join_is_not_finished
+  stdout ───
+
+    running 1 test
+    test thread_reaper::tests::completion_before_reap_is_latched_even_while_join_is_not_finished ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+
+        PASS [   0.021s] (12/12) multi_launcher thread_reaper::tests::supervisor_spawn_failure_detaches_without_panicking_and_retains_capacity_until_exit
+  stdout ───
+
+    running 1 test
+    test thread_reaper::tests::supervisor_spawn_failure_detaches_without_panicking_and_retains_capacity_until_exit ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6450 filtered out; finished in 0.00s
+
+

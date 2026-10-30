@@ -1,0 +1,85 @@
+{
+  "packages": [
+    {
+      "name": "File Search sender fixture",
+      "priority_confidence": "P1 / high",
+      "source_role": "G01 implementer",
+      "path": "goals/G01/follow-on/file-search-sender-fixture",
+      "status": "PROPOSED_NOT_EXECUTED",
+      "gate": "Independent test-only migration; accepted G01 is not blocked.",
+      "next_action": "Fresh accepted current source; inspect real sender signature, migrate untouched fixture and run its narrow proof."
+    },
+    {
+      "name": "G02 native parent admission",
+      "priority_confidence": "P1 / observed failure high; cause unknown",
+      "source_role": "G02 implementer",
+      "path": "goals/G02/follow-on/native-parent-admission-proof",
+      "status": "REQUIRED_CONTINUATION / NOT_EXECUTED",
+      "gate": "Native OS5 admission plus all publication safety/lifecycle/cancel/cleanup/recovery gates; G03 blocked.",
+      "next_action": "Fresh owned branch/current accepted source. Prototype evidence only; isolate exact failed ancestor/access boundary, preserve contract, no weakened fallback."
+    },
+    {
+      "name": "G03 conditional full-file operations",
+      "priority_confidence": "P2 / dependency high",
+      "source_role": "G03 original contract, sequential planner/implementer/reviewer",
+      "path": "../../reliability-feature-closeout-20261029/goals/G03-table-full-file-operations",
+      "status": "DEFERRED_DEPENDENCY",
+      "gate": "All G02 accepted reviewed source/native/lifecycle/recovery and integrated ancestry.",
+      "next_action": "New valid accepted dependency branch and fresh full-contract M0; do not reuse bootstrap docs branch as implementation base."
+    },
+    {
+      "name": "G04 native gesture/output proof",
+      "priority_confidence": "P1 / API gap high; no defect inferred",
+      "source_role": "G04 planner",
+      "path": "goals/G04/follow-on/native-gesture-output-proof",
+      "status": "NATIVE_PROOF_DEFERRED / NOT_EXECUTED",
+      "gate": "Supported held-secondary drag, exact current binary, isolated synthetic fixture, real Save/Copy observation/restoration.",
+      "next_action": "Fresh current-source identity and supported capabilities, then existing native pixel protocol."
+    },
+    {
+      "name": "G05 native read retirement/source ownership",
+      "priority_confidence": "P1 / required gate high",
+      "source_role": "G05 planner, implementer closure",
+      "path": "goals/G05/follow-on/g05-native-read-retirement",
+      "status": "REQUIRED_CONTINUATION / NOT_EXECUTED",
+      "gate": "Actual pending regular-file read cancellation/terminal retirement before retained source/effect/queued-start binding, editor/Test Rule and activation.",
+      "next_action": "Accepted M1-A/corrected B1 on fresh current source; establish pending-read proof first. Keep all FILE_CONDITIONS_NOT_EVALUATED refusals."
+    },
+    {
+      "name": "G06 native Jump/editor/focus proof",
+      "priority_confidence": "P2 / observed discovery gap high; cause unknown",
+      "source_role": "G06 orchestrator, reviewed native continuation",
+      "path": "goals/G06/follow-on/native-jump-focus-proof",
+      "status": "REQUIRED_CONTINUATION / NOT_EXECUTED",
+      "gate": "Supported returned owned window for exact-source isolated application.",
+      "next_action": "Retain accepted corrected editor/transaction; revalidate binary/profile/tool capability then existing native protocol. No guessed handle or security bypass."
+    },
+    {
+      "name": "G07 guard/publication compatibility",
+      "priority_confidence": "P2 / failures high; exact delete endpoint unknown",
+      "source_role": "G07 implementer",
+      "path": "goals/G07/follow-on/native-guard-publication-compatibility",
+      "status": "REQUIRED_CONTINUATION / NOT_EXECUTED",
+      "gate": "Exact source/alias delete spelling/poststate and safe guarded no-replace publication; then accepted native owner, Stored streaming writer, then UI.",
+      "next_action": "New owned branch/current accepted source; all prototype source evidence-only. No write-guard relaxation/path fallback or repeated known unsupported RootDirectory call."
+    },
+    {
+      "name": "G08 history verification restart",
+      "priority_confidence": "P2 / verification stop high",
+      "source_role": "G08 implementer, named reviewer R1",
+      "path": "goals/G08/follow-on/g08-history-verification-restart",
+      "status": "REQUIRED_CONTINUATION / NOT_EXECUTED",
+      "gate": "Fresh packet plus explicit finite verification allowance, actual toolbar+History privacy/control tests and named review before history acceptance.",
+      "next_action": "New current-source branch; all old prototype/correction source unaccepted. Revalidate complete history contract and choose bounded whole-history or R1-only proof scope explicitly."
+    },
+    {
+      "name": "G08 explicit recipe policy",
+      "priority_confidence": "P2 / conditional policy high",
+      "source_role": "G08 planner",
+      "path": "goals/G08/follow-on/explicit-invocation-recipe-policy",
+      "status": "CONDITIONAL / NOT_EXECUTED",
+      "gate": "Accepted history plus explicit current target/parameter/storage/intent/admission policy and separate selection.",
+      "next_action": "No recipe source shipped. Existing templates remain explicit preview/copy; not replay authority."
+    }
+  ]
+}

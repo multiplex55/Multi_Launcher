@@ -1,0 +1,3 @@
+# G04 follow-on index
+
+P1 native proof gap — [Goal](follow-on/native-gesture-output-proof/GOAL.md) / [Kickstart](follow-on/native-gesture-output-proof/KICKSTART.md). PROPOSED_NOT_EXECUTED. Planner authored; reviewer/orchestrator agree; no distinct duplicate finding. Require supported held-secondary native input, exact-source binary, isolated capture/profile, real Save/Copy all-pixel comparison and supported clipboard restoration. No source defect established. Original under roles/planner/follow-on retained.

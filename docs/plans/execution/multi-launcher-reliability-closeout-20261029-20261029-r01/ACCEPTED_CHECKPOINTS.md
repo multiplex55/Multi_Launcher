@@ -1,0 +1,100 @@
+# Accepted checkpoints
+
+## Current accepted boundary
+
+Through accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`: G00 documentation; G01 two bounded fixes; G05 M1-A and corrected B1 foundations only; G06 corrected editor/transaction; G09 selected-owner tests. G02/G03/G04/G07/G08 contribute reviewed documentation only. Whole G05/G06 remain partial. G10 documentation is accepted after cumulative review7318e862; closing `792b1a531a4b5a392be977de94afee4d745b8685` imported as `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`. No source behavior changed in G10; [PR1459](https://github.com/multiplex55/Multi_Launcher/pull/1459) is open and unmerged; publication facts are recorded in FINAL_HANDOFF.
+
+| Scope | Accepted cumulative source/test import | Boundary |
+|---|---|---|
+| G01 | `fd300ff748e54cee167a038337220e33beba2322` (plus earlier M1-A `ddbbf4c4`) | Corrected combined scope; rejected standalone `8d183f66` never independently accepted. |
+| G05 M1-A | `8f6befe70c402157f99bdae3404513ca02e46ecd` | Metadata and candidate/control binding; conditions refused. |
+| G05 corrected B1 | `4999a47c68a9e4e5b8531cf31e018eda3eefda4f` | Pure stream foundation including R1 correction; rejected standalone `bab30968` never independently accepted. |
+| G06 corrected cumulative | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` | Includes final real resolver correction; rejected standalone `b708e38a` never independently accepted. Native proof deferred. |
+| G09 | `fc9e5c7cbb509397b47c4d7f2902899c9d04dd43` | Three test modules only; production unchanged. |
+
+[Manifest](INTEGRATION_MANIFEST.md) records all 21 exact Rust source/test blobs; [status](PROGRAM_STATUS.md) records all eleven current dispositions. Closing donor refs can include rejected prototypes and must never be imported wholesale merely because their documentation was accepted. Counts below belong to separate checkpoints, not a unique aggregate test suite.
+
+## Historical acceptance/import receipts — preserved
+
+The following receipts and their dated/staged next actions are retained verbatim. The current boundary above governs resumption.
+
+
+Bootstrap was scaffolding; current accepted dispositions are recorded below.
+
+## G00 accepted receipt
+
+- Source branch codex/closeout-g00-baseline-and-continuation-20261029-r01 tip 7e53f4d28ca5b66a21e30e41545692cce5fa6b6a; normal push succeeded.
+- M0-A 76eae87c7a0e40bb5ce4aca1fb62c9823fbcf2b2 -> integration 9f755b7e.
+- M1-A/M2-A/M3-A 7e53f4d28ca5b66a21e30e41545692cce5fa6b6a -> integration 41cc682e; cherry-pick -x, normal push succeeded.
+- Changed owners: continue.md, G00 marked progress and execution docs/role receipts only. No source/config/manifests/history changes.
+- Independent Astra/max requested reviewer /root/reviewer: no substantive findings. Static checks passed; two committed links; stale-marker negative with six-line positive control. Cargo/native NOT_RUN.
+- Scope ACCEPTED_COMPLETE documentation; missing historical reports remain recorded limitation. No new follow-on. Next G01; G02 -> G03 hard gate unchanged.
+
+## G01 accepted import receipt
+
+- Donor codex/closeout-g01-diff-failure-information-20261029-r01 closing13243515329ce4010bd6db981f1fd3bcc26f2dec pushed. Source baseline master4a1283e6/bootstrap02d0ac64.
+- M0-A269508d4 -> integration21f5b01b via cherry-pick -x; M1-A4d21b035 -> ddbbf4c4 via cherry-pick -x. Normal pushes succeeded.
+- Corrected cumulative M1-B/M2-A/M3-A donors8d183f66,b09ecdca,6c6812f0,13243515 -> ONE accepted integrationfd300ff748e54cee167a038337220e33beba2322 with exact provenance in commit body. Initially rejected standalone8d not imported as an independent accepted commit. Donor history preserved.
+- R1/P1 found independently, fixed once; reviewer named confirmation2026-10-30 00:15:14UTC accepts corrected cumulative scope. Contingency resolved, not scheduled.
+- Fresh corrected test proof32/32 (25library+7unchanged Diff), preparation125.124s/cap600, run3.050s wall/0.327s execution/cap180, no retries. Original domain target failed unrelated FileSearch E0308; temporary exact Diff wrapper removed. Native NOT_RUN; no full-domain/native identity/retirement/atomicity claim.
+- After commit, git diff donor13243515 HEAD across four Rust paths plus manifest/lock/original Diff fixture exited0; diff --check master..HEAD passed. Reused exact-source receipts, no redundant run. No merge conflicts.
+- Final blobs: file_ops7e9fab3d4eb09a735f4c347ab86e0832fd3f8a66; folder_runtimee7cac72dbc89977556a475045d7ab0410b5c59e3; dialogecfd6e76f38cbcf16c5b914b610cc47d1fa61fa8; previewa1d93a6951a0e335768ccbc3a7e39b6438440db8.
+- Next G02 only; G03 hard gate unchanged. Complete proposed FileSearch fixture pair cataloged separately.
+
+## G02 documentation-only disposition receipt
+
+- Donor011af0c448dfdcdc0eb747083f909d3bfa6c1ab2, baseline50608bd4, contract24f3c13f, failed sourcef879a2a8. All pushed normally.
+- Independent reviewer2026-10-30 01:05:51UTC accepted documentation/deferral only; no substantive defect. Path-limited restore selects only G02 execution docs and mutable G02 Goal progress. All five source files explicitly excluded. Staged-path inspection and diff--check pass; git diff fd300ff7 across src/crates/Cargo.toml/Cargo.lock empty. No accepted-source change or redundant Cargo.
+- Both recorded runs19 selected15pass4fail; native CreateFileW OS error5 before stage creation. Denied ancestor/root cause unknown. Deterministic/early-refusal limits explicit, correction320.148s/600, cleanup limits retained. Complete canonical P1 future pair and exact stall report. G02 not accepted implementation; G03 blocked.
+- Documentation closure files checked for local Markdown links: zero broken. Parent maintains canonical future catalog. Source remains donor-only.
+
+## G03 documentation-only dependency receipt
+
+- Donore0f556cd8041c502d63479d89d0e68301cceb3b2 pushed; baselinebfa14e7c and handoff36fd12a9 imported with cherry-pick -x ascf69deda/6eb857fe; closure importedasd326679d536008167a294880e5bd9b16b502e732. Each normal push succeeded.
+- Independent reviewer2026-10-30 01:20:19UTC found no substantive defect;17 links/10docs all resolve, cumulative diff--check passes, conditional contract intact/Kickstart unchanged. Source, Cargo/native/large fixture/resource work NOT_RUN under hard gate.
+- DEFERRED_DEPENDENCY; original complete G03 pair remains future contract, no duplicate initiative. Requires ALL G02 independently accepted/integrated safety/lifecycle/native/cancel/cleanup/recovery then valid G03 base/fresh M0. OS5 resolution alone insufficient.
+- Parent exact src/crates/Cargo.toml/lock diff againstfd300ff7 remains empty after import, no Cargo rerun. Accepted source unchanged. Next independent G04.
+
+## G04 documentation-only native deferral receipt
+
+- Baseline06d23fc8/deferralf9e0fc3e/closureea27ce749318ab2c261384385fd03ef05f882b4f -> integration5201c9ea/462990ae/0b57567e83ee5e7f7f94a34c3c45db37ec3a53ac with cherry-pick -x. All donor/import normal pushes succeeded.
+- Reviewer accepts documentation only, no substantive findings:23links/13docs resolve, original contracts intact, cumulative diff--check passes, source corroborates protocol and288x208 oracle. Parent closure links0broken.
+- Native runtime initialized/list_apps only. Supported DragInput lacks mouse button; target not running/no windows; no launch/input/screenshot/clipboard. No source defect. Cargo/unit/native gesture/output NOT_RUN. Current-source binary and supported clipboard observation/restoration missing. NATIVE_PROOF_DEFERRED, not UNIT_VERIFIED/native acceptance.
+- Complete canonical P1 planner future pair plus actual stall and role records. Exact accepted source diff acrosssrc/crates/Cargo.toml/lock againstfd300ff7 empty after import. No redundant build/test. Next G05.
+
+## G05 M1-A accepted foundation receipt
+
+- Donor8b4d01a4cff48c2bdfaa30f760c03e91cbb6f9be, base c009b533; review receipt b14967e5a1eaddfad9290da2847ec90997e5bb53. Source import8f6befe70c402157f99bdae3404513ca02e46ecd/review97f64137a166f4a2728c9e91685477077da2b33d, baseline/contract imports ea4d13ff/fa54142a. All cherry-pick -x/normal pushes succeeded; no conflicts.
+- Independent reviewer no substantive findings, accepts M1-A only: shared descriptive metadata outcomes and production candidate/lease binding, unchanged public/capability condition gates, unrelated-revision legacy compatibility; direct conditioned tests establish Match then stale refusal, not outer-gate false passes.
+- Corrected exact-source19/19 (9new+10controls), initial381.358s/1200, fixture correction88.824s/600, final4.742s/180 (Nextest1.601s), no ignored/retries. Initial15pass4fail preserved; representable1microsecond timestamps with assertions and real WrongServiceLease fixture, no production weakening. No native handle/reader retirement/queued effect claim.
+- Exact final model blob b82c6849e03f90fdcd8762843ddf438c4b737f0d; execution4de797b4626218d13dcc1e080c24276f8350d7f3. Reviewer8source/manifest blobs matched,18links pass; cleanup no owned processes. Parent diff donor b149..integration across hotfolder modules/threeGUIowners/native file_operations/manifests empty after import. G01 changes disjoint; reuse exact relevant receipts, no redundant integration Cargo. Whole G05 IN_PROGRESS; M1-B fresh planning next.
+
+## G05 corrected cumulative M1-B1 receipt
+
+- Donor correction944f9d0ef4ed5ceee54c9a3d255c40e9a220494d / named acceptance37512cb9de1e6a9246890cfd9908fbe55f946d3d. Reviewer R1 resolved; corrected cumulative B1 only accepted. Original standalonebab withheld and never independently imported as accepted.
+- Packet1c5b3b88 ->e1ff5141 (-x); cumulative donorsbab309689e5acf0b1924fb20842fe06c53b37fec,6cbb6e43f8655b62e3cd29b836a24ba9335ef0b4,944f9d0e,37512cb9 -> ONE accepted source4999a47c68a9e4e5b8531cf31e018eda3eefda4f. Complete donor SHAs in commit body; original history preserved; normal pushes succeeded/no conflicts.
+- Initial20/20 did not cover R1. One received-byte accounting correction with two both-mode regression tables: corrected22/22 (9literal+9metadata+4controls),95.941s/600 preparation,3.909s/180 execution (Nextest0.779), no ignored/retries/compiler errors. Original183.339s preparation/3.633s20-case proof retained. No native claims.
+- Final conditions0559e8f9cc77430b210ab7949967ab8582cd6c99, model306d2cb9b4295e0e0a26cd38a9f782113294df76, mod1bac86b002a8b90eaf0ec9855b757006ad43f38d; other12 source/manifest identities unchanged. Reviewer independently verified named correction/source and passing evidence; cleanup processes exited/drained,42links/static pass.
+- Parent postcommit git diff --exit-code donor37512cb9..integration across all HotFolder sources/three GUI owners/native file_operations/manifests exits0 with empty diff; separate G01 source parity againstfd300ff7 also empty/exit0. Reuse exact relevant-source proof, no redundant Cargo. All condition gates retained. B1 pure parser only; native B2/editor/TestRule/final proof/enablement still pending. Closed R1 contingency stays role history, no future queue.
+- G05 B2 docs-only closure: a78895c6 ->1c68ad56 via -x, normal push succeeded. Independent docs review accepted; no B2 probe/source. M1-A/B1 remain accepted, source4999a47c unchanged. Full feature incomplete; all gates retained.
+- G06 accepted cumulative editor/transaction: donor7cb16df9 confirmed5c1bf680 -> integrationb9f5fa4b, full donor provenance in commit body. Focused29/29=26lib+3actualmainresolver, source/manifest parity empty exit0. Initial25cases24/25fixturefailure preserved/corrected25/25; reviewerR1 effectivePasteconflict fixed; final29/29. Prep207.519initial+349.032/600incremental, final6.908s. R1closed; nativeM3NOT_RUN. No redundant integrationCargo, no overlap with prior source owners.
+- G06 native closure: d5f7a67f->29b847fd reviewed docs only. Exactnormalbin155.734s/600 passed, native discovery unproved afterone recovery, appdesktopcheck0x80070005 causeunknown. NoUIinput/capture/focus/Saveproof; ownedprocessesretired. No sourcechange/redundantCargo.
+- G07 documentation/deferral ACCEPTED ONLY: donor5d4d3054 ->pathlimiteddocsimport51caaca8, normalpushsucceeded. Prototypee4e74ec8/all3sourceUNACCEPTED. Final10/12:4newpureprep+6controls pass,2nativegates fail; sourceexactproof/unreachedchecks inG07VERIFICATION. Prep170.815initialfailedDebug,411.306/600incremental, runs3.378/3.492; materialstop188.694unused. Postimportsource/manifest parity vsacceptedb9f5fa4b emptyexit0, no redundantCargo.
+
+## G08 documentation-only closure
+
+Donor e505f961849475ecf3affda40064b96a60243f9d -> f933d255ddad67024042f1629d834f2e02a4fc21, path-selected execution G08 directory and mutable original Goal only; canonical recipe Kickstart trailingblank normalized. All normal pushes succeeded. No production source imported: empty `git diff --exit-code b9f5fa4b HEAD -- src Cargo.toml Cargo.lock` exited0 after import. Prototype8d035538 and correctionbb8c5720 are UNACCEPTED. Initial14/14 applies only to old prototype. Reviewer P2/R1: shared toolbar leaked arbitrary diagnostics/unbounded currentdraftname; old privacy helper omittedtoolbar. Proposedguard and actualcompositionregression preserved; preparation32s supervisor cap, taskkillOSAccessDenied, naturaldrain101.880s/late0/timedouttrue; no R1 execution. No silentbudgetrenewal; cleanup and7blobparity recorded. Independentreviewer supportsdocs-only closure, R1OPEN_VERIFICATION, no newfinding. Completecanonicalrestart/recipe pairs retained. NativeNOT_RUN. LastacceptedSOURCE remainsb9f5fa4b.
+
+## G09 accepted selected-owner proof
+
+Donor090df0d0859189d63804c4e79524fb7a3be2478b -> fc9e5c7cbb509397b47c4d7f2902899c9d04dd43; review/closure174b6fff5eba1a28de6fb8b73d3a5ea77c91187a ->8f7c10a307a3d157ba863d9263c1964bac7032a5. Baseline/packetimports23de82e7/14ab4aeb. All -x imports normallypushed. Onlytests inthread_reaper.rs,duplicate_finder/tests.rs,screenshot_capture.rs; productionprefixes/manifests unchanged. Exactdonor/importsourceparity empty/exit0. Independentreview no substantivefinding;10inputblobs exact. 12/12serialselectedlibtests exit0/3.648s; prep211.037s numericexitnull explicitlypreserved, completeinventory and exact-source runexit0; incremental0/600. Nativefilecase8baselineexclusiveopens,heldindex0OS32throughcancelclose,falsejoinprobe/reopenrefusal, actualjoin/reopen->8exclusiveopens,warmgroup1/secondjoin/fixturecleanup. Gatebeforefile.read; no pendingReadFile/capture/apartment/allownerclaim. ScreenshotshutdownUnavailable stays truthful; reaperdetachmentnofalsejoinreceipt. No newfinding/futurepair. LogicNO_CHANGE_REVALIDATED; teststrengtheningaccepted. Lastproductionchangeb9f5fa4b; newestacceptedtestsourcefc9e5c7c.
+
+
+## G10 accepted documentation import
+
+535993a4fa32a5646e0ade6076c6941a71d47230 -> cb8ec0bf6a176f9e1c9707367b404f7338616299; 874065dbe21f227c4c3189dc859ba5521b210eb5 -> c703c43c778160d6bb40471d002b7808590c84ab; reviewed7318e862509113ed44b857483ff28219ea8700b7 -> b46ca96336950b2fffdd006c50ba6ba9d9e03faa; closing792b1a531a4b5a392be977de94afee4d745b8685 -> 2234ed892f8a3a5a6b2feb0579ac160f32e26aad. Every import uses cherry-pick -x and normal push succeeded. Cumulative reviewer ACCEPT/no substantivefindings; no new source/Cargo/native/CI. Exact source/crate/manifest/config comparison to closing donor is empty/exit0. Fresh origin/master remains4a1283e6. PR publication next.
+
+
+## Final publication and manifest coverage amendment
+
+PR1459 opened ready-for-review from publication head b128db10b0cb1652c4f28c96570ef282014c18c9 to master4a1283e6edd2c245f562a07dbe3dcc6a61061eed and attached. Cumulative review accepted 7318e862509113ed44b857483ff28219ea8700b7; named externalfixture amendment confirms21Rustpaths (20src+tests/settings_editor.rs), not20entiredelta. Externalfixture blob8ab1163c equals G06 donor/import/current and prior recorded input; three fallible-conversion caller migrations, assertions unchanged, externaltests NOT_RUN by29lib/binselection. No source edit/newtest or newinitiative. Publication receipt and final handoff distinguish snapshothead from subsequent documentation receipts, internalreview from GitHubreviews, and emptyPRworkflows from CIpass. No merge/masterchange.

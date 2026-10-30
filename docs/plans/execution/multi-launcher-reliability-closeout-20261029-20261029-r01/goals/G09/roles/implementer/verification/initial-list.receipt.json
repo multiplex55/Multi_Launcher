@@ -1,0 +1,32 @@
+﻿{
+    "phase":  "initial-list",
+    "command":  "cargo nextest list -p multi_launcher --lib --cargo-profile fast-dev --offline --locked -E \"test(=thread_reaper::tests::completion_before_reap_is_latched_even_while_join_is_not_finished) | test(=thread_reaper::tests::supervisor_spawn_failure_detaches_without_panicking_and_retains_capacity_until_exit) | test(=duplicate_finder::tests::dff_lifecycle_cancel_invalidates_publication_while_io_drains) | test(=duplicate_finder::tests::dff_lifecycle_coalesces_pending_scans_and_reopens_only_after_retirement) | test(=duplicate_finder::tests::activity_baseline_native_file_scan_cancel_and_warm_reopen) | test(=gui::screenshot_capture::tests::screenshot_delay_active_cancel_drains_and_discards_late_image) | test(=gui::screenshot_capture::tests::screenshot_delay_shutdown_hands_blocked_worker_to_reaper_without_waiting) | test(=gui::screenshot_capture::tests::screenshot_activity_publishes_actual_capture_before_gui_join) | test(=activity::tests::cancel_requires_the_exact_current_owner_capability) | test(=activity::tests::history_is_capped_and_clear_fences_late_retirement) | test(=gui::activity_dialog::tests::process_memory_sampler_obeys_visible_open_250ms_refresh_gate) | test(=gui::activity_dialog::tests::copied_text_contains_only_safe_owner_activity_metadata)\" --message-format json",
+    "head":  "691645e357d94f240a544996f5a58b532955a345",
+    "source_git_blobs":  {
+                             "Cargo.toml":  "994a55fea039ca79614fbb019ac1b05cfab7381b",
+                             "Cargo.lock":  "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+                             "src/thread_reaper.rs":  "ab1efa9dc88b3efd87ba7d9986fc052a29acf128",
+                             "src/duplicate_finder/tests.rs":  "18788605f3024df573c89c8703c520e4cf3c903d",
+                             "src/duplicate_finder/session.rs":  "9c0ef56315d3714245eb8e3974c96cb612aa9930",
+                             "src/duplicate_finder/content.rs":  "21fe66c814bb41b88055ba94c875808045f8ae78",
+                             "src/file_operations.rs":  "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+                             "src/gui/screenshot_capture.rs":  "168cb728eedc115f001880e15a9fd5d6d7f30172",
+                             "src/activity.rs":  "0c18f00ae805011f99cfa98a9fffc8150c3c0e11",
+                             "src/gui/activity_dialog.rs":  "3a3aacf771aab8e2af868d8dc986d985d9b763e0"
+                         },
+    "toolchain":  {
+                      "cargo":  "cargo 1.99.1 (5f94df478 2026-08-27)",
+                      "nextest":  "cargo-nextest 0.9.135 (610eefb88 2026-05-14)\r\nrelease: 0.9.135\r\ncommit-hash: 610eefb88762529a316373f4a50f5fd9194c3c35\r\ncommit-date: 2026-05-14\r\nhost: x86_64-pc-windows-msvc",
+                      "rustc":  "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+                  },
+    "start_utc":  "2026-10-30T07:29:06.7529941Z",
+    "cap_seconds":  1200,
+    "timed_out":  false,
+    "stdout":  "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g09-m1-20261030-r01\\initial-list.all-tests.json",
+    "stderr":  "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G09\\roles\\implementer\\verification\\initial-list.stderr.log",
+    "pid":  34300,
+    "end_utc":  "2026-10-30T07:32:37.8002999Z",
+    "elapsed_seconds":  211.037,
+    "exit_code":  null,
+    "output_drained":  true
+}

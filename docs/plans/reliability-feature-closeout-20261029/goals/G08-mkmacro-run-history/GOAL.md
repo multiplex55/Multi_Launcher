@@ -130,23 +130,30 @@ A usable bounded history UI passes focused tests and separate privacy review; re
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `DEFERRED_WITH_DESIGN` — R1 correction is unaccepted; preparation timed out, tests NOT_RUN.
+- **Run ID and branch:** `20261029-r01`, `codex/closeout-g08-mkmacro-run-history-20261029-r01`.
+- **Actual master/source base:** master `4a1283e6`, independent bootstrap `02d0ac64`; contract HEAD `826e418b`; accepted integration `ca2f6acb` separate.
+- **Current milestone:** `M1/R1` stopped at verification deadline; all G08 source unaccepted.
+- **Active role and requested/configured/resolved model:** NONE; requested Astra roles; configured Sol/high planner/reviewer and Luna/max implementer unchanged; actual backend UNVERIFIED.
+- **Last known commit / push:** corrected-source preservation `bb8c572026016d3042efce29e112f8199de41742`, normally pushed; all source UNACCEPTED.
+- **Next action:** docs-only integration, then independent G09; future G08 restart requires current-source packet, new explicit finite verification authority, corrected-source tests and R1 confirmation.
+- **Blocker and scope:** remaining 32-second preparation timed out; owned-tree termination was denied and process drained naturally. Late exit 0 is not qualifying proof. R1 tests NOT_RUN; recipe gate remains separate.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | History owner and privacy contract |
-| `M1-A` | PENDING | — | User-visible history |
-| `M1-B` | PENDING | — | History ownership/lifecycle tests |
-| `M2-A` | PENDING | — | Recipe scope decision then optional implementation |
-| `M3-A` | PENDING | — | Focused review and closure |
+| `M0-A` | COMPLETE | Contract `826e418b` | Implemented in combined checkpoint |
+| `M1-A` | DEFERRED_WITH_DESIGN | Prototype and R1 correction unaccepted; old 14/14 only | Fresh authorized proof and R1 confirmation |
+| `M1-B` | DEFERRED_WITH_DESIGN | R1 real-toolbar regression written, NOT_RUN | New explicit finite budget/current packet |
+| `M2-A` | DEFERRED_WITH_DESIGN | Planner recipe decision and canonical complete pair; accepted history/policy absent | Conditional future continuation only |
+| `M3-A` | COMPLETE_DOCS_ONLY | Independent R1 and documentation-only closure; source withheld | Parent docs integration; G09 next |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+- Runtime2026-10-30 M0-A IN_PROGRESS: independentbranch codex/closeout-g08-mkmacro-run-history-20261029-r01 frombootstrap02d0ac64, actualfetchedmaster4aunchanged/integrationca2f6acbauthoritative. Read-onlyboundedhistory/privacyplanner next; no code/tests/native. Recipesgatedseparately.
+
+- 2026-10-30 implementer: combined M1 checkpoint tested 14/14 PASS on exact final blobs; initial E0382 and 13/14 diagnostics preserved with two fixture-only corrections. Aggregate incremental preparation 567.882/600s. No source acceptance/Git mutation; native/manual NOT_RUN; distinct new finding NO_ACTION. Parent review/closure and conditional recipe decision remain.
+
+- 2026-10-30 R1 stop: single five-test preparation timed out at the remaining 32-second cap; taskkill OS Access denied, natural drainage101.880s/late exit0/timed_out=true. No R1 run or renewed budget. Source frozen/unaccepted; complete role-owned remaining-G08 restart pair references existing R1 and recipe packages. Parent checkpoint/docs-only disposition next.
+
+- Parent2026-10-30: bb8c572026016d3042efce29e112f8199de41742 normallypushed; independentclosure supportsdocs-only, R1OPEN_VERIFICATION/allsourceUNACCEPTED. Canonical fullrestart/recipe pairs preserved; nextindependentG09. No native proof or late-test pass claimed.

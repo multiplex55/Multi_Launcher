@@ -1,0 +1,30 @@
+{
+  "phase": "run-native-isolation",
+  "command": "cargo nextest run -p multi_launcher --lib --features perf-harness --cargo-profile fast-dev --offline --locked -E \"test(g07_) | test(=archive::catalog::tests::metadata_catalog_preserves_physical_duplicates_and_never_reads_payloads) | test(=archive::catalog::tests::unsupported_encrypted_unsafe_and_bad_encoding_entries_remain_visible) | test(=archive::plan::tests::physical_duplicate_names_keep_distinct_ids_and_conflict_only_when_both_selected) | test(=archive::plan::tests::windows_case_separator_and_file_ancestor_collisions_are_rejected) | test(=archive::plan::tests::read_only_occupancy_probe_blocks_existing_file_and_is_bounded) | test(=file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture)\" --retries 0 --no-fail-fast --status-level pass --final-status-level fail",
+  "head": "3f6408d672fc975279aa9cc75654af6baf456363",
+  "source_git_blobs": {
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+    "src/archive/mod.rs": "473747815bafa25633a53654282463beb0734618",
+    "src/archive/preparation.rs": "170bea7c95ac9ff9c51c8c939c5f8e5875f70038",
+    "src/archive/model.rs": "dac974cf472245266d7796cdc93f1b59ebfc3c97",
+    "src/archive/catalog.rs": "9981d9ccadb53c31c189dca10c33dfae877a6139",
+    "src/archive/plan.rs": "9a166aa3ebc2fe8dcf854fbd674b63fca2b3e60c",
+    "src/file_operations.rs": "7c5112cb72494ab4e241e1e4fb96a75a9ddc8f2e"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "nextest": "cargo-nextest 0.9.135 (610eefb88 2026-05-14)\r\nrelease: 0.9.135\r\ncommit-hash: 610eefb88762529a316373f4a50f5fd9194c3c35\r\ncommit-date: 2026-05-14\r\nhost: x86_64-pc-windows-msvc",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)"
+  },
+  "start_utc": "2026-10-30T05:25:30.2753474Z",
+  "cap_seconds": 180,
+  "timed_out": false,
+  "stdout": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G07\\roles\\implementer\\verification\\run-native-isolation.stdout.log",
+  "stderr": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G07\\roles\\implementer\\verification\\run-native-isolation.stderr.log",
+  "pid": 23400,
+  "end_utc": "2026-10-30T05:25:33.7709252Z",
+  "elapsed_seconds": 3.492,
+  "exit_code": 100,
+  "output_drained": true
+}

@@ -1,0 +1,15 @@
+# G06 source baseline
+
+2026-10-30: fetched actual master/origin/master4a1283e6edd2c245f562a07dbe3dcc6a61061eed unchanged. One clean worktree; no active Git operation. Goal branch codex/closeout-g06-jump-settings-and-focus-20261029-r01 from program bootstrap02d0ac64d51655f43d6e958ea551f5bf658ee48d; accepted integrationcda36e81 not branch ancestor except bootstrap. Current code is truth; no historical patches imported.
+
+## Implementer M1 revalidation — 2026-10-30
+
+Approved handoff and source HEAD: `d88f00b2375d7acaeb007e85b355a5cafb4d1030`. Inspected actual SettingsEditor state/mapping/render/catalog/save, all mapping callers, transaction general ownership/baseline/conditional rollback/acknowledgment, typed Jump parsers and allocator, and existing hotkey validator plus its production preparation caller `src/main.rs::resolve_hotkey_route_candidate_with_macro`. No controller/focus/native-hook source change was needed.
+
+The implementation retains the existing typed settings schema and committed application path. Raw drafts convert through the fallible `SettingsEditor::to_settings`; live Jump configuration is still applied only in `apply_saved_settings` after acknowledgment. Existing route preparation validates the final merged candidate; enabled Jump contributes conflict evidence without entering global trigger registration. All current `to_settings` callers were migrated, including the three integration-test callers (mechanical migration; the unrelated domain target was not run).
+
+Exact source/manifest Git blobs are recorded per preparation/run in [the implementer receipts](roles/implementer/verification/m1/). The first run's sole failure was a test sender lifetime: stale-save cancellation and concurrent-value preservation passed before the final empty-channel assertion observed `Disconnected`. Retaining a fixture client corrects that observation without changing production code or weakening the assertion. The initial selector used the handoff's stale `render::tests` module; the actual control test resides in `render::settings_shell_tests`. Its corrected selection includes all nine new cases and all sixteen requested controls.
+
+## R1 source revalidation — 2026-10-30
+
+Correction base `5c00e367c88e90e7897b5ccd9e537618d886eb1a`; reviewed donor `b708e38a` unaccepted. Read the reviewer record/complete pair and actual main resolver, binding construction, sequence validator and snapshot tests. The first responsible omission was after base validation: resolved Paste Sequences were never compared with Jump. Four changed source paths: `src/main.rs` (effective-route validation plus direct tests), `src/hotkey/validation.rs` (shared comparator visibility only), SettingsEditor `state.rs` (applicable custom-control feedback) and `mapping.rs` (one direct editor case). Existing default omission and disabled-route construction remain their owners. No source import, registry, hook, focus, playback or transaction redesign. Final tested blobs and unchanged manifest/control identities are in [R1 run receipt](roles/implementer/verification/r1/run-r1.receipt.json).
