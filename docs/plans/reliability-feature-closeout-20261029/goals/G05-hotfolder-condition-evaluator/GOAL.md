@@ -141,20 +141,20 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `IN_PROGRESS`; M0-A safety contract/source planning.
+- **Current state:** `PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED`; M1-A and corrected B1 accepted, remaining feature blocked.
 - **Run ID and branch:** 20261029-r01 / codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01.
-- **Actual master/source base:** fetched master4a1283e6; bootstrap02d0ac64; integration5873cb8a.
-- **Current milestone:** corrected cumulative M1-B1 independently accepted; native B2 packet next.
+- **Actual master/source base:** fetched master4a1283e6; bootstrap02d0ac64; accepted integration source4999a47c, receipt93029e71.
+- **Current milestone:** B2 proof-first continuation; no B2 source or native probe.
 - **Active role and requested/configured/resolved model:** parent checkpoint; implementer requested Astra xhigh/configured Luna max/backend UNVERIFIED.
-- **Last known commit / push:** correction944f9d0ef4ed5ceee54c9a3d255c40e9a220494d pushed; named acceptance receipt next.
-- **Next action:** import corrected cumulative B1 then fresh native B2 planner packet. All condition guards retained.
-- **Blocker and scope:** none reported.
+- **Last known commit / push:** named confirmation37512cb9 pushed; cumulative accepted integration4999a47c and receipt93029e71 pushed. Closing donor recorded by parent integration receipt.
+- **Next action:** independent documentation closure review, then G06. Future G05 requires canonical native-read-retirement pair; all condition gates retained.
+- **Blocker and scope:** actual pending regular-file read cancellation and terminal retirement proof not established. Native ownership, queued start, editor/Test Rule and enablement remain required.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
 | `M0-A` | ACCEPTED_COMPLETE | safety contract c009b533; source-only design | Preserve binding/gates |
 | `M1-A` | ACCEPTED_COMPLETE | independently reviewed8b4d01a4; corrected19/19 | Foundation only, all guards retained |
-| `M1-B` | IN_PROGRESS | B1 pure stream verified20/20, native B2 still required | Independent B1 review then B2 packet |
+| `M1-B` | PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED | corrected B1 22/22 independently accepted; B2 not implemented | Canonical native-read-retirement proof-first continuation |
 | `M1-C` | PENDING | — | Rule editor and Test Rule |
 | `M2-A` | PENDING | — | Narrow tests and final admission review |
 | `M3-A` | PENDING | — | Controlled enablement and closure |
@@ -178,3 +178,5 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 - B1 R1 correction2026-10-30: supplied-byte accounting fixes false Changed at unchanged-length EOF while preserving true source/length changes and sticky refusal. Corrected22/22,95.941s/3.909s within caps; source conditions0559e8f9 only. R1-only confirmation pending; B1 standalonebab not accepted/imported, M1-A unaffected, no B2.
 
 - B1 named confirmation2026-10-30: R1 resolved, corrected cumulative B1 accepted at944f9d0e only; standalonebab not independently accepted. Contingency closed/do not schedule. Parent cumulative accepted import then native B2 planning; whole G05 still IN_PROGRESS/gates closed.
+
+- B2 bounded closure2026-10-30: no existing supported regular-file pending-read retirement proof established; no probe attempted/no impossibility claim. PARTIAL_ACCEPTED/NATIVE_PROOF_DEFERRED; accepted M1-A/corrected B1 preserved and gates closed. Complete proof-first continuation under execution goals/G05/follow-on/g05-native-read-retirement. Independent documentation review next; continue G06 afterward.
