@@ -1,0 +1,11 @@
+# G05 M1-A reviewer role record
+
+Independent /root/reviewer reused sequentially. Requested Astra/max; configured Sol/high unchanged; actual serving model/effort UNVERIFIED. Branch codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01; checkpoint 8b4d01a4cff48c2bdfaa30f760c03e91cbb6f9be; diff base c009b533059acb9404f453484b053363dd1d51af. Parent persists returned content2026-10-30.
+
+Read complete G05 pair, contract/handoff/source/risk/progress/verification/role records. Inspected actual two-module production diff/tests and relevant lease/control/public callers. No substantive findings.
+
+Shared evaluator preserves numeric semantics/inclusive full-precision age/descriptive precedence. Missing/future required mtime Unavailable, content Unevaluated, public condition guard preserved. Execution owns candidate/control/single wall time; checks after fingerprint and actual lease transfer bind rule/candidate identity/epoch/path/native root-parent-file/length/mtime. Configured rules additionally exact store revision/control generation; unrelated revision compatibility for unconditioned rules protected. Direct conditioned tests establish Match then reject through production validator, not merely outer guard. Separate execution tests prove admission/effect behavior/gate.
+
+Reviewed preserved initial15/19 and corrected19/19 (9new+10controls), none ignored/retried. Corrected fixtures assert representable timestamps and actual WrongServiceLease result. Checkpoint matches all8 source/manifest blobs; cumulative diff--check passes;18 links resolve. Runtime/capability/persistence/manifests/native/GUI unchanged. Deterministic proof only; no native lifetime/reader retirement/queued through-effect/enablement claim.
+
+ACCEPTED_COMPLETE for M1-A ONLY. Whole G05 IN_PROGRESS, every condition refusal retained. NO_ACTION distinct reviewer follow-on; remaining reader/native/lifecycle/editor/TestRule within active contract. Parent checkpoint reconciliation/fresh M1-B handoff. Reviewer no edits/Git mutations/Cargo/build/native/dispatch.
