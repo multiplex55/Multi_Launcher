@@ -28,3 +28,10 @@ Bootstrap was scaffolding; current accepted dispositions are recorded below.
 - Independent reviewer2026-10-30 01:05:51UTC accepted documentation/deferral only; no substantive defect. Path-limited restore selects only G02 execution docs and mutable G02 Goal progress. All five source files explicitly excluded. Staged-path inspection and diff--check pass; git diff fd300ff7 across src/crates/Cargo.toml/Cargo.lock empty. No accepted-source change or redundant Cargo.
 - Both recorded runs19 selected15pass4fail; native CreateFileW OS error5 before stage creation. Denied ancestor/root cause unknown. Deterministic/early-refusal limits explicit, correction320.148s/600, cleanup limits retained. Complete canonical P1 future pair and exact stall report. G02 not accepted implementation; G03 blocked.
 - Documentation closure files checked for local Markdown links: zero broken. Parent maintains canonical future catalog. Source remains donor-only.
+
+## G03 documentation-only dependency receipt
+
+- Donore0f556cd8041c502d63479d89d0e68301cceb3b2 pushed; baselinebfa14e7c and handoff36fd12a9 imported with cherry-pick -x ascf69deda/6eb857fe; closure importedasd326679d536008167a294880e5bd9b16b502e732. Each normal push succeeded.
+- Independent reviewer2026-10-30 01:20:19UTC found no substantive defect;17 links/10docs all resolve, cumulative diff--check passes, conditional contract intact/Kickstart unchanged. Source, Cargo/native/large fixture/resource work NOT_RUN under hard gate.
+- DEFERRED_DEPENDENCY; original complete G03 pair remains future contract, no duplicate initiative. Requires ALL G02 independently accepted/integrated safety/lifecycle/native/cancel/cleanup/recovery then valid G03 base/fresh M0. OS5 resolution alone insufficient.
+- Parent exact src/crates/Cargo.toml/lock diff againstfd300ff7 remains empty after import, no Cargo rerun. Accepted source unchanged. Next independent G04.
