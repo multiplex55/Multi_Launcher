@@ -1,0 +1,19 @@
+{
+  "baseline_exclusive_opens": 8,
+  "cancel_close_still_held": true,
+  "capture_apartment": "NOT_RUN",
+  "cleanup": "fixture directory removed",
+  "fixture_bytes": 1048576,
+  "fixture_files": 8,
+  "gate": "native source acquired; before first file.read",
+  "held_raw_os_error": 32,
+  "held_source_indices": [
+    0
+  ],
+  "in_flight_ReadFile": "NOT_RUN",
+  "owner": "DuplicateFinderSession",
+  "post_join_exclusive_opens": 8,
+  "successful_reaper_join": true,
+  "warm_duplicate_groups": 1,
+  "warm_worker_joined": true
+}

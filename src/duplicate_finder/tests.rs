@@ -14,6 +14,15 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+// Declared before the session so owner drop closes admission before release.
+struct ReleaseScanOnDrop(Sender<()>);
+
+impl Drop for ReleaseScanOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
 struct StartedScan {
     generation: u64,
     roots: Vec<PathBuf>,
@@ -258,23 +267,38 @@ fn wait_for_current_complete(session: &DuplicateFinderSession, generation: u64) 
 #[test]
 fn activity_baseline_native_file_scan_cancel_and_warm_reopen() {
     use super::content::FirstReadCheckpointGate;
-    let directory = tempfile::tempdir().unwrap();
-    let payload = vec![42u8; 128 * 1024];
-    for index in 0..8 {
-        std::fs::write(
-            directory.path().join(format!("fixture-{index}.bin")),
-            &payload,
-        )
+    use std::os::windows::fs::OpenOptionsExt;
+
+    fn exclusive_read(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+    }
+
+    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/productivity_expansion/activity_retirement");
+    std::fs::create_dir_all(&fixture_root).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("g09-native-")
+        .tempdir_in(&fixture_root)
         .unwrap();
+    let payload = vec![42u8; 128 * 1024];
+    let files = (0..8)
+        .map(|index| directory.path().join(format!("fixture-{index}.bin")))
+        .collect::<Vec<_>>();
+    for path in &files {
+        std::fs::write(path, &payload).unwrap();
+        drop(exclusive_read(path).expect("baseline exclusive open must succeed"));
     }
     let gate = Arc::new(FirstReadCheckpointGate::new());
-    // Release on unwind too, so a failed observation cannot strand the reaper.
     struct Release(Arc<FirstReadCheckpointGate>);
     impl Drop for Release {
         fn drop(&mut self) {
             self.0.release();
         }
     }
+    // Session drops first on unwind, then this releases its transferred worker.
     let _release = Release(Arc::clone(&gate));
     let session = DuplicateFinderSession::with_wake_and_first_read_checkpoint(
         Arc::new(|| {}),
@@ -287,43 +311,95 @@ fn activity_baseline_native_file_scan_cancel_and_warm_reopen() {
     while !gate.reached() {
         assert!(
             Instant::now() < deadline,
-            "native reader checkpoint not reached"
+            "native pre-read checkpoint not reached"
         );
         std::thread::yield_now();
     }
-    let cancel = Instant::now();
-    assert!(session.cancel().unwrap());
-    let ack_us = cancel.elapsed().as_micros();
-    assert_eq!(session.view().snapshot.status, DiscoveryStatus::Cancelled);
+    let held = files
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| match exclusive_read(path) {
+            Ok(probe) => {
+                drop(probe);
+                None
+            }
+            Err(error) => {
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(32),
+                    "held probe {index}: {error}"
+                );
+                Some(index)
+            }
+        })
+        .collect::<Vec<_>>();
     assert!(
-        session.is_busy(),
-        "cancel publication is not native read retirement"
+        !held.is_empty(),
+        "actual native reader must hold a source handle"
     );
-    gate.release();
-    while session.is_busy() {
-        assert!(Instant::now() < deadline, "native scan did not drain");
-        std::thread::yield_now();
-    }
-    let drained_us = cancel.elapsed().as_micros();
+    let reaped = session.reaper_probe_for_test().unwrap();
+    assert!(session.cancel().unwrap());
+    let cancelled_generation = session.view().snapshot.generation;
+    assert_eq!(session.view().snapshot.status, DiscoveryStatus::Cancelled);
+    assert!(session.is_busy());
+    assert_eq!(
+        session.start_scan(vec![directory.path().to_owned()]),
+        Err(DuplicateFinderSessionError::WorkerRetiring)
+    );
+    assert_eq!(session.view().snapshot.generation, cancelled_generation);
     session.close();
+    let closed_generation = session.view().snapshot.generation;
+    for _ in 0..3 {
+        assert_eq!(
+            session.reopen(),
+            Err(DuplicateFinderSessionError::WorkerRetiring)
+        );
+        assert_eq!(session.view().snapshot.status, DiscoveryStatus::Closed);
+        assert_eq!(session.view().snapshot.generation, closed_generation);
+        assert!(!reaped.is_reaped());
+    }
+    for &index in &held {
+        assert_eq!(
+            exclusive_read(&files[index]).unwrap_err().raw_os_error(),
+            Some(32),
+            "cancel/close must not release the held source before worker exit"
+        );
+    }
+    gate.release();
     finish_close(&session);
-    let joined_us = cancel.elapsed().as_micros();
+    assert!(
+        reaped.is_reaped(),
+        "successful reopen follows the real reaper join"
+    );
+    assert_eq!(session.view().snapshot.status, DiscoveryStatus::Idle);
+    assert!(session.view().snapshot.verified_duplicate_groups.is_empty());
+    for path in &files {
+        drop(exclusive_read(path).expect("post-join exclusive open must succeed"));
+    }
     let warm = session
         .start_scan(vec![directory.path().to_owned()])
         .unwrap();
+    assert!(warm > closed_generation && closed_generation > operation);
     wait_for_current_complete(&session, warm);
     assert_eq!(session.view().snapshot.verified_duplicate_groups.len(), 1);
+    let warm_reaped = session.reaper_probe_for_test().unwrap();
     session.close();
     finish_close(&session);
+    assert!(warm_reaped.is_reaped());
+    directory
+        .close()
+        .expect("all task-owned fixtures are removed after joins");
     eprintln!(
-        "ACTIVITY_BASELINE {}",
+        "G09_NATIVE_HANDLE {}",
         serde_json::json!({
-            "owner":"duplicate_native_scan","operation_generation":operation,
-            "fixture_files":8,"fixture_bytes":8*payload.len(),"warm_reopen":true,
-            "cancel_ack_us":ack_us,"job_drain_us":drained_us,"worker_join_observed_us":joined_us,
-            "gate":"first native read; released immediately after cancel",
-            "timing_scope":"controlled checkpoint, not arbitrary native IO worst case",
-            "ui_frame_latency":"not measured","deadline_seconds":10,"cleanup":"post-join reopen confirmed"
+            "owner":"DuplicateFinderSession", "fixture_files":files.len(),
+            "fixture_bytes":files.len()*payload.len(), "baseline_exclusive_opens":files.len(),
+            "held_source_indices":held, "held_raw_os_error":32,
+            "cancel_close_still_held":true, "successful_reaper_join":true,
+            "post_join_exclusive_opens":files.len(), "warm_duplicate_groups":1,
+            "warm_worker_joined":true, "cleanup":"fixture directory removed",
+            "gate":"native source acquired; before first file.read",
+            "in_flight_ReadFile":"NOT_RUN", "capture_apartment":"NOT_RUN"
         })
     );
 }
@@ -332,8 +408,9 @@ fn activity_baseline_native_file_scan_cancel_and_warm_reopen() {
 fn dff_lifecycle_coalesces_pending_scans_and_reopens_only_after_retirement() {
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
+    let _release = ReleaseScanOnDrop(release_tx.clone());
     let job = Arc::new(GatedJob::new(started_tx, release_rx));
-    let session = DuplicateFinderSession::with_test_job(DiscoveryLimits::default(), job);
+    let session = DuplicateFinderSession::with_test_job(DiscoveryLimits::default(), job.clone());
 
     let first = session
         .start_scan(vec![PathBuf::from("first")])
@@ -358,32 +435,63 @@ fn dff_lifecycle_coalesces_pending_scans_and_reopens_only_after_retirement() {
     assert_eq!(session.view().snapshot.generation, latest);
     assert_eq!(session.view().snapshot.status, DiscoveryStatus::Scanning);
 
+    assert_eq!(job.calls.load(Ordering::Acquire), 2);
+    assert!(session.cancel().unwrap());
+    let cancelled_generation = session.view().snapshot.generation;
+    assert_eq!(
+        session.start_scan(vec![PathBuf::from("refused")]),
+        Err(DuplicateFinderSessionError::WorkerRetiring)
+    );
+    assert_eq!(session.view().snapshot.generation, cancelled_generation);
+    assert_eq!(job.calls.load(Ordering::Acquire), 2);
+    let reaped = session.reaper_probe_for_test().unwrap();
     session.close();
     assert!(session.view().closed);
+    let closed_generation = session.view().snapshot.generation;
+    for _ in 0..3 {
+        assert_eq!(
+            session.reopen(),
+            Err(DuplicateFinderSessionError::WorkerRetiring)
+        );
+        assert_eq!(session.view().snapshot.generation, closed_generation);
+        assert_eq!(session.view().snapshot.status, DiscoveryStatus::Closed);
+        assert!(!reaped.is_reaped());
+        assert_eq!(job.calls.load(Ordering::Acquire), 2);
+    }
     send_release(&release_tx);
     finish_close(&session);
+    assert!(reaped.is_reaped());
     assert_eq!(session.view().snapshot.status, DiscoveryStatus::Idle);
+    assert_eq!(session.view().snapshot.generation, closed_generation);
+    assert!(session.view().snapshot.roots.is_empty());
 
     let reopened = session
         .start_scan(vec![PathBuf::from("after-reopen")])
         .expect("same session admits a scan after actual retirement");
     let reopened_started = receive_started(&started_rx);
+    assert!(reopened > closed_generation);
     assert_eq!(reopened_started.generation, reopened);
     assert_eq!(reopened_started.roots, vec![PathBuf::from("after-reopen")]);
     send_release(&release_tx);
     wait_for_current_complete(&session, reopened);
+    assert_eq!(job.calls.load(Ordering::Acquire), 3);
+    assert_eq!(
+        session.view().snapshot.roots[0].selected_path,
+        PathBuf::from("after-reopen")
+    );
+    let fresh_reaped = session.reaper_probe_for_test().unwrap();
     session.close();
     finish_close(&session);
+    assert!(fresh_reaped.is_reaped());
 }
 
 #[test]
 fn dff_lifecycle_cancel_invalidates_publication_while_io_drains() {
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let session = DuplicateFinderSession::with_test_job(
-        DiscoveryLimits::default(),
-        Arc::new(GatedJob::new(started_tx, release_rx)),
-    );
+    let _release = ReleaseScanOnDrop(release_tx.clone());
+    let job = Arc::new(GatedJob::new(started_tx, release_rx));
+    let session = DuplicateFinderSession::with_test_job(DiscoveryLimits::default(), job.clone());
 
     let generation = session
         .start_scan(vec![PathBuf::from("blocked-root")])
@@ -411,6 +519,8 @@ fn dff_lifecycle_cancel_invalidates_publication_while_io_drains() {
     );
     assert_eq!(still_cancelled.snapshot.status, DiscoveryStatus::Cancelled);
     assert!(still_cancelled.busy);
+    assert_eq!(job.calls.load(Ordering::Acquire), 1);
+    assert!(!session.reaper_probe_for_test().unwrap().is_reaped());
     assert!(matches!(
         started_rx.try_recv(),
         Err(mpsc::TryRecvError::Empty)

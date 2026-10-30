@@ -1,0 +1,17 @@
+{
+  "checked_utc": "2026-10-30T07:34:33.1529280Z",
+  "known_pids": [
+    34300,
+    23916,
+    22668,
+    27084,
+    2824,
+    29524
+  ],
+  "known_live": [],
+  "build_test_live": [],
+  "fixture_root": "target/productivity_expansion/activity_retirement",
+  "fixture_children": [],
+  "termination_attempted": false,
+  "temporary_fixture_directory_removed_by_test": true
+}

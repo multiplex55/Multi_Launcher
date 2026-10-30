@@ -1,0 +1,16 @@
+{
+  "preparation_matches_run": true,
+  "current_matches_run": true,
+  "source_git_blobs": {
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+    "src/thread_reaper.rs": "ab1efa9dc88b3efd87ba7d9986fc052a29acf128",
+    "src/duplicate_finder/tests.rs": "18788605f3024df573c89c8703c520e4cf3c903d",
+    "src/duplicate_finder/session.rs": "9c0ef56315d3714245eb8e3974c96cb612aa9930",
+    "src/duplicate_finder/content.rs": "21fe66c814bb41b88055ba94c875808045f8ae78",
+    "src/file_operations.rs": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+    "src/gui/screenshot_capture.rs": "168cb728eedc115f001880e15a9fd5d6d7f30172",
+    "src/activity.rs": "0c18f00ae805011f99cfa98a9fffc8150c3c0e11",
+    "src/gui/activity_dialog.rs": "3a3aacf771aab8e2af868d8dc986d985d9b763e0"
+  }
+}

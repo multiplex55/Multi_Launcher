@@ -1,0 +1,8 @@
+{
+  "base": "691645e357d94f240a544996f5a58b532955a345",
+  "non_test_prefix_equal": {
+    "src/thread_reaper.rs": true,
+    "src/gui/screenshot_capture.rs": true
+  },
+  "duplicate_finder_tests": "dedicated test module; no production file edited"
+}
