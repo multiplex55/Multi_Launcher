@@ -10,3 +10,14 @@ None yet. Bootstrap is scaffolding, not production acceptance.
 - Changed owners: continue.md, G00 marked progress and execution docs/role receipts only. No source/config/manifests/history changes.
 - Independent Astra/max requested reviewer /root/reviewer: no substantive findings. Static checks passed; two committed links; stale-marker negative with six-line positive control. Cargo/native NOT_RUN.
 - Scope ACCEPTED_COMPLETE documentation; missing historical reports remain recorded limitation. No new follow-on. Next G01; G02 -> G03 hard gate unchanged.
+
+## G01 accepted import receipt
+
+- Donor codex/closeout-g01-diff-failure-information-20261029-r01 closing13243515329ce4010bd6db981f1fd3bcc26f2dec pushed. Source baseline master4a1283e6/bootstrap02d0ac64.
+- M0-A269508d4 -> integration21f5b01b via cherry-pick -x; M1-A4d21b035 -> ddbbf4c4 via cherry-pick -x. Normal pushes succeeded.
+- Corrected cumulative M1-B/M2-A/M3-A donors8d183f66,b09ecdca,6c6812f0,13243515 -> ONE accepted integrationfd300ff748e54cee167a038337220e33beba2322 with exact provenance in commit body. Initially rejected standalone8d not imported as an independent accepted commit. Donor history preserved.
+- R1/P1 found independently, fixed once; reviewer named confirmation2026-10-30 00:15:14UTC accepts corrected cumulative scope. Contingency resolved, not scheduled.
+- Fresh corrected test proof32/32 (25library+7unchanged Diff), preparation125.124s/cap600, run3.050s wall/0.327s execution/cap180, no retries. Original domain target failed unrelated FileSearch E0308; temporary exact Diff wrapper removed. Native NOT_RUN; no full-domain/native identity/retirement/atomicity claim.
+- After commit, git diff donor13243515 HEAD across four Rust paths plus manifest/lock/original Diff fixture exited0; diff --check master..HEAD passed. Reused exact-source receipts, no redundant run. No merge conflicts.
+- Final blobs: file_ops7e9fab3d4eb09a735f4c347ab86e0832fd3f8a66; folder_runtimee7cac72dbc89977556a475045d7ab0410b5c59e3; dialogecfd6e76f38cbcf16c5b914b610cc47d1fa61fa8; previewa1d93a6951a0e335768ccbc3a7e39b6438440db8.
+- Next G02 only; G03 hard gate unchanged. Complete proposed FileSearch fixture pair cataloged separately.
