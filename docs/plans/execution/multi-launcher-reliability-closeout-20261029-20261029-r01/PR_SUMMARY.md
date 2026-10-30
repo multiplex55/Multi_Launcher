@@ -11,3 +11,5 @@ G04 adds independently reviewed native-proof deferral and complete pixel protoco
 G05 M1-A adds reviewed descriptive metadata outcomes and execution-owned candidate/lease validation;19/19 targeted tests. Optional condition execution remains disabled. Reader/native/effect/editor/TestRule milestones still in progress.
 
 G05 corrected B1 adds an internal bounded literal-set stream and shared outcomes,22/22 focused tests after independently found EOF-accounting correction. Both modes need complete valid input/explicit EOF. This is a gated foundation; native acquisition/action binding/editor/TestRule enablement are not accepted yet.
+
+G08 contributes reviewed documentation only. Metadata-history prototype and toolbar privacy correction remain excluded: earlier14/14 did not prove fullsurfaceprivacy; corrected-source test execution NOT_RUN after boundedpreparationtimeout. Fullrestart and conditionalrecipepolicy packages retained. Productionaccepted source still G01/G05foundations/correctedG06 only; G09/G10 pending.

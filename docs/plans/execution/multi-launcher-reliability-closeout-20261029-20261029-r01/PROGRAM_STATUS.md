@@ -4,10 +4,10 @@ PROGRAM_ID: multi-launcher-reliability-closeout-20261029-20261029-r01
 MASTER_START: 4a1283e6edd2c245f562a07dbe3dcc6a61061eed
 INTEGRATION_BRANCH: codex/closeout-integration-20261029-r01
 INTEGRATION_LAST_ACCEPTED_SHA: b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7 (G01, G05 foundations, corrected G06 editor/transaction)
-ACTIVE_GOAL: G08 / baseline next
+ACTIVE_GOAL: G09 / baseline next
 ACTIVE_WRITER: NONE
-NEXT_EXACT_ACTION: verify current master, create independent G08 branch, read complete bounded MkMacro history contract and dispatch planner.
-LAST_PUSHED: G07donor5d4d3054 and docs-onlyimport51caaca8 normally pushed; last accepted SOURCE remainsb9f5fa4b.
+NEXT_EXACT_ACTION: verify current master, create independent G09 branch, read complete Activity Center owner/native retirement contract and dispatch planner.
+LAST_PUSHED: G08 donor e505f961 and docs-only import f933d255 normally pushed; last accepted SOURCE remains b9f5fa4b.
 
 | Goal | State | Gate / next action |
 |---|---|---|
@@ -19,6 +19,6 @@ LAST_PUSHED: G07donor5d4d3054 and docs-onlyimport51caaca8 normally pushed; last 
 | G05 | PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED | M1-A/corrected B1 accepted; B2 pending-file-read retirement proof not established; full continuation preserved/gates retained |
 | G06 | PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED | corrected editor/transaction accepted29/29; exactbin passed but no supported owned window; complete native continuation |
 | G07 | DEFERRED_WITH_DESIGN / FAILED_VERIFICATION / WRITER_DEFERRED | final10/12; guarded publicationOS32 and unknown source/alias deleteendpoint; ALLsourceUNACCEPTED, docs only |
-| G08 | PENDING | bounded private history |
+| G08 | DEFERRED_WITH_DESIGN / VERIFICATION_DEFERRED | initial14/14 prototype; reviewerR1 privacy; correction timedout32s/late0 after101.880s drainage; R1 testsNOT_RUN, ALLsourceUNACCEPTED; reviewed docs only |
 | G09 | PENDING | exact native retirement proof |
 | G10 | PENDING | all prior dispositions |
