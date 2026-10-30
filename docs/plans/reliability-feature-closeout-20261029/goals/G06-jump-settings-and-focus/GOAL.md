@@ -133,22 +133,22 @@ Settings UI, committed-state behavior and focused keyboard/viewport regressions 
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `IN_PROGRESS` — tested source checkpoint pending independent review/parent acceptance.
+- **Current state:** `PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED`.
 - **Run ID and branch:** `20261029-r01`; `codex/closeout-g06-jump-settings-and-focus-20261029-r01`.
-- **Actual master/source base:** master `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`; bootstrap `02d0ac64d51655f43d6e958ea551f5bf658ee48d`; approved handoff/source HEAD `d88f00b2375d7acaeb007e85b355a5cafb4d1030`.
-- **Current milestone:** combined `M1-A/M1-B` plus scoped `M2-A` tested; `M3-A` NOT_RUN.
-- **Active role and requested/configured/resolved model:** Implementer; requested Astra/xhigh, configured Luna/max unchanged, backend UNVERIFIED.
-- **Last known commit / push:** planner packet `d88f00b2`; no implementer Git mutation or source commit/push claim.
-- **Next action:** parent checkpoint and independent review of the coherent tested source, then exact-source native M3 gate.
-- **Blocker and scope:** no source blocker; native behavior remains unproved, with no capability failure inferred.
+- **Actual master/source base:** master4a1283e6; bootstrap02d0ac64; corrected source7cb16df951cb2eac1642fb428dbce84559f77562 confirmed5c1bf680/integratedb9f5fa4b.
+- **Current milestone:** M1-A/M1-B and focused M2 accepted; M3 native proof deferred.
+- **Active role and requested/configured/resolved model:** parent closure; requestedAstra/xhigh/configuredSol/medium/backendUNVERIFIED; role pins unchanged.
+- **Last known commit / push:** corrected source/confirmation and integration normally pushed; closing donor/import recorded by parent receipt after commit.
+- **Next action:** documentation closure review then G07; future M3 canonical native-jump-focus-proof Goal/Kickstart.
+- **Blocker and scope:** sky did not return owned native window after one recovery; app desktop check0x80070005, rootcauseunknown. Exact-source build passed; no native input/screenshots. Source acceptance retained.
 
-| Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
+| Milestone | State | Real evidence | Next exact action |
 |---|---|---|---|
-| `M0-A` | Source contract supplied | Planner packet `d88f00b2` and current source corroboration | Parent disposition |
-| `M1-A` | Tested; review pending | Raw draft controls, fallible typed conversion, validation/sample/catalog | Parent checkpoint/review |
-| `M1-B` | Tested; review pending | Existing transaction owns all Jump fields; acknowledgment-only live update; pending drafts preserved | Parent checkpoint/review |
-| `M2-A` | Focused PASS; acceptance pending | R1 final 29/29 selected library+binary cases; historical 24/25 fixture failure retained and corrected | Named R1 review |
-| `M3-A` | NOT_RUN | No native/bin/capture execution by implementer | Exact-source executable/profile and scoped native proof |
+| M0-A | ACCEPTED_COMPLETE | source contractd88f00b2 | Preserve ownership |
+| M1-A | ACCEPTED_COMPLETE | real validated draft controls/sample/catalog | Native observation pending |
+| M1-B | ACCEPTED_COMPLETE | acknowledged transaction/rollback/pendingdraft | Preserve source |
+| M2-A | ACCEPTED_COMPLETE | corrected29/29, R1independentlyresolved | No further source tests |
+| M3-A | NATIVE_PROOF_DEFERRED | normalbin155.734s passed; native discovery failed; processes retired | Complete canonical continuation |
 
 ### Append-only execution events
 
@@ -156,3 +156,4 @@ Settings UI, committed-state behavior and focused keyboard/viewport regressions 
 - Runtime2026-10-30: M0-A IN_PROGRESS; branch codex/closeout-g06-jump-settings-and-focus-20261029-r01 from bootstrap02d0ac64; fetched actual master4a1283e6 unchanged; integrationcda36e81 authoritative. Read-only planner next; no source/tests/native yet.
 - 2026-10-30 implementer: coherent editor/transaction checkpoint and focused M2 proof ready. Final 25/25 PASS; source remains unaccepted until parent review. Exact evidence in execution G06 `VERIFICATION.md`; no Git/native/bin action, distinct follow-on NO_ACTION.
 - 2026-10-30 R1 correction: parent explicitly authorized actual main-owned effective Paste Sequences conflict validation and focused binary tests after reviewer R1. Final29/29 PASS (26 library+3 direct resolver),261.429s preparation,6.908s run wall; cumulative incremental349.032s of600s. Current correction base `5c00e367`; source remains pending parent checkpoint/R1-only confirmation. Native M3 NOT_RUN; existing reviewer contingency is unchanged for parent disposition.
+- Native M3 closure2026-10-30: corrected7cb16df9 accepted5c1bf680/integratedb9f5fa4b; scopednormalbin155.734s passed. Owned native discovery failed afterone recovery; desktop-check0x80070005 causeunknown, noUIinput/capture proof. Processes retired. WholeG06 PARTIAL_ACCEPTED/NATIVE_PROOF_DEFERRED; canonicalnative-jump-focus-proof pair retainsrequiredM3. R1resolvednotqueued.

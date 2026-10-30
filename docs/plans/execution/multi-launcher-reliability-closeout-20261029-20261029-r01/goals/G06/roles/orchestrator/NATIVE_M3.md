@@ -1,0 +1,7 @@
+# G06 native M3 result — 2026-10-30
+
+NATIVE_PROOF_DEFERRED. Normal exact-source executable build succeeded155.734s/600, source5c1bf680/exe5e2a6be71538b017666ba9e1078e48adbce44573bfdb69f27afecb45bcde519d. No native UI behavior proof: supported sky discovery did not return the owned test window. Process metadata alone is insufficient for selection.
+
+First fixture had launcher/global cofire and was corrected once. Recovery used explicit owned cwd, corrected shortcut and interactive window style; no target still. Process41660 reported title/handle, and app logged desktop-check AccessDenied0x80070005. Exact cause unknown; no source defect or universal tool incapability inferred. No raw UIA/SendInput/guessed-window fallback. No input/screenshots/Save/hints/focus actions executed. No clipboard/user profile involved. Both owned processes retired; build/launch wrappers drained. See native-m3 JSON receipts and initial/recovery synthetic settings. First/recovery app logs remain in ignored owned profile; bounded meaningful diagnostics preserved here and in complete follow-on.
+
+Accepted cumulative source7cb16df9 confirmed5c1bf680/integratedb9f5fa4b remains safe29/29. Whole G06 PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED. Canonical remaining pair: ../../follow-on/native-jump-focus-proof/GOAL.md and KICKSTART.md. Reviewer R1 conflict contingency RESOLVED_IN_G06; do not queue it. This native continuation deduplicates role-authored package. No other actionable distinct issue established.

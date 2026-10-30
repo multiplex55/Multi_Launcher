@@ -1,0 +1,10 @@
+{
+  "native_input_executed": false,
+  "observation_utc": "2026-10-30T04:42:21.1349375Z",
+  "native_screenshot_captured": false,
+  "tool_returned_target_windows": 0,
+  "process_name": "multi_launcher",
+  "pid": 41660,
+  "main_window_title": "Multi Lnchr",
+  "main_window_handle": 3148666
+}
