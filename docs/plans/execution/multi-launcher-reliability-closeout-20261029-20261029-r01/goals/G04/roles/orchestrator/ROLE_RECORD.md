@@ -1,0 +1,3 @@
+# G04 orchestrator role record
+
+Parent/root configured Sol/medium; backend UNVERIFIED. User-requested planner/reviewer Astra/max and implementer Astra/xhigh unchanged; explicit contexts/config pins separately recorded. Read complete G04 pair, skill and all relevant computer-use docs. Initialized documented runtime and app inventory only; no input or effects. Exact secondary drag API absent; native proof pending. Parent owns Git/status/provenance; one child at a time. Scope source/protocol revalidation, meaningful focused evidence only if useful, exact native deferral/future pair if unsupported; no blind build or source fix. No distinct issue beyond current native proof gap; canonicalize role-authored future package after review.

@@ -131,14 +131,14 @@ Either reproducible native crop/redaction/save/copy acceptance is achieved with 
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
+- **Current state:** `IN_PROGRESS`; M0-A native feasibility.
+- **Run ID and branch:** 20261029-r01 / codex/closeout-g04-screenshot-native-redaction-20261029-r01.
+- **Actual master/source base:** fetched4a1283e6; bootstrap02d0ac64; authoritative integrationdf94f192.
 - **Current milestone:** `M0-A` pending.
 - **Active role and requested/configured/resolved model:** `NONE / unverified`.
 - **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Next action:** planner revalidates exact source gesture/output owners and returns bounded protocol/deferral packet.
+- **Blocker and scope:** documented native drag API lacks secondary-button selection; current-source app/output proof unexecuted.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
@@ -151,3 +151,5 @@ Either reproducible native crop/redaction/save/copy acceptance is achieved with 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+- Runtime2026-10-30: G03 dependency decision closed before G04. Native skill/runtime inspected; import/list_apps succeed, installed Multi Launcher not running/no windows. Documented DragInput lacks button selection; right-click does not prove held secondary crop. No launch/input/output/clipboard/native gesture attempted, no source candidate imported. Source/protocol planner next.
