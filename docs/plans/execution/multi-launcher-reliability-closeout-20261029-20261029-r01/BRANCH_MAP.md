@@ -16,3 +16,5 @@
 - G02 final donor011af0c448dfdcdc0eb747083f909d3bfa6c1ab2 pushed; source checkpointf879a2a880d59e941486241e652299dabc002365 UNACCEPTED. Current disposition supersedes prior pending event: DEFERRED_WITH_DESIGN/NATIVE_NOT_PROVEN. Only docs selected into integration, no five-file source import. G03 still blocked.
 
 - G03 codex/closeout-g03-table-full-file-operations-20261029-r01 from bootstrap (no accepted G02 source exists): baselinebfa14e7c -> importcf69deda; handoff36fd12a9 ->6eb857fe; closuree0f556cd8041c502d63479d89d0e68301cceb3b2 ->d326679d536008167a294880e5bd9b16b502e732. All pushed. DEFERRED_DEPENDENCY, docs only, no source. Future G03 implementation requires new accepted G02 ancestry.
+
+- G04 codex/closeout-g04-screenshot-native-redaction-20261029-r01 frombootstrap02d: baseline06d23fc8 ->5201c9ea; deferralf9e0fc3e ->462990ae; closureea27ce749318ab2c261384385fd03ef05f882b4f ->0b57567e83ee5e7f7f94a34c3c45db37ec3a53ac via cherry-pick -x. Each normally pushed. NATIVE_PROOF_DEFERRED; all docs, no source.

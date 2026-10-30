@@ -35,3 +35,10 @@ Bootstrap was scaffolding; current accepted dispositions are recorded below.
 - Independent reviewer2026-10-30 01:20:19UTC found no substantive defect;17 links/10docs all resolve, cumulative diff--check passes, conditional contract intact/Kickstart unchanged. Source, Cargo/native/large fixture/resource work NOT_RUN under hard gate.
 - DEFERRED_DEPENDENCY; original complete G03 pair remains future contract, no duplicate initiative. Requires ALL G02 independently accepted/integrated safety/lifecycle/native/cancel/cleanup/recovery then valid G03 base/fresh M0. OS5 resolution alone insufficient.
 - Parent exact src/crates/Cargo.toml/lock diff againstfd300ff7 remains empty after import, no Cargo rerun. Accepted source unchanged. Next independent G04.
+
+## G04 documentation-only native deferral receipt
+
+- Baseline06d23fc8/deferralf9e0fc3e/closureea27ce749318ab2c261384385fd03ef05f882b4f -> integration5201c9ea/462990ae/0b57567e83ee5e7f7f94a34c3c45db37ec3a53ac with cherry-pick -x. All donor/import normal pushes succeeded.
+- Reviewer accepts documentation only, no substantive findings:23links/13docs resolve, original contracts intact, cumulative diff--check passes, source corroborates protocol and288x208 oracle. Parent closure links0broken.
+- Native runtime initialized/list_apps only. Supported DragInput lacks mouse button; target not running/no windows; no launch/input/screenshot/clipboard. No source defect. Cargo/unit/native gesture/output NOT_RUN. Current-source binary and supported clipboard observation/restoration missing. NATIVE_PROOF_DEFERRED, not UNIT_VERIFIED/native acceptance.
+- Complete canonical P1 planner future pair plus actual stall and role records. Exact accepted source diff acrosssrc/crates/Cargo.toml/lock againstfd300ff7 empty after import. No redundant build/test. Next G05.
