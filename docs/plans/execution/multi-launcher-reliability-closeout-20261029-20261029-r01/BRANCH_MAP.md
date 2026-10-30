@@ -20,3 +20,5 @@
 - G04 codex/closeout-g04-screenshot-native-redaction-20261029-r01 frombootstrap02d: baseline06d23fc8 ->5201c9ea; deferralf9e0fc3e ->462990ae; closureea27ce749318ab2c261384385fd03ef05f882b4f ->0b57567e83ee5e7f7f94a34c3c45db37ec3a53ac via cherry-pick -x. Each normally pushed. NATIVE_PROOF_DEFERRED; all docs, no source.
 
 - G05 branch codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01 from bootstrap02d0ac64; baseline d845e0aab65f49913996791e26e8951d69a0637c and safety contract c009b533059acb9404f453484b053363dd1d51af pushed. No G05 source yet accepted/imported; M1-A metadata foundation next.
+
+- G05 M1-A source8b4d01a4cff48c2bdfaa30f760c03e91cbb6f9be reviewed without substantive findings; review donor b14967e5a1eaddfad9290da2847ec90997e5bb53. Imports: d845e0aa->ea4d13ff, c009b533->fa54142a,8b4d01a4->8f6befe70c402157f99bdae3404513ca02e46ecd,b14967e5->97f64137a166f4a2728c9e91685477077da2b33d via cherry-pick -x. Each normally pushed. Foundation only; whole G05 in progress/conditions refused.

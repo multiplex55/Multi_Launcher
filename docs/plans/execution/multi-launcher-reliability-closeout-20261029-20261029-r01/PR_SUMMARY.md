@@ -7,3 +7,5 @@ G02 contributes reviewed deferral/evidence/future-design documentation only. Its
 G03 contributes reviewed dependency documentation only; no full-file controls or resource-limit changes. Its existing complete conditional contract is preserved.
 
 G04 adds independently reviewed native-proof deferral and complete pixel protocol only. No screenshot source change or native acceptance; documented input lacks held-secondary drag.
+
+G05 M1-A adds reviewed descriptive metadata outcomes and execution-owned candidate/lease validation;19/19 targeted tests. Optional condition execution remains disabled. Reader/native/effect/editor/TestRule milestones still in progress.
