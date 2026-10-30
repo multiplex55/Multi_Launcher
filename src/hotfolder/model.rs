@@ -329,6 +329,14 @@ pub(super) enum ConditionUnavailable {
     ModificationTime,
     FutureModificationTime,
     Unevaluated,
+    ContentBudget,
+    ContentChunk,
+    ContentEncoding,
+    ContentRead,
+    ContentEof,
+    ContentUnsupported,
+    Cancelled,
+    Deadline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,6 +356,23 @@ pub(super) fn evaluate_rule_metadata(
     captured_now: std::time::SystemTime,
     binding: ConditionBinding,
 ) -> ConditionEvaluation {
+    evaluate_rule_with_content(rule, event, path, metadata, captured_now, binding, None)
+}
+
+/// Complete pure composition. Content evidence is tied to its admitted set;
+/// neither this result nor stream completion authorizes a filesystem effect.
+pub(super) fn evaluate_rule_with_content(
+    rule: &HotFolderRule,
+    event: HotFolderEventKind,
+    path: &Path,
+    metadata: Option<FileMetadata>,
+    captured_now: std::time::SystemTime,
+    binding: ConditionBinding,
+    content: Option<(
+        &super::conditions::LiteralSet,
+        &super::conditions::LiteralEvidence<'_>,
+    )>,
+) -> ConditionEvaluation {
     if let Err(reason) = rule
         .validate()
         .and_then(|()| validate_relative_file_path(path))
@@ -356,6 +381,21 @@ pub(super) fn evaluate_rule_metadata(
     }
     if let ConditionBinding::Changed { reason } = binding {
         return ConditionEvaluation::Changed { reason };
+    }
+    let content_result = match &rule.conditions.content {
+        Some(condition) => content.map_or(
+            ConditionEvaluation::Unavailable {
+                reason: ConditionUnavailable::Unevaluated,
+            },
+            |(set, evidence)| evidence.evaluate(set, condition),
+        ),
+        None => ConditionEvaluation::Match,
+    };
+    if matches!(
+        content_result,
+        ConditionEvaluation::Invalid { .. } | ConditionEvaluation::Changed { .. }
+    ) {
+        return content_result;
     }
     if rule.conditions.is_configured() && metadata.is_none() {
         return ConditionEvaluation::Unavailable {
@@ -374,10 +414,8 @@ pub(super) fn evaluate_rule_metadata(
             };
         }
     }
-    if rule.conditions.content.is_some() {
-        return ConditionEvaluation::Unavailable {
-            reason: ConditionUnavailable::Unevaluated,
-        };
+    if matches!(content_result, ConditionEvaluation::Unavailable { .. }) {
+        return content_result;
     }
     if let Err(reason) = evaluate_rule_scope(rule, event, path) {
         return ConditionEvaluation::NoMatch { reason };
@@ -387,14 +425,12 @@ pub(super) fn evaluate_rule_metadata(
         return ConditionEvaluation::Match;
     };
     match rule.conditions.evaluate_metadata(metadata, captured_now) {
-        MetadataConditionResult::Match => ConditionEvaluation::Match,
+        MetadataConditionResult::Match => content_result,
         MetadataConditionResult::NoMatch { reason } => ConditionEvaluation::NoMatch { reason },
         MetadataConditionResult::InvalidConfiguration { reason } => {
             ConditionEvaluation::Invalid { reason }
         }
-        MetadataConditionResult::NotEvaluated { .. } => ConditionEvaluation::Unavailable {
-            reason: ConditionUnavailable::Unevaluated,
-        },
+        MetadataConditionResult::NotEvaluated { .. } => content_result,
     }
 }
 
@@ -919,6 +955,147 @@ mod tests {
                     .join("target/productivity_expansion/app_data/copied"),
             },
         )
+    }
+
+    #[test]
+    fn hotfolder_condition_literal_composition_preserves_precedence_and_metadata_api() {
+        use super::super::conditions::{LiteralScan, LiteralSet, ScanObservation, StreamEnd};
+        use std::time::{Instant, UNIX_EPOCH};
+        let mut rule = valid_rule();
+        rule.conditions.content = Some(LiteralContentCondition::Contains("hit".into()));
+        rule.conditions.size_bytes = Some(InclusiveU64Range {
+            min: Some(10),
+            max: None,
+        });
+        let set = LiteralSet::admit(&[rule.conditions.content.clone().unwrap()]).unwrap();
+        let now = Instant::now();
+        let mut probe = || ScanObservation {
+            now,
+            cancelled: false,
+        };
+        let mut scan = LiteralScan::begin(&set, 3, now).unwrap();
+        scan.feed(b"hit", &mut probe).unwrap();
+        let complete = scan.finish(
+            StreamEnd::Eof { final_length: 3 },
+            ConditionBinding::Current,
+            &mut probe,
+        );
+        let unavailable = LiteralScan::begin(&set, 3, now).unwrap().finish(
+            StreamEnd::ReadFailed,
+            ConditionBinding::Current,
+            &mut probe,
+        );
+        let changed = LiteralScan::begin(&set, 3, now).unwrap().finish(
+            StreamEnd::MissingEof,
+            ConditionBinding::Changed {
+                reason: "fixture changed",
+            },
+            &mut probe,
+        );
+        let metadata = Some(FileMetadata {
+            size_bytes: 3,
+            modified_at: None,
+        });
+        let evaluate = |rule: &HotFolderRule, metadata, binding, evidence| {
+            evaluate_rule_with_content(
+                rule,
+                HotFolderEventKind::Created,
+                Path::new("sample.bin"),
+                metadata,
+                UNIX_EPOCH,
+                binding,
+                Some((&set, evidence)),
+            )
+        };
+        assert!(matches!(
+            evaluate(&rule, None, ConditionBinding::Current, &changed),
+            ConditionEvaluation::Changed { .. }
+        ));
+        assert!(matches!(
+            evaluate(&rule, metadata, ConditionBinding::Current, &unavailable),
+            ConditionEvaluation::Unavailable { .. }
+        ));
+        assert!(matches!(
+            evaluate(
+                &rule,
+                metadata,
+                ConditionBinding::Changed {
+                    reason: "fixture changed"
+                },
+                &unavailable
+            ),
+            ConditionEvaluation::Changed { .. }
+        ));
+        rule.conditions.modified_age_seconds = Some(InclusiveU64Range {
+            min: Some(2),
+            max: Some(1),
+        });
+        assert!(matches!(
+            evaluate(
+                &rule,
+                None,
+                ConditionBinding::Changed {
+                    reason: "fixture changed"
+                },
+                &changed
+            ),
+            ConditionEvaluation::Invalid { .. }
+        ));
+        rule.conditions.modified_age_seconds = None;
+        assert!(matches!(
+            evaluate(&rule, metadata, ConditionBinding::Current, &complete),
+            ConditionEvaluation::NoMatch { .. }
+        ));
+        rule.conditions.size_bytes = None;
+        assert_eq!(
+            evaluate(&rule, metadata, ConditionBinding::Current, &complete),
+            ConditionEvaluation::Match
+        );
+        assert_eq!(
+            evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Created,
+                Path::new("sample.bin"),
+                metadata,
+                UNIX_EPOCH,
+                ConditionBinding::Current
+            ),
+            ConditionEvaluation::Unavailable {
+                reason: ConditionUnavailable::Unevaluated
+            }
+        );
+        assert_eq!(
+            evaluate_rule_conditions(&rule, HotFolderEventKind::Created, Path::new("sample.bin")),
+            Err(FILE_CONDITIONS_NOT_EVALUATED)
+        );
+        assert!(matches!(
+            evaluate_rule_with_content(
+                &rule,
+                HotFolderEventKind::Modified,
+                Path::new("sample.bin"),
+                metadata,
+                UNIX_EPOCH,
+                ConditionBinding::Current,
+                Some((&set, &unavailable))
+            ),
+            ConditionEvaluation::Unavailable { .. }
+        ));
+        rule.conditions.modified_age_seconds = Some(InclusiveU64Range {
+            min: Some(10),
+            max: None,
+        });
+        assert!(matches!(
+            evaluate(
+                &rule,
+                Some(FileMetadata {
+                    size_bytes: 3,
+                    modified_at: Some(UNIX_EPOCH)
+                }),
+                ConditionBinding::Current,
+                &unavailable
+            ),
+            ConditionEvaluation::Unavailable { .. }
+        ));
     }
 
     #[test]

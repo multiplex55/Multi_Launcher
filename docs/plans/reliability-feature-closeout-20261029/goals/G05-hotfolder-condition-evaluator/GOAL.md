@@ -144,17 +144,17 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 - **Current state:** `IN_PROGRESS`; M0-A safety contract/source planning.
 - **Run ID and branch:** 20261029-r01 / codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01.
 - **Actual master/source base:** fetched master4a1283e6; bootstrap02d0ac64; integration5873cb8a.
-- **Current milestone:** M1-A independently accepted; fresh M1-B packet next.
+- **Current milestone:** corrected cumulative M1-B1 independently accepted; native B2 packet next.
 - **Active role and requested/configured/resolved model:** parent checkpoint; implementer requested Astra xhigh/configured Luna max/backend UNVERIFIED.
-- **Last known commit / push:** source8b4d01a4cff48c2bdfaa30f760c03e91cbb6f9be pushed; review receipt next.
-- **Next action:** integrate reviewed M1-A then fresh planner M1-B packet against actual interfaces. All condition guards retained.
+- **Last known commit / push:** correction944f9d0ef4ed5ceee54c9a3d255c40e9a220494d pushed; named acceptance receipt next.
+- **Next action:** import corrected cumulative B1 then fresh native B2 planner packet. All condition guards retained.
 - **Blocker and scope:** none reported.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
 | `M0-A` | ACCEPTED_COMPLETE | safety contract c009b533; source-only design | Preserve binding/gates |
 | `M1-A` | ACCEPTED_COMPLETE | independently reviewed8b4d01a4; corrected19/19 | Foundation only, all guards retained |
-| `M1-B` | PENDING | — | Bounded literal scan |
+| `M1-B` | IN_PROGRESS | B1 pure stream verified20/20, native B2 still required | Independent B1 review then B2 packet |
 | `M1-C` | PENDING | — | Rule editor and Test Rule |
 | `M2-A` | PENDING | — | Narrow tests and final admission review |
 | `M3-A` | PENDING | — | Controlled enablement and closure |
@@ -172,3 +172,9 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 - Independent M1-A review2026-10-30: no substantive findings, metadata/binding foundation accepted at8b4d01a4 only. Parent records/integrates reviewed checkpoint and requests fresh M1-B packet. Whole G05 remains IN_PROGRESS; no native lifetime/reader/queued effect/editor/TestRule acceptance.
 
 - M1-B ordered scope amendment2026-10-30UTC: first B1 pure bounded streaming literal evidence/composition; no filesystem reader or condition enablement. Next native owner/cancellation/retirement/source-to-effect/actual queued-start packet remains required. All guards stay closed. This split follows existing ownership, not a deferral or whole-feature acceptance.
+
+- M1-B1 source checkpoint2026-10-30: exact20/20 first focused batch, pure scan/composition only; native acquisition/effect/GUI unchanged. No errors/corrections,183.339s/3.633s within caps; cleanup complete. Parent independent review next, all B2 proof obligations and configured-condition gates retained.
+
+- B1 R1 correction2026-10-30: supplied-byte accounting fixes false Changed at unchanged-length EOF while preserving true source/length changes and sticky refusal. Corrected22/22,95.941s/3.909s within caps; source conditions0559e8f9 only. R1-only confirmation pending; B1 standalonebab not accepted/imported, M1-A unaffected, no B2.
+
+- B1 named confirmation2026-10-30: R1 resolved, corrected cumulative B1 accepted at944f9d0e only; standalonebab not independently accepted. Contingency closed/do not schedule. Parent cumulative accepted import then native B2 planning; whole G05 still IN_PROGRESS/gates closed.

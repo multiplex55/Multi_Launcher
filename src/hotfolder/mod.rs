@@ -5,6 +5,7 @@
 //! external action dispatch is supplied through an explicit adapter.
 
 mod capability;
+mod conditions;
 mod execution;
 mod model;
 mod runtime;
