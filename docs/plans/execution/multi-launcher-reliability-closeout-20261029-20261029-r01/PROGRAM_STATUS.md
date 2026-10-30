@@ -4,13 +4,13 @@ PROGRAM_ID: multi-launcher-reliability-closeout-20261029-20261029-r01
 MASTER_START: 4a1283e6edd2c245f562a07dbe3dcc6a61061eed
 PROGRAM_BOOTSTRAP_SHA: 02d0ac64d51655f43d6e958ea551f5bf658ee48d
 INTEGRATION_BRANCH: codex/closeout-integration-20261029-r01
-INTEGRATION_LAST_ACCEPTED_DOCS_SHA: ea3a7007e23090c1c2b13ea9018b29754579e4ef
+INTEGRATION_LAST_ACCEPTED_DOCS_SHA: 2234ed892f8a3a5a6b2feb0579ac160f32e26aad (G10 accepted documentation; subsequent publication receipts only)
 NEWEST_ACCEPTED_TEST_SOURCE_SHA: fc9e5c7cbb509397b47c4d7f2902899c9d04dd43
 LAST_ACCEPTED_PRODUCTION_SHA: b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7
-ACTIVE_GOAL: G10 / cumulative review accepted; integration and publication next
+ACTIVE_GOAL: G10 / accepted integration complete; PR publication next
 ACTIVE_WRITER: NONE after proposal handoff; parent owns materialization and publication
 G10_SUPPLIED_HEAD: 874065dbe21f227c4c3189dc859ba5521b210eb5 (parent reports committed/pushed packet; not final closing head)
-NEXT_EXACT_ACTION: import accepted G10 documentation, refresh master and open one integration PR; then record actual host head/base/check/review facts.
+NEXT_EXACT_ACTION: open one reviewed integration PR to freshly verified master4a1283e6, then record actual host head/base/check/review facts. Accepted G10 imports are complete.
 FINAL_ACCEPTANCE: PENDING
 FINAL_PR_URL: PENDING
 FINAL_PR_HEAD_AND_PUSH: PENDING

@@ -11,7 +11,7 @@ Observation: parent branch receipt `2026-10-30T07:46:39.1610151Z`, source parity
 | Last production behavior change | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` |
 | G10 original dependency baseline | `535993a4fa32a5646e0ade6076c6941a71d47230` from accepted integration |
 | G10 supplied planner packet | `874065dbe21f227c4c3189dc859ba5521b210eb5`; parent reported committed/pushed |
-| Final reviewed/imported G10 / PR head / push / checks | PENDING parent review and host receipts |
+| Accepted G10 review/closing import | Review7318e862; closing `792b1a531a4b5a392be977de94afee4d745b8685` -> `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`, normally pushed; PR host facts pending |
 
 ## Accepted source/test delta — 20 unique paths
 

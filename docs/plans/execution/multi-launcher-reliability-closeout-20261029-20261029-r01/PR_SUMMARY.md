@@ -1,6 +1,6 @@
 # PR summary
 
-Proposed title: **fix: preserve Diff failures and finish gated settings foundations**
+Proposed title: **fix: preserve Diff failures and validate Jump settings**
 
 Folder Diff now preserves destination-observation failures instead of treating every failed read as a missing file. Its operation feedback stays bound to the receiving comparison and reports completed/failed/cancelled outcomes; a same-comparison rescan keeps the mutation gate occupied until the matching terminal acknowledgment.
 

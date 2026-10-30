@@ -154,7 +154,7 @@ Final integration branch contains only accepted work; a truthful PR and dependen
 |---|---|---|
 | M0-A | ACCEPTED_COMPLETE | Eleven dispositions, branch/source provenance and dependencies reconciled. |
 | M1-A | NO_ACTION | Existing residuals preserved, no new distinct demonstrated defect. |
-| M1-B | PENDING | Prior accepted source already in dependency base; G10 accepted docs import awaits review. |
+| M1-B | ACCEPTED_COMPLETE | Accepted G10 docs imported through2234ed89; source unchanged. |
 | M2-A | ACCEPTED_COMPLETE | Independent cumulative review accepted7318e862, no substantive findings or extra tests. |
 | M2-B | PENDING | PR summary/handoff/checklist prepared; actual publication/head/check facts pending. |
 | M3-A | PENDING | Final reconciliation after parent operations; no merge/master-change claim. |

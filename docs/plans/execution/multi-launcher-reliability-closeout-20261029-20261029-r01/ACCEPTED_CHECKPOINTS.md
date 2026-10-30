@@ -2,7 +2,7 @@
 
 ## Current accepted boundary
 
-Through accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`: G00 documentation; G01 two bounded fixes; G05 M1-A and corrected B1 foundations only; G06 corrected editor/transaction; G09 selected-owner tests. G02/G03/G04/G07/G08 contribute reviewed documentation only. Whole G05/G06 remain partial. G10 is **not yet an accepted checkpoint**; append its actual review/import only after parent obtains them.
+Through accepted integration `ea3a7007e23090c1c2b13ea9018b29754579e4ef`: G00 documentation; G01 two bounded fixes; G05 M1-A and corrected B1 foundations only; G06 corrected editor/transaction; G09 selected-owner tests. G02/G03/G04/G07/G08 contribute reviewed documentation only. Whole G05/G06 remain partial. G10 documentation is accepted after cumulative review7318e862; closing `792b1a531a4b5a392be977de94afee4d745b8685` imported as `2234ed892f8a3a5a6b2feb0579ac160f32e26aad`. No source behavior changed in G10; PR facts remain pending.
 
 | Scope | Accepted cumulative source/test import | Boundary |
 |---|---|---|
@@ -88,3 +88,8 @@ Donor e505f961849475ecf3affda40064b96a60243f9d -> f933d255ddad67024042f1629d834f
 ## G09 accepted selected-owner proof
 
 Donor090df0d0859189d63804c4e79524fb7a3be2478b -> fc9e5c7cbb509397b47c4d7f2902899c9d04dd43; review/closure174b6fff5eba1a28de6fb8b73d3a5ea77c91187a ->8f7c10a307a3d157ba863d9263c1964bac7032a5. Baseline/packetimports23de82e7/14ab4aeb. All -x imports normallypushed. Onlytests inthread_reaper.rs,duplicate_finder/tests.rs,screenshot_capture.rs; productionprefixes/manifests unchanged. Exactdonor/importsourceparity empty/exit0. Independentreview no substantivefinding;10inputblobs exact. 12/12serialselectedlibtests exit0/3.648s; prep211.037s numericexitnull explicitlypreserved, completeinventory and exact-source runexit0; incremental0/600. Nativefilecase8baselineexclusiveopens,heldindex0OS32throughcancelclose,falsejoinprobe/reopenrefusal, actualjoin/reopen->8exclusiveopens,warmgroup1/secondjoin/fixturecleanup. Gatebeforefile.read; no pendingReadFile/capture/apartment/allownerclaim. ScreenshotshutdownUnavailable stays truthful; reaperdetachmentnofalsejoinreceipt. No newfinding/futurepair. LogicNO_CHANGE_REVALIDATED; teststrengtheningaccepted. Lastproductionchangeb9f5fa4b; newestacceptedtestsourcefc9e5c7c.
+
+
+## G10 accepted documentation import
+
+535993a4fa32a5646e0ade6076c6941a71d47230 -> cb8ec0bf6a176f9e1c9707367b404f7338616299; 874065dbe21f227c4c3189dc859ba5521b210eb5 -> c703c43c778160d6bb40471d002b7808590c84ab; reviewed7318e862509113ed44b857483ff28219ea8700b7 -> b46ca96336950b2fffdd006c50ba6ba9d9e03faa; closing792b1a531a4b5a392be977de94afee4d745b8685 -> 2234ed892f8a3a5a6b2feb0579ac160f32e26aad. Every import uses cherry-pick -x and normal push succeeded. Cumulative reviewer ACCEPT/no substantivefindings; no new source/Cargo/native/CI. Exact source/crate/manifest/config comparison to closing donor is empty/exit0. Fresh origin/master remains4a1283e6. PR publication next.
