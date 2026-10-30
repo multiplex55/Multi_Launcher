@@ -1,0 +1,3 @@
+# G10 orchestrator baseline
+
+Parent read completeG10Goal/Kickstart; verified unchangedfetchedmaster4a and acceptedintegrationea3a7007; newdependentgoalbranch records realancestry. G00–G09dispositionscomplete, notallfeaturescomplete. PlannerthenoneMarkdownwriterthenonecumulativereviewer. ParentaloneGit/globalledgers/finalPR. RequestedAstraxhigh/maxroles, observedconfigparentSolmedium/plannerreviewerSolhigh/implementerLunamax unchanged; actualbackendUNVERIFIED. No distinctnewfinding NO_ACTION. No Cargo/source/native atbaseline.
