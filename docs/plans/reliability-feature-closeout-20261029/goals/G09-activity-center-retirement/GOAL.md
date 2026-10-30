@@ -132,22 +132,22 @@ Selected G06 owner lifetime behavior has targeted meaningful receipts; no unsupp
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `IN_PROGRESS` — M1 proof checkpoint ready for independent review; no acceptance claim.
+- **Current state:** `NO_CHANGE_REVALIDATED` — selected owner production logic; test strengthening accepted by independent review.
 - **Run ID and branch:** `20261029-r01`, `codex/closeout-g09-activity-center-retirement-20261029-r01`.
 - **Actual master/source base:** master `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`; independent bootstrap `02d0ac64d51655f43d6e958ea551f5bf658ee48d`; authoritative integration `9b58d06ac1199a9864d3c7bf79d5e7aa080bb060` remains separate.
-- **Current milestone:** `M1-A`, exact two-owner proof and one native pre-read handle case executed.
-- **Active role and requested/configured/resolved model:** Implementer; requested Astra/xhigh, configured Luna/max unchanged, actual backend UNVERIFIED.
-- **Last known commit / push:** parent committed/pushed contract `691645e357d94f240a544996f5a58b532955a345`; current test checkpoint uncommitted by Implementer.
-- **Next action:** parent checkpoints exact test/evidence diff and requests independent review, then owns disposition/integration.
+- **Current milestone:** `M3-A`, owner-specific closure; no broad native claim.
+- **Active role and requested/configured/resolved model:** NONE; requested Astra roles, configured Sol/high planner/reviewer and Luna/max implementer unchanged; backend UNVERIFIED.
+- **Last known commit / push:** test checkpoint `090df0d0859189d63804c4e79524fb7a3be2478b` committed and normally pushed.
+- **Next action:** parent integrates reviewed test/documentation checkpoints, then begins G10.
 - **Blocker and scope:** no reproduced production defect. Test-only strengthening; all 12 selected tests pass. No global native retirement guarantee.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
 | `M0-A` | Complete contract | Exact retained Duplicate Finder and cancellable Screenshot owner contract at `691645e3` | Preserve contract |
-| `M1-A` | IN_PROGRESS | Implementer test checkpoint, 12/12 pass, production unchanged | Independent review |
-| `M1-B` | NO_CHANGE_REVALIDATED evidence | No production correction warranted by selected proof | Parent disposition after review |
-| `M2-A` | IN_PROGRESS | Actual native source-handle baseline/OS32/post-join/warm restart PASS; other native categories NOT_RUN | Review exact native claim |
-| `M3-A` | IN_PROGRESS | Owner matrix and cleanup in execution VERIFICATION | Parent canonical closure |
+| `M1-A` | ACCEPTED_COMPLETE | Reviewed test checkpoint090df0d0, 12/12 pass, production unchanged | Parent integration |
+| `M1-B` | NO_CHANGE_REVALIDATED | No production correction warranted by selected proof | Preserve owners/defaults |
+| `M2-A` | ACCEPTED_COMPLETE | Reviewed native source-handle baseline/OS32/post-join/warm restart PASS; other categories NOT_RUN | No broader inference |
+| `M3-A` | COMPLETE | Owner matrix, cleanup and independent review | G10 next after integration |
 
 ### Append-only execution events
 
@@ -156,3 +156,5 @@ Selected G06 owner lifetime behavior has targeted meaningful receipts; no unsupp
 - Runtime2026-10-30 M0-A IN_PROGRESS: independent codex/closeout-g09-activity-center-retirement-20261029-r01 frombootstrap02d; unchanged fetchedmaster4a, authoritativeintegration9b58 and acceptedsourceb9 separate. Read-onlyowner/nativeproof planner next; no source/tests/native.
 
 - 2026-10-30 M1 Implementer: strengthened existing test modules only. Exact serial library run passed 12/12, exit0, 3.648s wrapper/0.732s tests after 211.037s preparation. Native pre-read handle fixture passed and was removed; no owned build/test processes remain. Preparation numeric exit null is preserved; no test/compile failures or correction reruns. Production unchanged; checkpoint awaits parent commit and independent review. Details: [G09 verification](../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G09/VERIFICATION.md).
+
+- Parent2026-10-30: checkpoint090df0d0859189d63804c4e79524fb7a3be2478b normallypushed; independentreview reports no substantivefinding, exact10blob/non-testparity/nativeclaim checks pass. SelectedlogicNO_CHANGE_REVALIDATED, teststrengtheningaccepted; no broadretirementclaim or newfollow-on. Parentintegration thenG10.
