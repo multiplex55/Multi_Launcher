@@ -1,0 +1,24 @@
+{
+  "phase": "G01-R1 single approved correction preparation",
+  "command": "cargo nextest list -p multi_launcher --cargo-profile fast-dev --lib --test closeout_g01_diff_ops --offline --locked --color never -E \"test(diff_file_ops::) | test(diff::file_ops::tests::) | test(gui::diff_dialog::tests::folder_operation_) | test(=gui::diff_dialog::tests::principal_folder_workflow_uses_injected_controller_boundaries) | test(=gui::diff_dialog::tests::back_restores_retained_state_and_its_independent_runtime) | test(=gui::diff_dialog::tests::valid_rescan_applies_draft_clears_scan_data_and_retains_view_controls) | test(=gui::diff_dialog::tests::replacing_comparison_removes_obsolete_runtime) | test(=gui::diff_dialog::tests::gui_delete_planning_is_recycle_only) | test(=diff::folder_runtime::tests::prepare_rescan_cancels_work_clears_progress_and_increments_generation)\" --message-format json",
+  "head": "b09ecdcacfd97b5456692aab226b6a886f2c2164",
+  "source_git_blobs": {
+    "src/diff/file_ops.rs": "7e9fab3d4eb09a735f4c347ab86e0832fd3f8a66",
+    "src/diff/folder_runtime.rs": "e7cac72dbc89977556a475045d7ab0410b5c59e3",
+    "src/gui/diff_dialog/mod.rs": "ecfd6e76f38cbcf16c5b914b610cc47d1fa61fa8",
+    "src/gui/diff_dialog/operation_preview.rs": "a1d93a6951a0e335768ccbc3a7e39b6438440db8",
+    "tests/domain_cases/diff_file_ops.rs": "a6b2049cc249cc99921e8b293cba11facbba0dcd",
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380"
+  },
+  "wrapper_git_blob": "30d4db3c9e908d5a875c616c443932f35d438365",
+  "start": "2026-10-29T20:09:11.8650375-04:00",
+  "cap_seconds": 600,
+  "timed_out": false,
+  "raw_stdout_path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g01-r1-20261029-r01\\list.stdout.json",
+  "pid": 28720,
+  "end": "2026-10-29T20:11:16.9937957-04:00",
+  "elapsed_seconds": 125.124,
+  "exit_code": 0,
+  "output_drained": true
+}

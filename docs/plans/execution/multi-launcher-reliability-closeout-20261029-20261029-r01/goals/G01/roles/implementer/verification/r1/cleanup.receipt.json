@@ -1,0 +1,24 @@
+{
+  "checked_at": "2026-10-29T20:12:09.2847688-04:00",
+  "wrapper_path": "G:\\Repos\\rust\\Multi_Launcher\\tests\\closeout_g01_diff_ops.rs",
+  "wrapper_blob_before_removal": "30d4db3c9e908d5a875c616c443932f35d438365",
+  "wrapper_removed": true,
+  "source_git_blobs_after": {
+    "src/diff/file_ops.rs": "7e9fab3d4eb09a735f4c347ab86e0832fd3f8a66",
+    "src/diff/folder_runtime.rs": "e7cac72dbc89977556a475045d7ab0410b5c59e3",
+    "src/gui/diff_dialog/mod.rs": "ecfd6e76f38cbcf16c5b914b610cc47d1fa61fa8",
+    "src/gui/diff_dialog/operation_preview.rs": "a1d93a6951a0e335768ccbc3a7e39b6438440db8",
+    "tests/domain_cases/diff_file_ops.rs": "a6b2049cc249cc99921e8b293cba11facbba0dcd",
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380"
+  },
+  "owned_processes_remaining": [],
+  "compiler_runner_fixture_processes_observed": [],
+  "raw_inventory_path": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g01-r1-20261029-r01\\list.stdout.json",
+  "raw_inventory_bytes": 1187407,
+  "raw_inventory_sha256": "26D1C922D2AC9514F1DFECD4809CB3957A2EDB3F37081DA84566151DD731E0C1",
+  "raw_inventory_ignored": [
+    "target/closeout-g01-r1-20261029-r01/list.stdout.json"
+  ],
+  "test_manifest_diff": []
+}

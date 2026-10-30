@@ -1,0 +1,17 @@
+{
+  "checked_at": "2026-10-29T20:13:57.6705718-04:00",
+  "head": "b09ecdcacfd97b5456692aab226b6a886f2c2164",
+  "command": "git diff --check",
+  "exit_code": 0,
+  "tested_source_blob_checks": 7,
+  "exact_pass_lines": 32,
+  "relative_receipt_links_resolved": 18,
+  "source_changed_paths": [
+    "src/diff/file_ops.rs",
+    "src/diff/folder_runtime.rs",
+    "src/gui/diff_dialog/mod.rs"
+  ],
+  "staged_paths": [],
+  "wrapper_absent": true,
+  "note": "Source and documentation diff inspected; parent progress/orchestrator/reviewer records preserved; no Cargo after passing run"
+}

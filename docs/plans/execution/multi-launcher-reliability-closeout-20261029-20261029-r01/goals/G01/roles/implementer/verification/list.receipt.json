@@ -1,0 +1,13 @@
+{
+  "phase": "initial selected preparation/list",
+  "command": "cargo nextest list -p multi_launcher --cargo-profile fast-dev --lib --test domain --offline --locked --color never -E \"test(diff_file_ops::) | test(diff::file_ops::tests::) | test(gui::diff_dialog::tests::folder_operation_) | test(=gui::diff_dialog::tests::principal_folder_workflow_uses_injected_controller_boundaries) | test(=gui::diff_dialog::tests::back_restores_retained_state_and_its_independent_runtime) | test(=gui::diff_dialog::tests::valid_rescan_applies_draft_clears_scan_data_and_retains_view_controls) | test(=gui::diff_dialog::tests::replacing_comparison_removes_obsolete_runtime) | test(=gui::diff_dialog::tests::gui_delete_planning_is_recycle_only) | test(=diff::folder_runtime::tests::prepare_rescan_cancels_work_clears_progress_and_increments_generation)\" --message-format json",
+  "head": "8d183f663b212f8a707ac16a4c056eef5fe641ff",
+  "pid": 32852,
+  "start": "2026-10-29T19:44:21.8572187-04:00",
+  "cap_seconds": 1200,
+  "timed_out": false,
+  "end": "2026-10-29T19:50:18.1880549-04:00",
+  "elapsed_seconds": 356.327,
+  "exit_code": 101,
+  "output_drained": true
+}

@@ -689,6 +689,14 @@ pub struct OperationHandle {
     cancel: Arc<AtomicBool>,
 }
 impl OperationHandle {
+    #[cfg(test)]
+    pub(crate) fn with_test_channel(
+        receiver: Receiver<OperationEvent>,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self { receiver, cancel }
+    }
+
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release)
     }

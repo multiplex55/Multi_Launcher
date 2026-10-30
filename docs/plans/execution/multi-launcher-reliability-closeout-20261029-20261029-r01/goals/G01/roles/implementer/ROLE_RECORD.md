@@ -12,3 +12,33 @@
 - Cargo/Nextest/native: `NOT_RUN`; the parent approved a combined focused G01 batch after M1-B. Verification remains `PENDING`, and no acceptance is claimed.
 - New independent findings: `NO_ACTION`; no follow-on pair required.
 - Parent owns Git and authoritative ledgers. No commit, push, acceptance or M1-B implementation performed. Return this coherent source/test checkpoint for parent commit before further work.
+
+## M1-B — current-operation feedback
+
+- Same implementer context and model provenance: requested `gpt-6-astra/xhigh`, configured `gpt-6-luna/max`, backend/effort `UNVERIFIED`; no config edit. Starting HEAD `4d21b035a919df3b3627c7eea50a2dacb987a1f1`, after parent M1-A checkpoint/push.
+- Revalidated preview planning/dispatch, report polling, scan reset, runtime reconciliation, side swaps and retained-parent navigation against the approved packet. No extra baseline campaign.
+- Source ownership: `src/diff/folder_runtime.rs` stores comparison/dispatch context and bounded transient outcome; `src/gui/diff_dialog/mod.rs` validates adoption, renders feedback and coordinates lifetime; `operation_preview.rs` captures the immutable association and migrates its fixture. No persisted fields, alternate channel, delivery/trash change or M1-A edit.
+- Eleven focused `folder_operation_` tests authored; principal workflow now exercises the real report-adoption seam. One new-dispatch test uses a tiny owned-file copy and a two-second test-only event wait before cleanup; other completion cases inject deterministic events. No LauncherApp/native trash.
+- Static checks: scoped `rustfmt --edition 2024 --check --config skip_children=true` passed after formatting the same three source files; `git diff --check` passed. Inspected source/receipt diff and affected caller migration; parent-owned progress/orchestrator records preserved. See `../../VERIFICATION.md` for exact scope and pending test inventory.
+- Compilation/Nextest/native: `NOT_RUN`; combined M2-A verification is still pending. No checkpoint acceptance claimed.
+- New independent findings: `NO_ACTION`. No follow-on pair, Git mutation, commit, push or later milestone executed. Return checkpoint to parent before the combined preparation/run.
+
+## M2-A — combined focused verification
+
+- Reused `/root/implementer` under the explicit verification dispatch. Requested model/effort `gpt-6-astra/xhigh`; repository configured pin `gpt-6-luna/max`; serving backend/effort `UNVERIFIED`. No configuration change. Tested HEAD `8d183f663b212f8a707ac16a4c056eef5fe641ff` on the G01 branch.
+- Initial offline/locked fast-dev preparation of library plus `domain` exited 101 after 356.327 s under its 1200 s cap. First E0308 was the untouched File Search domain fixture's raw sender at line 43. Drained the initial process rather than leaving another compiler job running. No source correction was made.
+- Parent explicitly approved one temporary auto-discovered target containing the original seven Diff cases. One incremental preparation passed in 9.278 s under 600 s. Confirmed 30 selected names before execution: 23 library (6 destination, 11 folder-operation, 6 existing) plus 7 unchanged domain cases; none ignored.
+- Single focused run: 30/30 passed, Nextest 0.289 s, wall 3.221 s under 180 s, exit 0, no retry, no timeout. Exact commands, timestamps, source identities, compiler/tool versions, warning ownership and retained outputs are in `../../VERIFICATION.md` and `verification/`. No more Cargo followed success.
+- Removed the task-created root wrapper only after absolute-path/blob verification, retained its exact bytes, confirmed unchanged source/fixture/configuration and no remaining task process. Moved verbose raw unselected output to ignored target evidence with hashes; retained compact selected inventory, first diagnostic and run summary for review.
+- New independent finding: proposed `follow-on/file-search-sender-fixture/GOAL.md` and `KICKSTART.md`, complete and not executed. This supersedes earlier checkpoint `NO_ACTION` for the M2 discovery only. The original `domain` target remains compile-blocked; no broader pass/native claim.
+- No runtime source edits, test weakening, dependency installation, manifest change, Git mutation, commit, push or acceptance. Parent-owned planner/orchestrator documentation preserved. Return evidence for one independent G01 review and parent integration decision.
+- Final static inspection: own four receipt-file diff reviewed; new evidence and complete follow-on pair inspected; `git diff --check` passed; source/test/manifest/lockfile diff empty. Remaining tracked modifications are own permitted receipts and concurrent parent-owned progress/planner/orchestrator records. No unrelated implementation path changed.
+
+## G01-R1 — bounded review correction
+
+- Same role context and provenance: requested `gpt-6-astra/xhigh`; configured `gpt-6-luna/max`; serving backend/effort `UNVERIFIED`. Starting HEAD `b09ecdcacfd97b5456692aab226b6a886f2c2164`; no model configuration or Git mutation.
+- Confirmed the reviewer finding against current rescan/dispatch/report ownership. Removed immediate same-comparison operation drop; matching terminal acknowledgement releases only its own handle. Stale acknowledgement cannot adopt feedback or trigger rescan. Explicit changed-comparison invalidation remains unchanged in effect.
+- Added two deterministic owned-channel lifecycle cases. Existing report fixtures now establish active ownership, retain their assertions and strengthen wrong-context protection. Parent explicitly allowed the eight-line test-only OperationHandle constructor in `file_ops.rs`; no production executor behavior/API changed.
+- Parent replaced the initially smaller library selection with one original-30-plus-two batch because the executor file became a changed input. Prepared the exact saved temporary wrapper after absence/hash checks. Preparation125.124 s/cap600, exit0; run3.050 s/cap180, exit0; Nextest0.327 s,32/32 passed. No actual compile/test failure, retry, timeout or correction rerun. Full commands/source hashes/counts/times/warnings in `../../VERIFICATION.md` and `verification/r1/`.
+- Wrapper removed; unchanged domain fixture/manifest/lockfile and tested source hashes confirmed; no task process remains. No Cargo followed success. Source scope is runtime/dialog plus approved test-only constructor; own receipts only among documentation, preserving parent progress/role files.
+- No new independent finding (`NO_ACTION` for this correction). File Search follow-on remains proposed; reviewer contingency status belongs to parent after confirmation and was not edited. No acceptance, commit, push, later milestone or verification expansion performed.

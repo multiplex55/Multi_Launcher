@@ -1,0 +1,11 @@
+{
+  "checked_at": "2026-10-29T19:57:52.9381975-04:00",
+  "head": "8d183f663b212f8a707ac16a4c056eef5fe641ff",
+  "command": "git diff --check",
+  "exit_code": 0,
+  "source_blob_checks": 7,
+  "relative_receipt_links_resolved": 15,
+  "source_diff": [],
+  "staged_paths": [],
+  "own_scope": "G01 source/verification/risk receipts and roles/implementer only; concurrent parent progress/planner/orchestrator edits preserved"
+}

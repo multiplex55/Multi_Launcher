@@ -7,7 +7,7 @@ use crate::activity::{
     ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
     ActivityOwner, ActivityRetirement, ActivitySlot, ActivityTask,
 };
-use crate::diff::file_ops::OperationHandle;
+use crate::diff::file_ops::{ExecutionReport, ItemOutcome, OperationEvent, OperationHandle};
 use crate::diff::folder_compare::{EntryMetadata, FolderEntry, FolderModel, FolderStatus};
 use crate::diff::folder_scan::{RootIdentity, ScanHandle};
 use crate::diff::text_compare::{CompiledRules, TextComparisonRules, project};
@@ -20,6 +20,73 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FolderComparisonIdentity {
+    pub view_id: u64,
+    pub left_root: RootIdentity,
+    pub right_root: RootIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FolderOperationContext {
+    pub comparison: FolderComparisonIdentity,
+    pub generation: u64,
+}
+
+struct ActiveFolderOperation {
+    context: FolderOperationContext,
+    handle: OperationHandle,
+}
+
+pub(crate) const MAX_OPERATION_FAILURE_DETAILS: usize = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FolderOperationFailure {
+    pub relative: PathBuf,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FolderOperationFeedback {
+    pub completed: usize,
+    pub failed: usize,
+    pub cancelled: bool,
+    pub failures: Vec<FolderOperationFailure>,
+    pub omitted_failures: usize,
+}
+
+impl FolderOperationFeedback {
+    fn from_report(report: &ExecutionReport) -> Self {
+        let mut feedback = Self {
+            completed: 0,
+            failed: 0,
+            cancelled: report.cancelled,
+            failures: Vec::new(),
+            omitted_failures: 0,
+        };
+        for item in &report.items {
+            match &item.outcome {
+                ItemOutcome::Copied | ItemOutcome::Overwritten | ItemOutcome::CreatedDirectory => {
+                    feedback.completed += 1;
+                }
+                ItemOutcome::Failed(message) => {
+                    feedback.failed += 1;
+                    if feedback.failures.len() < MAX_OPERATION_FAILURE_DETAILS {
+                        feedback.failures.push(FolderOperationFailure {
+                            relative: item.relative.clone(),
+                            message: message.clone(),
+                        });
+                    } else {
+                        feedback.omitted_failures += 1;
+                    }
+                }
+                ItemOutcome::Cancelled => feedback.cancelled = true,
+            }
+        }
+        feedback
+    }
+}
 
 pub struct FolderRuntime {
     pub left_scan: Option<ScanHandle>,
@@ -35,7 +102,10 @@ pub struct FolderRuntime {
     result_tx: Sender<RefinementResult>,
     result_rx: Receiver<RefinementResult>,
     pub completed_comparisons: u64,
-    pub active_operation: Option<OperationHandle>,
+    active_operation: Option<ActiveFolderOperation>,
+    // Scan identities are cleared on rescan; this identity owns retained feedback.
+    comparison: Option<FolderComparisonIdentity>,
+    pub(crate) operation_feedback: Option<FolderOperationFeedback>,
     activity_center: Option<ActivityCenter>,
     refinement_slots: HashMap<PathBuf, (u64, ActivitySlot)>,
     pub left_error: Option<String>,
@@ -86,6 +156,8 @@ impl Default for FolderRuntime {
             result_rx,
             completed_comparisons: 0,
             active_operation: None,
+            comparison: None,
+            operation_feedback: None,
             activity_center: None,
             refinement_slots: HashMap::new(),
             left_error: None,
@@ -150,12 +222,82 @@ impl FolderRuntime {
             || self.right_scan.is_some()
             || !self.comparison_queue.is_empty()
             || !self.in_flight.is_empty()
+            || self.mutation_active()
     }
 
-    /// Mutation previews and plans deliberately live in dialog state; this
-    /// runtime owns only the currently executing operation handle.
+    /// Mutation plans live in dialog state; dispatch ownership and delivered
+    /// feedback remain with the retained comparison's ephemeral runtime.
     pub fn mutation_active(&self) -> bool {
         self.active_operation.is_some()
+    }
+
+    pub(crate) fn belongs_to(&self, comparison: &FolderComparisonIdentity) -> bool {
+        self.comparison
+            .as_ref()
+            .is_none_or(|current| current == comparison)
+    }
+
+    pub(crate) fn reconcile_comparison(&mut self, comparison: FolderComparisonIdentity) {
+        if !self.belongs_to(&comparison) {
+            self.prepare_rescan();
+            self.active_operation = None;
+            self.operation_feedback = None;
+        }
+        self.comparison = Some(comparison);
+    }
+
+    pub(crate) fn start_operation(
+        &mut self,
+        context: FolderOperationContext,
+        handle: OperationHandle,
+    ) {
+        self.comparison = Some(context.comparison.clone());
+        self.operation_feedback = None;
+        self.active_operation = Some(ActiveFolderOperation { context, handle });
+    }
+
+    pub(crate) fn operation_events(&self) -> Option<(FolderOperationContext, Vec<OperationEvent>)> {
+        self.active_operation.as_ref().map(|operation| {
+            (
+                operation.context.clone(),
+                operation.handle.receiver.try_iter().collect(),
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_operation_event(&self) -> OperationEvent {
+        self.active_operation
+            .as_ref()
+            .expect("test dispatched an operation")
+            .handle
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("task-owned operation must finish before fixture cleanup")
+    }
+
+    /// A terminal acknowledgement releases only its own dispatch. A rescan may
+    /// have advanced the generation while cancellation was still pending.
+    /// Return true only when current-generation feedback was adopted.
+    pub(crate) fn finish_operation(
+        &mut self,
+        context: &FolderOperationContext,
+        report: &ExecutionReport,
+    ) -> bool {
+        if report.generation != context.generation
+            || !self
+                .active_operation
+                .as_ref()
+                .is_some_and(|operation| operation.context == *context)
+        {
+            return false;
+        }
+        self.active_operation = None;
+        if context.generation != self.generation {
+            return false;
+        }
+        self.operation_feedback = Some(FolderOperationFeedback::from_report(report));
+        true
     }
 
     /// Rebuild the deduplicated queue in user-visible priority order.
@@ -293,12 +435,13 @@ impl FolderRuntime {
             scan.cancel();
         }
         if let Some(operation) = &self.active_operation {
-            operation.cancel();
+            operation.handle.cancel();
         }
     }
 
     /// Cancel every class of work and establish a new generation before a
-    /// replacement scan can emit events.
+    /// replacement scan can emit events. Keep the mutation gate until its
+    /// terminal acknowledgement: cancellation alone does not finish an effect.
     pub fn prepare_rescan(&mut self) {
         self.cancel();
         self.generation = Self::next_generation_after(self.generation);
