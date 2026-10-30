@@ -1,0 +1,93 @@
+{
+  "checked_utc": "2026-10-30T04:33:52.5852683Z",
+  "head": "5c00e367c88e90e7897b5ccd9e537618d886eb1a",
+  "source_matches": [
+    {
+      "path": "Cargo.toml",
+      "matches": true
+    },
+    {
+      "path": "Cargo.lock",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/state.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/mapping.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/render.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/catalog.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/save.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_save.rs",
+      "matches": true
+    },
+    {
+      "path": "src/hotkey/validation.rs",
+      "matches": true
+    },
+    {
+      "path": "tests/settings_editor.rs",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode/config.rs",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode.rs",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode/ui.rs",
+      "matches": true
+    },
+    {
+      "path": "src/gui/render.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings/model.rs",
+      "matches": true
+    },
+    {
+      "path": "src/main.rs",
+      "matches": true
+    }
+  ],
+  "changed_source_paths": [
+    "src/hotkey/validation.rs",
+    "src/main.rs",
+    "src/settings_editor/mapping.rs",
+    "src/settings_editor/state.rs"
+  ],
+  "diff_check_exit": 0,
+  "owned_launcher_pids": [
+    19588,
+    35836
+  ],
+  "still_alive": [],
+  "compiler_or_runner_processes": [],
+  "fixtures": "New direct resolver fixtures use TempDir snapshots; no app/native playback or persistent native profile",
+  "raw_artifacts": "Ignored target only, retained and hashed",
+  "aggregate_incremental_seconds": 349.032,
+  "remaining_incremental_seconds_unused": 250.968,
+  "relative_links_checked": 31,
+  "broken_links": []
+}

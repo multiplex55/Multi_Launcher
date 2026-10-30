@@ -24,7 +24,13 @@ impl SettingsEditor {
         }
 
         self.sync_from_plugin_settings();
-        let mut desired = self.to_settings(&self.baseline_settings);
+        let mut desired = match self.to_settings(&self.baseline_settings) {
+            Ok(settings) => settings,
+            Err(message) => {
+                app.add_error_toast(message);
+                return;
+            }
+        };
         app.merge_file_search_ui_preferences_into_settings(&mut desired);
         let intent =
             crate::settings_save::SettingsSaveIntent::general(desired, &self.baseline_settings);
@@ -292,6 +298,31 @@ mod tests {
             "an unresolved/failed save cannot apply draft preferences"
         );
         app.settings_save_reconciliation_required = false;
+
+        for (chord, alphabet) in [("Enter", "ZY"), ("Ctrl+F8", "AA"), ("F2", "ZY")] {
+            draft_editor.jump_mode_activation_chord = chord.into();
+            draft_editor.jump_mode_hint_alphabet = alphabet.into();
+            draft_editor.save_settings(&ctx, &mut app);
+            assert!(
+                !app.settings_save_pending(),
+                "invalid drafts never submit a worker"
+            );
+            assert_eq!(draft_editor.jump_mode_activation_chord, chord);
+            assert_eq!(draft_editor.jump_mode_hint_alphabet, alphabet);
+            assert_eq!(
+                app.jump_mode_configuration(),
+                (
+                    settings.jump_mode_activation_chord,
+                    settings.jump_mode_hint_alphabet.clone()
+                )
+            );
+            assert_eq!(
+                app.settings_editor
+                    .baseline_settings
+                    .jump_mode_activation_chord,
+                settings.jump_mode_activation_chord
+            );
+        }
 
         let mut committed = settings.clone();
         committed.jump_mode_activation_chord = draft.jump_mode_activation_chord;

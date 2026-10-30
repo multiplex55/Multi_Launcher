@@ -157,6 +157,8 @@ impl SettingsEditor {
             show_launcher_icon: settings.show_launcher_icon,
             show_launcher_title: settings.show_launcher_title,
             experimental_jump_mode_enabled: settings.experimental_jump_mode_enabled,
+            jump_mode_activation_chord: settings.jump_mode_activation_chord.canonical_text(),
+            jump_mode_hint_alphabet: settings.jump_mode_hint_alphabet.canonical_text(),
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
@@ -271,14 +273,15 @@ impl SettingsEditor {
         self.sync_from_plugin_settings();
     }
 
-    pub fn to_settings(&self, current: &Settings) -> Settings {
+    pub fn to_settings(&self, current: &Settings) -> Result<Settings, String> {
+        let (jump_mode_activation_chord, jump_mode_hint_alphabet) = self.jump_preferences()?;
         let (static_location_enabled, static_pos, static_size) = Self::normalized_static_settings(
             self.follow_mouse,
             self.static_enabled,
             (self.static_x, self.static_y),
             (self.static_w, self.static_h),
         );
-        Settings {
+        Ok(Settings {
             paste_sequence: self.paste_sequence_preferences(),
             hotkey: if self.hotkey.trim().is_empty() {
                 None
@@ -348,8 +351,8 @@ impl SettingsEditor {
             show_launcher_icon: self.show_launcher_icon,
             show_launcher_title: self.show_launcher_title,
             experimental_jump_mode_enabled: self.experimental_jump_mode_enabled,
-            jump_mode_activation_chord: current.jump_mode_activation_chord,
-            jump_mode_hint_alphabet: current.jump_mode_hint_alphabet.clone(),
+            jump_mode_activation_chord,
+            jump_mode_hint_alphabet,
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
@@ -415,7 +418,7 @@ impl SettingsEditor {
             mkmacro_properties: current.mkmacro_properties.clone(),
             table_utility_resources: current.table_utility_resources,
             radial_submenu_migration: current.radial_submenu_migration.clone(),
-        }
+        })
     }
 }
 
@@ -434,7 +437,7 @@ mod tests {
             settings.note_confirm_discard_unsaved_changes = expected;
             let editor = SettingsEditor::from_settings(&settings);
             assert_eq!(editor.note_confirm_discard_unsaved_changes, expected);
-            let restored = editor.to_settings(&settings);
+            let restored = editor.to_settings(&settings).unwrap();
             assert_eq!(restored.note_confirm_discard_unsaved_changes, expected);
         }
     }
@@ -449,7 +452,7 @@ mod tests {
         initial.query_results_layout.plugin_opt_out = vec!["note".into(), "todo".into()];
 
         let editor = SettingsEditor::new(&initial);
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
         assert_eq!(saved.query_results_layout, initial.query_results_layout);
     }
 
@@ -463,7 +466,7 @@ mod tests {
         initial.coordinate_tool.crosshair.virtual_desktop_guides = true;
 
         let editor = SettingsEditor::new(&initial);
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
 
         assert_eq!(saved.coordinate_tool, initial.coordinate_tool);
     }
@@ -478,7 +481,7 @@ mod tests {
             temp_limit_gib: 16,
         };
 
-        let saved = editor.to_settings(&current);
+        let saved = editor.to_settings(&current).unwrap();
 
         assert_eq!(
             saved.table_utility_resources,
@@ -505,7 +508,7 @@ mod tests {
         initial.radial.show_expected_layout_diagnostics = true;
 
         let editor = SettingsEditor::from_settings(&initial);
-        let restored = editor.to_settings(&Settings::default());
+        let restored = editor.to_settings(&Settings::default()).unwrap();
         assert_eq!(restored.radial, initial.radial);
     }
 
@@ -530,7 +533,7 @@ mod tests {
             .radial_designer
             .expanded_sections
             .insert("inspector:cell-content".into(), true);
-        let restored = editor.to_settings(&current);
+        let restored = editor.to_settings(&current).unwrap();
 
         assert_eq!(restored.radial_designer, current.radial_designer);
     }
@@ -544,7 +547,7 @@ mod tests {
         current.mkmacro_properties.focus_steps = true;
         current.mkmacro_properties.activation_open = false;
 
-        let restored = editor.to_settings(&current);
+        let restored = editor.to_settings(&current).unwrap();
 
         assert_eq!(
             restored.mkmacro_properties, current.mkmacro_properties,
@@ -564,7 +567,7 @@ mod tests {
 
         editor.show_launcher_icon = true;
         editor.show_launcher_title = false;
-        let restored = editor.to_settings(&settings);
+        let restored = editor.to_settings(&settings).unwrap();
         assert!(restored.show_launcher_icon);
         assert!(!restored.show_launcher_title);
         assert_eq!(restored.mkmacro_properties, settings.mkmacro_properties);
@@ -583,7 +586,7 @@ mod tests {
         assert!(!editor.experimental_jump_mode_enabled);
 
         editor.experimental_jump_mode_enabled = true;
-        let enabled = editor.to_settings(&initial);
+        let enabled = editor.to_settings(&initial).unwrap();
         assert!(enabled.experimental_jump_mode_enabled);
         assert!(enabled.show_examples);
         assert_eq!(enabled.theme, initial.theme);
@@ -593,7 +596,7 @@ mod tests {
         );
 
         editor.experimental_jump_mode_enabled = false;
-        let disabled = editor.to_settings(&enabled);
+        let disabled = editor.to_settings(&enabled).unwrap();
         assert!(!disabled.experimental_jump_mode_enabled);
         assert!(disabled.show_examples);
         assert_eq!(disabled.theme, initial.theme);
@@ -612,8 +615,10 @@ mod tests {
             crate::gui::jump_mode::config::HintAlphabet::parse("ASDFJKLQ").unwrap();
 
         let mut editor = SettingsEditor::new(&initial);
+        assert_eq!(editor.jump_mode_activation_chord, "Ctrl+Shift+F8");
+        assert_eq!(editor.jump_mode_hint_alphabet, "ASDFJKLQ");
         editor.show_launcher_icon = !initial.show_launcher_icon;
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
 
         assert_eq!(saved.show_launcher_icon, editor.show_launcher_icon);
         assert_ne!(saved.show_launcher_icon, initial.show_launcher_icon);
@@ -625,6 +630,163 @@ mod tests {
             saved.jump_mode_hint_alphabet,
             initial.jump_mode_hint_alphabet
         );
+    }
+
+    #[test]
+    fn g06_jump_drafts_validate_canonicalize_and_reset_without_changing_baseline() {
+        let initial = Settings::default();
+        let mut editor = SettingsEditor::new(&initial);
+        editor.experimental_jump_mode_enabled = true;
+        editor.jump_mode_activation_chord = " shift + control + f8 ".into();
+        editor.jump_mode_hint_alphabet = "zyxw".into();
+        let saved = editor.to_settings(&initial).unwrap();
+        assert_eq!(
+            saved.jump_mode_activation_chord.canonical_text(),
+            "Ctrl+Shift+F8"
+        );
+        assert_eq!(saved.jump_mode_hint_alphabet.canonical_text(), "ZYXW");
+        assert_eq!(editor.jump_mode_hint_alphabet, "zyxw");
+        for invalid in ["", "Enter", "Ctrl+Alt+A", "Shift++Space"] {
+            editor.jump_mode_activation_chord = invalid.into();
+            assert!(editor.to_settings(&initial).is_err());
+            assert_eq!(editor.jump_mode_activation_chord, invalid);
+            assert_eq!(
+                editor.baseline_settings.jump_mode_activation_chord,
+                initial.jump_mode_activation_chord
+            );
+        }
+        editor.jump_mode_activation_chord = "Ctrl+F8".into();
+        for invalid in ["", "A", "AA", "A1", "éA"] {
+            editor.jump_mode_hint_alphabet = invalid.into();
+            assert!(editor.to_settings(&initial).is_err());
+            assert_eq!(editor.jump_mode_hint_alphabet, invalid);
+            assert_eq!(
+                editor.baseline_settings.jump_mode_hint_alphabet,
+                initial.jump_mode_hint_alphabet
+            );
+        }
+        editor.reset_jump_preferences();
+        let reset = editor.to_settings(&initial).unwrap();
+        assert!(!reset.experimental_jump_mode_enabled);
+        assert_eq!(
+            reset.jump_mode_activation_chord,
+            initial.jump_mode_activation_chord
+        );
+        assert_eq!(
+            reset.jump_mode_hint_alphabet,
+            initial.jump_mode_hint_alphabet
+        );
+    }
+
+    #[test]
+    fn g06_jump_draft_conflicts_respect_enabled_routes_and_modifier_subsets() {
+        let mut editor = SettingsEditor::new(&Settings::default());
+        editor.experimental_jump_mode_enabled = true;
+        editor.jump_mode_activation_chord = "Ctrl+Shift+F8".into();
+        editor.hotkey = "Ctrl+F8".into();
+        assert!(
+            editor
+                .to_settings(&Settings::default())
+                .unwrap_err()
+                .contains("launcher")
+        );
+        editor.hotkey = "Alt+F8".into();
+        assert!(editor.to_settings(&Settings::default()).is_ok());
+        editor.quit_hotkey = "F8".into();
+        editor.quit_hotkey_enabled = true;
+        assert!(editor.jump_preferences().unwrap_err().contains("quit"));
+        editor.quit_hotkey_enabled = false;
+        editor.help_hotkey = "Shift+F8".into();
+        editor.help_hotkey_enabled = true;
+        assert!(editor.jump_preferences().unwrap_err().contains("help"));
+        editor.help_hotkey_enabled = false;
+        assert!(editor.jump_preferences().is_ok());
+        editor.hotkey = "F8".into();
+        editor.experimental_jump_mode_enabled = false;
+        assert!(editor.jump_preferences().is_ok());
+    }
+
+    #[test]
+    fn g06_jump_r1_editor_rejects_applicable_custom_paste_controls() {
+        let mut settings = Settings::default();
+        settings.experimental_jump_mode_enabled = true;
+        settings.jump_mode_activation_chord =
+            crate::settings::JumpModeChord::parse("Ctrl+Shift+F8").unwrap();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = Some("Ctrl+F8".into());
+        let mut editor = SettingsEditor::new(&settings);
+        assert!(
+            editor
+                .to_settings(&settings)
+                .unwrap_err()
+                .contains("Paste Sequence Cancel")
+        );
+        assert_eq!(editor.jump_mode_activation_chord, "Ctrl+Shift+F8");
+        editor.paste_cancel_enabled = false;
+        assert!(editor.to_settings(&settings).is_ok());
+        editor.paste_next_enabled = true;
+        editor.paste_sequence.next_hotkey = Some("Ctrl+F8".into());
+        assert!(
+            editor
+                .to_settings(&settings)
+                .unwrap_err()
+                .contains("Paste Sequence Next")
+        );
+        editor.paste_sequence.next_hotkey = Some("Alt+F8".into());
+        assert!(editor.to_settings(&settings).is_ok());
+        editor.paste_sequence.next_hotkey = Some("Ctrl+F8".into());
+        editor.experimental_jump_mode_enabled = false;
+        assert!(editor.to_settings(&settings).is_ok());
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        let disabled = SettingsEditor::new(&settings);
+        assert!(disabled.to_settings(&settings).is_ok());
+        settings.enabled_plugins = None;
+        settings.paste_sequence = crate::settings::PasteSequencePreferences::default();
+        assert!(
+            SettingsEditor::new(&settings)
+                .to_settings(&settings)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn g06_jump_sample_uses_stable_allocator_and_catalog_control_ids() {
+        use crate::gui::jump_mode::{
+            HintMap, TargetGeneration, TargetId, TargetKind, TargetMetadata,
+        };
+        use crate::settings_editor::catalog::ids;
+        let mut editor = SettingsEditor::new(&Settings::default());
+        editor.jump_mode_hint_alphabet = "ZY".into();
+        let alphabet = crate::settings::HintAlphabet::parse("ZY").unwrap();
+        let map = HintMap::assign_with_alphabet(
+            (0..5).map(|index| {
+                TargetMetadata::new(
+                    TargetId::root_result(TargetGeneration(0), index),
+                    "example",
+                    TargetKind::Button,
+                    index as u64,
+                )
+            }),
+            &alphabet,
+        )
+        .unwrap();
+        let expected: Vec<_> = map
+            .assignments()
+            .iter()
+            .map(|a| a.hint().to_string())
+            .collect();
+        assert_eq!(editor.jump_hint_sample().unwrap(), expected);
+        assert_eq!(editor.jump_hint_sample().unwrap(), expected);
+        let results = editor.search_catalog().search("jump");
+        for id in [
+            ids::LAUNCHER_JUMP_CHORD,
+            ids::LAUNCHER_JUMP_ALPHABET,
+            ids::LAUNCHER_JUMP_RESET,
+        ] {
+            assert!(results.iter().any(|entry| entry.id.as_str() == id));
+        }
+        editor.jump_mode_hint_alphabet = "AA".into();
+        assert!(editor.jump_hint_sample().is_err());
     }
 
     #[test]
@@ -660,7 +822,7 @@ mod tests {
             });
 
         let editor = SettingsEditor::from_settings(&initial);
-        let restored = editor.to_settings(&initial);
+        let restored = editor.to_settings(&initial).unwrap();
 
         assert_eq!(
             restored.radial_submenu_migration,
@@ -687,7 +849,7 @@ mod tests {
             serde_json::to_value(&cfg).unwrap(),
         );
         let editor = SettingsEditor::new(&initial);
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
         let round_trip: ClipboardModifyPluginSettings = serde_json::from_value(
             saved
                 .plugin_settings
@@ -718,7 +880,7 @@ mod tests {
         initial.note.collapsed_sections_persist = false;
 
         let editor = SettingsEditor::new(&initial);
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
 
         assert_eq!(saved.note, initial.note);
     }
@@ -742,7 +904,7 @@ mod tests {
         editor.note_max_outline_depth = 99;
         editor.note_collapsed_sections_persist = false;
 
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
 
         assert!(!saved.note.rich_markdown_enabled);
         assert!(!saved.note.task_lists_enabled);
@@ -771,7 +933,7 @@ mod tests {
         editor.query_results_layout_rows = 0;
         editor.query_results_layout_cols = 0;
 
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
         assert_eq!(saved.query_results_layout.rows, 1);
         assert_eq!(saved.query_results_layout.cols, 1);
     }
@@ -783,12 +945,12 @@ mod tests {
 
         editor.note_panel_w = 199.0;
         editor.note_panel_h = 149.0;
-        let saved_min = editor.to_settings(&initial);
+        let saved_min = editor.to_settings(&initial).unwrap();
         assert_eq!(saved_min.note_panel_default_size, (200.0, 150.0));
 
         editor.note_panel_w = 2001.0;
         editor.note_panel_h = 1601.0;
-        let saved_max = editor.to_settings(&initial);
+        let saved_max = editor.to_settings(&initial).unwrap();
         assert_eq!(saved_max.note_panel_default_size, (2000.0, 1600.0));
     }
 
@@ -799,7 +961,7 @@ mod tests {
         initial.show_error_toasts = false;
 
         let editor = SettingsEditor::new(&initial);
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
         assert!(!saved.show_inline_errors);
         assert!(!saved.show_error_toasts);
     }
@@ -832,7 +994,7 @@ mod tests {
         let note_value = serde_json::to_value(NotePluginSettings::default()).unwrap();
         editor.set_plugin_setting_value("note", note_value.clone());
 
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
 
         assert_eq!(saved.plugin_settings.get("note"), Some(&note_value));
     }

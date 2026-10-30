@@ -22,7 +22,7 @@ fn always_on_top_persists() {
     let mut editor = SettingsEditor::new(&settings);
     assert!(editor.always_on_top);
     editor.always_on_top = false;
-    let new_settings = editor.to_settings(&settings);
+    let new_settings = editor.to_settings(&settings).unwrap();
     assert!(!new_settings.always_on_top);
 }
 
@@ -42,7 +42,7 @@ fn omni_plugin_settings_round_trip_preserves_all_fields() {
     );
 
     let editor = SettingsEditor::new(&settings);
-    let new_settings = editor.to_settings(&settings);
+    let new_settings = editor.to_settings(&settings).unwrap();
     let omni: OmniSearchSettings = serde_json::from_value(
         new_settings
             .plugin_settings
@@ -97,7 +97,7 @@ fn omni_settings_from_editor_are_persisted_and_applied_on_reload() {
         }),
     );
 
-    let saved = editor.to_settings(&initial);
+    let saved = editor.to_settings(&initial).unwrap();
     let mut plugins = PluginManager::new();
     plugins.reload_from_dirs(
         &Vec::new(),

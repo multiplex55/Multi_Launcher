@@ -28,6 +28,9 @@ pub mod ids {
     pub const LAUNCHER_SHOW_ICON: &str = "launcher.show_icon";
     pub const LAUNCHER_SHOW_TITLE: &str = "launcher.show_title";
     pub const LAUNCHER_JUMP_MODE: &str = "launcher.experimental_jump_mode";
+    pub const LAUNCHER_JUMP_CHORD: &str = "launcher.jump_activation_chord";
+    pub const LAUNCHER_JUMP_ALPHABET: &str = "launcher.jump_hint_alphabet";
+    pub const LAUNCHER_JUMP_RESET: &str = "launcher.jump_reset";
     pub const LAUNCHER_FOLLOW_MOUSE: &str = "launcher.follow_mouse";
     pub const LAUNCHER_STATIC_POSITION: &str = "launcher.static_position";
     pub const LAUNCHER_QUERY_SCALE: &str = "launcher.query_scale";
@@ -813,6 +816,30 @@ const SEEDS: &[Seed] = &[
         "Experimental Jump Mode",
         "Enable hint-based navigation for supported screens.",
         &["keyboard navigation", "jump hints"]
+    ),
+    seed!(
+        ids::LAUNCHER_JUMP_CHORD,
+        Application,
+        S::Main(M::LauncherWindow),
+        "Jump activation chord",
+        "Choose the local keyboard chord that displays Jump hints.",
+        &["jump hotkey", "navigation shortcut"]
+    ),
+    seed!(
+        ids::LAUNCHER_JUMP_ALPHABET,
+        Application,
+        S::Main(M::LauncherWindow),
+        "Jump hint alphabet",
+        "Choose the ordered letters used to allocate Jump hints.",
+        &["jump letters", "hint symbols"]
+    ),
+    seed!(
+        ids::LAUNCHER_JUMP_RESET,
+        Application,
+        S::Main(M::LauncherWindow),
+        "Reset Jump preferences",
+        "Restore the default Jump preferences in this draft.",
+        &["jump defaults", "reset navigation"]
     ),
     seed!(
         "launcher.offscreen_x",
@@ -2522,6 +2549,9 @@ mod tests {
             "launcher.show_icon",
             "launcher.show_title",
             "launcher.experimental_jump_mode",
+            "launcher.jump_activation_chord",
+            "launcher.jump_hint_alphabet",
+            "launcher.jump_reset",
             "launcher.offscreen_x",
             "launcher.offscreen_y",
             "launcher.follow_mouse",

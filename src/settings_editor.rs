@@ -26,7 +26,7 @@ mod tests {
         let mut editor = SettingsEditor::from_settings(&settings);
         editor.show_launcher_title = !settings.show_launcher_title;
         assert!(editor.validate_before_save().is_ok());
-        let candidate = editor.to_settings(&settings);
+        let candidate = editor.to_settings(&settings).unwrap();
         assert_eq!(candidate.paste_sequence, settings.paste_sequence);
         assert_eq!(candidate.hotkey, settings.hotkey);
         assert_ne!(candidate.show_launcher_title, settings.show_launcher_title);
@@ -83,7 +83,7 @@ mod tests {
         editor.static_w = 333;
         editor.static_h = 444;
 
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
         assert!(!saved.follow_mouse);
         assert!(saved.static_location_enabled);
         assert_eq!(saved.static_pos, Some((11, 22)));
@@ -105,7 +105,7 @@ mod tests {
         editor.static_w = 3;
         editor.static_h = 4;
 
-        let saved = editor.to_settings(&initial);
+        let saved = editor.to_settings(&initial).unwrap();
         assert!(saved.follow_mouse);
         assert!(!saved.static_location_enabled);
         assert_eq!(saved.static_pos, None);

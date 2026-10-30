@@ -1,0 +1,39 @@
+{
+  "phase": "prepare-02-selector",
+  "command": "cargo nextest list -p multi_launcher --lib --cargo-profile fast-dev --offline --locked -E \"test(g06_jump_) | test(jump_configuration_) | test(=settings_editor::mapping::tests::jump_preferences_survive_unrelated_settings_editor_save) | test(=settings_save::tests::jump_mode_general_save_acknowledges_and_rolls_back_owned_setting) | test(=settings_editor::save::tests::jump_mode_configuration_tracks_startup_and_committed_settings) | test(=settings_editor::render::settings_shell_tests::jump_mode_focuses_real_settings_controls_and_later_egui_keys_activate_them) | test(=settings::model::tests::jump_preferences_default_round_trip_and_recover_independently) | test(=gui::jump_mode::ui::tests::committed_configuration_change_retires_prefix_and_fences_held_leader) | test(=gui::jump_mode::ui::tests::disabling_after_configuration_change_keeps_release_fence_without_blocking_ordinary_input) | test(=gui::jump_mode::ui::tests::settings_does_not_take_foreign_focused_window_and_stale_layers_are_ignored) | test(=gui::jump_mode::ui::tests::entering_settings_surrenders_only_the_background_query_focus) | test(=gui::render::tests::launcher_show_focus_requests_actual_query_for_empty_and_nonempty_queries_in_both_jump_modes) | test(=gui::render::tests::notes_query_activation_hint_completion_needs_release_before_fresh_enter)\" --message-format json",
+  "head": "d88f00b2375d7acaeb007e85b355a5cafb4d1030",
+  "source_git_blobs": {
+    "Cargo.toml": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+    "Cargo.lock": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+    "src/settings_editor.rs": "aeff64e58ea0ae323891a11420ea1fdf541e84f7",
+    "src/settings_editor/state.rs": "01469448debfa5719a55db4f0fc9f575914ddeae",
+    "src/settings_editor/mapping.rs": "fbe82367234f84840175c8a9916f1cdea4a92fa5",
+    "src/settings_editor/render.rs": "5bc4d19a6bc7acaae8f15cebe062f73b45867bec",
+    "src/settings_editor/catalog.rs": "d7efb88647716a987b2015b5ab5c80019c9c8eda",
+    "src/settings_editor/save.rs": "482da92cdb0c1bf07751502c75c9fcfcbfe61f82",
+    "src/settings_save.rs": "fc8e150aa1fb550b70d243ae071f3f407f7b95b4",
+    "src/hotkey/validation.rs": "f9ba0b2d441942355335f1ed9b9dd9e35a5f2a4e",
+    "tests/settings_editor.rs": "8ab1163c63889beebf622d5d47303fd97ce97306",
+    "src/gui/jump_mode/config.rs": "5edbb7cad9642199fd551e7fff1fb74fd07476e2",
+    "src/gui/jump_mode.rs": "c915e7bfa9bb2d115ef3593c411c6286b6fd2ee5",
+    "src/gui/jump_mode/ui.rs": "5c21156851248de651638f750a462c1424171715",
+    "src/gui/render.rs": "178f7b20c2f7a49d2bcbae2ee68ee7c6ee83391b",
+    "src/settings/model.rs": "d62e3166b9a489025fa783f28877dad4c2585c34",
+    "src/main.rs": "7346ea391c3277eea3900589851a74b0bc3bb85b"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "nextest": "cargo-nextest 0.9.135 (610eefb88 2026-05-14)\r\nrelease: 0.9.135\r\ncommit-hash: 610eefb88762529a316373f4a50f5fd9194c3c35\r\ncommit-date: 2026-05-14\r\nhost: x86_64-pc-windows-msvc",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)"
+  },
+  "start_utc": "2026-10-30T04:07:11.9959944Z",
+  "cap_seconds": 600,
+  "timed_out": false,
+  "stdout": "G:\\Repos\\rust\\Multi_Launcher\\target\\closeout-g06-m1-20261029-r01\\prepare-02-selector.all-tests.json",
+  "stderr": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-reliability-closeout-20261029-20261029-r01\\goals\\G06\\roles\\implementer\\verification\\m1\\prepare-02-selector.stderr.log",
+  "pid": 7420,
+  "end_utc": "2026-10-30T04:07:15.5735151Z",
+  "elapsed_seconds": 3.573,
+  "exit_code": 0,
+  "output_drained": true
+}

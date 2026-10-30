@@ -133,24 +133,26 @@ Settings UI, committed-state behavior and focused keyboard/viewport regressions 
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
-- **Blocker and scope:** none reported.
+- **Current state:** `IN_PROGRESS` — tested source checkpoint pending independent review/parent acceptance.
+- **Run ID and branch:** `20261029-r01`; `codex/closeout-g06-jump-settings-and-focus-20261029-r01`.
+- **Actual master/source base:** master `4a1283e6edd2c245f562a07dbe3dcc6a61061eed`; bootstrap `02d0ac64d51655f43d6e958ea551f5bf658ee48d`; approved handoff/source HEAD `d88f00b2375d7acaeb007e85b355a5cafb4d1030`.
+- **Current milestone:** combined `M1-A/M1-B` plus scoped `M2-A` tested; `M3-A` NOT_RUN.
+- **Active role and requested/configured/resolved model:** Implementer; requested Astra/xhigh, configured Luna/max unchanged, backend UNVERIFIED.
+- **Last known commit / push:** planner packet `d88f00b2`; no implementer Git mutation or source commit/push claim.
+- **Next action:** parent checkpoint and independent review of the coherent tested source, then exact-source native M3 gate.
+- **Blocker and scope:** no source blocker; native behavior remains unproved, with no capability failure inferred.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Source and UX contract |
-| `M1-A` | PENDING | — | Editor and validation |
-| `M1-B` | PENDING | — | Commit and live application |
-| `M2-A` | PENDING | — | Focused navigation tests |
-| `M3-A` | PENDING | — | Close with precise UI evidence |
+| `M0-A` | Source contract supplied | Planner packet `d88f00b2` and current source corroboration | Parent disposition |
+| `M1-A` | Tested; review pending | Raw draft controls, fallible typed conversion, validation/sample/catalog | Parent checkpoint/review |
+| `M1-B` | Tested; review pending | Existing transaction owns all Jump fields; acknowledgment-only live update; pending drafts preserved | Parent checkpoint/review |
+| `M2-A` | Focused PASS; acceptance pending | R1 final 29/29 selected library+binary cases; historical 24/25 fixture failure retained and corrected | Named R1 review |
+| `M3-A` | NOT_RUN | No native/bin/capture execution by implementer | Exact-source executable/profile and scoped native proof |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
 - Runtime2026-10-30: M0-A IN_PROGRESS; branch codex/closeout-g06-jump-settings-and-focus-20261029-r01 from bootstrap02d0ac64; fetched actual master4a1283e6 unchanged; integrationcda36e81 authoritative. Read-only planner next; no source/tests/native yet.
+- 2026-10-30 implementer: coherent editor/transaction checkpoint and focused M2 proof ready. Final 25/25 PASS; source remains unaccepted until parent review. Exact evidence in execution G06 `VERIFICATION.md`; no Git/native/bin action, distinct follow-on NO_ACTION.
+- 2026-10-30 R1 correction: parent explicitly authorized actual main-owned effective Paste Sequences conflict validation and focused binary tests after reviewer R1. Final29/29 PASS (26 library+3 direct resolver),261.429s preparation,6.908s run wall; cumulative incremental349.032s of600s. Current correction base `5c00e367`; source remains pending parent checkpoint/R1-only confirmation. Native M3 NOT_RUN; existing reviewer contingency is unchanged for parent disposition.

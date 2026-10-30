@@ -1,0 +1,85 @@
+{
+  "checked_utc": "2026-10-30T04:13:27.3302710Z",
+  "source_matches": [
+    {
+      "path": "Cargo.toml",
+      "matches": true
+    },
+    {
+      "path": "Cargo.lock",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/state.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/mapping.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/render.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/catalog.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/save.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings_save.rs",
+      "matches": true
+    },
+    {
+      "path": "src/hotkey/validation.rs",
+      "matches": true
+    },
+    {
+      "path": "tests/settings_editor.rs",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode/config.rs",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode.rs",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode/ui.rs",
+      "matches": true
+    },
+    {
+      "path": "src/gui/render.rs",
+      "matches": true
+    },
+    {
+      "path": "src/settings/model.rs",
+      "matches": true
+    },
+    {
+      "path": "src/main.rs",
+      "matches": true
+    }
+  ],
+  "owned_launcher_pids": [
+    10004,
+    7420,
+    13256,
+    32720,
+    36352
+  ],
+  "still_alive": [],
+  "compiler_or_runner_processes": [],
+  "fixtures": "TempDir and IsolatedWorkspace owned by test lifetime; no persistent native profile created",
+  "raw_artifacts": "Retained in ignored target, not committed",
+  "duplicate_started_receipts": "Removed after complete phase receipts were drained"
+}

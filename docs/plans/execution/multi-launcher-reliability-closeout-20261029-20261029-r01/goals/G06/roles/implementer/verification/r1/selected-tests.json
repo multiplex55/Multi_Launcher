@@ -1,0 +1,147 @@
+[
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::config::tests::jump_configuration_alphabet_normalizes_case_and_preserves_order",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::config::tests::jump_configuration_alphabet_rejects_invalid_shapes",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::config::tests::jump_configuration_chord_rejects_malformed_ambiguous_and_reserved_input",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::config::tests::jump_configuration_chord_validates_supported_key_and_canonical_modifiers",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::config::tests::jump_configuration_preferences_serialize_canonically_and_recover_by_field",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::ui::tests::committed_configuration_change_retires_prefix_and_fences_held_leader",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::ui::tests::disabling_after_configuration_change_keeps_release_fence_without_blocking_ordinary_input",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::ui::tests::entering_settings_surrenders_only_the_background_query_focus",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::jump_mode::ui::tests::settings_does_not_take_foreign_focused_window_and_stale_layers_are_ignored",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::render::tests::launcher_show_focus_requests_actual_query_for_empty_and_nonempty_queries_in_both_jump_modes",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "gui::render::tests::notes_query_activation_hint_completion_needs_release_before_fresh_enter",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "hotkey::validation::tests::g06_jump_checks_active_radial_and_macro_reservations",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "hotkey::validation::tests::g06_jump_routes_reject_exact_local_cofire_without_registering_jump",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_editor::mapping::tests::g06_jump_draft_conflicts_respect_enabled_routes_and_modifier_subsets",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_editor::mapping::tests::g06_jump_drafts_validate_canonicalize_and_reset_without_changing_baseline",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_editor::mapping::tests::g06_jump_r1_editor_rejects_applicable_custom_paste_controls",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_editor::mapping::tests::g06_jump_sample_uses_stable_allocator_and_catalog_control_ids",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_editor::mapping::tests::jump_preferences_survive_unrelated_settings_editor_save",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_editor::render::settings_shell_tests::jump_mode_focuses_real_settings_controls_and_later_egui_keys_activate_them",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_editor::save::tests::jump_mode_configuration_tracks_startup_and_committed_settings",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_save::tests::g06_jump_acknowledgment_publishes_committed_values_and_keeps_newer_draft",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_save::tests::g06_jump_failed_preparation_and_apply_preserve_live_baseline_and_draft",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_save::tests::g06_jump_final_merged_candidate_is_rejected_by_preparation_before_persistence",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_save::tests::g06_jump_stale_prepared_draft_cannot_overwrite_concurrent_preferences",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings_save::tests::jump_mode_general_save_acknowledges_and_rolls_back_owned_setting",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher",
+    "name": "settings::model::tests::jump_preferences_default_round_trip_and_recover_independently",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher::bin/multi_launcher",
+    "name": "tests::g06_jump_r1_final_resolver_rejects_custom_paste_controls_and_respects_disables",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher::bin/multi_launcher",
+    "name": "tests::g06_jump_r1_final_resolver_rejects_saved_start_and_preserves_distinct_route",
+    "ignored": false
+  },
+  {
+    "binary": "multi_launcher::bin/multi_launcher",
+    "name": "tests::g06_jump_r1_final_resolver_retains_optional_default_omission",
+    "ignored": false
+  }
+]
