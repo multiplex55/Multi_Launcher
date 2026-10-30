@@ -1,0 +1,195 @@
+{
+  "checked_at": "2026-10-29T22:13:27.2962855-04:00",
+  "head": "c009b533059acb9404f453484b053363dd1d51af",
+  "branch": "codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01",
+  "source_checks": [
+    {
+      "path": "src/hotfolder/model.rs",
+      "git_blob": "b82c6849e03f90fdcd8762843ddf438c4b737f0d",
+      "matches_tested_source": true
+    },
+    {
+      "path": "src/hotfolder/execution.rs",
+      "git_blob": "4de797b4626218d13dcc1e080c24276f8350d7f3",
+      "matches_tested_source": true
+    },
+    {
+      "path": "src/hotfolder/mod.rs",
+      "git_blob": "1f07ab0ea5f6e3760b736d2cb412e4b4eea4c0ed",
+      "matches_tested_source": true
+    },
+    {
+      "path": "src/hotfolder/runtime.rs",
+      "git_blob": "3da1790f8eccf15d69446e1428b2d3c73865dd6c",
+      "matches_tested_source": true
+    },
+    {
+      "path": "src/hotfolder/capability.rs",
+      "git_blob": "2e6dbe8a41e6ac5f7aaba5c7ecc13257d441e02c",
+      "matches_tested_source": true
+    },
+    {
+      "path": "src/hotfolder/store.rs",
+      "git_blob": "3ec58d0d5f5337228ebeaa54e99bce665481e2fb",
+      "matches_tested_source": true
+    },
+    {
+      "path": "Cargo.toml",
+      "git_blob": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+      "matches_tested_source": true
+    },
+    {
+      "path": "Cargo.lock",
+      "git_blob": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+      "matches_tested_source": true
+    }
+  ],
+  "diff_check_exit": 0,
+  "changed_paths": [
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/RISKS.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/SOURCE_REVALIDATION.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/VERIFICATION.md",
+    "src/hotfolder/execution.rs",
+    "src/hotfolder/model.rs"
+  ],
+  "untracked_paths": [
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/ROLE_RECORD.md",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/correction-list.receipt.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/correction-list.stderr.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/correction-run.receipt.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/correction-run.stderr.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/correction-run.stdout.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/correction-selected-inventory.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/list.receipt.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/list.stderr.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/run.receipt.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/run.stderr.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/run.stdout.log",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/selected-inventory.json",
+    "docs/plans/execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G05/roles/implementer/verification/m1a/static-cleanup.receipt.json"
+  ],
+  "owned_processes": [
+    {
+      "phase": "list",
+      "pid": 39280,
+      "still_running": false,
+      "output_drained": true
+    },
+    {
+      "phase": "run",
+      "pid": 18704,
+      "still_running": false,
+      "output_drained": true
+    },
+    {
+      "phase": "correction-list",
+      "pid": 5448,
+      "still_running": false,
+      "output_drained": true
+    },
+    {
+      "phase": "correction-run",
+      "pid": 19188,
+      "still_running": false,
+      "output_drained": true
+    }
+  ],
+  "relevant_process_snapshot": [],
+  "local_links": [
+    {
+      "document": "SOURCE_REVALIDATION.md",
+      "link": "roles/implementer/verification/m1a/list.receipt.json",
+      "exists": true
+    },
+    {
+      "document": "SOURCE_REVALIDATION.md",
+      "link": "VERIFICATION.md",
+      "exists": true
+    },
+    {
+      "document": "SOURCE_REVALIDATION.md",
+      "link": "roles/implementer/verification/m1a/correction-run.receipt.json",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/planner/M1-A_HANDOFF.md",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/list.receipt.json",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/run.receipt.json",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/selected-inventory.json",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/run.stderr.log",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/correction-list.receipt.json",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/correction-run.receipt.json",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/correction-selected-inventory.json",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/correction-run.stderr.log",
+      "exists": true
+    },
+    {
+      "document": "VERIFICATION.md",
+      "link": "roles/implementer/verification/m1a/static-cleanup.receipt.json",
+      "exists": true
+    },
+    {
+      "document": "roles/implementer/ROLE_RECORD.md",
+      "link": "../../../../../../reliability-feature-closeout-20261029/goals/G05-hotfolder-condition-evaluator/GOAL.md",
+      "exists": true
+    },
+    {
+      "document": "roles/implementer/ROLE_RECORD.md",
+      "link": "../../../../../../reliability-feature-closeout-20261029/goals/G05-hotfolder-condition-evaluator/KICKSTART.md",
+      "exists": true
+    },
+    {
+      "document": "roles/implementer/ROLE_RECORD.md",
+      "link": "../../SAFETY_CONTRACT.md",
+      "exists": true
+    },
+    {
+      "document": "roles/implementer/ROLE_RECORD.md",
+      "link": "../planner/M1-A_HANDOFF.md",
+      "exists": true
+    },
+    {
+      "document": "roles/implementer/ROLE_RECORD.md",
+      "link": "../../VERIFICATION.md",
+      "exists": true
+    }
+  ],
+  "raw_inventory_ignored": [
+    "target/closeout-g05-m1a-20261029-r01/list.stdout.json",
+    "target/closeout-g05-m1a-20261029-r01/correction-list.stdout.json"
+  ],
+  "fixture_cleanup": "Test-owned tempfile TempDir store/journal fixtures completed and dropped with their test processes. No app/native worker fixture, manual native files, or external process was started. No unrelated temporary paths removed."
+}

@@ -1,0 +1,104 @@
+{
+  "selected_count": 19,
+  "new_prefix_count": 9,
+  "controls_count": 10,
+  "raw_inventory_path": "target/closeout-g05-m1a-20261029-r01/list.stdout.json",
+  "raw_inventory_sha256": "46E3063B4EA975B2DC35CB9E189A34EE633CA66E42E2DDD30DBF35CC3A897D69",
+  "selected": [
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::capability::tests::enabled_condition_rules_fail_closed_until_the_shared_evaluator_is_installed",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::execution::tests::external_terminal_is_correlated_and_finalized_once_by_c",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::execution::tests::hotfolder_condition_metadata_actual_lease_transfer_cannot_reuse_old_match",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::execution::tests::hotfolder_condition_metadata_binding_preserves_invalid_priority_and_control_generation",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::execution::tests::hotfolder_condition_metadata_binding_refuses_every_stale_evidence_field",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::execution::tests::hotfolder_condition_metadata_conditioned_execution_stays_refused",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::execution::tests::hotfolder_condition_metadata_execution_rechecks_before_effect_and_captures_time_once",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::execution::tests::m10c_fake_ready_execution_dedupes_partial_outputs_and_caps_runs",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::model::tests::condition_bearing_v2_json_rejects_negative_and_overflow_unsigned_bounds",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::model::tests::file_conditions_validate_ranges_bound_utf8_and_defer_content",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::model::tests::hotfolder_condition_metadata_content_remains_unevaluated_above_no_match",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::model::tests::hotfolder_condition_metadata_inclusive_bounds_keep_fractional_age",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::model::tests::hotfolder_condition_metadata_precedence_and_optional_modification_time",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::model::tests::hotfolder_condition_metadata_scope_reuse_never_removes_public_guard",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::model::tests::metadata_conditions_use_inclusive_bounds_and_one_captured_time",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::model::tests::modified_age_bounds_preserve_subsecond_precision",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::runtime::tests::settled_observation_leases_transfer_without_success_and_recheck_evidence",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::store::tests::legacy_condition_rows_and_malformed_v2_literals_are_quarantined_without_diagnostics_leaking",
+      "ignored": false
+    },
+    {
+      "binary": "multi_launcher",
+      "name": "hotfolder::store::tests::legacy_v1_load_is_read_only_and_intentional_save_upgrades_without_changing_untouched_rules",
+      "ignored": false
+    }
+  ]
+}

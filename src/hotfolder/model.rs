@@ -312,6 +312,92 @@ pub enum MetadataConditionResult {
     InvalidConfiguration { reason: &'static str },
 }
 
+/// Descriptive predicate evidence, never permission to execute an action.
+/// Reasons are fixed diagnostics and cannot contain paths or content literals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConditionEvaluation {
+    Invalid { reason: &'static str },
+    Changed { reason: &'static str },
+    Unavailable { reason: ConditionUnavailable },
+    NoMatch { reason: &'static str },
+    Match,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConditionUnavailable {
+    Metadata,
+    ModificationTime,
+    FutureModificationTime,
+    Unevaluated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConditionBinding {
+    Current,
+    Changed { reason: &'static str },
+}
+
+/// Shared pure metadata stage for execution and, later, a separately admitted
+/// sample. Validate all configuration/input before stale or unavailable data;
+/// incomplete content evidence outranks even a known size/scope no-match.
+pub(super) fn evaluate_rule_metadata(
+    rule: &HotFolderRule,
+    event: HotFolderEventKind,
+    path: &Path,
+    metadata: Option<FileMetadata>,
+    captured_now: std::time::SystemTime,
+    binding: ConditionBinding,
+) -> ConditionEvaluation {
+    if let Err(reason) = rule
+        .validate()
+        .and_then(|()| validate_relative_file_path(path))
+    {
+        return ConditionEvaluation::Invalid { reason };
+    }
+    if let ConditionBinding::Changed { reason } = binding {
+        return ConditionEvaluation::Changed { reason };
+    }
+    if rule.conditions.is_configured() && metadata.is_none() {
+        return ConditionEvaluation::Unavailable {
+            reason: ConditionUnavailable::Metadata,
+        };
+    }
+    if rule.conditions.modified_age_seconds.is_some() {
+        let Some(modified) = metadata.and_then(|metadata| metadata.modified_at) else {
+            return ConditionEvaluation::Unavailable {
+                reason: ConditionUnavailable::ModificationTime,
+            };
+        };
+        if captured_now.duration_since(modified).is_err() {
+            return ConditionEvaluation::Unavailable {
+                reason: ConditionUnavailable::FutureModificationTime,
+            };
+        }
+    }
+    if rule.conditions.content.is_some() {
+        return ConditionEvaluation::Unavailable {
+            reason: ConditionUnavailable::Unevaluated,
+        };
+    }
+    if let Err(reason) = evaluate_rule_scope(rule, event, path) {
+        return ConditionEvaluation::NoMatch { reason };
+    }
+    let Some(metadata) = metadata else {
+        // Only an unconditioned rule can reach this point without metadata.
+        return ConditionEvaluation::Match;
+    };
+    match rule.conditions.evaluate_metadata(metadata, captured_now) {
+        MetadataConditionResult::Match => ConditionEvaluation::Match,
+        MetadataConditionResult::NoMatch { reason } => ConditionEvaluation::NoMatch { reason },
+        MetadataConditionResult::InvalidConfiguration { reason } => {
+            ConditionEvaluation::Invalid { reason }
+        }
+        MetadataConditionResult::NotEvaluated { .. } => ConditionEvaluation::Unavailable {
+            reason: ConditionUnavailable::Unevaluated,
+        },
+    }
+}
+
 /// Purely evaluate one already-rooted relative filename against the stored
 /// rule conditions. The caller remains responsible for proving that `path`
 /// was reported beneath the current canonical watched root.
@@ -323,6 +409,10 @@ pub fn evaluate_rule_conditions(
     if rule.conditions.is_configured() {
         return Err(FILE_CONDITIONS_NOT_EVALUATED);
     }
+    evaluate_rule_scope(rule, event, path)
+}
+
+fn validate_relative_file_path(path: &Path) -> Result<(), &'static str> {
     if path.as_os_str().is_empty()
         || path.is_absolute()
         || path
@@ -331,6 +421,17 @@ pub fn evaluate_rule_conditions(
     {
         return Err("sample path is not a root-relative file path");
     }
+    Ok(())
+}
+
+/// Scope alone is reusable without modifying or clearing a stored rule's
+/// conditions. Public execution eligibility still uses the guard above.
+pub(super) fn evaluate_rule_scope(
+    rule: &HotFolderRule,
+    event: HotFolderEventKind,
+    path: &Path,
+) -> Result<(), &'static str> {
+    validate_relative_file_path(path)?;
     let trigger_matches = matches!(
         (rule.trigger, event),
         (
@@ -818,6 +919,243 @@ mod tests {
                     .join("target/productivity_expansion/app_data/copied"),
             },
         )
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_inclusive_bounds_keep_fractional_age() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let mut rule = valid_rule();
+        rule.conditions.size_bytes = Some(InclusiveU64Range {
+            min: Some(10),
+            max: Some(20),
+        });
+        rule.conditions.modified_age_seconds = Some(InclusiveU64Range {
+            min: Some(2),
+            max: Some(10),
+        });
+        let now = UNIX_EPOCH + Duration::from_secs(100);
+        for (size, age, matches) in [
+            (10, Duration::from_secs(2), true),
+            (20, Duration::from_secs(10), true),
+            (9, Duration::from_secs(2), false),
+            (21, Duration::from_secs(10), false),
+            (10, Duration::from_millis(1999), false),
+            (
+                10,
+                Duration::from_secs(10) + Duration::from_micros(1),
+                false,
+            ),
+        ] {
+            let modified_at = now - age;
+            assert_eq!(now.duration_since(modified_at).unwrap(), age);
+            let result = evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Created,
+                Path::new("sample.bin"),
+                Some(FileMetadata {
+                    size_bytes: size,
+                    modified_at: Some(modified_at),
+                }),
+                now,
+                ConditionBinding::Current,
+            );
+            assert_eq!(
+                result == ConditionEvaluation::Match,
+                matches,
+                "size={size}, age={age:?}"
+            );
+            if !matches {
+                assert!(matches!(result, ConditionEvaluation::NoMatch { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_precedence_and_optional_modification_time() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let mut rule = valid_rule();
+        rule.conditions.size_bytes = Some(InclusiveU64Range {
+            min: Some(10),
+            max: None,
+        });
+        rule.conditions.modified_age_seconds = Some(InclusiveU64Range {
+            min: None,
+            max: Some(10),
+        });
+        let now = UNIX_EPOCH + Duration::from_secs(100);
+        for (modified_at, reason) in [
+            (None, ConditionUnavailable::ModificationTime),
+            (
+                Some(now + Duration::from_micros(1)),
+                ConditionUnavailable::FutureModificationTime,
+            ),
+        ] {
+            if let Some(modified_at) = modified_at {
+                assert!(modified_at > now);
+            }
+            assert_eq!(
+                evaluate_rule_metadata(
+                    &rule,
+                    HotFolderEventKind::Modified,
+                    Path::new("sample.bin"),
+                    Some(FileMetadata {
+                        size_bytes: 0,
+                        modified_at
+                    }),
+                    now,
+                    ConditionBinding::Current
+                ),
+                ConditionEvaluation::Unavailable { reason }
+            );
+        }
+        assert_eq!(
+            evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Created,
+                Path::new("sample.bin"),
+                None,
+                now,
+                ConditionBinding::Current
+            ),
+            ConditionEvaluation::Unavailable {
+                reason: ConditionUnavailable::Metadata
+            }
+        );
+        let stale = ConditionBinding::Changed {
+            reason: "fixture evidence changed",
+        };
+        assert!(matches!(
+            evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Modified,
+                Path::new("sample.bin"),
+                None,
+                now,
+                stale
+            ),
+            ConditionEvaluation::Changed { .. }
+        ));
+        rule.conditions.content = Some(LiteralContentCondition::Contains(String::new()));
+        assert!(matches!(
+            evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Modified,
+                Path::new("sample.bin"),
+                None,
+                now,
+                stale
+            ),
+            ConditionEvaluation::Invalid { .. }
+        ));
+        rule.conditions.content = None;
+        rule.conditions.modified_age_seconds = None;
+        assert_eq!(
+            evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Created,
+                Path::new("sample.bin"),
+                Some(FileMetadata {
+                    size_bytes: 10,
+                    modified_at: None
+                }),
+                now,
+                ConditionBinding::Current
+            ),
+            ConditionEvaluation::Match
+        );
+        assert!(matches!(
+            evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Created,
+                Path::new("../sample.bin"),
+                None,
+                now,
+                stale
+            ),
+            ConditionEvaluation::Invalid { .. }
+        ));
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_content_remains_unevaluated_above_no_match() {
+        let mut rule = valid_rule();
+        rule.conditions.size_bytes = Some(InclusiveU64Range {
+            min: Some(10),
+            max: None,
+        });
+        for content in [
+            LiteralContentCondition::Contains("secret fixture".into()),
+            LiteralContentCondition::DoesNotContain("secret fixture".into()),
+        ] {
+            rule.conditions.content = Some(content);
+            let result = evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Modified,
+                Path::new("sample.bin"),
+                Some(FileMetadata {
+                    size_bytes: 0,
+                    modified_at: None,
+                }),
+                std::time::UNIX_EPOCH,
+                ConditionBinding::Current,
+            );
+            assert_eq!(
+                result,
+                ConditionEvaluation::Unavailable {
+                    reason: ConditionUnavailable::Unevaluated
+                }
+            );
+            assert!(!format!("{result:?}").contains("secret fixture"));
+        }
+    }
+
+    #[test]
+    fn hotfolder_condition_metadata_scope_reuse_never_removes_public_guard() {
+        let mut rule = valid_rule();
+        for (event, path, matches) in [
+            (HotFolderEventKind::Created, "sample.bin", true),
+            (HotFolderEventKind::RenamedTo, "sample.bin", true),
+            (HotFolderEventKind::Modified, "sample.bin", false),
+            (HotFolderEventKind::Created, "nested/sample.bin", false),
+            (HotFolderEventKind::Created, "sample.part", false),
+        ] {
+            assert_eq!(
+                evaluate_rule_scope(&rule, event, Path::new(path)).is_ok(),
+                matches
+            );
+            assert_eq!(
+                evaluate_rule_conditions(&rule, event, Path::new(path)).is_ok(),
+                matches
+            );
+        }
+        rule.conditions.size_bytes = Some(InclusiveU64Range {
+            min: Some(0),
+            max: None,
+        });
+        assert!(
+            evaluate_rule_scope(&rule, HotFolderEventKind::Created, Path::new("sample.bin"))
+                .is_ok()
+        );
+        assert_eq!(
+            evaluate_rule_metadata(
+                &rule,
+                HotFolderEventKind::Created,
+                Path::new("sample.bin"),
+                Some(FileMetadata {
+                    size_bytes: 0,
+                    modified_at: None
+                }),
+                std::time::UNIX_EPOCH,
+                ConditionBinding::Current
+            ),
+            ConditionEvaluation::Match
+        );
+        for path in ["sample.bin", "../sample.bin"] {
+            assert_eq!(
+                evaluate_rule_conditions(&rule, HotFolderEventKind::Created, Path::new(path)),
+                Err(FILE_CONDITIONS_NOT_EVALUATED)
+            );
+        }
     }
 
     #[test]

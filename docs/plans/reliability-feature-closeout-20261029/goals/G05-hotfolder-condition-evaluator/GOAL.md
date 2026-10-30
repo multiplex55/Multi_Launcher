@@ -144,16 +144,16 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 - **Current state:** `IN_PROGRESS`; M0-A safety contract/source planning.
 - **Run ID and branch:** 20261029-r01 / codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01.
 - **Actual master/source base:** fetched master4a1283e6; bootstrap02d0ac64; integration5873cb8a.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** planner current ready-candidate/conditions/action/editor/Test Rule owner map and bounded safety packet; no source until handoff.
+- **Current milestone:** M1-A verified19/19; independent checkpoint review pending.
+- **Active role and requested/configured/resolved model:** parent checkpoint; implementer requested Astra xhigh/configured Luna max/backend UNVERIFIED.
+- **Last known commit / push:** contract c009b533 pushed; M1-A source checkpoint next.
+- **Next action:** independent M1-A review; then fresh M1-B packet against checkpointed interfaces. All condition guards retained.
 - **Blocker and scope:** none reported.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Safety contract and existing-state check |
-| `M1-A` | PENDING | — | Metadata predicates and stale evidence |
+| `M0-A` | ACCEPTED_COMPLETE | safety contract c009b533; source-only design | Preserve binding/gates |
+| `M1-A` | IN_PROGRESS | exact corrected19/19; source checkpoint/review next | No reader/GUI/native enablement |
 | `M1-B` | PENDING | — | Bounded literal scan |
 | `M1-C` | PENDING | — | Rule editor and Test Rule |
 | `M2-A` | PENDING | — | Narrow tests and final admission review |
@@ -166,3 +166,5 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 - Runtime2026-10-30: prior goals dispositions closed sequentially throughG04; G05 independent frombootstrap. Master4a1283e6 unchanged after fetch, integration5873cb8a authoritative. Conditions fail-closed safety remains until actual evidence. Planner next; no source/test/native work at baseline.
 
 - Scope clarification2026-10-29session/2026-10-30UTC: necessary later narrow existing file_operations HotFolder ownership handoff and actual GUI dispatch binding are authorized by parent to avoid copied-evidence/path-reopen mismatch. No duplicate FFI/reader/framework/externalauthority redesign. M1-A constrained to existing model/execution/minimalvisibility/shared semantics, all condition gates retained. Planner safety contract/packet persisted; source implementation pending.
+
+- Runtime M1-A2026-10-30: corrected19/19 focused tests; two approved source modules only. All configured conditions still refused. Initial4fixture failures preserved; representable subsecond timestamps/real WrongServiceLease correction, no production weakening. Prep381.358s, incremental88.824s, finalrun4.742s within caps; cleanup complete. Parent source checkpoint then independent review, no M1-B work yet.
