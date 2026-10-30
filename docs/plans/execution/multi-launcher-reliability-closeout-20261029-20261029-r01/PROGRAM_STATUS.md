@@ -3,11 +3,11 @@
 PROGRAM_ID: multi-launcher-reliability-closeout-20261029-20261029-r01
 MASTER_START: 4a1283e6edd2c245f562a07dbe3dcc6a61061eed
 INTEGRATION_BRANCH: codex/closeout-integration-20261029-r01
-INTEGRATION_LAST_ACCEPTED_SHA: b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7 (G01, G05 foundations, corrected G06 editor/transaction)
-ACTIVE_GOAL: G09 / baseline next
+INTEGRATION_LAST_ACCEPTED_SHA: fc9e5c7cbb509397b47c4d7f2902899c9d04dd43 (G09 accepted tests; last production behavior b9f5fa4b)
+ACTIVE_GOAL: G10 / baseline next
 ACTIVE_WRITER: NONE
-NEXT_EXACT_ACTION: verify current master, create independent G09 branch, read complete Activity Center owner/native retirement contract and dispatch planner.
-LAST_PUSHED: G08 donor e505f961 and docs-only import f933d255 normally pushed; last accepted SOURCE remains b9f5fa4b.
+NEXT_EXACT_ACTION: verify current master, read complete G10 contract, create goal branch from accepted integration tip and dispatch bounded reconciliation planner.
+LAST_PUSHED: G09 donor174b6fff and integration8f7c10a3 normally pushed; accepted testsfc9e5c7c, productionb9f5fa4b.
 
 | Goal | State | Gate / next action |
 |---|---|---|
@@ -20,5 +20,5 @@ LAST_PUSHED: G08 donor e505f961 and docs-only import f933d255 normally pushed; l
 | G06 | PARTIAL_ACCEPTED / NATIVE_PROOF_DEFERRED | corrected editor/transaction accepted29/29; exactbin passed but no supported owned window; complete native continuation |
 | G07 | DEFERRED_WITH_DESIGN / FAILED_VERIFICATION / WRITER_DEFERRED | final10/12; guarded publicationOS32 and unknown source/alias deleteendpoint; ALLsourceUNACCEPTED, docs only |
 | G08 | DEFERRED_WITH_DESIGN / VERIFICATION_DEFERRED | initial14/14 prototype; reviewerR1 privacy; correction timedout32s/late0 after101.880s drainage; R1 testsNOT_RUN, ALLsourceUNACCEPTED; reviewed docs only |
-| G09 | PENDING | exact native retirement proof |
+| G09 | NO_CHANGE_REVALIDATED / TEST_STRENGTHENING_ACCEPTED | 12/12; exact retained/cancellable-owner ordering and native pre-read filehandle proof; production unchanged, no broader native claim |
 | G10 | PENDING | all prior dispositions |

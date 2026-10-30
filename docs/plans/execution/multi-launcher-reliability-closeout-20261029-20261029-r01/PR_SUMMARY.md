@@ -13,3 +13,5 @@ G05 M1-A adds reviewed descriptive metadata outcomes and execution-owned candida
 G05 corrected B1 adds an internal bounded literal-set stream and shared outcomes,22/22 focused tests after independently found EOF-accounting correction. Both modes need complete valid input/explicit EOF. This is a gated foundation; native acquisition/action binding/editor/TestRule enablement are not accepted yet.
 
 G08 contributes reviewed documentation only. Metadata-history prototype and toolbar privacy correction remain excluded: earlier14/14 did not prove fullsurfaceprivacy; corrected-source test execution NOT_RUN after boundedpreparationtimeout. Fullrestart and conditionalrecipepolicy packages retained. Productionaccepted source still G01/G05foundations/correctedG06 only; G09/G10 pending.
+
+G09 adds reviewed test-only retirement evidence (12/12) and one bounded native pre-read filehandle probe. Production behavior unchanged; no universalretirement/nativecapture/apartment guarantee. G10 final reconciliation/PR pending.
