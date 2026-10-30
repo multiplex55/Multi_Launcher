@@ -26,3 +26,5 @@
 - G05 B1 packet1c5b3b88acc2c285a08b00d3aeb6406bbe08c045 pushed on same goal branch. Pure streaming-evidence checkpoint only; native B2, editor/TestRule, final proof/enablement remain pending. No new source imported.
 
 - G05 B1 source bab309689e5acf0b1924fb20842fe06c53b37fec and review6cbb6e43f8655b62e3cd29b836a24ba9335ef0b4 pushed. Source UNACCEPTED/not imported: P2 R1 terminal-byte accounting classification; one bounded correction next. M1-A acceptance unchanged.
+
+- G05 B1 R1 correction944f9d0ef4ed5ceee54c9a3d255c40e9a220494d, confirmation37512cb9de1e6a9246890cfd9908fbe55f946d3d pushed. Packet1c5b3b88 ->e1ff5141 via cherry-pick -x. Cumulative donorsbab30968/6cbb6e43/944f9d0e/37512cb9 -> ONE accepted source import4999a47c68a9e4e5b8531cf31e018eda3eefda4f, full provenance in commit body. All normal pushes succeeded; initially rejected standalonebab never independently accepted/imported. R1 closed, B2 planning next.
