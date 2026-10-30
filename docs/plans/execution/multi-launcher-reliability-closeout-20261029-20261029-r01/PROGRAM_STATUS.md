@@ -7,14 +7,14 @@ INTEGRATION_BRANCH: codex/closeout-integration-20261029-r01
 INTEGRATION_LAST_ACCEPTED_DOCS_SHA: ea3a7007e23090c1c2b13ea9018b29754579e4ef
 NEWEST_ACCEPTED_TEST_SOURCE_SHA: fc9e5c7cbb509397b47c4d7f2902899c9d04dd43
 LAST_ACCEPTED_PRODUCTION_SHA: b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7
-ACTIVE_GOAL: G10 / documentation proposal checkpoint
+ACTIVE_GOAL: G10 / cumulative review accepted; integration and publication next
 ACTIVE_WRITER: NONE after proposal handoff; parent owns materialization and publication
 G10_SUPPLIED_HEAD: 874065dbe21f227c4c3189dc859ba5521b210eb5 (parent reports committed/pushed packet; not final closing head)
-NEXT_EXACT_ACTION: parent materializes proposals, obtains independent cumulative review, imports accepted documentation and prepares one integration PR; record host-confirmed head/base/check/review facts.
+NEXT_EXACT_ACTION: import accepted G10 documentation, refresh master and open one integration PR; then record actual host head/base/check/review facts.
 FINAL_ACCEPTANCE: PENDING
 FINAL_PR_URL: PENDING
 FINAL_PR_HEAD_AND_PUSH: PENDING
-FINAL_CI_AND_REVIEW: PENDING
+FINAL_CI_AND_REVIEW: independent cumulative review ACCEPTED on7318e862; GitHub checks/reviews PENDING
 
 Accepted production comprises G01 Diff fixes, gated G05 foundations and G06 editor/transaction. G09 changes tests only. G02/G07/G08 prototype source is excluded. Current progress is not completion of every feature.
 

@@ -1,6 +1,6 @@
 # Final handoff — prepared, publication pending
 
-The accepted integration contains two bounded Diff fixes, gated Hot Folder foundations, the corrected Jump editor/save transaction and selected-owner test strengthening. It does not complete all original features. G10 prepares reconciliation only; final cumulative review, accepted documentation import and PR publication are still parent actions.
+The accepted integration contains two bounded Diff fixes, gated Hot Folder foundations, the corrected Jump editor/save transaction and selected-owner test strengthening. It does not complete all original features. G10 prepares reconciliation only; independent cumulative review accepted `7318e862`; accepted documentation import and PR publication remain parent actions.
 
 ## Exact known refs and pending host facts
 
@@ -12,7 +12,7 @@ The accepted integration contains two bounded Diff fixes, gated Hot Folder found
 | Last production behavior | `b9f5fa4bfe4508bfc4cea8fcb99d007d8b862ad7` |
 | G10 branch | `codex/closeout-g10-residual-defect-triage-integration-20261029-r01`, dependent on accepted integration |
 | Parent-supplied committed/pushed packet | `874065dbe21f227c4c3189dc859ba5521b210eb5`; not final closing head |
-| Final G10 reviewer disposition/import | PENDING |
+| Final G10 reviewer disposition/import | Cumulative review ACCEPTED on `7318e862`; documentation import PENDING |
 | Actual PR URL / reviewed head / base | PENDING |
 | Final normal push / host checks / host reviews | PENDING |
 | Merge/master change | NOT_PERFORMED by this checkpoint; no automatic merge |

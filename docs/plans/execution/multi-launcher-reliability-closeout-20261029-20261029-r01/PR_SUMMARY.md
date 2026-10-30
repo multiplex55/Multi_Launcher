@@ -20,7 +20,7 @@ Activity retirement changes are test-only. The selected Duplicate Finder and Scr
 | [G06 editor/transaction/resolver](goals/G06/VERIFICATION.md) | Corrected29/29:26 library +3 actual main resolver; exact app build passed | Native owned-window discovery unsuccessful; no input/focus/Save acceptance. |
 | [G09 selected-owner tests](goals/G09/VERIFICATION.md) | 12/12 serial run, exit0 | Preparation numeric exit null is preserved. One narrow native handle fixture; production unchanged. |
 
-These are separate accepted checkpoint runs, not one new aggregate suite. No new G10 Cargo, broad test suite, lint, native campaign or CI execution was performed. Accepted source/manifest parity supports reuse; final cumulative independent review is **PENDING**.
+These are separate accepted checkpoint runs, not one new aggregate suite. No new G10 Cargo, broad test suite, lint, native campaign or CI execution was performed. Accepted source/manifest parity supports reuse; final cumulative independent review **accepted** checkpoint `7318e862509113ed44b857483ff28219ea8700b7` with no substantive findings; see the [review record](goals/G10/roles/reviewer/ROLE_RECORD.md).
 
 ## Deliberately excluded and deferred
 
