@@ -1,0 +1,259 @@
+{
+  "utc": "2026-10-30T07:49:29.0534420Z",
+  "head": "535993a4fa32a5646e0ade6076c6941a71d47230",
+  "accepted": [
+    {
+      "goal": "G01",
+      "path": "src/diff/file_ops.rs",
+      "donor": "13243515329ce4010bd6db981f1fd3bcc26f2dec",
+      "donor_blob": "7e9fab3d4eb09a735f4c347ab86e0832fd3f8a66",
+      "current_blob": "7e9fab3d4eb09a735f4c347ab86e0832fd3f8a66",
+      "equal": true
+    },
+    {
+      "goal": "G01",
+      "path": "src/diff/folder_runtime.rs",
+      "donor": "13243515329ce4010bd6db981f1fd3bcc26f2dec",
+      "donor_blob": "e7cac72dbc89977556a475045d7ab0410b5c59e3",
+      "current_blob": "e7cac72dbc89977556a475045d7ab0410b5c59e3",
+      "equal": true
+    },
+    {
+      "goal": "G01",
+      "path": "src/gui/diff_dialog/mod.rs",
+      "donor": "13243515329ce4010bd6db981f1fd3bcc26f2dec",
+      "donor_blob": "ecfd6e76f38cbcf16c5b914b610cc47d1fa61fa8",
+      "current_blob": "ecfd6e76f38cbcf16c5b914b610cc47d1fa61fa8",
+      "equal": true
+    },
+    {
+      "goal": "G01",
+      "path": "src/gui/diff_dialog/operation_preview.rs",
+      "donor": "13243515329ce4010bd6db981f1fd3bcc26f2dec",
+      "donor_blob": "a1d93a6951a0e335768ccbc3a7e39b6438440db8",
+      "current_blob": "a1d93a6951a0e335768ccbc3a7e39b6438440db8",
+      "equal": true
+    },
+    {
+      "goal": "G05",
+      "path": "src/hotfolder/conditions.rs",
+      "donor": "a78895c63f31c9f48ae579e3203c14fa3faa8c35",
+      "donor_blob": "0559e8f9cc77430b210ab7949967ab8582cd6c99",
+      "current_blob": "0559e8f9cc77430b210ab7949967ab8582cd6c99",
+      "equal": true
+    },
+    {
+      "goal": "G05",
+      "path": "src/hotfolder/execution.rs",
+      "donor": "a78895c63f31c9f48ae579e3203c14fa3faa8c35",
+      "donor_blob": "4de797b4626218d13dcc1e080c24276f8350d7f3",
+      "current_blob": "4de797b4626218d13dcc1e080c24276f8350d7f3",
+      "equal": true
+    },
+    {
+      "goal": "G05",
+      "path": "src/hotfolder/mod.rs",
+      "donor": "a78895c63f31c9f48ae579e3203c14fa3faa8c35",
+      "donor_blob": "1bac86b002a8b90eaf0ec9855b757006ad43f38d",
+      "current_blob": "1bac86b002a8b90eaf0ec9855b757006ad43f38d",
+      "equal": true
+    },
+    {
+      "goal": "G05",
+      "path": "src/hotfolder/model.rs",
+      "donor": "a78895c63f31c9f48ae579e3203c14fa3faa8c35",
+      "donor_blob": "306d2cb9b4295e0e0a26cd38a9f782113294df76",
+      "current_blob": "306d2cb9b4295e0e0a26cd38a9f782113294df76",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/hotkey/validation.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "acaeccaca9b7e923af40585df9a050d22b32eeb3",
+      "current_blob": "acaeccaca9b7e923af40585df9a050d22b32eeb3",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/main.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "b5306acb3060edf0cd189c111b9dc4e611dec6de",
+      "current_blob": "b5306acb3060edf0cd189c111b9dc4e611dec6de",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/settings_editor.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "aeff64e58ea0ae323891a11420ea1fdf541e84f7",
+      "current_blob": "aeff64e58ea0ae323891a11420ea1fdf541e84f7",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/settings_editor/catalog.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "d7efb88647716a987b2015b5ab5c80019c9c8eda",
+      "current_blob": "d7efb88647716a987b2015b5ab5c80019c9c8eda",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/settings_editor/mapping.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "9ba092473a809f25536b2ed4e846f893f2586dd4",
+      "current_blob": "9ba092473a809f25536b2ed4e846f893f2586dd4",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/settings_editor/render.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "5bc4d19a6bc7acaae8f15cebe062f73b45867bec",
+      "current_blob": "5bc4d19a6bc7acaae8f15cebe062f73b45867bec",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/settings_editor/save.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "482da92cdb0c1bf07751502c75c9fcfcbfe61f82",
+      "current_blob": "482da92cdb0c1bf07751502c75c9fcfcbfe61f82",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/settings_editor/state.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "981e8d23308ea121cba97ece47138d07836d8237",
+      "current_blob": "981e8d23308ea121cba97ece47138d07836d8237",
+      "equal": true
+    },
+    {
+      "goal": "G06",
+      "path": "src/settings_save.rs",
+      "donor": "d5f7a67fead714fd465cb9ed0b9ac5a4e68fc436",
+      "donor_blob": "443d33aaa82cf3fad6eca2559ccab4163ebc469b",
+      "current_blob": "443d33aaa82cf3fad6eca2559ccab4163ebc469b",
+      "equal": true
+    },
+    {
+      "goal": "G09",
+      "path": "src/duplicate_finder/tests.rs",
+      "donor": "174b6fff5eba1a28de6fb8b73d3a5ea77c91187a",
+      "donor_blob": "18788605f3024df573c89c8703c520e4cf3c903d",
+      "current_blob": "18788605f3024df573c89c8703c520e4cf3c903d",
+      "equal": true
+    },
+    {
+      "goal": "G09",
+      "path": "src/gui/screenshot_capture.rs",
+      "donor": "174b6fff5eba1a28de6fb8b73d3a5ea77c91187a",
+      "donor_blob": "168cb728eedc115f001880e15a9fd5d6d7f30172",
+      "current_blob": "168cb728eedc115f001880e15a9fd5d6d7f30172",
+      "equal": true
+    },
+    {
+      "goal": "G09",
+      "path": "src/thread_reaper.rs",
+      "donor": "174b6fff5eba1a28de6fb8b73d3a5ea77c91187a",
+      "donor_blob": "ab1efa9dc88b3efd87ba7d9986fc052a29acf128",
+      "current_blob": "ab1efa9dc88b3efd87ba7d9986fc052a29acf128",
+      "equal": true
+    }
+  ],
+  "excluded": [
+    {
+      "goal": "G02",
+      "path": "src/file_operations.rs",
+      "baseline_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "current_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G02",
+      "path": "src/table_utility_session.rs",
+      "baseline_blob": "b7f5bb8b525d0786067fb30d6d25199c6fb5ce4d",
+      "current_blob": "b7f5bb8b525d0786067fb30d6d25199c6fb5ce4d",
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G02",
+      "path": "src/table_utility_session/publication.rs",
+      "baseline_blob": null,
+      "current_blob": null,
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G07",
+      "path": "src/archive/mod.rs",
+      "baseline_blob": "267a87a87552d63c5f8c67d76448a43c01eeccee",
+      "current_blob": "267a87a87552d63c5f8c67d76448a43c01eeccee",
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G07",
+      "path": "src/archive/preparation.rs",
+      "baseline_blob": null,
+      "current_blob": null,
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G07",
+      "path": "src/file_operations.rs",
+      "baseline_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "current_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G08",
+      "path": "src/gui/mkmacro_dialog/history.rs",
+      "baseline_blob": null,
+      "current_blob": null,
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G08",
+      "path": "src/gui/mkmacro_dialog/mod.rs",
+      "baseline_blob": "a9f2335418f69f72dc407a686f6ca4f8956a4960",
+      "current_blob": "a9f2335418f69f72dc407a686f6ca4f8956a4960",
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G08",
+      "path": "src/gui/mkmacro_dialog/toolbar.rs",
+      "baseline_blob": "4cf3875d7014fd443916987b34f97978035907f3",
+      "current_blob": "4cf3875d7014fd443916987b34f97978035907f3",
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G08",
+      "path": "src/mkmacro/runtime.rs",
+      "baseline_blob": "3a454dfc77b4a5572bf0250ac6a4d1d661290ccd",
+      "current_blob": "3a454dfc77b4a5572bf0250ac6a4d1d661290ccd",
+      "unchanged_or_absent": true
+    },
+    {
+      "goal": "G08",
+      "path": "src/mkmacro/runtime/summary.rs",
+      "baseline_blob": "269d50f56344620fd59b0d4976077a821e725e2a",
+      "current_blob": "269d50f56344620fd59b0d4976077a821e725e2a",
+      "unchanged_or_absent": true
+    }
+  ],
+  "manifests": [
+    {
+      "path": "Cargo.toml",
+      "baseline_blob": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+      "current_blob": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+      "equal": true
+    },
+    {
+      "path": "Cargo.lock",
+      "baseline_blob": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+      "current_blob": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+      "equal": true
+    }
+  ]
+}
