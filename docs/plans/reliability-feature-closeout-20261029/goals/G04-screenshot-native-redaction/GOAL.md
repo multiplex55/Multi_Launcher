@@ -131,25 +131,27 @@ Either reproducible native crop/redaction/save/copy acceptance is achieved with 
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `IN_PROGRESS`; M0-A native feasibility.
+- **Current state:** `NATIVE_PROOF_DEFERRED`; documentation-only inventory/protocol/decision recorded, parent review pending.
 - **Run ID and branch:** 20261029-r01 / codex/closeout-g04-screenshot-native-redaction-20261029-r01.
 - **Actual master/source base:** fetched4a1283e6; bootstrap02d0ac64; authoritative integrationdf94f192.
-- **Current milestone:** `M0-A` pending.
-- **Active role and requested/configured/resolved model:** `NONE / unverified`.
-- **Last known commit / push:** none for this package.
-- **Next action:** planner revalidates exact source gesture/output owners and returns bounded protocol/deferral packet.
+- **Current milestone:** `M2-A` native gate deferred; M0/M1 protocol and M3 decision are docs only.
+- **Active role and requested/configured/resolved model:** implementer / requested Astra-xhigh / local Luna-max unchanged / actual backend UNVERIFIED.
+- **Last known commit / push:** parent baseline 06d23fc8a520d91f71d02cd1cc2fb95cc08500b4; no implementer commit/push.
+- **Next action:** parent independently reviews/canonicalizes the known native-gesture-output-proof package, then G05. Future execution needs documented secondary drag, identified current-source binary, isolated profile/fixture and actual clipboard-image observation/restoration.
 - **Blocker and scope:** documented native drag API lacks secondary-button selection; current-source app/output proof unexecuted.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
 |---|---|---|---|
-| `M0-A` | PENDING | — | Native feasibility and accepted-source inventory |
-| `M1-A` | PENDING | — | Build a truthful synthetic-or-native proof protocol |
-| `M1-B` | PENDING | — | Correct only demonstrated defects |
-| `M2-A` | PENDING | — | Run focused tests and native path if support exists |
-| `M3-A` | PENDING | — | Acceptance classification |
+| `M0-A` | NATIVE_PROOF_DEFERRED | Source/capability inventory documented only | Parent reviews safe docs |
+| `M1-A` | NATIVE_PROOF_DEFERRED | Planner complete native pixel protocol; NOT_EXECUTED | Preserve future pair |
+| `M1-B` | NATIVE_PROOF_DEFERRED | No reproduced defect; no correction made | Correct only a future demonstrated defect |
+| `M2-A` | NATIVE_PROOF_DEFERRED | Cargo/unit/native/output all NOT_RUN | Await exact capability/provenance/output gates |
+| `M3-A` | NATIVE_PROOF_DEFERRED | Documentation-only decision; no UNIT_VERIFIED claim | Parent review/canonicalization then G05 |
 
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
 
 - Runtime2026-10-30: G03 dependency decision closed before G04. Native skill/runtime inspected; import/list_apps succeed, installed Multi Launcher not running/no windows. Documented DragInput lacks button selection; right-click does not prove held secondary crop. No launch/input/output/clipboard/native gesture attempted, no source candidate imported. Source/protocol planner next.
+
+- 2026-10-30 01:30:34 UTC: planner source/protocol packet persisted and docs-only disposition recorded in [M2-A stall](../../../execution/multi-launcher-reliability-closeout-20261029-20261029-r01/goals/G04/stalls/M2-A-20261030T013034Z.md). Primary Redact/secondary crop, markup-only history, shared layer-then-crop Save/Copy and Solid semantics are SOURCE_OBSERVED only. Native secondary drag, current-source binary identity and actual clipboard-image proof remain unestablished. No source defect inferred; all current tests/native/output NOT_RUN. Planner pair covers known gap; NO_ACTION distinct findings, no duplicate follow-on.
