@@ -1,0 +1,3 @@
+# G05 orchestrator role record
+
+Parent/root configured Sol/medium; backend UNVERIFIED. Planner/reviewer requested Astra/max, implementer Astra/xhigh via reused explicit contexts; role pins/config unchanged. G04 disposition fully closed before G05. Read complete G05 pair; clean sole worktree/master verified; independent bootstrap branch. Scope bounded source-supported conditions/editor/Test Rule with existing ownership and fail-closed safety. No blanket native-deferral inference from G02/G04; planner must establish actual ready-candidate/action native boundary. One source writer; parent Git/ledger. No source/test work yet. NO_ACTION distinct findings at baseline.

@@ -1,0 +1,5 @@
+# G05 source revalidation baseline
+
+Run20261029-r01; branch codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01 from bootstrap02d0ac64d51655f43d6e958ea551f5bf658ee48d. Actual/fetched master4a1283e6edd2c245f562a07dbe3dcc6a61061eed unchanged. Clean sole worktree. Authoritative integration5873cb8a73dfa771d59431afe29986cda51b6c93: G00/G01 accepted, G02 native safety deferred, G03 dependency deferred, G04 native proof deferred; only G01 production source acceptedfd300ff7. G05 independent.
+
+Complete G05 Goal/Kickstart read. Current owners/types/callers/tests must be planner/source revalidated before edits. Persisted optional v2 conditions must remain fail closed until same-candidate/rule/action evidence and bounded predicates/editor/TestRule proof complete. No source/test/native work performed at baseline. Sibling global ledger bootstrap snapshot, integration authoritative.

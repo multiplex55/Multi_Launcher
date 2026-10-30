@@ -141,13 +141,13 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 
 ## 10. Execution progress — mutable (Codex updates here)
 
-- **Current state:** `NOT_STARTED`.
-- **Run ID and branch:** assigned by the orchestrator after safe source verification.
-- **Actual master/source base:** `UNVERIFIED_FOR_EXECUTION`.
+- **Current state:** `IN_PROGRESS`; M0-A safety contract/source planning.
+- **Run ID and branch:** 20261029-r01 / codex/closeout-g05-hotfolder-condition-evaluator-20261029-r01.
+- **Actual master/source base:** fetched master4a1283e6; bootstrap02d0ac64; integration5873cb8a.
 - **Current milestone:** `M0-A` pending.
 - **Active role and requested/configured/resolved model:** `NONE / unverified`.
 - **Last known commit / push:** none for this package.
-- **Next action:** read [KICKSTART](KICKSTART.md), confirm prerequisite and revalidate source; then begin on a fresh task branch.
+- **Next action:** planner current ready-candidate/conditions/action/editor/Test Rule owner map and bounded safety packet; no source until handoff.
 - **Blocker and scope:** none reported.
 
 | Milestone | State | Real artifact, source commit, verification and owner | Next exact action |
@@ -162,3 +162,5 @@ Size/age/literal conditions and Test Rule are implemented with accepted safety p
 ### Append-only execution events
 
 - Planning package created 2026-10-29; no goal code, test, branch, PR or merge was executed by generating these documents.
+
+- Runtime2026-10-30: prior goals dispositions closed sequentially throughG04; G05 independent frombootstrap. Master4a1283e6 unchanged after fetch, integration5873cb8a authoritative. Conditions fail-closed safety remains until actual evidence. Planner next; no source/test/native work at baseline.
