@@ -2926,6 +2926,8 @@ mod tests {
             MkAction::Delay(_) => (EditorKind::Timing, true),
             MkAction::Process(_) => (EditorKind::Process, true),
             MkAction::LauncherCommand(_) => (EditorKind::Launcher, true),
+            MkAction::OpenFolder(_) => (EditorKind::OpenFolder, cfg!(windows)),
+            MkAction::OpenUrl(_) => (EditorKind::OpenUrl, cfg!(windows)),
             MkAction::WindowActivate(_)
             | MkAction::WindowClose(_)
             | MkAction::WindowWait(_)
@@ -3174,6 +3176,50 @@ mod tests {
             action_catalog::draft_validation_contract(&read),
             action_catalog::DraftValidationContract::CommitReady
         ));
+    }
+
+    #[test]
+    fn direct_open_rows_are_typed_read_only_and_absent_from_the_palette() {
+        use crate::mkmacro::{MkOpenFolderPayload, MkOpenUrlPayload};
+
+        let actions = [
+            (
+                MkAction::OpenFolder(MkOpenFolderPayload {
+                    path: "C:\\work with spaces\\notes".into(),
+                }),
+                action_catalog::EditorKind::OpenFolder,
+                "Open Folder",
+                "C:\\work with spaces\\notes",
+            ),
+            (
+                MkAction::OpenUrl(MkOpenUrlPayload {
+                    url: "https://example.test/path?token=visible-in-authoring#part".into(),
+                }),
+                action_catalog::EditorKind::OpenUrl,
+                "Open URL",
+                "https://example.test/path?token=visible-in-authoring#part",
+            ),
+        ];
+
+        for (action, editor, name, detail) in actions {
+            assert_eq!(action_catalog::action_name(&action), name);
+            assert_eq!(action_catalog::action_details(&action), detail);
+            assert_eq!(action_catalog::editor_for_action(&action), editor);
+            assert!(action_catalog::editor_route_recognizes(&action, editor));
+            assert_eq!(
+                action_catalog::editor_contract(editor),
+                Some(action_catalog::EditorContract::ExistingActionReadOnly)
+            );
+            assert_eq!(
+                crate::mkmacro::executor::has_runtime_support(&action),
+                cfg!(windows)
+            );
+            assert!(
+                action_catalog::descriptors()
+                    .iter()
+                    .all(|descriptor| descriptor.name != name)
+            );
+        }
     }
 
     #[test]
@@ -4060,6 +4106,9 @@ mod tests {
                                 completeness.placeholder_copy.is_none(),
                                 "{context}: placeholder editor copy"
                             );
+                        }
+                        action_catalog::EditorContract::ExistingActionReadOnly => {
+                            panic!("{context}: read-only direct opens must not be palette entries")
                         }
                     }
                     assert!(

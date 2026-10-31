@@ -257,7 +257,7 @@ pub fn parse_package(bytes: &[u8]) -> Result<MkMacroPackage> {
         .and_then(|version| u32::try_from(version).ok())
         .context("package manifest has no valid schema version")?;
     ensure!(
-        matches!(source_schema, 12 | 13 | SCHEMA_VERSION),
+        matches!(source_schema, 12 | 13 | 14 | SCHEMA_VERSION),
         "unsupported macro schema version {source_schema}"
     );
     let mut package: MkMacroPackage =
@@ -506,7 +506,7 @@ fn validate_package(package: &MkMacroPackage) -> Result<()> {
         manifest.format_version
     );
     ensure!(
-        matches!(manifest.schema_version, 12 | 13 | SCHEMA_VERSION),
+        matches!(manifest.schema_version, 12 | 13 | 14 | SCHEMA_VERSION),
         "unsupported macro schema version {}",
         manifest.schema_version
     );
@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_normalizes_canonical_schema_twelve_packages_and_rejects_future_schema() {
+    fn parser_normalizes_direct_open_compatible_legacy_schemas_and_rejects_future_schema() {
         let mut package = MkMacroPackage {
             manifest: MkMacroPackageManifest {
                 format_version: PACKAGE_FORMAT_VERSION,
@@ -964,8 +964,11 @@ mod tests {
             },
             assets: vec![],
         };
-        let parsed = parse_package(&serde_json::to_vec(&package).unwrap()).unwrap();
-        assert_eq!(parsed.manifest.schema_version, SCHEMA_VERSION);
+        for legacy_schema in [12, 13, 14] {
+            package.manifest.schema_version = legacy_schema;
+            let parsed = parse_package(&serde_json::to_vec(&package).unwrap()).unwrap();
+            assert_eq!(parsed.manifest.schema_version, SCHEMA_VERSION);
+        }
 
         package.manifest.schema_version = SCHEMA_VERSION;
         package.manifest.macros[0].steps[0].action = MkAction::OcrFindText(MkOcrFindPayload {
@@ -992,6 +995,39 @@ mod tests {
                 .to_string()
                 .contains("unsupported macro schema")
         );
+    }
+
+    #[test]
+    fn direct_open_actions_round_trip_through_schema_fifteen_packages() {
+        let directory = tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let document = MkMacroDocument {
+            macros: vec![macro_with(
+                1,
+                "Direct opens",
+                None,
+                vec![
+                    step(
+                        1,
+                        MkAction::OpenFolder(MkOpenFolderPayload {
+                            path: "C:\\direct open fixture".into(),
+                        }),
+                    ),
+                    step(
+                        2,
+                        MkAction::OpenUrl(MkOpenUrlPayload {
+                            url: "https://example.test/path?q=1#part".into(),
+                        }),
+                    ),
+                ],
+            )],
+            ..Default::default()
+        };
+        let encoded = export_package(&store, &document, &[1]).unwrap();
+        let parsed = parse_package(&encoded).unwrap();
+        assert_eq!(parsed.manifest.schema_version, SCHEMA_VERSION);
+        assert_eq!(parsed.manifest.macros, document.macros);
+        assert!(parsed.assets.is_empty());
     }
 
     #[test]

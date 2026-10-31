@@ -6491,6 +6491,22 @@ mod runtime_snapshot_tests {
         ) -> ExecResult {
             Ok(())
         }
+
+        fn open_folder(
+            &self,
+            _target: &crate::mkmacro::direct_open::OpenFolderTarget,
+            _control: &RunControl,
+        ) -> ExecResult {
+            Ok(())
+        }
+
+        fn open_url(
+            &self,
+            _target: &crate::mkmacro::direct_open::OpenUrlTarget,
+            _control: &RunControl,
+        ) -> ExecResult {
+            Ok(())
+        }
     }
 
     #[derive(Clone)]

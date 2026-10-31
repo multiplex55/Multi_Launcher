@@ -4125,6 +4125,18 @@ fn action_ui(
                 launcher_pick = Some(super::launcher_action_picker::PickerPurpose::LauncherCommand);
             }
         }
+        MkAction::OpenFolder(payload) => {
+            ui.heading("Open Folder");
+            ui.label("Folder path");
+            ui.monospace(&payload.path);
+            ui.weak("This saved direct-open value is read-only in this editor.");
+        }
+        MkAction::OpenUrl(payload) => {
+            ui.heading("Open URL");
+            ui.label("HTTP or HTTPS URL");
+            ui.monospace(&payload.url);
+            ui.weak("This saved direct-open value is read-only in this editor.");
+        }
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => {}
         MkAction::OcrFindText(p) => {
             super::ocr_controls::search_match_ui(ui, &mut p.search);

@@ -712,6 +712,9 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if value.get("schema_version").and_then(|v| v.as_u64()) == Some(13) {
         migrate_v13_to_v14(&mut value)?;
     }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(14) {
+        migrate_v14_to_v15(&mut value)?;
+    }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = input_version != SCHEMA_VERSION;
@@ -742,6 +745,13 @@ pub(crate) fn probe_document(bytes: &[u8]) -> Result<DocumentProbe> {
     }
     if input_version == 13 {
         migrate_v13_to_v14(&mut value)?;
+    }
+    if value
+        .get("schema_version")
+        .and_then(|version| version.as_u64())
+        == Some(14)
+    {
+        migrate_v14_to_v15(&mut value)?;
     }
     if input_version >= 11 {
         serde_json::from_value::<MkMacroDocument>(value)?;
@@ -827,6 +837,16 @@ fn migrate_v13_to_v14(value: &mut serde_json::Value) -> Result<()> {
         }
     }
     root.insert("schema_version".into(), serde_json::json!(14));
+    Ok(())
+}
+
+/// Direct-open actions are additive. Schema-14 documents keep all content and
+/// advance only the document version when read by schema 15.
+fn migrate_v14_to_v15(value: &mut serde_json::Value) -> Result<()> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("schema 14 macro document must be an object"))?;
+    root.insert("schema_version".into(), serde_json::json!(15));
     Ok(())
 }
 
@@ -1834,6 +1854,68 @@ mod tests {
         assert_eq!(reloaded, loaded);
         persist(&path, &reloaded).unwrap();
         assert_eq!(fs::read(path).unwrap(), canonical);
+    }
+
+    #[test]
+    fn direct_open_schema_fourteen_upgrades_only_the_version_and_persists_canonically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let mut expected = representative_schema_twelve_document();
+        let next_step_id = expected.macros[0]
+            .steps
+            .iter()
+            .map(|step| step.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        expected.macros[0].steps.push(MkStep {
+            metadata: Default::default(),
+            id: next_step_id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action: MkAction::LauncherCommand(MkLauncherCommandPayload {
+                query: "legacy saved query".into(),
+                legacy_resolved_action: Some(crate::actions::Action {
+                    label: "legacy label".into(),
+                    desc: "legacy description".into(),
+                    action: "legacy:open".into(),
+                    args: Some("legacy argument".into()),
+                }),
+            }),
+        });
+        let mut source = serde_json::to_value(&expected).unwrap();
+        source["schema_version"] = serde_json::json!(14);
+        let macros_before = source["macros"].clone();
+        let folders_before = source["folders"].clone();
+        let settings_before = source["settings"].clone();
+        let bytes = serde_json::to_vec(&source).unwrap();
+
+        assert_eq!(probe_document(&bytes).unwrap(), DocumentProbe::Supported);
+        fs::write(&path, bytes).unwrap();
+        let (loaded, changed) = read_document(&path).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(loaded.macros, expected.macros);
+        assert_eq!(loaded.folders, expected.folders);
+        assert_eq!(loaded.settings, expected.settings);
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(matches!(
+            loaded.macros[0].steps.last().map(|step| &step.action),
+            Some(MkAction::LauncherCommand(MkLauncherCommandPayload {
+                legacy_resolved_action: Some(crate::actions::Action { action, .. }),
+                ..
+            })) if action == "legacy:open"
+        ));
+
+        persist(&path, &loaded).unwrap();
+        let canonical: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(canonical["schema_version"], SCHEMA_VERSION);
+        assert_eq!(canonical["macros"], macros_before);
+        assert_eq!(canonical["folders"], folders_before);
+        assert_eq!(canonical["settings"], settings_before);
     }
 
     #[test]

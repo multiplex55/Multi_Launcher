@@ -5,6 +5,7 @@ pub mod authoring_fields;
 pub mod call_graph;
 pub mod compiler;
 pub mod coordinates;
+pub mod direct_open;
 pub mod editor_mutation;
 pub mod executor;
 pub mod hotkeys;

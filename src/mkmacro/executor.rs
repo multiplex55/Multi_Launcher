@@ -1,5 +1,9 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 mod frame;
+use super::direct_open::{
+    DirectOpenError, DirectOpenField, OpenFolderTarget, OpenUrlTarget, prepare_open_folder,
+    prepare_open_url,
+};
 use super::ocr::{
     OcrBackend, OcrDocument, OcrSearchResult, UnsupportedOcrBackend, recognize_region,
     search_document,
@@ -320,6 +324,10 @@ pub trait LauncherBackend: Send + Sync {
     fn command(&self, query: &str, control: &RunControl) -> ExecResult;
     /// Submits a migration-only resolved action for GUI-thread activation.
     fn resolved_legacy(&self, action: &crate::actions::Action, control: &RunControl) -> ExecResult;
+    /// Opens one already validated absolute directory through the native OS boundary.
+    fn open_folder(&self, target: &OpenFolderTarget, control: &RunControl) -> ExecResult;
+    /// Opens one already validated HTTP(S) URL through the native OS boundary.
+    fn open_url(&self, target: &OpenUrlTarget, control: &RunControl) -> ExecResult;
 }
 pub trait ClipboardBackend: Send + Sync {
     /// Captures the text clipboard. Backends which cannot preserve non-text
@@ -636,6 +644,184 @@ impl LauncherBackend for ProductionLauncher {
             .context("action", action.action.clone())),
         }
     }
+
+    fn open_folder(&self, target: &OpenFolderTarget, control: &RunControl) -> ExecResult {
+        dispatch_open_folder(target, control)
+    }
+
+    fn open_url(&self, target: &OpenUrlTarget, control: &RunControl) -> ExecResult {
+        dispatch_open_url(target, control)
+    }
+}
+
+#[cfg(windows)]
+fn dispatch_open_folder(target: &OpenFolderTarget, control: &RunControl) -> ExecResult {
+    use std::process::Command;
+
+    let metadata = std::fs::metadata(target.path()).map_err(|error| {
+        native_open_error("folder", error.raw_os_error().map(|code| code as u32))
+    })?;
+    if !metadata.is_dir() || !target.path().is_absolute() {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::InvalidTarget,
+            "The folder target is no longer available",
+        )
+        .context("field", "folder.path"));
+    }
+
+    let executable = windows_explorer_executable()?;
+    let mut command = Command::new(executable);
+    command.arg(target.path());
+    // This is the final cancellation check before creating the external process.
+    control.checkpoint()?;
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| native_open_error("folder", error.raw_os_error().map(|code| code as u32)))
+}
+
+#[cfg(not(windows))]
+fn dispatch_open_folder(_: &OpenFolderTarget, control: &RunControl) -> ExecResult {
+    control.checkpoint()?;
+    unsupported_context("native direct-open", "open folder")
+}
+
+#[cfg(windows)]
+fn dispatch_open_url(target: &OpenUrlTarget, control: &RunControl) -> ExecResult {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::{
+            Foundation::HWND,
+            UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        },
+        core::{PCWSTR, w},
+    };
+
+    let mut url: Vec<u16> = std::ffi::OsStr::new(target.as_str())
+        .encode_wide()
+        .collect();
+    url.push(0);
+    // ShellExecuteW receives one URL argument and never evaluates shell text.
+    control.checkpoint()?;
+    let result = unsafe {
+        ShellExecuteW(
+            HWND::default(),
+            w!("open"),
+            PCWSTR(url.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as usize;
+    if code <= 32 {
+        Err(native_open_error("URL", Some(code as u32)))
+    } else {
+        // A successful return is the completed OS handoff. Do no later
+        // bookkeeping that could turn it into an error and cause a retry.
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn dispatch_open_url(_: &OpenUrlTarget, control: &RunControl) -> ExecResult {
+    control.checkpoint()?;
+    unsupported_context("native direct-open", "open URL")
+}
+
+#[cfg(windows)]
+fn windows_explorer_executable() -> ExecResult<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::{
+        Foundation::GetLastError, System::SystemInformation::GetWindowsDirectoryW,
+    };
+
+    let mut buffer = vec![0u16; 260];
+    for _ in 0..3 {
+        let length = unsafe { GetWindowsDirectoryW(Some(&mut buffer)) } as usize;
+        if length == 0 {
+            let code = unsafe { GetLastError().0 };
+            return Err(native_open_error("folder", Some(code)));
+        }
+        if length < buffer.len() {
+            buffer.truncate(length);
+            let directory = PathBuf::from(std::ffi::OsString::from_wide(&buffer));
+            if !directory.is_absolute() {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    "Could not locate the Windows folder opener",
+                )
+                .context("field", "folder.path"));
+            }
+            return Ok(directory.join("explorer.exe"));
+        }
+        buffer.resize(length + 1, 0);
+    }
+    Err(ExecutionDiagnostic::new(
+        DiagnosticKind::Backend,
+        "Could not locate the Windows folder opener",
+    )
+    .context("field", "folder.path"))
+}
+
+fn native_open_error(target: &'static str, native_code: Option<u32>) -> ExecutionDiagnostic {
+    let field = if target == "folder" {
+        "folder.path"
+    } else {
+        "url.url"
+    };
+    let mut error = ExecutionDiagnostic::new(
+        DiagnosticKind::Backend,
+        if target == "folder" {
+            "Could not hand off the folder to Windows"
+        } else {
+            "Could not hand off the URL to the default browser"
+        },
+    )
+    .context("field", field)
+    .context("backend", "native shell");
+    if let Some(code) = native_code {
+        error.context.insert("native_code".into(), code.to_string());
+    }
+    error
+}
+
+fn direct_open_target_error(
+    action: &'static str,
+    field: DirectOpenField,
+    error: DirectOpenError,
+) -> ExecutionDiagnostic {
+    let kind = match error {
+        DirectOpenError::NullVariable => DiagnosticKind::TypeMismatch,
+        _ => DiagnosticKind::InvalidTarget,
+    };
+    ExecutionDiagnostic::new(kind, error.safe_message(field))
+        .context("action", action)
+        .context("field", field.as_str())
+}
+
+fn safe_direct_open_backend_error(
+    action: &'static str,
+    field: &'static str,
+    error: ExecutionDiagnostic,
+) -> ExecutionDiagnostic {
+    let native_code = error
+        .context
+        .get("native_code")
+        .and_then(|value| value.parse::<u32>().ok());
+    let mut safe = ExecutionDiagnostic::new(
+        error.kind,
+        match action {
+            "Open Folder" => "Could not hand off the folder to Windows",
+            _ => "Could not hand off the URL to the default browser",
+        },
+    )
+    .context("action", action)
+    .context("field", field);
+    if let Some(code) = native_code {
+        safe.context.insert("native_code".into(), code.to_string());
+    }
+    safe
 }
 
 /// Constructs the application's effect boundaries without exposing an accidental
@@ -700,6 +886,14 @@ impl LauncherBackend for Unsupported {
     fn resolved_legacy(&self, _: &crate::actions::Action, control: &RunControl) -> ExecResult {
         control.checkpoint()?;
         unsupported()
+    }
+    fn open_folder(&self, _: &OpenFolderTarget, control: &RunControl) -> ExecResult {
+        control.checkpoint()?;
+        unsupported_context(self.backend, "open folder")
+    }
+    fn open_url(&self, _: &OpenUrlTarget, control: &RunControl) -> ExecResult {
+        control.checkpoint()?;
+        unsupported_context(self.backend, "open URL")
     }
 }
 impl PromptBackend for Unsupported {
@@ -4663,6 +4857,28 @@ impl Executor {
                     .command(&query, Arc::as_ref(&self.control))
                     .map_err(|error| error.context("backend", "launcher").context("query", query))
             }
+            MkAction::OpenFolder(payload) => {
+                let target = prepare_open_folder(&payload.path, v).map_err(|error| {
+                    direct_open_target_error("Open Folder", DirectOpenField::FolderPath, error)
+                })?;
+                self.control.checkpoint()?;
+                self.backends
+                    .launcher
+                    .open_folder(&target, Arc::as_ref(&self.control))
+                    .map_err(|error| {
+                        safe_direct_open_backend_error("Open Folder", "folder.path", error)
+                    })
+            }
+            MkAction::OpenUrl(payload) => {
+                let target = prepare_open_url(&payload.url, v).map_err(|error| {
+                    direct_open_target_error("Open URL", DirectOpenField::Url, error)
+                })?;
+                self.control.checkpoint()?;
+                self.backends
+                    .launcher
+                    .open_url(&target, Arc::as_ref(&self.control))
+                    .map_err(|error| safe_direct_open_backend_error("Open URL", "url.url", error))
+            }
             MkAction::WindowActivate(p) => self.backends.window.activate(p),
             MkAction::WindowClose(m) => self.backends.window.close(m),
             MkAction::WindowMoveResize(p) => self.backends.window.move_resize(p),
@@ -6976,6 +7192,7 @@ fn has_runtime_support_with_ocr(action: &MkAction, ocr_supported: bool) -> bool 
         | MkAction::Continue
         | MkAction::PixelCheck { .. }
         | MkAction::FindPixel(_) => true,
+        MkAction::OpenFolder(_) | MkAction::OpenUrl(_) => cfg!(windows),
         MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => true,
         MkAction::OcrFindText(_) | MkAction::OcrClickText(_) | MkAction::OcrReadText(_) => {
             ocr_supported
@@ -7103,6 +7320,7 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::UiFocus(_)
         | MkAction::UiWait(_) => "UIAutomation",
         MkAction::Process(_) | MkAction::LauncherCommand(_) => "launcher",
+        MkAction::OpenFolder(_) | MkAction::OpenUrl(_) => "native shell",
         MkAction::WaitUntil { .. } => "condition_evaluator",
         MkAction::PromptInput(_) => "prompt",
         MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_) => "clipboard",
@@ -7208,6 +7426,12 @@ pub mod fake {
         pub cursor: Mutex<MkPoint>,
         pub prompt_responses: Mutex<Vec<PromptResponse>>,
         pub processes: Mutex<Vec<MkProcessPayload>>,
+        pub opened_folders: Mutex<Vec<PathBuf>>,
+        pub opened_urls: Mutex<Vec<String>>,
+        pub open_folder_attempts: Mutex<usize>,
+        pub open_url_attempts: Mutex<usize>,
+        pub stop_open_url_before_acceptance: Mutex<bool>,
+        pub stop_open_url_after_acceptance: Mutex<bool>,
         pub launcher_queries: Mutex<Vec<String>>,
         pub legacy_actions: Mutex<Vec<crate::actions::Action>>,
         pub command_controls: Mutex<Vec<usize>>,
@@ -7231,6 +7455,12 @@ pub mod fake {
                 cursor: Mutex::new(MkPoint { x: 0, y: 0 }),
                 prompt_responses: Mutex::new(Vec::new()),
                 processes: Mutex::new(Vec::new()),
+                opened_folders: Mutex::new(Vec::new()),
+                opened_urls: Mutex::new(Vec::new()),
+                open_folder_attempts: Mutex::new(0),
+                open_url_attempts: Mutex::new(0),
+                stop_open_url_before_acceptance: Mutex::new(false),
+                stop_open_url_after_acceptance: Mutex::new(false),
                 launcher_queries: Mutex::new(Vec::new()),
                 legacy_actions: Mutex::new(Vec::new()),
                 command_controls: Mutex::new(Vec::new()),
@@ -7623,6 +7853,46 @@ pub mod fake {
                 .push(control as *const RunControl as usize);
             control.checkpoint()?;
             self.event(format!("legacy:{}", action.action))
+        }
+        fn open_folder(&self, target: &OpenFolderTarget, control: &RunControl) -> ExecResult {
+            self.command_controls
+                .lock()
+                .unwrap()
+                .push(control as *const RunControl as usize);
+            control.checkpoint()?;
+            *self.open_folder_attempts.lock().unwrap() += 1;
+            if let Some(error) = self.failures.lock().unwrap().get("open_folder").cloned() {
+                return Err(error);
+            }
+            self.opened_folders
+                .lock()
+                .unwrap()
+                .push(target.path().to_path_buf());
+            self.events.lock().unwrap().push("open_folder".into());
+            Ok(())
+        }
+        fn open_url(&self, target: &OpenUrlTarget, control: &RunControl) -> ExecResult {
+            self.command_controls
+                .lock()
+                .unwrap()
+                .push(control as *const RunControl as usize);
+            if std::mem::take(&mut *self.stop_open_url_before_acceptance.lock().unwrap()) {
+                control.stop();
+            }
+            control.checkpoint()?;
+            *self.open_url_attempts.lock().unwrap() += 1;
+            if let Some(error) = self.failures.lock().unwrap().get("open_url").cloned() {
+                return Err(error);
+            }
+            self.opened_urls
+                .lock()
+                .unwrap()
+                .push(target.as_str().to_owned());
+            self.events.lock().unwrap().push("open_url".into());
+            if std::mem::take(&mut *self.stop_open_url_after_acceptance.lock().unwrap()) {
+                control.stop();
+            }
+            Ok(())
         }
     }
     impl PromptBackend for FakeBackend {
@@ -9229,6 +9499,329 @@ mod phase_d_tests {
 
         assert_eq!(error.kind, DiagnosticKind::TargetNotFound);
         assert_eq!(configured[0].action, MkAction::ImageFind(payload));
+    }
+}
+
+#[cfg(test)]
+mod direct_open_execution_tests {
+    use super::{fake::FakeBackend, *};
+    use crate::mkmacro::{
+        MkErrorPolicy, MkMacro, MkOpenFolderPayload, MkOpenUrlPayload, MkRetry, MkStep, compile,
+    };
+
+    fn step(id: u64, action: MkAction) -> MkStep {
+        MkStep {
+            metadata: Default::default(),
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        }
+    }
+
+    fn open_folder(path: &str) -> MkAction {
+        MkAction::OpenFolder(MkOpenFolderPayload { path: path.into() })
+    }
+
+    fn open_url(url: &str) -> MkAction {
+        MkAction::OpenUrl(MkOpenUrlPayload { url: url.into() })
+    }
+
+    fn plan(steps: Vec<MkStep>) -> MkExecutionPlan {
+        compile(&MkMacro {
+            signature: Default::default(),
+            id: 9,
+            name: "direct-open fixture".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps,
+        })
+        .unwrap()
+    }
+
+    fn run_with_control(
+        steps: Vec<MkStep>,
+        fake: Arc<FakeBackend>,
+        control: Arc<RunControl>,
+    ) -> ExecResult {
+        Executor::new(fake.clone().backends(), control).execute(
+            &plan(steps),
+            ExecutionOptions::normal(),
+            &|_| {},
+        )
+    }
+
+    fn run(steps: Vec<MkStep>, fake: Arc<FakeBackend>) -> ExecResult {
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        run_with_control(steps, fake, control)
+    }
+
+    #[test]
+    fn direct_open_runtime_hands_off_expanded_targets_once() {
+        let folder_root = tempfile::tempdir().unwrap();
+        let folder = folder_root.path().join("folder with spaces – café");
+        std::fs::create_dir(&folder).unwrap();
+        let folder_string = folder.to_str().unwrap().to_owned();
+
+        let fake = Arc::new(FakeBackend::default());
+        run(
+            vec![
+                step(
+                    1,
+                    MkAction::SetVariable {
+                        name: "folder".into(),
+                        value: MkValue::String(folder_string),
+                    },
+                ),
+                step(2, open_folder("${folder}")),
+                step(
+                    3,
+                    MkAction::SetVariable {
+                        name: "target".into(),
+                        value: MkValue::String("https://example.test/path?q=one%20two#part".into()),
+                    },
+                ),
+                step(4, open_url("${target}")),
+            ],
+            fake.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(*fake.open_folder_attempts.lock().unwrap(), 1);
+        assert_eq!(*fake.open_url_attempts.lock().unwrap(), 1);
+        assert_eq!(fake.opened_folders.lock().unwrap().len(), 1);
+        assert!(fake.opened_folders.lock().unwrap()[0].is_absolute());
+        assert!(fake.opened_folders.lock().unwrap()[0].is_dir());
+        assert_eq!(
+            fake.opened_urls.lock().unwrap().as_slice(),
+            ["https://example.test/path?q=one%20two#part"]
+        );
+        assert_eq!(fake.events(), ["open_folder", "open_url"]);
+    }
+
+    #[test]
+    fn direct_open_uses_current_url_values_across_actions_and_runs() {
+        let fake = Arc::new(FakeBackend::default());
+        let first = "https://example.test/first?q=1";
+        let second = "https://example.test/second?q=2";
+        let third = "https://example.test/third?q=3";
+        let set_target = |id, value: &str| {
+            step(
+                id,
+                MkAction::SetVariable {
+                    name: "target".into(),
+                    value: MkValue::String(value.into()),
+                },
+            )
+        };
+
+        run(
+            vec![
+                set_target(1, first),
+                step(2, open_url("${target}")),
+                set_target(3, second),
+                step(4, open_url("${target}")),
+            ],
+            fake.clone(),
+        )
+        .unwrap();
+        run(
+            vec![set_target(1, third), step(2, open_url("${target}"))],
+            fake.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fake.opened_urls.lock().unwrap().as_slice(),
+            [first, second, third]
+        );
+        assert_eq!(*fake.open_url_attempts.lock().unwrap(), 3);
+    }
+
+    #[test]
+    fn direct_open_invalid_expanded_values_and_cancellation_have_zero_handoffs() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("not a folder.txt");
+        std::fs::write(&file, "fixture").unwrap();
+        let fake = Arc::new(FakeBackend::default());
+        let folder_error = run(
+            vec![
+                step(
+                    1,
+                    MkAction::SetVariable {
+                        name: "folder".into(),
+                        value: MkValue::String(file.to_str().unwrap().into()),
+                    },
+                ),
+                step(2, open_folder("${folder}")),
+            ],
+            fake.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(folder_error.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(*fake.open_folder_attempts.lock().unwrap(), 0);
+        assert!(fake.opened_folders.lock().unwrap().is_empty());
+
+        let url_error = run(
+            vec![
+                step(
+                    1,
+                    MkAction::SetVariable {
+                        name: "target".into(),
+                        value: MkValue::String("javascript:alert(1)".into()),
+                    },
+                ),
+                step(2, open_url("${target}")),
+            ],
+            fake.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(url_error.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(*fake.open_url_attempts.lock().unwrap(), 0);
+        assert!(fake.opened_urls.lock().unwrap().is_empty());
+
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        control.stop();
+        let cancelled = run_with_control(
+            vec![step(1, open_url("https://example.test/"))],
+            fake.clone(),
+            control,
+        )
+        .unwrap_err();
+        assert_eq!(cancelled.kind, DiagnosticKind::Cancelled);
+        assert_eq!(*fake.open_url_attempts.lock().unwrap(), 0);
+        assert!(fake.opened_urls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_open_cancellation_at_acceptance_boundary_never_retries_an_accepted_url() {
+        let target = "https://example.test/accept-once";
+
+        let before_acceptance = Arc::new(FakeBackend::default());
+        *before_acceptance
+            .stop_open_url_before_acceptance
+            .lock()
+            .unwrap() = true;
+        let mut action = step(1, open_url(target));
+        action.on_error = MkErrorPolicy::Retry(MkRetry {
+            attempts: 3,
+            delay_ms: 0,
+        });
+        let error = run(vec![action], before_acceptance.clone()).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(
+            *before_acceptance.open_url_attempts.lock().unwrap(),
+            0,
+            "the adapter's final cancellation check must happen before acceptance"
+        );
+        assert!(before_acceptance.opened_urls.lock().unwrap().is_empty());
+
+        let after_acceptance = Arc::new(FakeBackend::default());
+        *after_acceptance
+            .stop_open_url_after_acceptance
+            .lock()
+            .unwrap() = true;
+        let mut action = step(1, open_url(target));
+        action.on_error = MkErrorPolicy::Retry(MkRetry {
+            attempts: 3,
+            delay_ms: 0,
+        });
+        let error = run(vec![action], after_acceptance.clone()).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(*after_acceptance.open_url_attempts.lock().unwrap(), 1);
+        assert_eq!(
+            after_acceptance.opened_urls.lock().unwrap().as_slice(),
+            [target]
+        );
+    }
+
+    #[test]
+    fn direct_open_backend_errors_redact_target_and_context_values() {
+        let secret = "direct_open_backend_private_sentinel";
+        let fake = Arc::new(FakeBackend::default());
+        fake.fail(
+            "open_url",
+            ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                format!("native failure for https://example.test/?token={secret}"),
+            )
+            .context("url", secret)
+            .context("template", secret)
+            .context("native_code", "5; private data"),
+        );
+        let error = run(vec![step(1, open_url("https://example.test/"))], fake).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert_eq!(
+            error.context.get("field").map(String::as_str),
+            Some("url.url")
+        );
+        assert!(!format!("{error:?}").contains(secret));
+        assert!(!format!("{error:?}").contains("native failure"));
+        assert!(!format!("{error:?}").contains("private data"));
+    }
+
+    #[test]
+    fn direct_open_retry_and_continue_policies_only_retry_pre_handoff_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeBackend::default());
+        let mut successful = step(1, open_folder(directory.path().to_str().unwrap()));
+        successful.on_error = MkErrorPolicy::Retry(MkRetry {
+            attempts: 3,
+            delay_ms: 0,
+        });
+        run(vec![successful], fake.clone()).unwrap();
+        assert_eq!(*fake.open_folder_attempts.lock().unwrap(), 1);
+        assert_eq!(fake.opened_folders.lock().unwrap().len(), 1);
+
+        for (policy, attempts, should_continue) in [
+            (MkErrorPolicy::Stop, 1, false),
+            (MkErrorPolicy::Continue, 1, true),
+            (
+                MkErrorPolicy::Retry(MkRetry {
+                    attempts: 2,
+                    delay_ms: 0,
+                }),
+                2,
+                false,
+            ),
+        ] {
+            let fake = Arc::new(FakeBackend::default());
+            fake.fail(
+                "open_url",
+                ExecutionDiagnostic::new(DiagnosticKind::Backend, "pre-handoff OS adapter failure"),
+            );
+            let mut first = step(1, open_url("https://example.test/"));
+            first.on_error = policy;
+            let result = run(
+                vec![
+                    first,
+                    step(
+                        2,
+                        MkAction::Text(MkTextPayload {
+                            text: "continued".into(),
+                            mode: crate::mkmacro::MkTextMode::Type,
+                        }),
+                    ),
+                ],
+                fake.clone(),
+            );
+            assert_eq!(result.is_ok(), should_continue);
+            assert_eq!(*fake.open_url_attempts.lock().unwrap(), attempts);
+            assert!(fake.opened_urls.lock().unwrap().is_empty());
+            assert_eq!(
+                fake.events().contains(&"text:continued".into()),
+                should_continue
+            );
+        }
     }
 }
 

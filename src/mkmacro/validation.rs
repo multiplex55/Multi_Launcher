@@ -1,7 +1,7 @@
-use super::SearchRegion;
 use super::model::*;
 use super::variables::*;
 use super::{CaptureGeometryError, MonitorDescriptor};
+use super::{SearchRegion, direct_open};
 use regex::Regex;
 use std::{collections::HashSet, path::Path};
 
@@ -473,6 +473,28 @@ fn analyze_document_with_context(
                             sid,
                             "empty_launcher_command",
                             "Launcher Command requires a command/query",
+                        );
+                    }
+                }
+                MkAction::OpenFolder(payload) => {
+                    if let Err(error) = direct_open::validate_open_folder_template(&payload.path) {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_open_folder_template",
+                            error.safe_message(direct_open::DirectOpenField::FolderPath),
+                        );
+                    }
+                }
+                MkAction::OpenUrl(payload) => {
+                    if let Err(error) = direct_open::validate_open_url_template(&payload.url) {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_open_url_template",
+                            error.safe_message(direct_open::DirectOpenField::Url),
                         );
                     }
                 }
@@ -3470,6 +3492,85 @@ mod clipboard_action_model_validation_tests {
             known_wrong_type
                 .iter()
                 .all(|diagnostic| !diagnostic.message.contains(sentinel))
+        );
+    }
+}
+
+#[cfg(test)]
+mod direct_open_validation_tests {
+    use super::*;
+
+    fn document(actions: Vec<MkAction>) -> MkMacroDocument {
+        MkMacroDocument {
+            macros: vec![MkMacro {
+                signature: Default::default(),
+                id: 1,
+                name: "direct-open validation".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
+                playback: Default::default(),
+                steps: actions
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, action)| MkStep {
+                        metadata: Default::default(),
+                        id: index as u64 + 1,
+                        enabled: true,
+                        breakpoint: false,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: Default::default(),
+                        action,
+                    })
+                    .collect(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn direct_open_drafts_validate_literal_urls_and_interpolation_templates() {
+        let valid = document(vec![
+            MkAction::SetVariable {
+                name: "folder".into(),
+                value: MkValue::String("C:\\test folder".into()),
+            },
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: "${folder}".into(),
+            }),
+            MkAction::SetVariable {
+                name: "host".into(),
+                value: MkValue::String("example.test".into()),
+            },
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://${host}/path?q=$${literal}".into(),
+            }),
+        ]);
+        assert!(validate_document(&valid, None).is_empty());
+
+        let secret = "direct_open_validation_private_sentinel";
+        let invalid = document(vec![
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: String::new(),
+            }),
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: format!("https://example.test/{secret} with space"),
+            }),
+        ]);
+        let diagnostics = validate_document(&invalid, None);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_open_folder_template" && diagnostic.step_id == Some(1)
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_open_url_template" && diagnostic.step_id == Some(2)
+        }));
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.message.contains(secret))
         );
     }
 }

@@ -182,6 +182,8 @@ fn rewrite_action_pixel_targets(action: &mut MkAction, search_ids: &BTreeMap<u64
         | MkAction::Delay(_)
         | MkAction::Process(_)
         | MkAction::LauncherCommand(_)
+        | MkAction::OpenFolder(_)
+        | MkAction::OpenUrl(_)
         | MkAction::WindowActivate(_)
         | MkAction::WindowClose(_)
         | MkAction::WindowWait(_)
@@ -908,5 +910,25 @@ mod tests {
                 .all(|id| !end.inserted_ids.contains(id))
         );
         assert!(analyze_structure(&destination).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn direct_open_payloads_are_untouched_by_pixel_identity_rewrites() {
+        use crate::mkmacro::{MkOpenFolderPayload, MkOpenUrlPayload};
+
+        let search_ids = BTreeMap::from([(7, 99)]);
+        let mut actions = [
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: "${folder}".into(),
+            }),
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://${host}/path?q=${query}".into(),
+            }),
+        ];
+        let original = actions.clone();
+        for action in &mut actions {
+            rewrite_action_pixel_targets(action, &search_ids);
+        }
+        assert_eq!(actions, original);
     }
 }
