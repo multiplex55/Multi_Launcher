@@ -1,0 +1,9 @@
+{
+  "observed_utc": "2026-10-31T01:11:58.1214375+00:00",
+  "prior_branch": "codex/linear-01-g02-table-publication-20261030",
+  "prior_closing_tip": "f26ba48e73657d1ab033884bf11e7731b7380646",
+  "push": "SUCCESS",
+  "next_branch": "codex/linear-02-g05-hotfolder-20261030",
+  "source_clean": true,
+  "process_family": "B1 completed; known PIDs absent, outputs drained, child-tree limitation recorded"
+}
