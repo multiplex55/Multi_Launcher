@@ -1,0 +1,88 @@
+{
+  "phase": "list",
+  "verb": "cargo nextest list",
+  "command_arguments": [
+    "nextest",
+    "list",
+    "-p",
+    "multi_launcher",
+    "-p",
+    "multi_launcher_table_core",
+    "--cargo-profile",
+    "fast-dev",
+    "--lib",
+    "--offline",
+    "--locked",
+    "--color",
+    "never",
+    "-E",
+    "test(table_publication_) | test(resource_pool_leases_share_usage_and_release_on_last_owner) | test(partial_temp_append_failure_keeps_charge_until_owned_file_is_removed) | test(failed_temp_deletion_keeps_a_retryable_charge_until_removed) | test(cloned_snapshot_handles_keep_each_allocation_charged_after_session_drop) | test(pending_job_releases_its_resource_leases_before_confirmed_activity_retirement) | test(file_page_failure_and_cancellation_preserve_the_last_good_page) | test(file_page_completion_from_closed_lifetime_is_ignored_after_reopen) | test(table_session_draft_edits_revoke_queued_export_receipts) | test(table_file_save_refuses_to_replace_the_opened_source) | test(table_file_save_requires_confirmation_and_publishes_the_captured_output)",
+    "--message-format",
+    "json"
+  ],
+  "filter": "test(table_publication_) | test(resource_pool_leases_share_usage_and_release_on_last_owner) | test(partial_temp_append_failure_keeps_charge_until_owned_file_is_removed) | test(failed_temp_deletion_keeps_a_retryable_charge_until_removed) | test(cloned_snapshot_handles_keep_each_allocation_charged_after_session_drop) | test(pending_job_releases_its_resource_leases_before_confirmed_activity_retirement) | test(file_page_failure_and_cancellation_preserve_the_last_good_page) | test(file_page_completion_from_closed_lifetime_is_ignored_after_reopen) | test(table_session_draft_edits_revoke_queued_export_receipts) | test(table_file_save_refuses_to_replace_the_opened_source) | test(table_file_save_requires_confirmation_and_publishes_the_captured_output)",
+  "head": "80455ffa2efec14de5a1571e411a618994b26083",
+  "branch": "codex/linear-01-g02-table-publication-20261030",
+  "source_identities": [
+    {
+      "path": "src/file_operations.rs",
+      "git_blob": "645f8e8babedfde7f4362cebcc4b822c4fb2ffba",
+      "sha256": "b3e3a8db372f91cafde04fbe8e81906e138a3503726a207bcc9523f2e7bf5cea"
+    },
+    {
+      "path": "src/table_utility_session.rs",
+      "git_blob": "83ecd7be538cbbe29985007de76ba0523599fc06",
+      "sha256": "81607e1f9d24ba2470e08684273f61cdc5358b1cbcee784a2f54532cfd5de7c1"
+    },
+    {
+      "path": "src/table_utility_session/publication.rs",
+      "git_blob": "43d8edc3ecae7984eec387505e2a4a86afae2e4b",
+      "sha256": "622fe9b00e80208fbae8d440c66646b51e80a19cb956ce1cdd2fb705bfa4a530"
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/lib.rs",
+      "git_blob": "0e4dccc43056ac0a4e29b4329dac5626cf784d5b",
+      "sha256": "eda9adebb919b2cc52ed4062913575f12ea02c0e014849266543f163ca8c28c2"
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/resource.rs",
+      "git_blob": "b10c0b880b129a7902369c5af4490e21c1342a6d",
+      "sha256": "2ce1f1bb3a9e9d373253dba1ae67bbb5778216f8645853c5cb611aaf493ce583"
+    }
+  ],
+  "git_status_short_at_start": [
+    " M crates/multi_launcher_table_core/src/lib.rs",
+    " M crates/multi_launcher_table_core/src/resource.rs",
+    " M docs/plans/execution/multi-launcher-linear-followons-20261030-r01/PROGRAM_STATUS.md",
+    " M src/file_operations.rs",
+    " M src/table_utility_session.rs",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/ACCEPTED_SOURCE_MANIFEST.md",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/DEPENDENCY_MAP.md",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/RISKS_AND_DECISIONS.md",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/roles/orchestrator/PREPARATION_OBSERVATIONS.md",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/roles/planner/",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G02/roles/",
+    "?? src/table_utility_session/"
+  ],
+  "started_utc": "2026-10-30T19:06:49.1431085+00:00",
+  "finished_utc": "2026-10-30T19:09:25.6173084+00:00",
+  "elapsed_seconds": 156.474,
+  "cap_seconds": 600,
+  "cargo_pid": 14240,
+  "observed_process_tree_pids": [
+    14240
+  ],
+  "process_tree_inventory_status": "limited",
+  "process_tree_inventory_errors": [
+    "Access denied"
+  ],
+  "live_owned_pids_at_drain": [],
+  "timed_out": false,
+  "exit_code": 101,
+  "stdout_path": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\roles\\implementer\\verification\\m1a-current\\list.stdout.log",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_path": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\roles\\implementer\\verification\\m1a-current\\list.stderr.log",
+  "stderr_sha256": "e9cbf0126b18c7d4067e2b3dc26f14deaba709e604ddf93e10204f17616ae5a2",
+  "output_drained": true,
+  "supervisor_pid": 25480
+}

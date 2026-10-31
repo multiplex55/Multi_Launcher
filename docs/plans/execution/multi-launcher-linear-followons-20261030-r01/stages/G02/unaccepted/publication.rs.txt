@@ -1,0 +1,415 @@
+//! Private source-bound, new-file-only foundation. Worker/session lifecycle
+//! integration is a separate checkpoint; this module has no production caller.
+
+use super::*;
+use crate::file_operations::{NativeFileIdentity, NativeTablePublication};
+use multi_launcher_table_core::{TableSourceId, TableTempFile};
+
+const MAX_PUBLICATION_CHUNK: usize = 64 * 1024;
+
+struct PublicationManifest {
+    lifetime: TableSessionLifetime,
+    source_revision: TableSourceRevision,
+    accepted_revision: TableSourceRevision,
+    view_revision: TableViewRevision,
+    selection_revision: TableSelectionRevision,
+    operation: TableExportOperation,
+    source_id: TableSourceId,
+    identity: TableSourceIdentity,
+    path: PathBuf,
+    draft: Arc<str>,
+    source_display_revision: u64,
+    source: Arc<TableFileBackedSource>,
+    rows: TableFileRowSelection,
+    columns: TableResourceOwned<HashSet<usize>>,
+    admission: TableResourcePool,
+}
+
+impl PublicationManifest {
+    fn capture(session: &mut TableUtilitySession) -> Result<Self, String> {
+        if !session.open
+            || session.source_dirty
+            || session.resource_policy_error.is_some()
+            || session.resource_pool.pending_temp_cleanup_count() != 0
+        {
+            return Err("Table publication is not currently available.".into());
+        }
+        let source = session
+            .accepted_source
+            .as_ref()
+            .and_then(TableAcceptedSource::file_source)
+            .ok_or("Publication requires an admitted file source.")?;
+        let accepted_revision = session
+            .accepted_source_revision
+            .filter(|revision| *revision == session.source_revision)
+            .ok_or("The admitted source is stale.")?;
+        let rows = session
+            .file_row_selection
+            .as_ref()
+            .filter(|rows| {
+                rows.source_id() == source.id()
+                    && rows.row_count() == source.row_count()
+                    && rows.selected_count() > 0
+            })
+            .ok_or("The row selection belongs to another source or is empty.")?;
+        if !source.validation_complete()
+            || session.selected_columns.is_empty()
+            || session
+                .selected_columns
+                .iter()
+                .any(|column| *column >= source.column_count())
+            || parse_options_for_file_source(source.options()) != session.parse_options
+        {
+            return Err("The source or selected columns are not current.".into());
+        }
+        let path = session
+            .source_path
+            .clone()
+            .ok_or("The admitted source path is missing.")?;
+        let next = session
+            .next_export
+            .checked_add(1)
+            .ok_or("Publication operation exhausted.")?;
+        session.next_export = next;
+        Ok(Self {
+            lifetime: session.lifetime,
+            source_revision: session.source_revision,
+            accepted_revision,
+            view_revision: session.view_revision,
+            selection_revision: session.selection_revision,
+            operation: TableExportOperation(next),
+            source_id: source.id(),
+            identity: source.identity(),
+            path,
+            draft: Arc::clone(&session.source),
+            source_display_revision: session.source_display_revision,
+            source: Arc::clone(source),
+            rows: rows.clone(),
+            columns: session.selected_columns.clone(),
+            admission: session.resource_pool.capture_policy(),
+        })
+    }
+
+    fn matches(&self, session: &TableUtilitySession) -> bool {
+        session.open
+            && !session.source_dirty
+            && session.lifetime == self.lifetime
+            && session.source_revision == self.source_revision
+            && session.accepted_source_revision == Some(self.accepted_revision)
+            && session.view_revision == self.view_revision
+            && session.selection_revision == self.selection_revision
+            && session.next_export == self.operation.0
+            && session.source_path.as_ref() == Some(&self.path)
+            && session.source_display_revision == self.source_display_revision
+            && Arc::ptr_eq(&session.source, &self.draft)
+            && session.parse_options == parse_options_for_file_source(self.source.options())
+            && session.file_row_selection.as_ref().is_some_and(|rows| {
+                rows.source_id() == self.rows.source_id()
+                    && rows.row_count() == self.rows.row_count()
+                    && rows.mode() == self.rows.mode()
+                    && rows.exception_count() == self.rows.exception_count()
+            })
+            && *session.selected_columns == *self.columns
+            && session
+                .accepted_source
+                .as_ref()
+                .and_then(TableAcceptedSource::file_source)
+                .is_some_and(|source| {
+                    Arc::ptr_eq(source, &self.source)
+                        && source.id() == self.source_id
+                        && source.identity() == self.identity
+                })
+    }
+}
+
+struct PublicationStage {
+    manifest: PublicationManifest,
+    native: Arc<NativeTablePublication>,
+    file: TableTempFile,
+    identity: NativeFileIdentity,
+    poisoned: bool,
+}
+
+#[derive(Debug)]
+struct PublicationReceipt {
+    operation: TableExportOperation,
+    identity: NativeFileIdentity,
+    bytes: u64,
+}
+
+impl PublicationStage {
+    fn reserve(session: &mut TableUtilitySession, destination: &Path) -> Result<Self, String> {
+        let manifest = PublicationManifest::capture(session)?;
+        let native = NativeTablePublication::reserve(
+            &manifest.path,
+            NativeFileIdentity::from_parts(
+                manifest.identity.volume_serial_number,
+                manifest.identity.file_id,
+            ),
+            manifest.source.byte_count(),
+            destination,
+        )
+        .map_err(|error| error.to_string())?;
+        let directory = native.directory().to_path_buf();
+        let probe_path = directory.clone();
+        let workspace = TableTempWorkspace::for_publication_directory(
+            directory,
+            manifest.admission.clone(),
+            move || temp_volume_available_bytes(&probe_path),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut file = workspace
+            .create_publication_file(|path| native.create_stage(path))
+            .map_err(|error| error.to_string())?;
+        let path = file.path().to_path_buf();
+        let identity = file
+            .inspect_owned(|file| native.inspect_stage(file, &path))
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            manifest,
+            native,
+            file,
+            identity,
+            poisoned: false,
+        })
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if self.poisoned || bytes.len() > MAX_PUBLICATION_CHUNK {
+            self.poisoned = true;
+            return Err("Publication chunk is oversized or the stage already failed.".into());
+        }
+        if let Err(error) = self.file.append(bytes) {
+            self.poisoned = true;
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+
+    // The stage cannot authorize itself: the actual session is checked at the
+    // irreversible boundary. M1-B must provide the sole normal session caller.
+    fn publish(mut self, session: &TableUtilitySession) -> Result<PublicationReceipt, String> {
+        if self.poisoned
+            || !self.manifest.matches(session)
+            || self.manifest.admission.pending_temp_cleanup_count() != 0
+        {
+            return Err("Publication authority is stale or cleanup is unresolved.".into());
+        }
+        self.native
+            .verify_source()
+            .map_err(|error| error.to_string())?;
+        let path = self.file.path().to_path_buf();
+        if self
+            .file
+            .inspect_owned(|file| self.native.inspect_stage(file, &path))
+            .map_err(|error| error.to_string())?
+            != self.identity
+        {
+            return Err("Publication stage identity changed before sealing.".into());
+        }
+        let bytes = self.file.charged_bytes();
+        let identity = self
+            .file
+            .publish_owned(|file| self.native.publish(file, &path, self.identity))
+            .map_err(|error| error.to_string())?;
+        Ok(PublicationReceipt {
+            operation: self.manifest.operation,
+            identity,
+            bytes,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, TableUtilitySession) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.csv");
+        std::fs::write(&path, b"a,b\n1,2\n3,4\n").unwrap();
+        let mut session = TableUtilitySession::new();
+        let (path, source) = scan_table_file(
+            &path,
+            TableFileParseOptions::for_profile(TableUtilityProfile::Table, true),
+            session.resource_pool.capture_policy(),
+            &TableCancellationToken::new(),
+            &mut |_| {},
+        )
+        .unwrap_or_else(|error| match error {
+            FileReadError::Cancelled => panic!("fixture source admission was cancelled"),
+            FileReadError::Failed(message) => {
+                panic!("fixture source admission failed: {message}")
+            }
+        });
+        session.open = true;
+        session.source_path = Some(path);
+        session.parse_options = parse_options_for_file_source(source.options());
+        session.accepted_source_revision = Some(session.source_revision);
+        session.source_dirty = false;
+        session.file_row_selection = Some(
+            TableFileRowSelection::all_selected(
+                source.id(),
+                source.row_count(),
+                &session.resource_pool,
+            )
+            .unwrap(),
+        );
+        session.selected_columns =
+            all_selected_columns(&session.resource_pool, source.column_count()).unwrap();
+        session.accepted_source = Some(TableAcceptedSource::FileBacked(source));
+        (directory, session)
+    }
+
+    #[test]
+    fn table_publication_native_new_file_preserves_source_and_transfers_exact_identity() {
+        let (directory, mut session) = fixture();
+        let baseline = session.resource_pool.usage();
+        let output = directory.path().join("output.csv");
+        let mut stage = PublicationStage::reserve(&mut session, &output).unwrap();
+        let identity = stage.identity;
+        let staged_path = stage.file.path().to_path_buf();
+        stage.append(b"header\n").unwrap();
+        stage.append(b"full row\n").unwrap();
+        assert_eq!(
+            session.resource_pool.usage().temp_bytes,
+            baseline.temp_bytes + 16
+        );
+        let receipt = stage.publish(&session).unwrap();
+        assert_eq!(receipt.identity, identity);
+        assert_eq!(receipt.bytes, 16);
+        assert_eq!(receipt.operation.value(), session.next_export);
+        assert_eq!(
+            crate::file_operations::native_file_identity(&File::open(&output).unwrap()).unwrap(),
+            identity
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), b"header\nfull row\n");
+        assert!(!staged_path.exists());
+        assert_eq!(session.resource_pool.usage(), baseline);
+        assert_eq!(
+            std::fs::read(session.source_path.as_ref().unwrap()).unwrap(),
+            b"a,b\n1,2\n3,4\n"
+        );
+    }
+
+    #[test]
+    fn table_publication_native_occupied_same_source_and_appeared_outputs_are_untouched() {
+        let (directory, mut session) = fixture();
+        let source = session.source_path.clone().unwrap();
+        assert!(PublicationStage::reserve(&mut session, &source).is_err());
+        let alias = directory.path().join("alias.csv");
+        std::fs::hard_link(&source, &alias).unwrap();
+        assert!(PublicationStage::reserve(&mut session, &alias).is_err());
+        assert!(PublicationStage::reserve(&mut session, directory.path()).is_err());
+        let output = directory.path().join("appeared.csv");
+        let mut stage = PublicationStage::reserve(&mut session, &output).unwrap();
+        let path = stage.file.path().to_path_buf();
+        stage.append(b"private output").unwrap();
+        std::fs::write(&output, b"external occupant").unwrap();
+        assert!(stage.publish(&session).is_err());
+        assert_eq!(std::fs::read(output).unwrap(), b"external occupant");
+        assert!(!path.exists());
+        assert_eq!(session.resource_pool.pending_temp_cleanup_count(), 0);
+    }
+
+    #[test]
+    fn table_publication_native_source_parent_and_stage_cannot_be_substituted() {
+        let (directory, mut session) = fixture();
+        let source = session.source_path.clone().unwrap();
+        let output = directory.path().join("output.csv");
+        let stage = PublicationStage::reserve(&mut session, &output).unwrap();
+        let stage_path = stage.file.path().to_path_buf();
+        assert!(OpenOptions::new().write(true).open(&source).is_err());
+        assert!(std::fs::rename(&source, directory.path().join("moved-source")).is_err());
+        assert!(
+            std::fs::rename(
+                directory.path(),
+                directory.path().with_extension("relocated")
+            )
+            .is_err()
+        );
+        assert!(std::fs::rename(&stage_path, directory.path().join("moved-stage")).is_err());
+        assert!(std::fs::remove_file(&stage_path).is_err());
+        assert!(OpenOptions::new().write(true).open(&stage_path).is_err());
+        drop(stage);
+        assert!(!stage_path.exists());
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn table_publication_native_preexisting_writer_and_wrong_source_identity_refuse() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.csv");
+        std::fs::write(&path, b"a\n1\n").unwrap();
+        let writer = OpenOptions::new().write(true).open(&path).unwrap();
+        assert!(open_readonly_source(&path).is_err());
+        drop(writer);
+        let (_fixture, session) = fixture();
+        let source = session
+            .accepted_source
+            .as_ref()
+            .unwrap()
+            .file_source()
+            .unwrap();
+        let identity = source.identity();
+        assert!(
+            NativeTablePublication::reserve(
+                &path,
+                NativeFileIdentity::from_parts(identity.volume_serial_number, identity.file_id),
+                source.byte_count(),
+                &directory.path().join("output.csv"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn table_publication_native_unsupported_paths_refuse_before_stage_creation() {
+        let (directory, mut session) = fixture();
+        let baseline = session.resource_pool.usage();
+        for path in [
+            directory.path().join("output.csv:stream"),
+            directory.path().join("NUL.csv"),
+            directory.path().join("trailing."),
+            directory.path().join("missing-parent").join("output.csv"),
+            PathBuf::from("relative-output.csv"),
+        ] {
+            assert!(
+                PublicationStage::reserve(&mut session, &path).is_err(),
+                "{}",
+                path.display()
+            );
+            assert_eq!(session.resource_pool.usage(), baseline);
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn table_publication_manifest_revisions_and_bounded_chunks_refuse_without_output() {
+        for mismatch in 0..8 {
+            let (directory, mut session) = fixture();
+            let baseline = session.resource_pool.usage();
+            let output = directory.path().join("output.csv");
+            let mut stage = PublicationStage::reserve(&mut session, &output).unwrap();
+            let path = stage.file.path().to_path_buf();
+            stage.append(b"not published").unwrap();
+            match mismatch {
+                0 => session.lifetime.0 += 1,
+                1 => session.source_revision.0 += 1,
+                2 => session.view_revision.0 += 1,
+                3 => session.selection_revision.0 += 1,
+                4 => {
+                    session.source = Arc::from("changed draft");
+                    session.source_display_revision += 1;
+                }
+                5 => session.next_export += 1,
+                6 => session.file_row_selection = None,
+                _ => assert!(stage.append(&vec![0; MAX_PUBLICATION_CHUNK + 1]).is_err()),
+            }
+            assert!(stage.publish(&session).is_err());
+            assert!(!output.exists());
+            assert!(!path.exists());
+            assert_eq!(session.resource_pool.usage(), baseline);
+        }
+    }
+}

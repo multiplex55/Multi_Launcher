@@ -1,0 +1,47 @@
+{
+  "captured_utc": "2026-10-30T18:57:44.441Z",
+  "base_commit": "80455ffa2efec14de5a1571e411a618994b26083",
+  "donor_commit": "f879a2a880d59e941486241e652299dabc002365",
+  "source_identities": [
+    {
+      "path": "src/file_operations.rs",
+      "current_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "working_sha256": "b88bd57c493406acbdd39681782637890cc0334e02053fb57ced024a53bd814a",
+      "donor_parent_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "donor_blob": "61a4bc3e41b1f4b36f8cc7fdbcb78e96631ec7dd",
+      "current_matches_donor_parent": true
+    },
+    {
+      "path": "src/table_utility_session.rs",
+      "current_blob": "b7f5bb8b525d0786067fb30d6d25199c6fb5ce4d",
+      "working_sha256": "3e43d7a35182882296cbe970d97bd9d5108cf341f48933f1a6e051c6871211dd",
+      "donor_parent_blob": "b7f5bb8b525d0786067fb30d6d25199c6fb5ce4d",
+      "donor_blob": "f0f9c6b5deb3fbbd39b079600b3efdd2ee508f07",
+      "current_matches_donor_parent": true
+    },
+    {
+      "path": "src/table_utility_session/publication.rs",
+      "current_blob": null,
+      "working_sha256": null,
+      "donor_parent_blob": null,
+      "donor_blob": "8c5de16370cf0bfc5168cdb1df8d1e2277dc9695",
+      "current_matches_donor_parent": false
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/lib.rs",
+      "current_blob": "0cba07df6636a0922ac7ad815c80918f54ce10d5",
+      "working_sha256": "c9b53733edeff8ac5307df2788b96941f0b57e0ed052ad868c7be07e1204efee",
+      "donor_parent_blob": "0cba07df6636a0922ac7ad815c80918f54ce10d5",
+      "donor_blob": "0e4dccc43056ac0a4e29b4329dac5626cf784d5b",
+      "current_matches_donor_parent": true
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/resource.rs",
+      "current_blob": "74def7e006cffddff576bab08563bd284c52374b",
+      "working_sha256": "986c2f08e603f450af9cc54de497423bf52e0807979b847e0c17e112c9c7ad82",
+      "donor_parent_blob": "74def7e006cffddff576bab08563bd284c52374b",
+      "donor_blob": "7adf7f8cf557b12eb6220c85b9341937e0954ec4",
+      "current_matches_donor_parent": true
+    }
+  ]
+}

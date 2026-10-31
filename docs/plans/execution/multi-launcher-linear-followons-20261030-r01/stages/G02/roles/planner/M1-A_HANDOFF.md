@@ -1,0 +1,9 @@
+# B01/M1-A planner packet receipt
+
+Read-only /root/g02_packet, configured planner gpt-6.1-sol/high; host serving backend UNVERIFIED. Packet returned in active session after original/follow-on/safety/inventory/current source/donor comparison. No writes/build/native actions.
+
+Current five permitted source paths equal f879a2a8^ (empty path-scoped diff). Private publisher/module/TableTempFileOwner absent. Reconstruct only those owners against accepted baseline; f879a2a8 source remains UNACCEPTED. Exact source scope and acceptance budget in ../../SOURCE_REVALIDATION.md.
+
+Planner identifies retained-chain reopen after initial native admission: request metadata-only DirectoryOpenAccess::Metadata; keep initial component validation and reopen identity/canonical/volume checks. Preserve BackendFailure.path/kind/message at Table boundary. Existing native CreateFile helper must transfer stage ownership before fallible inspection; cleanup capability belongs in existing core resource pending-cleanup map, no parallel queue. No path fallback or changed sharing. rename_open_file_no_replace uses original handle and ReplaceIfExists=false; known unsupported relative RootDirectory ERROR87 must not be repeated.
+
+Positive must reach CREATE_NEW, append<=64KiB, charge-before-write, flush/sync, original-handle no-replace, exact transferred identity/output bytes, source preservation and temporary charge retirement. All four historical native setup failures must remain in19-case inventory; generic early refusal success is insufficient. Exact19 inventory references archived receipt in SOURCE_REVALIDATION. M1-B only after independently accepted M1-A; G03 requires entire G02. Unknowns: actual denied ancestor/host cause and no-replace compatibility under retained guards. Defer rather than weaken either.
