@@ -1,0 +1,26 @@
+[
+  {
+    "path": "src/mkmacro/runtime/summary.rs",
+    "base_blob": "269d50f56344620fd59b0d4976077a821e725e2a",
+    "donor_base_blob": "269d50f56344620fd59b0d4976077a821e725e2a",
+    "equal": true
+  },
+  {
+    "path": "src/mkmacro/runtime.rs",
+    "base_blob": "3a454dfc77b4a5572bf0250ac6a4d1d661290ccd",
+    "donor_base_blob": "3a454dfc77b4a5572bf0250ac6a4d1d661290ccd",
+    "equal": true
+  },
+  {
+    "path": "src/gui/mkmacro_dialog/mod.rs",
+    "base_blob": "a9f2335418f69f72dc407a686f6ca4f8956a4960",
+    "donor_base_blob": "a9f2335418f69f72dc407a686f6ca4f8956a4960",
+    "equal": true
+  },
+  {
+    "path": "src/gui/mkmacro_dialog/toolbar.rs",
+    "base_blob": "4cf3875d7014fd443916987b34f97978035907f3",
+    "donor_base_blob": "4cf3875d7014fd443916987b34f97978035907f3",
+    "equal": true
+  }
+]
