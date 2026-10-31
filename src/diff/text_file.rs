@@ -270,6 +270,8 @@ struct UndoRecord {
     after: String,
     ignored_before: Vec<IgnoredLineRange>,
     ignored_after: Vec<IgnoredLineRange>,
+    bookmarks_before: Vec<usize>,
+    bookmarks_after: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -288,6 +290,8 @@ pub struct TextDocument {
     redo: Vec<UndoRecord>,
     ignored_line_ranges: Vec<IgnoredLineRange>,
     ignored_range_invalidation: bool,
+    bookmarks: Vec<usize>,
+    bookmark_invalidation: bool,
 }
 
 impl fmt::Debug for TextDocument {
@@ -309,6 +313,7 @@ impl fmt::Debug for TextDocument {
             .field("undo_depth", &self.undo.len())
             .field("redo_depth", &self.redo.len())
             .field("ignored_range_count", &self.ignored_line_ranges.len())
+            .field("bookmark_count", &self.bookmarks.len())
             .finish()
     }
 }
@@ -331,6 +336,8 @@ impl TextDocument {
             redo: vec![],
             ignored_line_ranges: vec![],
             ignored_range_invalidation: false,
+            bookmarks: vec![],
+            bookmark_invalidation: false,
         }
     }
 
@@ -354,6 +361,8 @@ impl TextDocument {
             redo: vec![],
             ignored_line_ranges: vec![],
             ignored_range_invalidation: false,
+            bookmarks: vec![],
+            bookmark_invalidation: false,
         }
     }
     #[cfg(test)]
@@ -378,6 +387,8 @@ impl TextDocument {
             redo: vec![],
             ignored_line_ranges: vec![],
             ignored_range_invalidation: false,
+            bookmarks: vec![],
+            bookmark_invalidation: false,
         })
     }
     pub fn source(&self) -> &str {
@@ -388,6 +399,47 @@ impl TextDocument {
     }
     pub fn ignored_line_ranges(&self) -> &[IgnoredLineRange] {
         &self.ignored_line_ranges
+    }
+    pub fn bookmarks(&self) -> &[usize] {
+        &self.bookmarks
+    }
+    pub fn is_bookmarked(&self, source_line: usize) -> bool {
+        self.bookmarks.binary_search(&source_line).is_ok()
+    }
+    pub fn toggle_bookmark(&mut self, source_line: usize) -> bool {
+        match self.bookmarks.binary_search(&source_line) {
+            Ok(index) => {
+                self.bookmarks.remove(index);
+                false
+            }
+            Err(index) => {
+                self.bookmarks.insert(index, source_line);
+                true
+            }
+        }
+    }
+    pub fn take_bookmark_invalidation(&mut self) -> bool {
+        std::mem::take(&mut self.bookmark_invalidation)
+    }
+    /// Returns the exact source bytes for a half-open source-line interval,
+    /// including each selected line's original delimiter.
+    pub fn raw_line_range(&self, start: usize, end: usize) -> Option<&str> {
+        if start >= end {
+            return None;
+        }
+        let mut byte_offset = 0;
+        let mut start_byte = None;
+        for (line, part) in self.source.split_inclusive('\n').enumerate() {
+            if line == start {
+                start_byte = Some(byte_offset);
+            }
+            byte_offset += part.len();
+            if line + 1 == end {
+                let start_byte = start_byte?;
+                return Some(&self.source[start_byte..byte_offset]);
+            }
+        }
+        None
     }
     pub(crate) fn set_ignored_line_ranges(
         &mut self,
@@ -418,13 +470,17 @@ impl TextDocument {
         }
         let before = std::mem::replace(&mut self.source, source);
         let ignored_before = std::mem::take(&mut self.ignored_line_ranges);
+        let bookmarks_before = std::mem::take(&mut self.bookmarks);
         self.ignored_range_invalidation = false;
+        self.bookmark_invalidation = !bookmarks_before.is_empty();
         self.revision += 1;
         self.undo.push(UndoRecord {
             before,
             after: self.source.clone(),
             ignored_before,
             ignored_after: self.ignored_line_ranges.clone(),
+            bookmarks_before,
+            bookmarks_after: self.bookmarks.clone(),
         });
         self.redo.clear();
         Ok(true)
@@ -441,7 +497,19 @@ impl TextDocument {
         }
         let before = self.source.clone();
         let ignored_before = self.ignored_line_ranges.clone();
+        let bookmarks_before = self.bookmarks.clone();
         let (mapped_ignored, invalidated) = map_ignored_ranges(&self.ignored_line_ranges, edits)?;
+        let bookmark_ranges = self
+            .bookmarks
+            .iter()
+            .map(|line| {
+                line.checked_add(1)
+                    .map(|end| IgnoredLineRange { start: *line, end })
+                    .ok_or_else(|| "bookmark line is out of bounds".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (mapped_bookmark_ranges, bookmark_invalidated) =
+            map_ignored_ranges(&bookmark_ranges, edits)?;
         self.source = if self.preserve_source_line_endings {
             apply_memory_line_edits(&self.source, edits)?
         } else {
@@ -461,12 +529,19 @@ impl TextDocument {
         }
         self.ignored_line_ranges = mapped_ignored;
         self.ignored_range_invalidation = invalidated;
+        self.bookmarks = mapped_bookmark_ranges
+            .into_iter()
+            .map(|range| range.start)
+            .collect();
+        self.bookmark_invalidation = bookmark_invalidated;
         self.revision += 1;
         self.undo.push(UndoRecord {
             before,
             after: self.source.clone(),
             ignored_before,
             ignored_after: self.ignored_line_ranges.clone(),
+            bookmarks_before,
+            bookmarks_after: self.bookmarks.clone(),
         });
         self.redo.clear();
         Ok(())
@@ -477,7 +552,9 @@ impl TextDocument {
         };
         self.source = r.before.clone();
         self.ignored_line_ranges = r.ignored_before.clone();
+        self.bookmarks = r.bookmarks_before.clone();
         self.ignored_range_invalidation = false;
+        self.bookmark_invalidation = false;
         self.revision += 1;
         self.redo.push(r);
         true
@@ -488,7 +565,9 @@ impl TextDocument {
         };
         self.source = r.after.clone();
         self.ignored_line_ranges = r.ignored_after.clone();
+        self.bookmarks = r.bookmarks_after.clone();
         self.ignored_range_invalidation = false;
+        self.bookmark_invalidation = false;
         self.revision += 1;
         self.undo.push(r);
         true
@@ -769,6 +848,8 @@ mod tests {
             redo: vec![],
             ignored_line_ranges: vec![],
             ignored_range_invalidation: false,
+            bookmarks: vec![],
+            bookmark_invalidation: false,
         };
         d.apply_edits(&[
             LineEdit {
@@ -787,6 +868,63 @@ mod tests {
         assert_eq!(d.source(), "x\ny");
         assert!(d.undo());
         assert_eq!(d.source(), "a\nb")
+    }
+
+    #[test]
+    fn raw_line_range_preserves_delimiters_and_terminal_newline() {
+        let source = "α\r\nignored\r\nz\r\n\nend\n";
+        let document = TextDocument::from_memory_source(source.into());
+        assert_eq!(document.raw_line_range(1, 3), Some("ignored\r\nz\r\n"));
+        assert_eq!(document.raw_line_range(3, 4), Some("\n"));
+        assert_eq!(document.raw_line_range(4, 5), Some("end\n"));
+        assert_eq!(document.raw_line_range(5, 6), None);
+        assert_eq!(document.raw_line_range(2, 2), None);
+    }
+
+    #[test]
+    fn bookmarks_map_and_restore_inside_the_existing_undo_records() {
+        let mut document = TextDocument::from_memory_source("zero\none\ntwo\nthree".into());
+        assert!(document.toggle_bookmark(1));
+        assert!(document.toggle_bookmark(3));
+        assert!(!document.toggle_bookmark(1));
+        assert!(document.toggle_bookmark(1));
+        assert_eq!(document.bookmarks(), &[1, 3]);
+
+        document
+            .apply_edits(&[LineEdit {
+                start: 0,
+                delete_count: 0,
+                replacement: vec!["inserted".into()],
+            }])
+            .unwrap();
+        assert_eq!(document.bookmarks(), &[2, 4]);
+        assert!(!document.take_bookmark_invalidation());
+        assert!(document.undo());
+        assert_eq!(document.bookmarks(), &[1, 3]);
+        assert!(document.redo());
+        assert_eq!(document.bookmarks(), &[2, 4]);
+
+        document
+            .apply_edits(&[LineEdit {
+                start: 2,
+                delete_count: 1,
+                replacement: vec!["replaced".into()],
+            }])
+            .unwrap();
+        assert_eq!(document.bookmarks(), &[4]);
+        assert!(document.take_bookmark_invalidation());
+        assert!(document.undo());
+        assert_eq!(document.bookmarks(), &[2, 4]);
+        assert!(document.redo());
+        assert_eq!(document.bookmarks(), &[4]);
+
+        document.replace_source("replacement".into()).unwrap();
+        assert!(document.bookmarks().is_empty());
+        assert!(document.take_bookmark_invalidation());
+        assert!(document.undo());
+        assert_eq!(document.bookmarks(), &[4]);
+        assert!(document.redo());
+        assert!(document.bookmarks().is_empty());
     }
 
     #[test]

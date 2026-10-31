@@ -860,11 +860,15 @@ impl TextScrollState {
     }
 
     pub fn target_measured_row(&mut self, comparison_row: usize, cache: &RowMeasurementCache) {
-        let projected = cache
+        let Some(projected) = cache
             .comparison_to_projected
             .get(comparison_row)
             .and_then(|row| *row)
-            .unwrap_or_else(|| comparison_row.min(cache.heights.len()));
+        else {
+            self.aligned_row = comparison_row;
+            self.within_row = 0.0;
+            return;
+        };
         self.aligned_row = comparison_row;
         self.within_row = 0.0;
         let y = cache.offset_for_row(projected) as f32;
@@ -910,6 +914,18 @@ pub struct RowMeasureKey {
     pub wrap: bool,
     pub projection_mode: u8,
     pub projection_context: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingScrollRequest {
+    row: usize,
+    generation: u64,
+}
+
+impl PendingScrollRequest {
+    pub fn row(self) -> usize {
+        self.row
+    }
 }
 
 pub const MIN_VISUAL_LINE_HEIGHT: f32 = 20.0;
@@ -1113,6 +1129,14 @@ pub struct SourceLineSelection {
     pub end: usize,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct SelectedSourceText {
+    pub source_id: u64,
+    pub revision: u64,
+    pub side: DiffSide,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingTextAlignment {
     pub source_id: u64,
@@ -1135,6 +1159,7 @@ pub struct TextViewModel {
     pub current_row: Option<usize>,
     /// A model-row navigation target waiting to be consumed by the view.
     pub pending_scroll_row: Option<usize>,
+    pending_scroll_generation: u64,
     pub scroll: TextScrollState,
     pub row_measurements: RowMeasurementCache,
     pub projection_mode: RowProjectionMode,
@@ -1158,6 +1183,7 @@ pub struct TextViewModel {
     pub source_line_selection: Option<SourceLineSelection>,
     pub annotation_revision: u64,
     pub annotation_notice: Option<String>,
+    pub projection_notice: Option<String>,
     manual_alignment_source_ids: (u64, u64),
     manual_alignment_source_revisions: (u64, u64),
     pub current_intraline: Option<IntralineLocation>,
@@ -1262,6 +1288,8 @@ impl TextViewModel {
         };
         let left = load(self.left_path.as_ref())?;
         let right = load(self.right_path.as_ref())?;
+        let cleared_bookmarks =
+            !self.left.bookmarks().is_empty() || !self.right.bookmarks().is_empty();
         let cleared_annotations = !self.left.ignored_line_ranges().is_empty()
             || !self.right.ignored_line_ranges().is_empty()
             || !self.manual_alignments.is_empty()
@@ -1276,9 +1304,9 @@ impl TextViewModel {
         self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
         self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
         self.annotation_revision = self.annotation_revision.wrapping_add(1);
-        if cleared_annotations {
+        if cleared_annotations || cleared_bookmarks {
             self.annotation_notice = Some(
-                "Reload cleared ignored-line ranges, selections, and anchors for both sources."
+                "Reload cleared source annotations, bookmarks, selections, or anchors for the replaced sources."
                     .into(),
             );
         }
@@ -1301,6 +1329,10 @@ impl TextViewModel {
         let had_ignored = match side {
             DiffSide::Left => !self.left.ignored_line_ranges().is_empty(),
             DiffSide::Right => !self.right.ignored_line_ranges().is_empty(),
+        };
+        let had_bookmarks = match side {
+            DiffSide::Left => !self.left.bookmarks().is_empty(),
+            DiffSide::Right => !self.right.bookmarks().is_empty(),
         };
         let had_selection = self
             .source_line_selection
@@ -1333,9 +1365,9 @@ impl TextViewModel {
         self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
         self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
         self.annotation_revision = self.annotation_revision.wrapping_add(1);
-        if had_ignored || had_selection {
+        if had_ignored || had_selection || had_bookmarks {
             self.annotation_notice = Some(
-                "Reload cleared ignored-line ranges or source selection for the reloaded source."
+                "Reload cleared ignored-line ranges, bookmarks, or source selection for the reloaded source."
                     .into(),
             );
         }
@@ -1423,6 +1455,7 @@ impl TextViewModel {
             active_side: DiffSide::Left,
             current_row: None,
             pending_scroll_row: None,
+            pending_scroll_generation: 0,
             scroll: TextScrollState::default(),
             row_measurements: RowMeasurementCache::default(),
             projection_mode: RowProjectionMode::All,
@@ -1446,6 +1479,7 @@ impl TextViewModel {
             source_line_selection: None,
             annotation_revision: 0,
             annotation_notice: None,
+            projection_notice: None,
             manual_alignment_source_ids,
             manual_alignment_source_revisions,
             current_intraline: None,
@@ -1490,6 +1524,8 @@ impl TextViewModel {
         }
         let cleared_ignored = (left_changed && !self.left.ignored_line_ranges().is_empty())
             || (right_changed && !self.right.ignored_line_ranges().is_empty());
+        let cleared_bookmarks = (left_changed && !self.left.bookmarks().is_empty())
+            || (right_changed && !self.right.bookmarks().is_empty());
         let cleared_selection = self.source_line_selection.is_some_and(|selection| {
             (left_changed && selection.side == DiffSide::Left)
                 || (right_changed && selection.side == DiffSide::Right)
@@ -1497,6 +1533,9 @@ impl TextViewModel {
             (left_changed && pending.side == DiffSide::Left)
                 || (right_changed && pending.side == DiffSide::Right)
         });
+
+        next_left.take_bookmark_invalidation();
+        next_right.take_bookmark_invalidation();
 
         self.left = next_left;
         self.right = next_right;
@@ -1533,11 +1572,17 @@ impl TextViewModel {
         self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
         self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
         self.annotation_revision = self.annotation_revision.wrapping_add(1);
+        let mut notices = Vec::new();
         if cleared_ignored || cleared_selection {
-            self.annotation_notice = Some(
-                "Replacing text inputs cleared ignored ranges or source selection for the changed source."
-                    .into(),
+            notices.push(
+                "Replacing text inputs cleared ignored ranges or source selection for the changed source.",
             );
+        }
+        if cleared_bookmarks {
+            notices.push("Replacing text inputs cleared bookmarks for the changed source.");
+        }
+        if !notices.is_empty() {
+            self.annotation_notice = Some(notices.join(" "));
         }
         self.current_intraline = None;
         self.cursor = None;
@@ -1590,6 +1635,9 @@ impl TextViewModel {
                 .or(self.current_row);
             self.comparison = Some(m.result);
             self.recalculating = false;
+            if let Some(row) = self.pending_scroll_row {
+                self.request_scroll_row(Some(row));
+            }
         }
     }
     fn start_compare(&mut self) {
@@ -1662,6 +1710,21 @@ impl TextViewModel {
         self.comparison.as_ref().map_or_else(Vec::new, |c| {
             text_compare::row_projection(c, self.projection_mode, self.projection_context)
         })
+    }
+    pub fn set_row_projection(&mut self, mode: RowProjectionMode, context: usize) {
+        let context = context.min(text_compare::MAX_ROW_PROJECTION_CONTEXT);
+        if self.projection_mode == mode && self.projection_context == context {
+            return;
+        }
+        self.projection_mode = mode;
+        self.projection_context = context;
+        self.row_measurements = Default::default();
+        if self.find_projection_only {
+            self.refresh_find();
+        }
+        if let Some(row) = self.pending_scroll_row {
+            self.request_scroll_row(Some(row));
+        }
     }
     pub fn refresh_find(&mut self) {
         let projection = self.find_projection_only.then(|| self.projected_rows());
@@ -1790,6 +1853,115 @@ impl TextViewModel {
             DiffSide::Right => &self.right,
         };
         text_compare::line_is_ignored(document.ignored_line_ranges(), line)
+    }
+
+    pub fn has_fresh_source_selection(&self) -> bool {
+        self.fresh_source_selection().is_ok()
+    }
+
+    /// Captures the selected source lines exactly as stored, including original
+    /// Unicode bytes, delimiters, and any ignored source lines in the interval.
+    pub fn selected_raw_source_text(&self) -> Result<SelectedSourceText, String> {
+        let selection = self.fresh_source_selection()?;
+        let document = match selection.side {
+            DiffSide::Left => &self.left,
+            DiffSide::Right => &self.right,
+        };
+        let text = document
+            .raw_line_range(selection.start, selection.end)
+            .ok_or_else(|| "Source selection no longer maps to raw text".to_string())?;
+        Ok(SelectedSourceText {
+            source_id: selection.source_id,
+            revision: selection.revision,
+            side: selection.side,
+            text: text.to_owned(),
+        })
+    }
+
+    pub fn toggle_bookmark_at_selection(&mut self) -> Result<bool, String> {
+        let selection = self.fresh_source_selection()?;
+        let document = match selection.side {
+            DiffSide::Left => &mut self.left,
+            DiffSide::Right => &mut self.right,
+        };
+        Ok(document.toggle_bookmark(selection.focus_line))
+    }
+
+    /// Navigates bookmarks in comparison-row order, left before right on ties.
+    /// It only updates source selection and scroll state, leaving the active
+    /// difference/hunk unchanged.
+    pub fn navigate_bookmark(&mut self, forward: bool) -> Result<(), String> {
+        let has_selection = self.source_line_selection.is_some();
+        let selected = if has_selection {
+            Some(self.fresh_source_selection()?)
+        } else {
+            None
+        };
+        let (bookmarks, current) = {
+            let comparison = self.fresh_comparison()?;
+            let mut bookmarks = Vec::new();
+            for (row_index, row) in comparison.rows.iter().enumerate() {
+                if let Some(line) = row.left
+                    && self.left.is_bookmarked(line)
+                {
+                    bookmarks.push((row_index, DiffSide::Left, line));
+                }
+                if let Some(line) = row.right
+                    && self.right.is_bookmarked(line)
+                {
+                    bookmarks.push((row_index, DiffSide::Right, line));
+                }
+            }
+            let current = selected
+                .map(|selection| {
+                    let row = comparison
+                        .rows
+                        .iter()
+                        .position(|row| {
+                            visual_to_source(row, selection.side) == Some(selection.focus_line)
+                        })
+                        .ok_or_else(|| {
+                            "Focused source line has no current comparison row".to_string()
+                        })?;
+                    Ok::<_, String>((row, selection.side))
+                })
+                .transpose()?;
+            (bookmarks, current)
+        };
+        let target = match (current, forward) {
+            (Some((row, side)), true) => bookmarks
+                .iter()
+                .find(|(candidate_row, candidate_side, _)| {
+                    (*candidate_row, bookmark_side_order(*candidate_side))
+                        > (row, bookmark_side_order(side))
+                })
+                .copied(),
+            (Some((row, side)), false) => bookmarks
+                .iter()
+                .rev()
+                .find(|(candidate_row, candidate_side, _)| {
+                    (*candidate_row, bookmark_side_order(*candidate_side))
+                        < (row, bookmark_side_order(side))
+                })
+                .copied(),
+            (None, true) => bookmarks.first().copied(),
+            (None, false) => bookmarks.last().copied(),
+        }
+        .ok_or_else(|| {
+            if bookmarks.is_empty() {
+                "No source bookmarks are available".to_string()
+            } else if forward {
+                "There is no later source bookmark".to_string()
+            } else {
+                "There is no earlier source bookmark".to_string()
+            }
+        })?;
+        let (row, side, line) = target;
+        if !self.select_source_line(side, line, false) {
+            return Err("Bookmark no longer maps to a source line".into());
+        }
+        self.request_scroll_row(Some(row));
+        Ok(())
     }
 
     fn fresh_source_selection(&self) -> Result<SourceLineSelection, String> {
@@ -1969,7 +2141,58 @@ impl TextViewModel {
         self.current_row = row;
         self.request_scroll_row(row);
     }
+    pub fn pending_scroll_request(&self) -> Option<PendingScrollRequest> {
+        self.pending_scroll_row.map(|row| PendingScrollRequest {
+            row,
+            generation: self.pending_scroll_generation,
+        })
+    }
+    pub fn accept_pending_scroll_request(
+        &mut self,
+        request: PendingScrollRequest,
+        measurement_key: &RowMeasureKey,
+    ) -> bool {
+        if self.pending_scroll_row != Some(request.row)
+            || self.pending_scroll_generation != request.generation
+            || self.row_measurements.key.as_ref() != Some(measurement_key)
+            || self
+                .row_measurements
+                .comparison_to_projected
+                .get(request.row)
+                .and_then(|projected| *projected)
+                .is_none()
+        {
+            return false;
+        }
+        self.pending_scroll_row = None;
+        true
+    }
     pub fn request_scroll_row(&mut self, row: Option<usize>) {
+        self.pending_scroll_generation = self.pending_scroll_generation.wrapping_add(1);
+        if let Some(row) = row
+            && let Some(comparison) = self.comparison.as_ref()
+        {
+            if row >= comparison.rows.len() {
+                self.projection_notice =
+                    Some("The requested row no longer exists in this comparison.".into());
+                self.pending_scroll_row = None;
+                return;
+            }
+            let projected = text_compare::row_projection(
+                comparison,
+                self.projection_mode,
+                self.projection_context,
+            );
+            if projected.binary_search(&row).is_err() {
+                self.projection_mode = RowProjectionMode::All;
+                self.row_measurements = Default::default();
+                self.projection_notice =
+                    Some("Showing all rows to reveal the requested source line or match.".into());
+                if self.find_projection_only {
+                    self.refresh_find();
+                }
+            }
+        }
         self.pending_scroll_row = row;
         if let Some(row) = row {
             self.scroll.target_measured_row(row, &self.row_measurements);
@@ -2116,6 +2339,7 @@ impl TextViewModel {
             DiffSide::Right => &mut self.right,
         };
         let invalidated = target_document.take_ignored_range_invalidation();
+        let bookmarks_invalidated = target_document.take_bookmark_invalidation();
         let ignored_changed = before_ignored != target_document.ignored_line_ranges();
         if ignored_changed {
             self.annotation_revision = self.annotation_revision.wrapping_add(1);
@@ -2129,6 +2353,12 @@ impl TextViewModel {
         if source_selection_cleared {
             self.annotation_notice =
                 Some("The copied edit cleared selection on the changed source side.".into());
+        }
+        if bookmarks_invalidated {
+            self.annotation_notice = Some(
+                "The copied edit replaced bookmarked source lines; those bookmarks were cleared."
+                    .into(),
+            );
         }
         self.map_manual_alignments_after_edit(other(from), &edit);
         if self
@@ -2293,6 +2523,13 @@ fn other(s: DiffSide) -> DiffSide {
     match s {
         DiffSide::Left => DiffSide::Right,
         DiffSide::Right => DiffSide::Left,
+    }
+}
+
+fn bookmark_side_order(side: DiffSide) -> u8 {
+    match side {
+        DiffSide::Left => 0,
+        DiffSide::Right => 1,
     }
 }
 fn source_line(s: &str, n: usize) -> String {
@@ -2561,6 +2798,277 @@ mod tests {
         assert_eq!(
             model.source_line_selection.unwrap().source_id,
             model.right.source_id()
+        );
+    }
+
+    #[test]
+    fn m3c_selected_raw_source_text_keeps_exact_bytes_and_ignored_lines() {
+        let original = "α\r\nignored\r\nlast\n";
+        let mut model =
+            TextViewModel::new_memory(original.into(), "right".into(), &DiffConfigV1::default())
+                .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.select_source_line(DiffSide::Left, 1, false);
+        model.ignore_selected_lines().unwrap();
+        let selected = model.selected_raw_source_text().unwrap();
+        assert_eq!(selected.side, DiffSide::Left);
+        assert_eq!(selected.source_id, model.left.source_id());
+        assert_eq!(selected.revision, model.left.revision);
+        assert_eq!(selected.text, "ignored\r\n");
+        assert_eq!(model.left.source(), original);
+
+        model
+            .left
+            .replace_source("changed\r\nignored\r\nlast\n".into())
+            .unwrap();
+        assert!(
+            model
+                .selected_raw_source_text()
+                .err()
+                .unwrap()
+                .contains("selection is stale")
+        );
+    }
+
+    #[test]
+    fn m3c_bookmarks_navigate_by_row_and_side_without_moving_the_active_hunk() {
+        let mut model = TextViewModel::new_memory(
+            "same\nleft change".into(),
+            "same\nright change".into(),
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let difference_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .navigation
+            .all_difference_rows[0];
+        model.current_row = Some(difference_row);
+        model.projection_mode = RowProjectionMode::DifferencesOnly;
+        model.projection_context = 0;
+
+        let annotation_revision = model.annotation_revision;
+        let left_revision = model.left.revision;
+        let right_revision = model.right.revision;
+        model.select_source_line(DiffSide::Left, 0, false);
+        assert!(model.toggle_bookmark_at_selection().unwrap());
+        model.select_source_line(DiffSide::Right, 0, false);
+        assert!(model.toggle_bookmark_at_selection().unwrap());
+        assert_eq!(model.annotation_revision, annotation_revision);
+        assert_eq!(model.left.revision, left_revision);
+        assert_eq!(model.right.revision, right_revision);
+        assert!(!model.left.is_dirty() && !model.right.is_dirty());
+        model.source_line_selection = None;
+
+        model.navigate_bookmark(true).unwrap();
+        assert_eq!(
+            model.source_line_selection.unwrap().side,
+            DiffSide::Left,
+            "left wins a same-row tie"
+        );
+        assert_eq!(model.source_line_selection.unwrap().focus_line, 0);
+        assert_eq!(model.current_row, Some(difference_row));
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert!(model.projection_notice.is_some());
+
+        model.navigate_bookmark(true).unwrap();
+        assert_eq!(model.source_line_selection.unwrap().side, DiffSide::Right);
+        assert_eq!(model.current_row, Some(difference_row));
+        assert!(model.navigate_bookmark(true).is_err());
+        model.navigate_bookmark(false).unwrap();
+        assert_eq!(model.source_line_selection.unwrap().side, DiffSide::Left);
+        assert_eq!(model.current_row, Some(difference_row));
+    }
+
+    #[test]
+    fn m3c_bookmarks_follow_swaps_and_source_replacement() {
+        let mut model = TextViewModel::new_memory(
+            "left\nsecond".into(),
+            "right\nsecond".into(),
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        model.left.toggle_bookmark(0);
+        model.right.toggle_bookmark(1);
+        model.swap_sides();
+        assert!(model.left.is_bookmarked(1));
+        assert!(model.right.is_bookmarked(0));
+
+        let preserved_right = model.right.source().to_owned();
+        model
+            .replace_memory_sources("replacement left".into(), preserved_right)
+            .unwrap();
+        assert!(model.left.bookmarks().is_empty());
+        assert!(model.right.is_bookmarked(0));
+        assert!(
+            model
+                .annotation_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("bookmarks"))
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let left_path = directory.path().join("left.txt");
+        let right_path = directory.path().join("right.txt");
+        let replacement_path = directory.path().join("replacement.txt");
+        fs::write(&left_path, "left\nline").unwrap();
+        fs::write(&right_path, "right\nline").unwrap();
+        fs::write(&replacement_path, "reloaded\ntext").unwrap();
+        let mut file_model = TextViewModel::load(
+            &TextCompareState {
+                left: Some(left_path),
+                right: Some(right_path),
+                relative_path: None,
+                origin: TextCompareOrigin::FileBacked,
+            },
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        file_model.left.toggle_bookmark(0);
+        file_model.right.toggle_bookmark(1);
+        let reloaded = crate::diff::text_file::load_text_file(replacement_path).unwrap();
+        file_model
+            .reload_external(DiffSide::Left, &reloaded)
+            .unwrap();
+        assert!(file_model.left.bookmarks().is_empty());
+        assert!(file_model.right.is_bookmarked(1));
+        assert!(
+            file_model
+                .annotation_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("bookmarks"))
+        );
+    }
+
+    #[test]
+    fn m3c_projection_changes_are_presentation_only_and_refresh_limited_find() {
+        let mut model = TextViewModel::new_memory(
+            "same\nleft change".into(),
+            "same\nright change".into(),
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.find_query = "same".into();
+        model.find_projection_only = true;
+        model.refresh_find();
+        assert!(!model.find_matches.is_empty());
+        let row_ids: Vec<_> = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        let hunk_ids: Vec<_> = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .hunks
+            .iter()
+            .map(|hunk| hunk.id)
+            .collect();
+        let rules_revision = model.rules.revision;
+        let annotation_revision = model.annotation_revision;
+
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        assert!(model.find_matches.is_empty());
+        model.set_row_projection(RowProjectionMode::IdenticalOnly, 0);
+        assert!(!model.find_matches.is_empty());
+        model.set_row_projection(RowProjectionMode::All, usize::MAX);
+        assert_eq!(
+            model.projection_context,
+            text_compare::MAX_ROW_PROJECTION_CONTEXT
+        );
+        assert_eq!(model.rules.revision, rules_revision);
+        assert_eq!(model.annotation_revision, annotation_revision);
+        assert!(!model.recalculating);
+        assert_eq!(
+            model
+                .comparison
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            row_ids
+        );
+        assert_eq!(
+            model
+                .comparison
+                .as_ref()
+                .unwrap()
+                .hunks
+                .iter()
+                .map(|hunk| hunk.id)
+                .collect::<Vec<_>>(),
+            hunk_ids
+        );
+
+        model.find_projection_only = false;
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        model.refresh_find();
+        model.navigate_find(true);
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert!(model.projection_notice.is_some());
+    }
+
+    #[test]
+    fn m3c_scroll_reveal_requires_exact_measurements_and_preserves_newer_requests() {
+        let mut model = TextViewModel::new_memory(
+            "same\nleft change".into(),
+            "same\nright change".into(),
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let comparison = model.comparison.as_ref().unwrap();
+        let target = comparison
+            .rows
+            .iter()
+            .position(|row| row.kind == text_compare::DiffRowKind::Equal)
+            .unwrap();
+        let row_count = comparison.rows.len();
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        assert!(!model.projected_rows().contains(&target));
+        model.scroll.left_vertical = 321.0;
+        model.request_scroll_row(Some(target));
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert_eq!(model.pending_scroll_row, Some(target));
+        assert_eq!(model.scroll.left_vertical, 321.0);
+
+        let key = measure_key(false, 100.0, 100.0);
+        let projected = model.projected_rows();
+        model.row_measurements.rebuild(
+            key.clone(),
+            projected.clone(),
+            row_count,
+            vec![20.0; projected.len()],
+        );
+        let first = model.pending_scroll_request().unwrap();
+        assert!(model.accept_pending_scroll_request(first, &key));
+        assert_eq!(model.pending_scroll_row, None);
+
+        model.request_scroll_row(Some(target));
+        let captured = model.pending_scroll_request().unwrap();
+        model.request_scroll_row(Some(target));
+        let newer = model.pending_scroll_request().unwrap();
+        assert_ne!(captured, newer, "even the same-row re-request is distinct");
+        assert!(!model.accept_pending_scroll_request(captured, &key));
+        assert_eq!(model.pending_scroll_request(), Some(newer));
+        assert!(model.accept_pending_scroll_request(newer, &key));
+
+        model.request_scroll_row(Some(row_count + 1));
+        assert_eq!(model.pending_scroll_row, None);
+        assert!(
+            model
+                .projection_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("no longer exists"))
         );
     }
 

@@ -7,6 +7,11 @@ use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use eframe::egui::{self, Color32, RichText};
 use std::hash::{Hash, Hasher};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TextViewAction {
+    CompareSelectionWithClipboard { view_id: u64 },
+}
+
 fn equality_status_labels(
     raw_equal: bool,
     effectively_equal: bool,
@@ -25,9 +30,15 @@ fn equality_status_labels(
     )
 }
 
-pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewModel) {
+pub fn show(
+    ui: &mut egui::Ui,
+    workspace: u64,
+    view: u64,
+    model: &mut TextViewModel,
+) -> Option<TextViewAction> {
     model.poll();
     shortcuts(ui, model);
+    let mut action = None;
     ui.horizontal_wrapped(|ui| {
         if ui.button("◀ Previous (F7)").clicked() {
             model.navigate(NavigationDirection::Previous)
@@ -56,6 +67,51 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         }
         if ui.button("Find").clicked() {
             model.find_open = true;
+        }
+        if ui
+            .add_enabled(
+                model.has_fresh_source_selection(),
+                egui::Button::new("Compare selected lines with Clipboard"),
+            )
+            .clicked()
+        {
+            action = Some(TextViewAction::CompareSelectionWithClipboard { view_id: view });
+        }
+        if ui.button("Previous bookmark").clicked()
+            && let Err(error) = model.navigate_bookmark(false)
+        {
+            model.annotation_notice = Some(error);
+        }
+        if ui.button("Next bookmark").clicked()
+            && let Err(error) = model.navigate_bookmark(true)
+        {
+            model.annotation_notice = Some(error);
+        }
+        let bookmark_label = model
+            .source_line_selection
+            .map(|selection| match selection.side {
+                DiffSide::Left => ("Left", selection.focus_line + 1),
+                DiffSide::Right => ("Right", selection.focus_line + 1),
+            });
+        if ui
+            .add_enabled(
+                model.has_fresh_source_selection(),
+                egui::Button::new("Toggle bookmark"),
+            )
+            .clicked()
+        {
+            let selected = bookmark_label;
+            match model.toggle_bookmark_at_selection() {
+                Ok(added) => {
+                    if let Some((side, line)) = selected {
+                        model.annotation_notice = Some(format!(
+                            "{} bookmark on {side} line {line}.",
+                            if added { "Added" } else { "Removed" }
+                        ));
+                    }
+                }
+                Err(error) => model.annotation_notice = Some(error),
+            }
         }
         ui.menu_button("Ignored lines", |ui| {
             let selected = model.source_line_selection.is_some();
@@ -116,16 +172,37 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                 ui.checkbox(&mut model.visible_line_endings, "Line Endings");
             });
             ui.checkbox(&mut model.text_details_open, "Text Details");
-            ui.selectable_value(
-                &mut model.projection_mode,
-                RowProjectionMode::All,
-                "All rows",
-            );
-            ui.selectable_value(
-                &mut model.projection_mode,
-                RowProjectionMode::DifferencesOnly,
-                "Differences only",
-            );
+            let mut projection_mode = model.projection_mode;
+            let mut projection_context = model.projection_context;
+            let mut projection_changed = ui
+                .selectable_value(&mut projection_mode, RowProjectionMode::All, "All rows")
+                .changed()
+                | ui.selectable_value(
+                    &mut projection_mode,
+                    RowProjectionMode::DifferencesOnly,
+                    "Differences only",
+                )
+                .changed()
+                | ui.selectable_value(
+                    &mut projection_mode,
+                    RowProjectionMode::IdenticalOnly,
+                    "Identical only",
+                )
+                .changed();
+            if projection_mode == RowProjectionMode::DifferencesOnly {
+                projection_changed |= ui
+                    .add(
+                        egui::Slider::new(
+                            &mut projection_context,
+                            0..=crate::diff::text_compare::MAX_ROW_PROJECTION_CONTEXT,
+                        )
+                        .text("Context lines"),
+                    )
+                    .changed();
+            }
+            if projection_changed {
+                model.set_row_projection(projection_mode, projection_context);
+            }
             let mut ignore = model.rules.ignore_all_whitespace;
             if ui
                 .selectable_value(&mut ignore, false, "All differences")
@@ -317,6 +394,9 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         if let Some(notice) = model.annotation_notice.as_deref() {
             semantic_status(ui, StatusTone::Info, notice, None);
         }
+        if let Some(notice) = model.projection_notice.as_deref() {
+            semantic_status(ui, StatusTone::Info, notice, None);
+        }
         if let Some(error) = model.alignment_error.as_deref() {
             semantic_status(ui, StatusTone::Warning, error, None);
         }
@@ -336,8 +416,10 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
     let (left_width, splitter_width, right_width) =
         comparison_dimensions(available, comparison_height, model.splitter);
     prepare_row_measurements(ui, model, left_width, right_width);
-    let pending = model.pending_scroll_row;
-    let mut scroll_accepted = pending.is_none();
+    let pending_request = model.pending_scroll_request();
+    let pending = pending_request.map(|request| request.row());
+    let pending_measurement_key = model.row_measurements.key.clone();
+    let mut scroll_accepted = pending_request.is_some();
     ui.horizontal(|ui| {
         // `comparison_dimensions` accounts for every pixel; no implicit item
         // spacing may be inserted around the dedicated splitter.
@@ -396,13 +478,17 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             pane(ui, workspace, view, DiffSide::Right, model, pending)
         });
     });
-    if scroll_accepted {
-        model.pending_scroll_row = None;
+    if let (Some(request), Some(measurement_key)) =
+        (pending_request, pending_measurement_key.as_ref())
+        && scroll_accepted
+    {
+        model.accept_pending_scroll_request(request, measurement_key);
     }
     if model.text_details_open {
         text_details(ui, model, details_height);
     }
     super::rules_dialog::show(ui.ctx(), view, model);
+    action
 }
 
 pub(super) fn save_side(model: &mut TextViewModel, side: DiffSide) -> bool {
@@ -500,6 +586,7 @@ fn prepare_row_measurements(
         projection_mode: match model.projection_mode {
             RowProjectionMode::All => 0,
             RowProjectionMode::DifferencesOnly => 1,
+            RowProjectionMode::IdenticalOnly => 2,
         },
         projection_context: model.projection_context,
     };
@@ -544,6 +631,25 @@ fn prepare_row_measurements(
     model
         .row_measurements
         .rebuild(key, projected, c.rows.len(), heights);
+}
+
+fn projected_measurement_for_row(
+    comparison_row: usize,
+    projected: &[usize],
+    measurements: &crate::diff::model::RowMeasurementCache,
+) -> Option<usize> {
+    if measurements.key.is_none() {
+        return None;
+    }
+    let projected_row = projected.binary_search(&comparison_row).ok()?;
+    (measurements.projected_to_comparison.get(projected_row) == Some(&comparison_row)
+        && measurements
+            .comparison_to_projected
+            .get(comparison_row)
+            .and_then(|row| *row)
+            == Some(projected_row)
+        && measurements.heights.get(projected_row).is_some())
+    .then_some(projected_row)
 }
 
 /// Allocates the pane before laying out any of its content. The child can grow
@@ -675,12 +781,15 @@ fn render_pane_contents(
     if !wrapped {
         scroll = scroll.horizontal_scroll_offset(stored_x);
     }
-    if let Some(row_index) = pending {
-        let visual = projected
-            .binary_search(&row_index)
-            .unwrap_or_else(|i| i.min(projected.len().saturating_sub(1)));
+    let pending_visual =
+        pending.and_then(|row| projected_measurement_for_row(row, &projected, &measurement_cache));
+    let scroll_target_accepted = pending.is_none() || pending_visual.is_some();
+    if pending.is_some() && model.row_measurements.key.is_none() {
+        ui.ctx().request_repaint();
+    }
+    if let Some(visual) = pending_visual {
         let offset = if wrapped {
-            model.row_measurements.offset_for_row(visual) as f32
+            measurement_cache.offset_for_row(visual) as f32
         } else {
             visual as f32 * row_height
         };
@@ -771,6 +880,14 @@ fn render_pane_contents(
                     )
                     .on_hover_text(semantic);
                     if let Some(n) = line {
+                        let bookmarked = match side {
+                            DiffSide::Left => model.left.is_bookmarked(n),
+                            DiffSide::Right => model.right.is_bookmarked(n),
+                        };
+                        if bookmarked {
+                            ui.label(RichText::new("★").color(Color32::YELLOW))
+                                .on_hover_text("Source-line bookmark");
+                        }
                         if crate::diff::text_compare::line_is_ignored(&ignored_ranges, n) {
                             ui.label(RichText::new("⊘").color(Color32::LIGHT_BLUE))
                                 .on_hover_text("Ignored in the effective comparison");
@@ -1069,7 +1186,7 @@ fn render_pane_contents(
     if let Some(anchor) = remove_anchor {
         model.remove_manual_alignment(anchor);
     }
-    true
+    scroll_target_accepted
 }
 
 fn text_details(ui: &mut egui::Ui, model: &mut TextViewModel, height: f32) {
@@ -1412,11 +1529,68 @@ mod tests {
             )
             .is_some()
         );
+        for label in [
+            "Compare selected lines with Clipboard",
+            "Previous bookmark",
+            "Next bookmark",
+            "Toggle bookmark",
+        ] {
+            assert!(
+                accessible_widget_bounds(
+                    &output,
+                    egui::accesskit::Role::Button,
+                    Some(label),
+                    None,
+                )
+                .is_some(),
+                "{label} remains reachable"
+            );
+        }
         assert_eq!(
             model.source_line_selection.unwrap().start..model.source_line_selection.unwrap().end,
             1..3
         );
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn scroll_targets_require_an_exact_projected_measurement_row() {
+        let mut measurements = crate::diff::model::RowMeasurementCache::default();
+        measurements.rebuild(
+            crate::diff::model::RowMeasureKey {
+                left_source_id: 1,
+                right_source_id: 2,
+                left_revision: 3,
+                right_revision: 4,
+                comparison_revision: 5,
+                annotation_revision: 6,
+                left_text_width_bits: 7,
+                right_text_width_bits: 8,
+                font_theme: 9,
+                text_style: 10,
+                display_config: 11,
+                wrap: true,
+                projection_mode: 0,
+                projection_context: 3,
+            },
+            vec![2, 5],
+            7,
+            [20.0, 24.0],
+        );
+
+        assert_eq!(
+            projected_measurement_for_row(5, &[2, 5], &measurements),
+            Some(1)
+        );
+        assert_eq!(
+            projected_measurement_for_row(4, &[2, 5], &measurements),
+            None,
+            "a missing target cannot be reported as its insertion neighbor"
+        );
+        assert_eq!(
+            projected_measurement_for_row(1, &[2, 5], &measurements),
+            None
+        );
     }
 
     #[test]

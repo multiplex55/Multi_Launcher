@@ -463,7 +463,10 @@ pub enum RowProjectionMode {
     #[default]
     All,
     DifferencesOnly,
+    IdenticalOnly,
 }
+
+pub const MAX_ROW_PROJECTION_CONTEXT: usize = 20;
 
 /// A presentation-only row map. Entries are logical indices into `rows`; the
 /// comparison and its stable row/hunk identities remain untouched.
@@ -476,14 +479,30 @@ pub fn row_projection(
         return (0..result.rows.len()).collect();
     }
     let mut keep = vec![false; result.rows.len()];
-    for h in &result.hunks {
-        let start = h.start_row.saturating_sub(context);
-        let end = h.end_row.saturating_add(context).min(result.rows.len());
-        keep[start..end].fill(true);
+    match mode {
+        RowProjectionMode::All => unreachable!(),
+        RowProjectionMode::DifferencesOnly => {
+            for h in &result.hunks {
+                let start = h.start_row.saturating_sub(context);
+                let end = h.end_row.saturating_add(context).min(result.rows.len());
+                keep[start..end].fill(true);
+            }
+        }
+        RowProjectionMode::IdenticalOnly => {
+            for (row_index, row) in result.rows.iter().enumerate() {
+                if row.kind == DiffRowKind::Equal {
+                    keep[row_index] = true;
+                }
+            }
+        }
     }
     keep.into_iter()
         .enumerate()
-        .filter_map(|(i, yes)| yes.then_some(i))
+        .filter_map(|(i, yes)| {
+            (yes && (mode != RowProjectionMode::IdenticalOnly
+                || result.rows[i].kind != DiffRowKind::Ignored))
+                .then_some(i)
+        })
         .collect()
 }
 
@@ -1534,6 +1553,49 @@ mod presentation_tests {
         assert_eq!(
             row_projection(&c, RowProjectionMode::DifferencesOnly, 1),
             vec![0, 1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn m3c_identical_projection_excludes_ignored_rows_and_keeps_results_unchanged() {
+        let compiled = CompiledRules::compile(&TextComparisonRules::default()).unwrap();
+        let c = compare_with_annotations(
+            "same\nnoise\nleft",
+            "same\nnoise\nright",
+            1,
+            2,
+            3,
+            4,
+            &compiled,
+            100,
+            &[],
+            &[IgnoredLineRange { start: 1, end: 2 }],
+            &[IgnoredLineRange { start: 1, end: 2 }],
+            5,
+        )
+        .unwrap();
+        let before = c.clone();
+        let identical = row_projection(&c, RowProjectionMode::IdenticalOnly, 0);
+        assert!(!identical.is_empty());
+        assert!(
+            identical
+                .iter()
+                .all(|&row| c.rows[row].kind == DiffRowKind::Equal)
+        );
+        let context = row_projection(&c, RowProjectionMode::IdenticalOnly, 1);
+        assert!(
+            context
+                .iter()
+                .all(|&row| c.rows[row].kind == DiffRowKind::Equal)
+        );
+        assert_eq!(c.rows, before.rows);
+        assert_eq!(c.hunks, before.hunks);
+        assert_eq!(c.navigation, before.navigation);
+
+        let no_identical = compared("left", "right");
+        assert!(row_projection(&no_identical, RowProjectionMode::IdenticalOnly, 0).is_empty());
+        assert!(
+            row_projection(&no_identical, RowProjectionMode::IdenticalOnly, usize::MAX).is_empty()
         );
     }
     #[test]
