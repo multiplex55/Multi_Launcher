@@ -13,6 +13,10 @@ B3 predecessor receipt: [B2 to B3](stages/G03/PREDECESSOR_RECEIPT.json).
 
 B4 predecessor receipt: [B3 to B4](stages/G06/PREDECESSOR_RECEIPT.json).
 
-| B5 codex/linear-05-g08-mkmacro-history-20261030 |16564925a82c464e351f8e9936db61383e3a1241|in progress|initial HEAD equality and ancestor PASS|
+| B5 codex/linear-05-g08-mkmacro-history-20261030 |16564925a82c464e351f8e9936db61383e3a1241|0bc964572f38c7b18cc790e7fa9da0f48df469ef|M0/M3 pushed; ancestor PASS|
 
 B5 predecessor: [B4 to B5](stages/G08-history/PREDECESSOR_RECEIPT.json).
+
+| B6 codex/linear-06-g04-screenshot-native-20261030 |0bc964572f38c7b18cc790e7fa9da0f48df469ef|in progress|initial HEAD equality and ancestor PASS|
+
+B6 predecessor: [B5 to B6](stages/G04/PREDECESSOR_RECEIPT.json).

@@ -1,0 +1,10 @@
+{
+  "prior_branch": "codex/linear-05-g08-mkmacro-history-20261030",
+  "prior_tip": "0bc964572f38c7b18cc790e7fa9da0f48df469ef",
+  "push": "success",
+  "status": "clean",
+  "utc": "2026-10-31T03:04:29.6298370Z",
+  "next_branch": "codex/linear-06-g04-screenshot-native-20261030",
+  "owned_operations": "retired/output_drained",
+  "descendants": "UNVERIFIED"
+}

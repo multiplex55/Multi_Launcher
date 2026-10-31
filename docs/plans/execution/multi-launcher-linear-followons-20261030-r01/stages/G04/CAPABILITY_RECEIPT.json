@@ -1,0 +1,31 @@
+{
+  "utc": "2026-10-31T03:04:31.603592+00:00",
+  "source_head": "0bc964572f38c7b18cc790e7fa9da0f48df469ef",
+  "current_package": "C:\\Users\\Jay\\.codex\\plugins\\cache\\openai-bundled\\computer-use\\26.1027.30824",
+  "stale_catalog_package": "26.928.20755 missing; found current26.1027.30824",
+  "documents_sha256": {
+    "skills/computer-use/SKILL.md": "8211e4b11a19a0dc4f0ace91096c74c5b36037ca4cb2c8988f0f535bb209e951",
+    "docs/api.md": "c36d005fb98ed79837a1a5d4605ebad036cec95864e5646f451425163d5c16af",
+    "docs/guidance.md": "b171b26bc19f49226bb594bf3ed3f36666e5dd063a996c297986b2b461ac8efd",
+    "docs/confirmations.md": "9c45b3eb20e4a7fb14860e50f635e200b321a52fef6d26f39f7b936bd44be11a"
+  },
+  "source_blobs": {
+    "src/gui/screenshot_editor.rs": "0051162761961a6fcb3ac1a68f07d32f107ff641",
+    "src/annotation/redaction.rs": "6f67f44c309afee39eb20b8a8923056cf3b63ab1"
+  },
+  "drag_fields": [
+    "from_x",
+    "from_y",
+    "screenshotId?",
+    "to_x",
+    "to_y",
+    "window"
+  ],
+  "held_secondary_drag_documented": false,
+  "clipboard_image_observation_restoration_documented": false,
+  "click_mouse_button_not_held_drag": true,
+  "native_calls_issued": false,
+  "app_build_launch": "NOT_RUN",
+  "gesture_capture_save_copy_pixels": "NOT_RUN",
+  "source_changed": false
+}
