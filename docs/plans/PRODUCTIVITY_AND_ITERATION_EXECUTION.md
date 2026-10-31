@@ -12,7 +12,8 @@ Started 2026-10-31 in the single existing `G:\Repos\rust\Multi_Launcher` checkou
 | C03 | `feat/diff-text-workflows-20261031` | `feat/mkmacro-direct-open-20261031` / `a335bda87a86c8c5e481361b5e11ff819108c88c` | `b0575949e38acde9f37e3c4f1655248b99879b93` | partial: M3-A–M3-D implemented_pending_verification; source/state/build/review accepted, native blocked |
 | C04 | `feat/utility-ui-usability-20261031` | `feat/diff-text-workflows-20261031` / `d7f00fdfb738b99f3ddc1b9ed8e6658a26174d22` | `9364c1a1b882b1aa82e5051306c276bf201f4ff9` | M0-A complete; M4-A/M4-B implemented_pending_verification (native blocked); M4-C blocked (restore/resize attempt cap) |
 | C05 | `feat/unicode-inspector-20261031` | `feat/utility-ui-usability-20261031` / `39a45573d0dc5021a8fca15e4f580bda8162d58d` | `d2b52b341ed90700fb3b65d9384947fd0a2b0c7a` | partial: M5-A complete; M5-B blocked (themed final-row visibility attempt cap), candidate preserved and absent |
-| C06–C07 | Not started | Must use immediately preceding actual final tip | pending | pending |
+| C06 | `feat/zip-extraction-20261031` | `feat/unicode-inspector-20261031` / `5640d3754876801d4fc017e1277dfad41f2ce0ea` | this M0-A | M0-A in_progress; M6-A–M6-C pending |
+| C07 | Not started | Must use immediately preceding actual final tip | pending | pending |
 
 ## C01/M0-A
 
@@ -482,3 +483,11 @@ Additional M5-B receipts after the first in-progress table (same source/argv rec
 |`c05-m5b-final-row-inventory_20261031T195232107Z_d7bc2dc11c99471b861034032569f994`|0|1.664308|True/True|
 |`c05-m5b-final-scoped-correction-preparation_20261031T193346778Z_80c4c3f20a344c6fa4a54721714851ac`|0|117.003315|True/True|
 |`c05-m5b-review-fixes-preparation_20261031T193018481Z_36b4080471c546008d94231f7db6159d`|101|36.57873|True/True|
+
+## C06 / M0-A baseline and C05 handoff
+
+C05 final_tip_sha `5640d3754876801d4fc017e1277dfad41f2ce0ea`, branch `feat/unicode-inspector-20261031`, pushed, clean. Significant checkpoint9b30ce50(M5-A) and documentation-only M5-B stop5640d375; actual source equals accepted9b30ce50. M5-A domain complete; M5-B absent/blocked under20261031T195454Z report. Accepted current-source application build172.056994s is reused, not a UI pass. Native desktop and shared geometry limitations remain separate; C06 may not use the archived inspector or sizing helpers.
+
+Read-only C06 transition inspection verified current local/upstream both5640d375, no tracked/untracked user changes, origin multiplex55/Multi_Launcher, primary integration master, no existing C06 branch. Created fresh `feat/zip-extraction-20261031` directly at that actual predecessor and verified initial HEAD. This ledger-only M0-A precedes all ZIP source changes/builds. Baseline SHA/direct-parent proof and push outcome follow in the next ordinary update. Single checkout; no merge/rebase/cherry-pick, extra checkout or worktree. Parent remains Git/ledger/Cargo scheduling owner; one implementer source writer.
+
+M6-A establishes ZIP-owned bound source/root-relative component/staging/no-clobber native authority, retaining pure catalog/planner and actual2GiB-entry/8GiB-run defaults. M6-B depends on actual native gates plus streaming integrity, bounded/cancellable I/O and joined worker retirement. M6-C may expose extraction ONLY after A/B acceptance; no path-only fallback or weaker writer. Persistent-size integration remains blocked. Existing focused planner packet is retained; only changed/uncertain facts are revalidated.
