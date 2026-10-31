@@ -10,7 +10,7 @@ Started 2026-10-31 in the single existing `G:\Repos\rust\Multi_Launcher` checkou
 | C01 | `perf/productivity-iteration-20261031` | `master` / `d6541edd5f89c7dc04de8c68b65e2b9247978163` | `a8a6aa8e62012b83f1e99098c442654cb8ef6778` | M0-A/M0-B/M1-A complete; M1-B/M1-C assessed_no_accepted_optimization |
 | C02 | `feat/mkmacro-direct-open-20261031` | `perf/productivity-iteration-20261031` / `f0fb5adede067774ae06752fc3573c6724100fb5` | `3b042f90bf9f32236b6ae5d5f37269bfd97320d8` | partial: M0-A/M2-A complete; M2-B implemented_pending_verification (native admission blocked) |
 | C03 | `feat/diff-text-workflows-20261031` | `feat/mkmacro-direct-open-20261031` / `a335bda87a86c8c5e481361b5e11ff819108c88c` | `b0575949e38acde9f37e3c4f1655248b99879b93` | partial: M3-A–M3-D implemented_pending_verification; source/state/build/review accepted, native blocked |
-| C04 | `feat/utility-ui-usability-20261031` | `feat/diff-text-workflows-20261031` / `d7f00fdfb738b99f3ddc1b9ed8e6658a26174d22` | `9364c1a1b882b1aa82e5051306c276bf201f4ff9` | M0-A complete; M4-A/M4-B implemented_pending_verification (native blocked); M4-C pending |
+| C04 | `feat/utility-ui-usability-20261031` | `feat/diff-text-workflows-20261031` / `d7f00fdfb738b99f3ddc1b9ed8e6658a26174d22` | `9364c1a1b882b1aa82e5051306c276bf201f4ff9` | M0-A complete; M4-A/M4-B implemented_pending_verification (native blocked); M4-C blocked (restore/resize attempt cap) |
 | C05–C07 | Not started | Must use immediately preceding actual final tip | pending | pending |
 
 ## C01/M0-A
@@ -293,3 +293,118 @@ One production owner changed: Theme Settings adds Interface density radio choice
 Preparation `c04-m4b-library-prep_20261031T165129676Z_2eafa3b7c45c4108a23a5a43ab104176` passed111.117s. Inventory7 nonignored; `c04-m4b-focused-tests_20261031T165407387Z_87802de71ccd4fdc9c366334552d5562` ran7:6 passed/1 new fixture failed (.721s Nextest/1.555s runner). The helper clicked a pre-preview rect after density changed spacing; refreshed layout/observed rect before each next click, preserving product assertions. Corrected preparation `c04-m4b-library-prep-correction1_20261031T165436129Z_5437afc6c6e54cd29e164fb5c6656d8c` passed83.786s. Exact corrected case `c04-m4b-density-test-correction1_20261031T165620969Z_74a9f9054ab847bc9e086ceca19f98b4` passed1/1,.534s Nextest/1.347s runner; six unchanged passes reused, not one clean7-case run. All measured jobs verified cleanup/drain, no timeout/interruption. Format/diff checks pass; source file plus ledger only.
 
 Native preview/Save/Cancel/restart remains unverified under unchanged admission blocker. No additional theme-family/full-suite/pixel campaign or source-only native pass. Independent C04 review follows complete M4-C. Commit/push identity follows next ordinary update.
+
+M4-B commit `15474ff8551a5b3981039e6872f809c56fcb34d5` pushed successfully; clean checkpoint. Planner refined M4-C against9364c1a1, then M4-A changed only Jump/Help and M4-B only added existing-density controls/test fields to Theme Settings. Sizing owner/API facts remain applicable; preserve new controls.
+
+### C04/M4-C plan (blocked; no foundation source accepted)
+
+One milestone, at most two coherent source checkpoints: (1) bounded policy/settings/runtime foundation plus representative integrations and verification; (2) remaining inventory integration/reset/legacy migration and closure. Foundation is not M4-C completion. Parent owns ledger/Git, one source writer, no broad tests/native retry. Plan facts: cached egui0.36.2 has no public per-window current_size/reset API; Resize::State/requested_size are private. The initial fixed_size restore strategy and subsequent builder-only min/max lock were disproved by actual resize tests (natural 63px height). A body-content minimum/chrome-conversion candidate is preserved but unverified; no helper is active in production. Preserve IDs/layers, prove resize resumes, never fixed_size every frame or clear global areas. Native viewports use one-shot InnerSize and relevant monitor/viewport bounds, not small parent launcher.
+
+Persist finite stable tool keys and bounded logical dimensions only, version/default/corrupt handling. Separate preferred, applied/clamped and observed/pending-user-resize sizes. Restoration/clamping/DPI/repeated discarded passes must not overwrite preference. Debounce/coalesce per-key Settings::update patches against latest committed settings; reset tombstones invalidate old pending/completion state. Preserve utility-size field from current in SettingsEditor::to_settings, exclude it from GENERAL_SETTINGS_FIELDS/general save/rollback; retain failures without false committed state, flush before owned save-worker admission closes. No per-paint disk writes, content/position/window-ID persistence, or global window framework.
+
+Shared size is durable Diff authority; adapt body/outer through current chrome without activating unrelated Diff session/position persistence. Clipboard legacy plugin width/height are one-way fallback only when no shared preference; retire clamped close writer/LauncherClosePreferences plumbing deliberately. File Preview runtime dimensions cease being independent preferred authority. Native Regex/XML/QR builders plus embedded equivalents share one preference through explicit units adapter. Settings can provide one finite tool selector/reset control instead of every form adding a button. Preserve explicit fixed surfaces; if actual inspected resizable flags contradict a proposed inventory row, record the concrete exclusion/equivalent rather than changing unrelated lifecycle.
+
+Foundation acceptance: pure finite keys/size/version/corrupt/clamp, once-open/reset/resizable-next-frame, larger preference survives smaller viewport, independent writes/reset/stale completion, settings stale draft/rollback, owned flush/failure, and representative Diff/text/list-or-table/editor integrations with safe existing-size adapters. Integration acceptance: every row below has shared behavior or documented existing equivalent/exclusion; native builder adapters and existing Clipboard close writer migrated, reset accessible, no competing preferences. Reuse exact existing state/geometry tests, relevant library/affected integration targets only, normal GoalH bounds. Native restart/DPI interaction remains unverified under existing admission blocker; do not count headless bounds as native proof.
+
+#### Ordinary sizing inventory
+
+Paths are under src/. Keys are stable tool types, never dynamic document/title/path values. Multiple live instances share the durable preference while preserving their existing live IDs. Initial state below is pending; update groups only after actual integration/inspection.
+
+| File / surface | Stable key(s) | State |
+| --- | --- | --- |
+| actions_editor.rs / App Editor | custom-apps | blocked (helper unaccepted) |
+| settings_editor/render.rs | settings | blocked (helper unaccepted) |
+| plugin_editor.rs | plugin-settings | blocked (helper unaccepted) |
+| help_window.rs / Quick, Command Help | quick-help, command-help | blocked (helper unaccepted) |
+| multi_manager/ui.rs / primary, settings | multi-manager, multi-manager-settings | blocked (helper unaccepted) |
+| gui/action_sheet.rs | action-sheet | blocked (helper unaccepted) |
+| gui/activity_dialog.rs | activity | blocked (helper unaccepted) |
+| gui/add_action_dialog.rs | add-action | blocked (helper unaccepted) |
+| gui/add_bookmark_dialog.rs | add-bookmark | blocked (helper unaccepted) |
+| gui/alias_dialog.rs | folder-alias | blocked (helper unaccepted) |
+| gui/bookmark_alias_dialog.rs | bookmark-alias | blocked (helper unaccepted) |
+| gui/tempfile_alias_dialog.rs | tempfile-alias | blocked (helper unaccepted) |
+| gui/batch_rename_dialog.rs / primary | batch-rename | blocked (helper unaccepted) |
+| gui/brightness_dialog.rs | brightness | blocked (helper unaccepted) |
+| gui/calendar_popover.rs | calendar | blocked (helper unaccepted) |
+| gui/calendar_event_editor.rs | calendar-event-editor | blocked (helper unaccepted) |
+| gui/calendar_event_details.rs | calendar-event-details | blocked (helper unaccepted) |
+| gui/clipboard_dialog.rs / production History | clipboard-history | blocked (helper unaccepted) |
+| gui/clipboard_modify_dialog.rs | clipboard-modify | blocked (helper unaccepted) |
+| gui/cpu_list_dialog.rs | cpu-usage | blocked (helper unaccepted) |
+| gui/dashboard_editor_dialog.rs / primary | dashboard-editor | blocked (helper unaccepted) |
+| gui/data_recovery_dialog.rs / primary | data-recovery | blocked (helper unaccepted) |
+| gui/diff_dialog/mod.rs / primary, inputs | diff, diff-text-input | blocked (helper unaccepted) |
+| gui/diff_dialog/rules_dialog.rs | diff-comparison-rules | blocked (helper unaccepted) |
+| gui/diff_dialog/folder_rules_dialog.rs | diff-folder-rules | blocked (helper unaccepted) |
+| gui/duplicate_finder_dialog.rs | duplicate-finder | blocked (helper unaccepted) |
+| gui/fav_dialog.rs | favorites | blocked (helper unaccepted) |
+| gui/file_search_dialog.rs | file-search | blocked (helper unaccepted) |
+| gui/file_search_preview_dialog.rs | file-preview | blocked (helper unaccepted) |
+| gui/hash_generator_dialog.rs | hash-generator | blocked (helper unaccepted) |
+| gui/hotfolder_dialog.rs | hotfolder-manager | blocked (helper unaccepted) |
+| gui/hotkey_directory_dialog.rs | hotkey-directory | blocked (helper unaccepted) |
+| gui/image_compare_dialog.rs | image-comparison | blocked (helper unaccepted) |
+| gui/image_panel.rs / ordinary viewer | image-viewer | blocked (helper unaccepted) |
+| gui/image_crop_editor.rs / shared editor | image-crop-editor | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/image_crop_editor.rs | mkmacro-reference-crop | blocked (helper unaccepted) |
+| gui/json_utility_dialog.rs | json-utility | blocked (helper unaccepted) |
+| gui/macro_dialog.rs | legacy-macros | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/mod.rs | mkmacro | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/action_catalog.rs | mkmacro-action-catalog | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/action_editor.rs / primary | mkmacro-action-editor | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/launcher_action_picker.rs | mkmacro-launcher-picker | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/package_ui.rs / five ordinary variants | mkmacro-package-export, mkmacro-package-import, mkmacro-template-save, mkmacro-templates, mkmacro-help | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/recording_review.rs | mkmacro-recording-review | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/search.rs / Find/Replace | mkmacro-step-search | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/window_picker.rs | mkmacro-window-picker | blocked (helper unaccepted) |
+| gui/mkmacro_dialog/parameter_prompt.rs / native parameters | mkmacro-parameters | blocked (helper unaccepted) |
+| gui/render.rs::show_macro_prompt | mkmacro-runtime-prompt | blocked (helper unaccepted) |
+| gui/mouse_settings_dialog.rs | mouse-settings | blocked (helper unaccepted) |
+| gui/mouse_gesture_settings_dialog.rs / settings, picker | gesture-settings, gesture-settings-window-picker | blocked (helper unaccepted) |
+| gui/mouse_gestures_dialog.rs / library, binding | mouse-gestures, gesture-binding-editor | blocked (helper unaccepted) |
+| plugins/mouse_gestures.rs / ignore-window picker | gesture-ignore-window-picker | blocked (helper unaccepted) |
+| gui/note_graph_dialog.rs | note-graph | blocked (helper unaccepted) |
+| gui/note_panel.rs / primary editor | note-editor | blocked (helper unaccepted) |
+| gui/notes_dialog.rs / Quick Notes, templates | quick-notes, note-templates | blocked (helper unaccepted) |
+| gui/ocr_view.rs / result | ocr-result | blocked (helper unaccepted) |
+| gui/paste_sequence_dialog.rs | paste-sequences | blocked (helper unaccepted) |
+| gui/pinboard_windows.rs::show_pin_list | screenshot-pin-list | blocked (helper unaccepted) |
+| gui/qr_dialog.rs / native, embedded | qr-generator | blocked (helper unaccepted) |
+| gui/regex_tester_dialog.rs / native, embedded | regex-tester | blocked (helper unaccepted) |
+| gui/xml_toolkit_dialog.rs / native, embedded | xml-toolkit | blocked (helper unaccepted) |
+| gui/search_replace_dialog.rs / primary | search-replace | blocked (helper unaccepted) |
+| gui/screenshot_editor.rs / ordinary editor | screenshot-editor | blocked (helper unaccepted) |
+| gui/shell_cmd_dialog.rs | shell-commands | blocked (helper unaccepted) |
+| gui/snippet_dialog.rs | snippets | blocked (helper unaccepted) |
+| gui/snippet_prompt_dialog.rs | snippet-prompt | blocked (helper unaccepted) |
+| gui/table_utility_dialog.rs / Table, CSV | table-utility | blocked (helper unaccepted) |
+| gui/tempfile_dialog.rs | create-tempfile | blocked (helper unaccepted) |
+| gui/theme_settings_dialog.rs | theme-settings | blocked (helper unaccepted) |
+| gui/toast_log_dialog.rs | toast-log | blocked (helper unaccepted) |
+| gui/todo_dialog.rs | todos | blocked (helper unaccepted) |
+| gui/unused_assets_dialog.rs | unused-note-assets | blocked (helper unaccepted) |
+| gui/volume_dialog.rs | volume | blocked (helper unaccepted) |
+| Later Unicode, ZIP dialogs | unicode-inspector, zip-extractor | blocked (helper unaccepted) |
+
+Exceptions: fixed Convert, Timer/Alarm, View Todos; modal confirmations/overwrite/discard and transient note-link confirmations; native OS file/folder pickers; capture/selection/input overlays, screen draw/radial menus/designer workspace, actual screenshot pins; main launcher position/layout. Ordinary screenshot editor, reference crop and pin list remain included. Native parameter/runtime prompts require actual resizable-kind confirmation before inclusion. No unrelated persistence activation.
+
+Foundation writer plan approved: pure settings::utility_dialog_sizes finite-key/versioned dimension/reset owner; explicit context runtime installed by LauncherApp::new_with_policy, existing path/SettingsSaveWorkerRegistry ownership, independent mapping/save/rollback field; representative Diff/Hash/Table/Theme Settings integrations. Shared-over-legacy Clipboard precedence/reset semantics established now, actual old close-writer retirement and remaining inventory in checkpoint2. Opaque unsupported/corrupt existing geometry may be retained inactive for unrelated Settings writes; active managed preferences/new geometry writes accept only bounded known keys and sanitized dimensions/reset metadata. Geometry attempts must preserve unsupported evidence or fail visibly, not replace with defaults. Tests include that ownership and actual resize-cause observation (not arbitrary drag/content reflow). No extra framework/milestones; remaining exact owner checks stop once implementation can proceed.
+
+### M4-C bounded stop and source disposition
+
+M4-C is **blocked** by restore/real-resize acceptance failure at the GoalH initial+2 focused-corrections cap, not by missing desktop automation. First compile preparation116.2s failed integration visibility/return-shape/conversion; correction1~102s failed one overlapping borrow; correction2 passed204.820s. Initial metadata inventory commands failed exit2 (missing input path) and96 (wrong file expectation), no tests; exact corrected inventory22 nonignored then succeeded. Full argument vectors/source hashes/raw output/ownership checks remain in receipts.
+
+| Prepared execution | Selected / outcome | Runner seconds |
+| --- | --- | --- |
+| `c04-m4c-foundation-execution_20261031T174558012Z_a042398692b24f528ad546d9085ad88f` |22:12 passed,2 failed,8 not run|2.080534|
+| `c04-m4c-foundation-correction3-execution_20261031T175315561Z_661d20ee08f144f499f0117c19bab935` |10:8 passed,same2 failed|.926232|
+| `c04-m4c-foundation-correction4-execution_20261031T175719590Z_fd7e37cefddf47a986777d9b7bc9a8de` |9:7 passed,same2 failed|2.098604|
+
+Both exact failures are `gui::utility_dialog_size::tests::{real_window_resize_grip_records_candidate_after_one_shot_restore,omitted_window_reopens_with_latest_size_from_another_instance}`. Expected400×300 restoration/real two-axis resize/shared-instance reopen; actual400×63 natural footprint. Edge-widget ID gate was changed after pinned-source inspection; builder-only fixed/min-max paths still failed height. Corresponding correction3/4 compilations passed96.715s/83.119s. All completed runs/preps have verified cleanup/drain, no timeout; testinvocation600s/test100s limits preserved.
+
+Stop message arrived after content-UI minimum proposal preparation had already started. It retired normally: `c04-m4c-foundation-correction5_20261031T180130253Z_bcf8762dcb944ba3b26fe4b9c45b23a2`, exit0,99.258860s, cleanup/drain/helper lease verified. No inventory/tests followed. This last proposal is compile-only, not accepted or shipped; budget was not silently renewed.
+
+Before cleanup, captured tracked patch38,840bytes and all13 source files with SHA-256 verified copies under `C:\Users\Jay\AppData\Local\Temp\Multi_Launcher\productivity-iteration-20261031\c04-m4c-unverified-source_20261031T180444Z_0c876f539d7a42c184af0e8c0cacd196`. Manifest SHA256 `53EAE08BF76D7F9B1501353CD5F1CC34F84926D55C39B66BA2AFDA7021DEB7CF`. Restored ONLY task-owned uncommitted M4-C source to accepted M4-B15474ff8 and removed the two copied new modules. No accepted/user/pre-existing source was discarded. Source diff now empty; three Windows stat artifacts were refreshed only after their normalized blob hashes matched HEAD. No history reset/rewrite, other checkout or worktree. Parent ledger remains intact; no known task-owned process remains.
+
+Mandatory stop report: [20261031T180743Z.md](execution/standalone/productivity-and-iteration/stalls/20261031T180743Z.md). No shared utility-size owner/helper/field or inventory migration is delivered. M4-A/B source remains accepted, native checks pending. Independent C05–C07 may proceed from safe committed C04 final tip; Unicode/ZIP persistent-size integration remains blocked and must not create a competing implementation. Source-only C04 review and actual accepted app build follow; report/ledger commit is documentation, not accepted M4-C implementation.
