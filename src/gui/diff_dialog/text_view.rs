@@ -1,3 +1,4 @@
+use crate::diff::model::TextCompareOrigin;
 use crate::diff::model::{DiffSide, TextViewModel};
 use crate::diff::text_compare::{
     ChangeImportance, DiffRowKind, FindScope, NavigationDirection, RowProjectionMode,
@@ -124,18 +125,28 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             {
                 model.redo();
             }
-            if ui.button("Save Left").clicked() {
-                model.save(DiffSide::Left);
+            let save_left = if model.origin == TextCompareOrigin::Memory {
+                "Save Left As…"
+            } else {
+                "Save Left"
+            };
+            let save_right = if model.origin == TextCompareOrigin::Memory {
+                "Save Right As…"
+            } else {
+                "Save Right"
+            };
+            if ui.button(save_left).clicked() {
+                save_side(model, DiffSide::Left);
             }
-            if ui.button("Save Right").clicked() {
-                model.save(DiffSide::Right);
+            if ui.button(save_right).clicked() {
+                save_side(model, DiffSide::Right);
             }
             if ui.button("Save All Modified").clicked() {
                 if model.left.is_dirty() {
-                    model.save(DiffSide::Left);
+                    save_side(model, DiffSide::Left);
                 }
                 if model.right.is_dirty() {
-                    model.save(DiffSide::Right);
+                    save_side(model, DiffSide::Right);
                 }
             }
         });
@@ -287,6 +298,31 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         text_details(ui, model, details_height);
     }
     super::rules_dialog::show(ui.ctx(), view, model);
+}
+
+pub(super) fn save_side(model: &mut TextViewModel, side: DiffSide) -> bool {
+    let name = match side {
+        DiffSide::Left => "left.txt",
+        DiffSide::Right => "right.txt",
+    };
+    save_side_with_picker(model, side, || {
+        rfd::FileDialog::new()
+            .add_filter("Text files", &["txt"])
+            .set_file_name(name)
+            .save_file()
+    })
+}
+
+fn save_side_with_picker(
+    model: &mut TextViewModel,
+    side: DiffSide,
+    pick_destination: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> bool {
+    if model.origin == TextCompareOrigin::Memory {
+        pick_destination().is_some_and(|path| model.save_as_memory(side, &path))
+    } else {
+        model.save(side)
+    }
 }
 
 const TEXT_INSET: f32 = 72.0;
@@ -887,6 +923,8 @@ fn side_status(
     }
 }
 fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
+    let mut save_active_side = None;
+    let mut save_all = false;
     ui.input_mut(|i| {
         if i.consume_key(egui::Modifiers::CTRL, egui::Key::F) {
             m.find_open = true;
@@ -911,7 +949,7 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
             m.redo();
         }
         if i.consume_key(egui::Modifiers::CTRL, egui::Key::S) {
-            m.save(m.active_side);
+            save_active_side = Some(m.active_side);
         }
         if i.consume_key(
             egui::Modifiers {
@@ -921,13 +959,22 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
             },
             egui::Key::S,
         ) {
-            if m.left.is_dirty() {
-                m.save(DiffSide::Left);
-            }
-            if m.right.is_dirty() {
-                m.save(DiffSide::Right);
-            }
+            save_all = true;
         }
+    });
+    if let Some(side) = save_active_side {
+        save_side(m, side);
+    }
+    if save_all {
+        if m.left.is_dirty() {
+            save_side(m, DiffSide::Left);
+        }
+        if m.right.is_dirty() {
+            save_side(m, DiffSide::Right);
+        }
+    }
+
+    ui.input_mut(|i| {
         let copy_modifiers = egui::Modifiers {
             alt: true,
             ctrl: true,
@@ -955,7 +1002,18 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, fs, rc::Rc};
+
+    fn wait_for_test_comparison(model: &mut TextViewModel) {
+        for _ in 0..500 {
+            model.poll();
+            if model.comparison.is_some() && !model.recalculating {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(model.comparison.is_some(), "text comparison completed");
+    }
 
     fn render_text_view_frame(
         context: &egui::Context,
@@ -1394,5 +1452,103 @@ mod tests {
             "horizontal scrolling is available"
         );
         assert!(content.y < 50.0, "unwrapped JSON remains one visual line");
+    }
+
+    #[test]
+    fn memory_text_save_as_cancel_preserves_origin_source_and_dirty_revision() {
+        let mut model = TextViewModel::from_test_text("left".into(), "right".into());
+        model.left.replace_source("edited\r\nleft".into()).unwrap();
+        let source = model.left.source().to_owned();
+        let revision = model.left.revision;
+        let saved_revision = model.left.saved_revision;
+        let error = model.left_error.clone();
+        assert!(!save_side_with_picker(&mut model, DiffSide::Left, || None));
+        assert_eq!(model.origin, TextCompareOrigin::Memory);
+        assert_eq!(model.left_path, None);
+        assert_eq!(model.left.source(), source);
+        assert_eq!(model.left.revision, revision);
+        assert_eq!(model.left.saved_revision, saved_revision);
+        assert_eq!(model.left_error, error);
+        assert!(model.left.is_dirty());
+    }
+
+    #[test]
+    fn text_save_shortcut_finishes_before_hunk_copy_shortcut() {
+        let directory = tempfile::tempdir().unwrap();
+        let left_path = directory.path().join("left.txt");
+        let right_path = directory.path().join("right.txt");
+        fs::write(&left_path, "before").unwrap();
+        fs::write(&right_path, "right").unwrap();
+        let mut model = TextViewModel::load(
+            &crate::diff::model::TextCompareState {
+                left: Some(left_path.clone()),
+                right: Some(right_path),
+                relative_path: None,
+                origin: TextCompareOrigin::FileBacked,
+            },
+            &Default::default(),
+        )
+        .unwrap();
+        model
+            .left
+            .replace_source("unsaved before copy".into())
+            .unwrap();
+        model.schedule_compare();
+        wait_for_test_comparison(&mut model);
+        let row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row.kind,
+                    crate::diff::text_compare::DiffRowKind::Modified
+                        | crate::diff::text_compare::DiffRowKind::Deleted
+                        | crate::diff::text_compare::DiffRowKind::Inserted
+                )
+            })
+            .unwrap();
+        model.current_row = Some(row);
+
+        let key_event = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let context = egui::Context::default();
+        context
+            .run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 700.0),
+                    )),
+                    focused: true,
+                    events: vec![
+                        key_event(egui::Key::S, egui::Modifiers::CTRL),
+                        key_event(
+                            egui::Key::ArrowLeft,
+                            egui::Modifiers {
+                                alt: true,
+                                ctrl: true,
+                                ..Default::default()
+                            },
+                        ),
+                    ],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| show(ui, 1, 2, &mut model));
+                },
+            )
+            .drop_without_applying_deltas();
+
+        assert_eq!(fs::read(&left_path).unwrap(), b"unsaved before copy");
+        assert_eq!(model.left.source(), "right");
+        assert!(model.left.is_dirty());
     }
 }

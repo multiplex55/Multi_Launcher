@@ -299,11 +299,20 @@ mod folder_rule_tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextCompareOrigin {
+    FileBacked,
+    Memory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextCompareState {
     pub left: Option<PathBuf>,
     pub right: Option<PathBuf>,
     pub relative_path: Option<PathBuf>,
+    /// `None` paths may denote a missing folder-child side. Origin identifies
+    /// memory text explicitly instead of inferring it from absent paths.
+    pub origin: TextCompareOrigin,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryCompareState {
@@ -463,6 +472,7 @@ impl DiffWorkspace {
                     left: Some(lp.clone()),
                     right: Some(rp.clone()),
                     relative_path: None,
+                    origin: TextCompareOrigin::FileBacked,
                 })
             }
         } else if lm.is_dir() && rm.is_dir() {
@@ -517,6 +527,7 @@ impl DiffWorkspace {
                     left,
                     right,
                     relative_path: Some(relative_path),
+                    origin: TextCompareOrigin::FileBacked,
                 })
             },
         };
@@ -531,6 +542,25 @@ impl DiffWorkspace {
         } else {
             false
         }
+    }
+
+    /// Pushes a new memory comparison while retaining the current view and its
+    /// model identity for Back navigation.
+    pub fn push_memory_text_compare(&mut self) -> u64 {
+        let next = RetainedView {
+            id: id(),
+            view: DiffView::TextCompare(TextCompareState {
+                left: None,
+                right: None,
+                relative_path: None,
+                origin: TextCompareOrigin::Memory,
+            }),
+        };
+        let next_id = next.id;
+        let old = std::mem::replace(&mut self.current_view, next);
+        self.navigation_stack.push(old);
+        self.current_job_generation = self.current_job_generation.wrapping_add(1);
+        next_id
     }
 
     /// Replaces a folder child with the adjacent differing file from the
@@ -613,6 +643,7 @@ impl DiffWorkspace {
                     left,
                     right,
                     relative_path: Some(relative_path),
+                    origin: TextCompareOrigin::FileBacked,
                 })
             },
         };
@@ -1068,6 +1099,7 @@ struct CompareMessage {
 /// Non-egui controller for a retained text comparison. The last accepted
 /// alignment remains available while `recalculating` is true.
 pub struct TextViewModel {
+    pub origin: TextCompareOrigin,
     pub left_path: Option<PathBuf>,
     pub right_path: Option<PathBuf>,
     pub left: TextDocument,
@@ -1101,6 +1133,7 @@ pub struct TextViewModel {
     pub current_intraline: Option<IntralineLocation>,
     pub syntax_cache: crate::diff::syntax::SyntaxCache,
     pub large_file_tier: crate::diff::worker::LargeFileTier,
+    large_file_policy: crate::diff::worker::LargeFilePolicy,
     pub splitter: f32,
     pub recalculate_at: Option<Instant>,
     pub recalculating: bool,
@@ -1117,20 +1150,9 @@ pub struct TextViewModel {
 impl TextViewModel {
     #[cfg(test)]
     pub(crate) fn from_test_text(left: String, right: String) -> Self {
-        let mut model = Self::load(
-            &TextCompareState {
-                left: None,
-                right: None,
-                relative_path: None,
-            },
-            &DiffConfigV1::default(),
-        )
-        .unwrap();
-        model.left = TextDocument::from_test_text(left);
-        model.right = TextDocument::from_test_text(right);
+        let mut model = Self::new_memory(left, right, &DiffConfigV1::default()).unwrap();
         model.wrap = false;
         model.scroll.wrapped = false;
-        model.start_compare();
         for _ in 0..100 {
             model.poll();
             if model.comparison.is_some() {
@@ -1174,6 +1196,11 @@ impl TextViewModel {
 
     /// Reload is intentionally all-or-nothing with respect to dirty buffers.
     pub fn reload_files(&mut self) -> Result<(), String> {
+        if self.origin == TextCompareOrigin::Memory {
+            return Err(
+                "In-memory text has no files to reload; use Recompare or Edit Inputs".into(),
+            );
+        }
         if self.has_dirty() {
             return Err(
                 "Reload would discard unsaved edits; save or discard them explicitly first".into(),
@@ -1224,6 +1251,9 @@ impl TextViewModel {
         Ok(())
     }
     pub fn load(state: &TextCompareState, settings: &DiffConfigV1) -> Result<Self, String> {
+        if state.origin == TextCompareOrigin::Memory {
+            return Err("Memory comparisons must be created from explicit text input".into());
+        }
         fn doc(path: Option<&PathBuf>) -> Result<TextDocument, String> {
             path.map(|p| {
                 load_text_file(p)
@@ -1237,6 +1267,38 @@ impl TextViewModel {
         }
         let left = doc(state.left.as_ref())?;
         let right = doc(state.right.as_ref())?;
+        Self::from_documents(state, settings, left, right)
+    }
+
+    /// Creates a memory-backed comparison using the same comparison model and
+    /// worker as file-backed text views.
+    pub fn new_memory(
+        left: String,
+        right: String,
+        settings: &DiffConfigV1,
+    ) -> Result<Self, String> {
+        validate_memory_text(&left)?;
+        validate_memory_text(&right)?;
+        let state = TextCompareState {
+            left: None,
+            right: None,
+            relative_path: None,
+            origin: TextCompareOrigin::Memory,
+        };
+        Self::from_documents(
+            &state,
+            settings,
+            TextDocument::from_memory_source(left),
+            TextDocument::from_memory_source(right),
+        )
+    }
+
+    fn from_documents(
+        state: &TextCompareState,
+        settings: &DiffConfigV1,
+        left: TextDocument,
+        right: TextDocument,
+    ) -> Result<Self, String> {
         let wrap =
             if crate::diff::syntax::code_like(state.left.as_deref().or(state.right.as_deref())) {
                 false
@@ -1244,17 +1306,21 @@ impl TextViewModel {
                 settings.wrap_text
             };
         let bytes = left.source().len().saturating_add(right.source().len()) as u64;
-        let estimated_rows =
+        let estimated_rows = if state.origin == TextCompareOrigin::Memory {
+            memory_text_line_count(left.source()).max(memory_text_line_count(right.source())) as u64
+        } else {
             left.source()
                 .bytes()
                 .filter(|b| *b == b'\n')
                 .count()
                 .max(right.source().bytes().filter(|b| *b == b'\n').count()) as u64
-                + 1;
+                + 1
+        };
         let large_file_tier = settings.large_file_policy().tier(bytes, estimated_rows);
         let mut out = Self {
             left_path: state.left.clone(),
             right_path: state.right.clone(),
+            origin: state.origin,
             left,
             right,
             comparison: None,
@@ -1285,6 +1351,7 @@ impl TextViewModel {
             current_intraline: None,
             syntax_cache: Default::default(),
             large_file_tier,
+            large_file_policy: settings.large_file_policy(),
             splitter: validated_splitter(settings.pane_split),
             recalculate_at: Some(Instant::now()),
             recalculating: true,
@@ -1298,6 +1365,54 @@ impl TextViewModel {
         };
         out.start_compare();
         Ok(out)
+    }
+
+    /// Commits edited memory inputs through each document's revision/undo
+    /// owner. Validation and read-only checks run for both sides before either
+    /// source changes.
+    pub fn replace_memory_sources(&mut self, left: String, right: String) -> Result<bool, String> {
+        if self.origin != TextCompareOrigin::Memory {
+            return Err("Only an in-memory comparison can replace text inputs".into());
+        }
+        validate_memory_text(&left)?;
+        validate_memory_text(&right)?;
+        if self.left.read_only || self.right.read_only {
+            return Err("In-memory text documents must be editable".into());
+        }
+
+        let mut next_left = self.left.clone();
+        let mut next_right = self.right.clone();
+        let left_changed = next_left.replace_source(left)?;
+        let right_changed = next_right.replace_source(right)?;
+        if !left_changed && !right_changed {
+            return Ok(false);
+        }
+
+        self.left = next_left;
+        self.right = next_right;
+        self.manual_alignments.clear();
+        self.pending_alignment = None;
+        self.alignment_error = None;
+        self.current_intraline = None;
+        self.cursor = None;
+        self.current_row = None;
+        self.pending_scroll_row = None;
+        self.row_measurements = Default::default();
+        self.find_matches.clear();
+        self.current_find_match = None;
+        self.comparison = None;
+        self.generation = self.generation.wrapping_add(1);
+        self.receiver = None;
+        self.large_file_tier = self.large_file_policy.tier(
+            self.left
+                .source()
+                .len()
+                .saturating_add(self.right.source().len()) as u64,
+            memory_text_line_count(self.left.source())
+                .max(memory_text_line_count(self.right.source())) as u64,
+        );
+        self.schedule_compare();
+        Ok(true)
     }
     pub fn schedule_compare(&mut self) {
         self.recalculate_at = Some(Instant::now() + Duration::from_millis(250));
@@ -1554,9 +1669,73 @@ impl TextViewModel {
         }
         result.is_ok()
     }
+
+    /// Saves one memory side to an explicitly chosen destination while
+    /// retaining its memory origin and pathless document identity.
+    pub fn save_as_memory(&mut self, side: DiffSide, path: &Path) -> bool {
+        if self.origin != TextCompareOrigin::Memory {
+            let error = "Save As is only available for in-memory text".to_string();
+            match side {
+                DiffSide::Left => self.left_error = Some(error),
+                DiffSide::Right => self.right_error = Some(error),
+            }
+            return false;
+        }
+        let (document, error) = match side {
+            DiffSide::Left => (&mut self.left, &mut self.left_error),
+            DiffSide::Right => (&mut self.right, &mut self.right_error),
+        };
+        let result = document.save_as_exact_utf8(path);
+        *error = result.as_ref().err().map(ToString::to_string);
+        result.is_ok()
+    }
     pub fn has_dirty(&self) -> bool {
         self.left.is_dirty() || self.right.is_dirty()
     }
+}
+
+pub const MEMORY_TEXT_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub const MEMORY_TEXT_MAX_LINES: usize = 100_000;
+
+/// Rejects oversized input before it enters a retained comparison. Content is
+/// never truncated or silently normalized.
+pub fn validate_memory_text(source: &str) -> Result<(), String> {
+    if source.len() > MEMORY_TEXT_MAX_BYTES {
+        return Err(format!(
+            "Text input exceeds the {} MiB per-side limit",
+            MEMORY_TEXT_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+    let lines = memory_text_line_count(source);
+    if lines > MEMORY_TEXT_MAX_LINES {
+        return Err(format!(
+            "Text input exceeds the {MEMORY_TEXT_MAX_LINES}-line per-side limit"
+        ));
+    }
+    Ok(())
+}
+
+fn memory_text_line_count(source: &str) -> usize {
+    if source.is_empty() {
+        return 0;
+    }
+    let bytes = source.as_bytes();
+    let mut lines = 1usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                lines = lines.saturating_add(1);
+                if bytes.get(index + 1) == Some(&b'\n') {
+                    index += 1;
+                }
+            }
+            b'\n' => lines = lines.saturating_add(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    lines
 }
 fn other(s: DiffSide) -> DiffSide {
     match s {
@@ -1578,6 +1757,247 @@ fn insertion_line(rows: &[AlignedDiffRow], at: usize, side: DiffSide) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_for_text_comparison(model: &mut TextViewModel) {
+        for _ in 0..500 {
+            model.poll();
+            if model.comparison.is_some() && !model.recalculating {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(model.comparison.is_some(), "text comparison completed");
+    }
+
+    #[test]
+    fn memory_text_constructor_preserves_exact_sources_and_uses_text_engine() {
+        let left = "α\0\u{200b}\r\nsame\r\n\nlast\r".to_string();
+        let right = "α\0\u{200b}\r\nsame\r\n\nchanged\r".to_string();
+        let mut model =
+            TextViewModel::new_memory(left.clone(), right.clone(), &DiffConfigV1::default())
+                .unwrap();
+        assert_eq!(model.origin, TextCompareOrigin::Memory);
+        assert_eq!(model.left_path, None);
+        assert_eq!(model.right_path, None);
+        assert_eq!(model.left.source(), left);
+        assert_eq!(model.right.source(), right);
+        wait_for_text_comparison(&mut model);
+        assert!(!model.comparison.as_ref().unwrap().hunks.is_empty());
+
+        let empty =
+            TextViewModel::new_memory(String::new(), String::new(), &Default::default()).unwrap();
+        assert_eq!(empty.left.source(), "");
+        assert_eq!(empty.right.source(), "");
+
+        model.swap_sides();
+        assert_eq!(model.origin, TextCompareOrigin::Memory);
+        assert_eq!(model.left.source(), right);
+        assert_eq!(model.right.source(), left);
+    }
+
+    #[test]
+    fn memory_text_limits_reject_without_truncating_or_mutating_existing_sources() {
+        let mut model =
+            TextViewModel::new_memory("left".into(), "right".into(), &Default::default()).unwrap();
+        let before = (
+            model.left.source().to_owned(),
+            model.right.source().to_owned(),
+            model.left.revision,
+            model.right.revision,
+        );
+        let oversized = "x".repeat(MEMORY_TEXT_MAX_BYTES + 1);
+        assert!(validate_memory_text(&oversized).is_err());
+        assert!(validate_memory_text(&"\n".repeat(MEMORY_TEXT_MAX_LINES)).is_err());
+        assert!(
+            model
+                .replace_memory_sources("accepted".into(), oversized)
+                .is_err()
+        );
+        assert_eq!(model.left.source(), before.0);
+        assert_eq!(model.right.source(), before.1);
+        assert_eq!(model.left.revision, before.2);
+        assert_eq!(model.right.revision, before.3);
+    }
+
+    #[test]
+    fn memory_text_replacement_rejects_old_comparison_and_invalidates_alignment() {
+        let mut model =
+            TextViewModel::new_memory("a\nb".into(), "a\nb".into(), &Default::default()).unwrap();
+        wait_for_text_comparison(&mut model);
+        model
+            .set_manual_alignments(vec![ManualTextAlignment {
+                left_line: 0,
+                right_line: 0,
+            }])
+            .unwrap();
+        let previous_revision = model.left.revision;
+        let old_generation = model.generation;
+        assert!(
+            model
+                .replace_memory_sources("changed\nb".into(), "a\nb".into())
+                .unwrap()
+        );
+        assert!(model.generation > old_generation);
+        assert_eq!(model.left.revision, previous_revision + 1);
+        assert!(model.manual_alignments.is_empty());
+        assert!(model.comparison.is_none());
+        wait_for_text_comparison(&mut model);
+        let result = model.comparison.as_ref().unwrap();
+        assert_eq!(result.left_revision, model.left.revision);
+        assert_eq!(result.right_revision, model.right.revision);
+        assert!(!model.saved_filesystem_mutation);
+    }
+
+    #[test]
+    fn memory_text_hunk_copy_and_undo_use_document_revision_owner() {
+        let original_left = "prefix\r\nleft\nsuffix\r";
+        let original_right = "prefix\r\nright\nsuffix\r";
+        let mut model = TextViewModel::new_memory(
+            original_left.into(),
+            original_right.into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row.kind,
+                    crate::diff::text_compare::DiffRowKind::Modified
+                        | crate::diff::text_compare::DiffRowKind::Deleted
+                        | crate::diff::text_compare::DiffRowKind::Inserted
+                )
+            })
+            .unwrap();
+        model.current_row = Some(row);
+        model.copy_hunk(DiffSide::Left).unwrap();
+        assert_eq!(model.right.source(), original_left);
+        assert!(model.right.is_dirty());
+        model.active_side = DiffSide::Right;
+        assert!(model.undo());
+        assert_eq!(model.right.source(), original_right);
+    }
+
+    #[test]
+    fn memory_text_hunk_copy_at_eof_preserves_empty_and_terminal_newline_policy() {
+        for (left, right, expected) in [
+            ("a\nb", "a", "a\nb"),
+            ("b", "", "b"),
+            ("a\nb\n", "a\n", "a\nb\n"),
+        ] {
+            let mut model =
+                TextViewModel::new_memory(left.into(), right.into(), &Default::default()).unwrap();
+            wait_for_text_comparison(&mut model);
+            let row = model
+                .comparison
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .position(|row| {
+                    matches!(
+                        row.kind,
+                        crate::diff::text_compare::DiffRowKind::Modified
+                            | crate::diff::text_compare::DiffRowKind::Deleted
+                            | crate::diff::text_compare::DiffRowKind::Inserted
+                    )
+                })
+                .unwrap();
+            model.current_row = Some(row);
+            model.copy_hunk(DiffSide::Left).unwrap();
+            assert_eq!(model.right.source(), expected);
+        }
+    }
+
+    #[test]
+    fn memory_text_reload_is_inert_and_save_as_keeps_memory_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("saved text.txt");
+        let mut model = TextViewModel::new_memory(
+            "left\r\n".into(),
+            "right\r\n\r\n".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        model.left.replace_source("edited\r\n".into()).unwrap();
+        let before = (model.left.source().to_owned(), model.left.revision);
+        assert!(model.reload_files().is_err());
+        assert_eq!(model.left.source(), before.0);
+        assert_eq!(model.left.revision, before.1);
+        assert!(model.save_as_memory(DiffSide::Left, &path));
+        assert_eq!(fs::read(&path).unwrap(), b"edited\r\n");
+        assert_eq!(model.origin, TextCompareOrigin::Memory);
+        assert_eq!(model.left_path, None);
+        assert!(!model.saved_filesystem_mutation);
+        assert!(model.left_error.is_none());
+        assert!(!model.has_dirty());
+
+        model.left.replace_source("still edited".into()).unwrap();
+        let saved_revision = model.left.saved_revision;
+        let parent_file = directory.path().join("not a directory");
+        fs::write(&parent_file, b"block").unwrap();
+        assert!(!model.save_as_memory(DiffSide::Left, &parent_file.join("output.txt")));
+        assert_eq!(model.left.saved_revision, saved_revision);
+        assert!(model.left.is_dirty());
+        assert_eq!(model.left.source(), "still edited");
+    }
+
+    #[test]
+    fn memory_text_workspace_push_and_back_retain_previous_view_identity() {
+        let mut workspace = DiffWorkspace::default();
+        workspace.current_view = RetainedView {
+            id: 761,
+            view: DiffView::TextCompare(TextCompareState {
+                left: None,
+                right: Some("right".into()),
+                relative_path: Some("child.txt".into()),
+                origin: TextCompareOrigin::FileBacked,
+            }),
+        };
+        let memory_id = workspace.push_memory_text_compare();
+        assert_eq!(workspace.current_view.id, memory_id);
+        assert!(matches!(
+            &workspace.current_view.view,
+            DiffView::TextCompare(state)
+                if state.origin == TextCompareOrigin::Memory
+                    && state.left.is_none()
+                    && state.right.is_none()
+        ));
+        assert!(workspace.back());
+        assert_eq!(workspace.current_view.id, 761);
+        assert!(matches!(
+            &workspace.current_view.view,
+            DiffView::TextCompare(state)
+                if state.origin == TextCompareOrigin::FileBacked
+                    && state.left.is_none()
+                    && state.right.as_deref() == Some(Path::new("right"))
+                    && state.relative_path.as_deref() == Some(Path::new("child.txt"))
+        ));
+    }
+
+    #[test]
+    fn memory_text_missing_folder_child_side_remains_file_backed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("left.txt");
+        fs::write(&path, "left").unwrap();
+        let state = TextCompareState {
+            left: Some(path),
+            right: None,
+            relative_path: Some("child.txt".into()),
+            origin: TextCompareOrigin::FileBacked,
+        };
+        let mut model = TextViewModel::load(&state, &Default::default()).unwrap();
+        assert_eq!(model.origin, TextCompareOrigin::FileBacked);
+        assert_eq!(model.left.source(), "left");
+        assert_eq!(model.right.source(), "");
+        assert!(model.reload_files().is_ok());
+        assert_eq!(model.origin, TextCompareOrigin::FileBacked);
+    }
     #[test]
     fn swap_sides_round_trips_text_binary_and_folder() {
         for view in [
@@ -1585,6 +2005,7 @@ mod tests {
                 left: Some("l".into()),
                 right: Some("r".into()),
                 relative_path: None,
+                origin: TextCompareOrigin::FileBacked,
             }),
             DiffView::BinaryCompare(BinaryCompareState {
                 left: Some("l".into()),

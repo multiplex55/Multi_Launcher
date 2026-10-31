@@ -1,4 +1,4 @@
-use multi_launcher::file_search::coordinator::CancellationToken;
+use multi_launcher::file_search::coordinator::{CancellationToken, SearchEventSender};
 use multi_launcher::file_search::model::{
     ContentMatchMode, FileTypeFilter, FilenameMatchMode, SearchEvent, SearchId, SearchKind,
     SearchRequest, SearchResult, SearchScope,
@@ -36,11 +36,12 @@ fn write(path: &Path, text: &str) {
 }
 fn filenames(request: SearchRequest, settings: &FileSearchSettings) -> (Vec<String>, Vec<String>) {
     let (tx, rx) = mpsc::channel();
+    let event_sender: SearchEventSender = tx.into();
     let summary = search_filenames_in_directory(
         request,
         settings,
         &CancellationToken::new(),
-        &tx,
+        &event_sender,
         SearchId(1),
     )
     .unwrap();

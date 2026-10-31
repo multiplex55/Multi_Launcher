@@ -6,6 +6,7 @@
 
 use crate::common::atomic_file::save_atomic;
 use std::collections::hash_map::DefaultHasher;
+use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -261,7 +262,7 @@ struct UndoRecord {
     after: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TextDocument {
     source: String,
     pub revision: u64,
@@ -271,9 +272,32 @@ pub struct TextDocument {
     has_bom: bool,
     line_ending: LineEnding,
     trailing_newline: bool,
+    preserve_source_line_endings: bool,
     undo: Vec<UndoRecord>,
     redo: Vec<UndoRecord>,
 }
+
+impl fmt::Debug for TextDocument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextDocument")
+            .field("source", &"<redacted>")
+            .field("revision", &self.revision)
+            .field("saved_revision", &self.saved_revision)
+            .field("read_only", &self.read_only)
+            .field("encoding", &self.encoding)
+            .field("has_bom", &self.has_bom)
+            .field("line_ending", &self.line_ending)
+            .field("trailing_newline", &self.trailing_newline)
+            .field(
+                "preserve_source_line_endings",
+                &self.preserve_source_line_endings,
+            )
+            .field("undo_depth", &self.undo.len())
+            .field("redo_depth", &self.redo.len())
+            .finish()
+    }
+}
+
 impl TextDocument {
     /// Creates an editable, UTF-8 document for a side which does not exist yet.
     pub fn empty() -> Self {
@@ -286,6 +310,27 @@ impl TextDocument {
             has_bom: false,
             line_ending: LineEnding::Lf,
             trailing_newline: false,
+            preserve_source_line_endings: false,
+            undo: vec![],
+            redo: vec![],
+        }
+    }
+
+    /// Creates an editable UTF-8 document from explicit memory input without
+    /// normalizing line endings, trailing blank lines, or Unicode content.
+    pub fn from_memory_source(source: String) -> Self {
+        let (line_ending, trailing_newline) =
+            content_text_policy(&LoadedContent::Text(source.clone()));
+        Self {
+            source,
+            revision: 0,
+            saved_revision: 0,
+            read_only: false,
+            encoding: TextEncoding::Utf8,
+            has_bom: false,
+            line_ending,
+            trailing_newline,
+            preserve_source_line_endings: true,
             undo: vec![],
             redo: vec![],
         }
@@ -306,6 +351,7 @@ impl TextDocument {
             has_bom: file.has_bom,
             line_ending: file.line_ending,
             trailing_newline: file.trailing_newline,
+            preserve_source_line_endings: false,
             undo: vec![],
             redo: vec![],
         })
@@ -345,16 +391,20 @@ impl TextDocument {
             return Err("document is read-only".into());
         }
         let before = self.source.clone();
-        let mut lines = source_lines(&self.source);
-        let mut ordered = edits.to_vec();
-        ordered.sort_by_key(|e| std::cmp::Reverse(e.start));
-        for e in ordered {
-            if e.start > lines.len() || e.start + e.delete_count > lines.len() {
-                return Err("line edit is out of bounds".into());
+        self.source = if self.preserve_source_line_endings {
+            apply_memory_line_edits(&self.source, edits)?
+        } else {
+            let mut lines = source_lines(&self.source);
+            let mut ordered = edits.to_vec();
+            ordered.sort_by_key(|e| std::cmp::Reverse(e.start));
+            for e in ordered {
+                if e.start > lines.len() || e.start + e.delete_count > lines.len() {
+                    return Err("line edit is out of bounds".into());
+                }
+                lines.splice(e.start..e.start + e.delete_count, e.replacement);
             }
-            lines.splice(e.start..e.start + e.delete_count, e.replacement);
-        }
-        self.source = lines.join("\n");
+            lines.join("\n")
+        };
         if self.source == before {
             return Ok(());
         }
@@ -387,6 +437,17 @@ impl TextDocument {
     pub fn save(&mut self, path: &Path) -> anyhow::Result<()> {
         let bytes = self.encoded()?;
         save_atomic(path, &bytes)?;
+        self.saved_revision = self.revision;
+        Ok(())
+    }
+
+    /// Saves the current in-memory source as exact UTF-8 bytes. Unlike file
+    /// save, this intentionally does not apply the document's newline policy.
+    pub fn save_as_exact_utf8(&mut self, path: &Path) -> anyhow::Result<()> {
+        if self.read_only {
+            anyhow::bail!("document is read-only");
+        }
+        save_atomic(path, self.source.as_bytes())?;
         self.saved_revision = self.revision;
         Ok(())
     }
@@ -431,6 +492,115 @@ impl TextDocument {
         Ok(out)
     }
 }
+
+#[derive(Clone)]
+struct MemoryLine {
+    content: String,
+    ending: String,
+}
+
+fn memory_lines(source: &str) -> Vec<MemoryLine> {
+    let bytes = source.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let content_end = if index > start && bytes[index - 1] == b'\r' {
+            index - 1
+        } else {
+            index
+        };
+        lines.push(MemoryLine {
+            content: source[start..content_end].to_owned(),
+            ending: source[content_end..=index].to_owned(),
+        });
+        start = index + 1;
+    }
+    if start < source.len() {
+        lines.push(MemoryLine {
+            content: source[start..].to_owned(),
+            ending: String::new(),
+        });
+    }
+    lines
+}
+
+/// Applies line-based merges without rewriting any untouched memory-source
+/// delimiters. Newly inserted boundaries use a nearby destination delimiter.
+fn apply_memory_line_edits(source: &str, edits: &[LineEdit]) -> Result<String, String> {
+    let preserve_terminal_newline = source.ends_with('\n');
+    let mut lines = memory_lines(source);
+    let mut ordered = edits.to_vec();
+    ordered.sort_by_key(|edit| std::cmp::Reverse(edit.start));
+    for edit in ordered {
+        let end = edit
+            .start
+            .checked_add(edit.delete_count)
+            .ok_or_else(|| "line edit is out of bounds".to_string())?;
+        if edit.start > lines.len() || end > lines.len() {
+            return Err("line edit is out of bounds".into());
+        }
+        let deleted = &lines[edit.start..end];
+        let delimiter = deleted
+            .iter()
+            .find(|line| !line.ending.is_empty())
+            .or_else(|| {
+                lines[..edit.start]
+                    .iter()
+                    .rev()
+                    .find(|line| !line.ending.is_empty())
+            })
+            .or_else(|| lines[end..].iter().find(|line| !line.ending.is_empty()))
+            .map_or_else(|| "\n".to_string(), |line| line.ending.clone());
+        let final_ending = deleted
+            .last()
+            .map(|line| line.ending.clone())
+            .unwrap_or_else(|| delimiter.clone());
+        let replacement_count = edit.replacement.len();
+        let replacement = edit
+            .replacement
+            .into_iter()
+            .enumerate()
+            .map(|(index, content)| MemoryLine {
+                content,
+                ending: if index + 1 == replacement_count {
+                    final_ending.clone()
+                } else {
+                    delimiter.clone()
+                },
+            })
+            .collect::<Vec<_>>();
+        lines.splice(edit.start..end, replacement);
+    }
+    let fallback_delimiter = lines
+        .iter()
+        .find(|line| !line.ending.is_empty())
+        .map_or_else(|| "\n".to_string(), |line| line.ending.clone());
+    let last_index = lines.len().saturating_sub(1);
+    for line in lines.iter_mut().take(last_index) {
+        if line.ending.is_empty() {
+            line.ending = fallback_delimiter.clone();
+        }
+    }
+    if let Some(last) = lines.last_mut() {
+        if preserve_terminal_newline {
+            if last.ending.is_empty() {
+                last.ending = fallback_delimiter;
+            }
+        } else {
+            last.ending.clear();
+        }
+    }
+    let mut output = String::new();
+    for line in lines {
+        output.push_str(&line.content);
+        output.push_str(&line.ending);
+    }
+    Ok(output)
+}
+
 fn source_lines(s: &str) -> Vec<String> {
     // `str::lines` treats CRLF as one delimiter (splitting on either byte
     // independently would manufacture a blank line between CR and LF).
@@ -485,6 +655,7 @@ mod tests {
             has_bom: false,
             line_ending: LineEnding::Lf,
             trailing_newline: false,
+            preserve_source_line_endings: false,
             undo: vec![],
             redo: vec![],
         };
@@ -505,5 +676,42 @@ mod tests {
         assert_eq!(d.source(), "x\ny");
         assert!(d.undo());
         assert_eq!(d.source(), "a\nb")
+    }
+
+    #[test]
+    fn memory_text_document_preserves_exact_unicode_newlines_and_redacts_debug() {
+        let sentinel = "MEMORY_BODY_SECRET_SENTINEL_83fd5e";
+        let source = format!("{sentinel}α\0\u{200b}\r\nline\rsecond\n\n");
+        let document = TextDocument::from_memory_source(source.clone());
+        assert_eq!(document.source(), source);
+        assert!(!document.is_dirty());
+        let debug = format!("{document:?}");
+        assert!(!debug.contains(sentinel));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn memory_text_save_as_writes_exact_source_and_acknowledges_only_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exact output.txt");
+        let mut document = TextDocument::from_memory_source("a\r\nb\r\n\nλ".into());
+        document.replace_source("a\r\nb\r\n\nλ\r".into()).unwrap();
+        let expected = document.source().as_bytes().to_vec();
+        document.save_as_exact_utf8(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(!document.is_dirty());
+
+        document.replace_source("unsaved".into()).unwrap();
+        let saved_revision = document.saved_revision;
+        let parent_file = directory.path().join("not a directory");
+        std::fs::write(&parent_file, b"block").unwrap();
+        assert!(
+            document
+                .save_as_exact_utf8(&parent_file.join("output.txt"))
+                .is_err()
+        );
+        assert!(document.is_dirty());
+        assert_eq!(document.saved_revision, saved_revision);
+        assert_eq!(document.source(), "unsaved");
     }
 }
