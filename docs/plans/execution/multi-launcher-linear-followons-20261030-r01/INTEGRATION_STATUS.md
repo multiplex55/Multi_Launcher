@@ -2,6 +2,6 @@
 
 Authoritative ledger: [PROGRAM_STATUS](PROGRAM_STATUS.md).
 
-B1 G02 docs-only closure f26ba48e pushed; native proof deferred, candidate excluded.
-B2 G05 docs-only closure c6019ac5 pushed; N0naturalread/no pending/no cancellation, all refusals retained.
-B3 M0checkpoint495f1391 pushed from exactB2tip; [dependency decision](stages/G03/DEFERRED_DEPENDENCY.md), [stop report](stalls/G03-M0-A-20261031T014821Z.md). No G03 source/tests. Independent docs-only disposition ACCEPTED; closing commit/push then B4.
+B1 G02 docs-onlyf26ba48e pushed; B2 G05 docs-onlyc6019ac5 pushed; B3 G03 dependency-only5638e107 pushed. New source accepted0.
+
+B4 M0checkpoint6a5c8346 pushed; current-source build passed, supported owned window missing after one recovery, nativeUI NOT_RUN. App retired0/drained, source unchanged. [Stop report](stalls/G06-native-20261031T020638Z.md), [verification](stages/G06/VERIFICATION.md). Independent docs review/closing commit/push then B5 History.

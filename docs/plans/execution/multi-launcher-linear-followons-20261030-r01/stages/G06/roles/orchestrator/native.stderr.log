@@ -1,0 +1,6 @@
+2026-10-31T02:01:05.761975Z  WARN multi_launcher: using retained starter radial definition error=radial store is Missing
+2026-10-31T02:01:06.669663Z  WARN multi_launcher::window_manager: failed to restore launcher window error=Failed to check window desktop: Access is denied. (0x80070005)
+2026-10-31T02:01:07.627385Z ERROR multi_launcher::dashboard::data_cache: dashboard retained last-good snapshot error=snippets file was removed store="snippets"
+2026-10-31T02:01:07.627742Z ERROR multi_launcher::dashboard::data_cache: dashboard retained last-good snapshot error=todos file was removed store="todos"
+2026-10-31T02:01:07.628634Z ERROR multi_launcher::dashboard::data_cache: dashboard retained last-good snapshot error=favorites file was removed store="favorites"
+2026-10-31T02:01:07.628752Z ERROR multi_launcher::dashboard::data_cache: failed to refresh gestures; retaining last-good data error=gesture definitions file was removed

@@ -1,0 +1,32 @@
+{
+  "phase": "normal_app_build",
+  "source_head": "6a5c83469ea725480cfed19739e626b2a5f171e2",
+  "command_arguments": [
+    "build",
+    "-p",
+    "multi_launcher",
+    "--bin",
+    "multi_launcher",
+    "--profile",
+    "fast-dev",
+    "--offline",
+    "--locked"
+  ],
+  "started_utc": "2026-10-31T01:54:42.4602888+00:00",
+  "cap_seconds": 600,
+  "direct_pid": 8556,
+  "child_tree": "UNVERIFIED: prior CIM denial; only owned root handle used",
+  "status": "BUILD_PASSED",
+  "timed_out": false,
+  "termination_error": null,
+  "output_drained": true,
+  "ended_utc": "2026-10-31T01:58:53.4402009+00:00",
+  "elapsed_seconds": 250.98,
+  "direct_exit": 0,
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "c8386e7c4789da97c57f228694ec232d7f4b44b6264fbc5edfc8d8aa86879af2",
+  "executable": "G:\\Repos\\rust\\Multi_Launcher\\target\\fast-dev\\multi_launcher.exe",
+  "exe_sha256": "de42d4e6f504cc0f34b06fcd869effc9dfcc411155182802ef470df849f85c58",
+  "exe_length": 119170048,
+  "source_paths_changed_after": []
+}

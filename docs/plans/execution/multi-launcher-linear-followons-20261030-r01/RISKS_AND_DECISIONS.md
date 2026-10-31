@@ -7,3 +7,5 @@ No source acceptance from old donor results. No native permission elevation/ACL 
 Normal Git checkpoint pushes only; no force/reset/rebase/merge. One final B9 PR, never auto-merge. Actual backend model resolution UNVERIFIED despite named role configuration.
 
 G05 N0 observed normal completion rather than pending cancellation; 4run/3pass/1fail, no retry. No OS/API impossibility inferred. Required controlled pending regular-file facility remains unproved. Candidate excluded/restored, all conditions refused. Initial metadata serialization defect preserved/repaired from original precise fields; raw and canonical source identities distinguished under core.autocrlf.
+
+G06 current exact-source app build passed250.980s; supported owned-window discovery returned0after one recovery. App again logged desktop-check0x80070005, causeunknown. No actual UI/focus/Save test; process metadata was not used as guessed authority. Owned app exited0/drained after close request, cleanup0.830s. No source rewrite or security/desktop workaround. This is distinct from G02 filesystem admission OS5 and G05 natural read completion.

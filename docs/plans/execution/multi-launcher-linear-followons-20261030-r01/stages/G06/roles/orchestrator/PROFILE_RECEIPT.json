@@ -1,0 +1,13 @@
+{
+  "created_utc": "2026-10-31T01:55:58.1667626+00:00",
+  "program_id": "multi-launcher-linear-followons-20261030-r01",
+  "fixture_root": "G:\\Repos\\rust\\Multi_Launcher\\target\\linear-followons-20261030-r01\\G06",
+  "profile": "G:\\Repos\\rust\\Multi_Launcher\\target\\linear-followons-20261030-r01\\G06\\profile",
+  "user_profile_copied": false,
+  "app_constructed": false,
+  "paste_next_cancel_disabled_before_start": true,
+  "settings_sha256": "288787e08d97a58f89f4571bc7884fb79900e2b4ea5e37a7a4c7eb3e6f84d575",
+  "actions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "single_instance": "canonical own data root, as source-observed",
+  "launch": "NOT_RUN; exact-source build pending"
+}

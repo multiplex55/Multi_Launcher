@@ -1,0 +1,29 @@
+{
+  "observed_utc": "2026-10-31T02:04:39.3149719+00:00",
+  "initial_fixture_payloads_preserved_with_matching_prelaunch_hashes": true,
+  "recorded_pids": [
+    8556,
+    27080,
+    23016
+  ],
+  "live_recorded_pids": [],
+  "paste_next_still_null": true,
+  "paste_cancel_still_null": true,
+  "post_settings_sha256": "403fb1551966300663c8f9cade56ad1b8a8af2e1c0db7bd0480c4afcf90b4b9c",
+  "retained_owned_profile": "G:\\Repos\\rust\\Multi_Launcher\\target\\linear-followons-20261030-r01\\G06\\profile",
+  "generated_files": [
+    "actions.json",
+    "clipboard_modifiers.json",
+    "multi_manager_workspaces.json",
+    "NATIVE_STOP_REQUEST",
+    "settings.json",
+    "usage.json"
+  ],
+  "profile_changes": "Normal startup/default persistence in own cwd; no native Settings Save was exercised",
+  "user_profile_copied": false,
+  "native_input_or_state_capture_issued": false,
+  "clipboard_action_issued": false,
+  "source_diff": "git diff --exit-code 6a5c8346 -- src crates Cargo.toml Cargo.lock .codex: exit0",
+  "child_tree": "UNVERIFIED",
+  "app_retirement": "CloseMainWindow requested; exit0, output drained, no forced termination; cleanup0.830s/60"
+}

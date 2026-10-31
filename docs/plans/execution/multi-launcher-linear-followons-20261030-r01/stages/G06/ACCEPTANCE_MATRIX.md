@@ -1,11 +1,14 @@
-# G06 acceptance matrix
+# G06 acceptance matrix — B04 disposition
 
-| Gate | Observation |
-|---|---|
-| Accepted editor/transaction/R1 |all17source/manifest blobs match existing29/29 evidence; no rerun |
-| Supported current runtime |import/list_apps successful; no owned window yet |
-| Exact current-source normal app build |NOT_RUN |
-| Owned window discovery/input/Save/focus/hints/foreign/fence |NOT_RUN |
-| Native cleanup |no app process/fixture launched yet |
+| Gate | Observation | State |
+|---|---|---|
+| Accepted editor/transaction/R1 |17/17blobs match existing29/29 |preserved, not rerun |
+| Exact current-source normal app |250.980s/600 exit0, bound exe hash |BUILD_PASSED |
+| Isolated profile/Paste shortcuts |fresh own cwd, next/cancel null before construction |observed fixture setup |
+| Supported owned window |0returned after one supported recovery |NATIVE_PROOF_DEFERRED |
+| Editor/Save/reopen/chord/hints/focus/foreign/fence |no target, no input/capture |NOT_RUN |
+| Actual app desktop error |0x80070005, causeunknown |observed diagnostic only |
+| Owned process cleanup |exit0/drained,0.830s/60, knownPIDs absent |retired; child-tree limitation explicit |
+| New source/feature acceptance |no source change |NONE |
 
-Unit/build/source evidence cannot fill native observation cells.
+Independent docs-only review pending; no NATIVE_ACCEPTED claim.
