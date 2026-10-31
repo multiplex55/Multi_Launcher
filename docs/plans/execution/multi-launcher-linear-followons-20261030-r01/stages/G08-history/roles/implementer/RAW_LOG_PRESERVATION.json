@@ -1,0 +1,23 @@
+{
+  "reason": "Exact raw logs compressed to retain bytes and legitimate trailing blank lines without violating git diff --check; original raw logs remain in ignored target paths recorded by command receipts.",
+  "logs": [
+    {
+      "raw_name": "N0_list_initial.stderr.log",
+      "raw_sha256": "e857d1f729efbeb60b94c20caaaa063ac990701eb27dd903bee0b77493c62fa5",
+      "preserved_name": "N0_list_initial.stderr.log.gz",
+      "gzip_sha256": "01d19545f199e924d683e9d06a9abc20080fff491bdc03e417a878cbdca9d32c"
+    },
+    {
+      "raw_name": "N0_list_corrected.stderr.log",
+      "raw_sha256": "c95b135aa1c049950dfebe5fa9a63def8ce1eedba3d011cb887d8edf6a1a0f6c",
+      "preserved_name": "N0_list_corrected.stderr.log.gz",
+      "gzip_sha256": "a29f9fbbd68e73c970b0ca005c6fd618f49751165c209d9a87ac69d83800118d"
+    },
+    {
+      "raw_name": "N0_list_final.stderr.log",
+      "raw_sha256": "71c0ffc3344b72919ac075139302ff2e39f0046d0c89799fcb80db5af3ff4761",
+      "preserved_name": "N0_list_final.stderr.log.gz",
+      "gzip_sha256": "1247f496f10c192c131c0f2d624130c4272c01a545fd2d4f273b179abc4c6039"
+    }
+  ]
+}

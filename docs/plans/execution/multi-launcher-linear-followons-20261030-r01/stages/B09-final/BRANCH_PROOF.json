@@ -1,0 +1,106 @@
+{
+  "utc": "2026-10-31T03:58:00.681491+00:00",
+  "run_start_master": "f28355df5e210cfc1633284b0b80c7f156090245",
+  "merges_on_chain": [],
+  "branches": [
+    {
+      "stage": "B1",
+      "branch": "codex/linear-01-g02-table-publication-20261030",
+      "creation_parent": "f28355df5e210cfc1633284b0b80c7f156090245",
+      "closing_tip": "f26ba48e73657d1ab033884bf11e7731b7380646",
+      "head_at_reconciliation": "f26ba48e73657d1ab033884bf11e7731b7380646",
+      "first_commit": "80455ffa2efec14de5a1571e411a618994b26083",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "f26ba48e73657d1ab033884bf11e7731b7380646",
+      "push_verified": true
+    },
+    {
+      "stage": "B2",
+      "branch": "codex/linear-02-g05-hotfolder-20261030",
+      "creation_parent": "f26ba48e73657d1ab033884bf11e7731b7380646",
+      "closing_tip": "c6019ac581fbc409a24a7c9693efc7ff660e1549",
+      "head_at_reconciliation": "c6019ac581fbc409a24a7c9693efc7ff660e1549",
+      "first_commit": "0c6f2b0624be4c43a3d69e455072a04f08d79f2d",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "c6019ac581fbc409a24a7c9693efc7ff660e1549",
+      "push_verified": true
+    },
+    {
+      "stage": "B3",
+      "branch": "codex/linear-03-g03-table-full-file-20261030",
+      "creation_parent": "c6019ac581fbc409a24a7c9693efc7ff660e1549",
+      "closing_tip": "5638e107df2e09bbf4f86a622af3cc15205b3af2",
+      "head_at_reconciliation": "5638e107df2e09bbf4f86a622af3cc15205b3af2",
+      "first_commit": "495f139120b3467b216fc68451cc1a93a5e9c927",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "5638e107df2e09bbf4f86a622af3cc15205b3af2",
+      "push_verified": true
+    },
+    {
+      "stage": "B4",
+      "branch": "codex/linear-04-g06-jump-native-20261030",
+      "creation_parent": "5638e107df2e09bbf4f86a622af3cc15205b3af2",
+      "closing_tip": "16564925a82c464e351f8e9936db61383e3a1241",
+      "head_at_reconciliation": "16564925a82c464e351f8e9936db61383e3a1241",
+      "first_commit": "6a5c83469ea725480cfed19739e626b2a5f171e2",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "16564925a82c464e351f8e9936db61383e3a1241",
+      "push_verified": true
+    },
+    {
+      "stage": "B5",
+      "branch": "codex/linear-05-g08-mkmacro-history-20261030",
+      "creation_parent": "16564925a82c464e351f8e9936db61383e3a1241",
+      "closing_tip": "0bc964572f38c7b18cc790e7fa9da0f48df469ef",
+      "head_at_reconciliation": "0bc964572f38c7b18cc790e7fa9da0f48df469ef",
+      "first_commit": "7d3adf75e2282ed4c5b6afb2010e62357578628f",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "0bc964572f38c7b18cc790e7fa9da0f48df469ef",
+      "push_verified": true
+    },
+    {
+      "stage": "B6",
+      "branch": "codex/linear-06-g04-screenshot-native-20261030",
+      "creation_parent": "0bc964572f38c7b18cc790e7fa9da0f48df469ef",
+      "closing_tip": "b00365b30cee011a049fd836260d720372b35f02",
+      "head_at_reconciliation": "b00365b30cee011a049fd836260d720372b35f02",
+      "first_commit": "6b5413335c093e7d9d3c1cb3ec877805917842ce",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "b00365b30cee011a049fd836260d720372b35f02",
+      "push_verified": true
+    },
+    {
+      "stage": "B7",
+      "branch": "codex/linear-07-g07-zip-extraction-20261030",
+      "creation_parent": "b00365b30cee011a049fd836260d720372b35f02",
+      "closing_tip": "ee59a328a490b73589243e7c1acdb58fb763055b",
+      "head_at_reconciliation": "ee59a328a490b73589243e7c1acdb58fb763055b",
+      "first_commit": "c01bc07cdc68327e21ff7fd0999c284dd1211e13",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "ee59a328a490b73589243e7c1acdb58fb763055b",
+      "push_verified": true
+    },
+    {
+      "stage": "B8",
+      "branch": "codex/linear-08-g08-recipes-policy-20261030",
+      "creation_parent": "ee59a328a490b73589243e7c1acdb58fb763055b",
+      "closing_tip": "4bc5c4b156936135c0d3f5421512a7ceeb57b4b3",
+      "head_at_reconciliation": "4bc5c4b156936135c0d3f5421512a7ceeb57b4b3",
+      "first_commit": "0808a1e9a75d2f771624156d32e39612ec8a50e4",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "4bc5c4b156936135c0d3f5421512a7ceeb57b4b3",
+      "push_verified": true
+    },
+    {
+      "stage": "B9",
+      "branch": "codex/linear-09-final-review-20261030",
+      "creation_parent": "4bc5c4b156936135c0d3f5421512a7ceeb57b4b3",
+      "closing_tip": null,
+      "head_at_reconciliation": "89a345d9a8fcf6284cfc4f908d0cda4bd71474cf",
+      "first_commit": "89a345d9a8fcf6284cfc4f908d0cda4bd71474cf",
+      "creation_and_ancestry_verified": true,
+      "remote_tip": "89a345d9a8fcf6284cfc4f908d0cda4bd71474cf",
+      "push_verified": true
+    }
+  ]
+}

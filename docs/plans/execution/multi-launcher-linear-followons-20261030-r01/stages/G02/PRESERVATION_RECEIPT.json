@@ -1,0 +1,48 @@
+{
+  "base": "80455ffa2efec14de5a1571e411a618994b26083",
+  "captured_utc": "2026-10-30T21:04:47.821625-04:00",
+  "accepted_source": false,
+  "tracked_patch": "docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\UNACCEPTED_SOURCE.patch.gz",
+  "tracked_patch_sha256": "1aadc2f2fae25712ed3026c3ea9bd132620c8c6c67bd98934a58f67d2eb40e97",
+  "tracked_patch_reverse_check": "PASS on exact decompressed raw patch before rollback; raw patch reapplies after rollback",
+  "new_source_copy": "docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\unaccepted/publication.rs.txt",
+  "new_source_sha256": "ecdb625972fdd9df02b3b5d473dcd477eb8b90d86426b3ab49e1100551aaaa21",
+  "source_identities": [
+    {
+      "path": "src/file_operations.rs",
+      "git_blob": "4742aa14a51e1c27bdfbbdaa815e267ceb7e99b6",
+      "sha256": "70ad643d6518e50cd41d4918b7b1e6131c02b5332689d86064ae02e891ee80d6"
+    },
+    {
+      "path": "src/table_utility_session.rs",
+      "git_blob": "83ecd7be538cbbe29985007de76ba0523599fc06",
+      "sha256": "81607e1f9d24ba2470e08684273f61cdc5358b1cbcee784a2f54532cfd5de7c1"
+    },
+    {
+      "path": "src/table_utility_session/publication.rs",
+      "git_blob": "3b87dc6ab0a7e1277a6307e4fe141dea1b4fdf0c",
+      "sha256": "ecdb625972fdd9df02b3b5d473dcd477eb8b90d86426b3ab49e1100551aaaa21"
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/lib.rs",
+      "git_blob": "0e4dccc43056ac0a4e29b4329dac5626cf784d5b",
+      "sha256": "eda9adebb919b2cc52ed4062913575f12ea02c0e014849266543f163ca8c28c2"
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/resource.rs",
+      "git_blob": "b10c0b880b129a7902369c5af4490e21c1342a6d",
+      "sha256": "2ce1f1bb3a9e9d373253dba1ae67bbb5778216f8645853c5cb611aaf493ce583"
+    }
+  ],
+  "raw_inventory": "target\\linear-followons-20261030-r01\\G02\\correction-list.stdout.json",
+  "raw_inventory_sha256": "1af71233837d5a6d7a70ea212e69b7d834b17b5c720a8056d4993021633e1936",
+  "raw_inventory_original_receipt_path": "docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\roles\\implementer\\verification\\m1a-current\\correction-list.stdout.log",
+  "native_result": "15/19; OS5 at C:\\Users\\Jay before CREATE_NEW",
+  "cleanup": "Recorded Cargo/supervisor PIDs absent; output drained; child tree limited by CIM denial",
+  "compressed_patch_path": "docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\UNACCEPTED_SOURCE.patch.gz",
+  "compressed_patch_sha256": "1aadc2f2fae25712ed3026c3ea9bd132620c8c6c67bd98934a58f67d2eb40e97",
+  "compressed_roundtrip_raw_sha256": "bfb32591a85b0637efffc762fb738756c20878f87ffecf2ffd6c1e8535d1fcb0",
+  "raw_patch_visibility": "Raw patch retained locally at original ignored path and target/linear-followons-20261030-r01/G02/UNACCEPTED_SOURCE.patch; exact .patch.gz is tracked to preserve required unified-diff context whitespace without modifying evidence.",
+  "raw_patch": "docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\UNACCEPTED_SOURCE.patch",
+  "raw_patch_sha256": "bfb32591a85b0637efffc762fb738756c20878f87ffecf2ffd6c1e8535d1fcb0"
+}

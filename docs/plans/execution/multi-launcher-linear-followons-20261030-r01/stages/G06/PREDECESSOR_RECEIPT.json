@@ -1,0 +1,9 @@
+{
+  "observed_utc": "2026-10-31T01:49:49.5938367+00:00",
+  "prior_branch": "codex/linear-03-g03-table-full-file-20261030",
+  "prior_closing_tip": "5638e107df2e09bbf4f86a622af3cc15205b3af2",
+  "push": "SUCCESS",
+  "next_branch": "codex/linear-04-g06-jump-native-20261030",
+  "clean_worktree": true,
+  "process_status": "No G03 Cargo/native fixture; earlier task processes drained and source restored"
+}

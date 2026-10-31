@@ -1,0 +1,19 @@
+{
+  "utc": "2026-10-31T04:08:58.105879+00:00",
+  "checked_head": "e77d6924388148b84c8836494a525c07817e1af3",
+  "phase": "Publication/report metadata only after independent cumulative acceptance; before closing report commit",
+  "typed_json_parsed_before_this_record": 66,
+  "explicit_empty_raw_exception": [
+    "stages/G05/roles/implementer/verification/n0-r1/list.stdout.json"
+  ],
+  "relative_links_checked": 111,
+  "source_config_parity": true,
+  "untracked_source": [],
+  "merges_on_chain": [],
+  "all_committed_changes_under_execution_root": true,
+  "cumulative_paths_at_checked_head": 181,
+  "pr_number": 1460,
+  "pr_body_hash_matches_exact_posted_body": true,
+  "independent_review": "ACCEPTED at89a345d9",
+  "new_cargo_or_native_checks": false
+}

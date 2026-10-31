@@ -1,0 +1,66 @@
+{
+  "observed_utc": "2026-10-30T21:05:34.8351857-04:00",
+  "staged_paths": [],
+  "source_changes": [
+    "crates/multi_launcher_table_core/src/lib.rs",
+    "crates/multi_launcher_table_core/src/resource.rs",
+    "src/file_operations.rs",
+    "src/table_utility_session.rs"
+  ],
+  "proof": [
+    {
+      "path": "src/file_operations.rs",
+      "current_sha256": "70ad643d6518e50cd41d4918b7b1e6131c02b5332689d86064ae02e891ee80d6",
+      "tested_sha256": "70ad643d6518e50cd41d4918b7b1e6131c02b5332689d86064ae02e891ee80d6",
+      "current_is_exact_tested_task_candidate": true,
+      "base_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "recorded_clean_baseline_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "baseline_matches_recorded": true,
+      "preserved_new_module_matches": null
+    },
+    {
+      "path": "src/table_utility_session.rs",
+      "current_sha256": "81607e1f9d24ba2470e08684273f61cdc5358b1cbcee784a2f54532cfd5de7c1",
+      "tested_sha256": "81607e1f9d24ba2470e08684273f61cdc5358b1cbcee784a2f54532cfd5de7c1",
+      "current_is_exact_tested_task_candidate": true,
+      "base_blob": "b7f5bb8b525d0786067fb30d6d25199c6fb5ce4d",
+      "recorded_clean_baseline_blob": "b7f5bb8b525d0786067fb30d6d25199c6fb5ce4d",
+      "baseline_matches_recorded": true,
+      "preserved_new_module_matches": null
+    },
+    {
+      "path": "src/table_utility_session/publication.rs",
+      "current_sha256": "ecdb625972fdd9df02b3b5d473dcd477eb8b90d86426b3ab49e1100551aaaa21",
+      "tested_sha256": "ecdb625972fdd9df02b3b5d473dcd477eb8b90d86426b3ab49e1100551aaaa21",
+      "current_is_exact_tested_task_candidate": true,
+      "base_blob": null,
+      "recorded_clean_baseline_blob": null,
+      "baseline_matches_recorded": true,
+      "preserved_new_module_matches": true,
+      "baseline_absence_verified": true
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/lib.rs",
+      "current_sha256": "eda9adebb919b2cc52ed4062913575f12ea02c0e014849266543f163ca8c28c2",
+      "tested_sha256": "eda9adebb919b2cc52ed4062913575f12ea02c0e014849266543f163ca8c28c2",
+      "current_is_exact_tested_task_candidate": true,
+      "base_blob": "0cba07df6636a0922ac7ad815c80918f54ce10d5",
+      "recorded_clean_baseline_blob": "0cba07df6636a0922ac7ad815c80918f54ce10d5",
+      "baseline_matches_recorded": true,
+      "preserved_new_module_matches": null
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/resource.rs",
+      "current_sha256": "2ce1f1bb3a9e9d373253dba1ae67bbb5778216f8645853c5cb611aaf493ce583",
+      "tested_sha256": "2ce1f1bb3a9e9d373253dba1ae67bbb5778216f8645853c5cb611aaf493ce583",
+      "current_is_exact_tested_task_candidate": true,
+      "base_blob": "74def7e006cffddff576bab08563bd284c52374b",
+      "recorded_clean_baseline_blob": "74def7e006cffddff576bab08563bd284c52374b",
+      "baseline_matches_recorded": true,
+      "preserved_new_module_matches": null
+    }
+  ],
+  "patch_reverse_check": "PASS",
+  "task_authority": "User-requested pasted Kickstart section5: preserve exact task-authored patch and created untracked files, verify hashes, then revert only known task-authored uncommitted changes. No unrelated user changes existed at clean initial baseline.",
+  "evidence_correction": "Absent module baseline represented as null after git ls-tree confirmation; original rev-parse error text was not a blob. No source or preservation identities changed."
+}

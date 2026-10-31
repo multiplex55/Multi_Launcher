@@ -1,0 +1,76 @@
+{
+  "phase": "G07 exact12 nextest list",
+  "base_head": "d62ac109d27c2810ba097c04cae562185ee2c0f7",
+  "source_before": {
+    "src/file_operations.rs": {
+      "sha256": "ddebb4ea78265c4b769e2128c0ab1b5d4ea1e1a9b1e35aae7aac518aca30ea91",
+      "git_blob": "719f3405ba8588589145c0f899f6b3a420b078f9"
+    },
+    "src/archive/preparation.rs": {
+      "sha256": "79ffac88d4c74061c42c670ae393deef43bdda5602c349c2edcf4c3f97b72357",
+      "git_blob": "b1b47a8e71e8faeb6ca5e674aa9962f67617b154"
+    },
+    "src/archive/mod.rs": {
+      "sha256": "35d434dad9c45353f0f6b311cbccff42cd469ca48ed826ff4786e5a537041098",
+      "git_blob": "ba84fd5ca01d55bee053a1c927cc0165612efb6c"
+    }
+  },
+  "command_arguments": [
+    "nextest",
+    "list",
+    "-p",
+    "multi_launcher",
+    "--lib",
+    "--features",
+    "perf-harness",
+    "--cargo-profile",
+    "fast-dev",
+    "--offline",
+    "--locked",
+    "--message-format",
+    "json",
+    "-E",
+    "test(g07_) | test(=archive::catalog::tests::metadata_catalog_preserves_physical_duplicates_and_never_reads_payloads) | test(=archive::catalog::tests::unsupported_encrypted_unsafe_and_bad_encoding_entries_remain_visible) | test(=archive::plan::tests::physical_duplicate_names_keep_distinct_ids_and_conflict_only_when_both_selected) | test(=archive::plan::tests::windows_case_separator_and_file_ancestor_collisions_are_rejected) | test(=archive::plan::tests::read_only_occupancy_probe_blocks_existing_file_and_is_bounded) | test(=file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture)"
+  ],
+  "filter": "test(g07_) | test(=archive::catalog::tests::metadata_catalog_preserves_physical_duplicates_and_never_reads_payloads) | test(=archive::catalog::tests::unsupported_encrypted_unsafe_and_bad_encoding_entries_remain_visible) | test(=archive::plan::tests::physical_duplicate_names_keep_distinct_ids_and_conflict_only_when_both_selected) | test(=archive::plan::tests::windows_case_separator_and_file_ancestor_collisions_are_rejected) | test(=archive::plan::tests::read_only_occupancy_probe_blocks_existing_file_and_is_bounded) | test(=file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture)",
+  "started_utc": "2026-10-31T03:36:13.3537605+00:00",
+  "cap_seconds": 1200,
+  "direct_pid": 34332,
+  "direct_process": "rustup",
+  "direct_executable": "C:\\Users\\Jay\\.cargo\\bin\\cargo.exe",
+  "status": "LIST_FAILED",
+  "timed_out": false,
+  "termination_error": null,
+  "output_drained": true,
+  "child_tree": "UNVERIFIED; retained direct process object and no descendant inventory",
+  "selected_count": 0,
+  "ended_utc": "2026-10-31T03:38:43.8977460+00:00",
+  "elapsed_seconds": 150.544,
+  "direct_pid_exit": 101,
+  "stdout_path": "G:\\Repos\\rust\\Multi_Launcher\\target\\productivity_expansion\\archive_native\\g07-list.stdout.json",
+  "stderr_path": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G07\\roles\\implementer\\N1_list.stderr.log",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "408ad652f42a1f4b0ed50cdbbc88020d801218d1aa4cb275773680d4b5797220",
+  "selected_names": [],
+  "selected_inventory_path": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G07\\roles\\implementer\\N1_selected_inventory.json",
+  "selected_inventory_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "inventory_parse_error": null,
+  "source_after": {
+    "src/file_operations.rs": {
+      "sha256": "ddebb4ea78265c4b769e2128c0ab1b5d4ea1e1a9b1e35aae7aac518aca30ea91",
+      "git_blob": "719f3405ba8588589145c0f899f6b3a420b078f9"
+    },
+    "src/archive/preparation.rs": {
+      "sha256": "79ffac88d4c74061c42c670ae393deef43bdda5602c349c2edcf4c3f97b72357",
+      "git_blob": "b1b47a8e71e8faeb6ca5e674aa9962f67617b154"
+    },
+    "src/archive/mod.rs": {
+      "sha256": "35d434dad9c45353f0f6b311cbccff42cd469ca48ed826ff4786e5a537041098",
+      "git_blob": "ba84fd5ca01d55bee053a1c927cc0165612efb6c"
+    }
+  },
+  "source_paths_changed_after": [
+    "src/archive/mod.rs",
+    "src/file_operations.rs"
+  ]
+}

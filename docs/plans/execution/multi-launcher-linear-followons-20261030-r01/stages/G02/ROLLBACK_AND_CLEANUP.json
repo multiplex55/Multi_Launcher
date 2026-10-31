@@ -1,0 +1,35 @@
+{
+  "observed_utc": "2026-10-30T21:06:20.2257255-04:00",
+  "recorded_pids": [
+    14240,
+    32388,
+    21032,
+    38764,
+    31660
+  ],
+  "live_recorded_pids": [],
+  "child_tree": "UNVERIFIED: CIM Access denied",
+  "fixture_directories": [
+    {
+      "path": "C:\\Users\\Jay\\AppData\\Local\\Temp\\.tmp3cbqfL",
+      "exists": false
+    },
+    {
+      "path": "C:\\Users\\Jay\\AppData\\Local\\Temp\\.tmpiyh52f",
+      "exists": false
+    },
+    {
+      "path": "C:\\Users\\Jay\\AppData\\Local\\Temp\\.tmpmyyC91",
+      "exists": false
+    },
+    {
+      "path": "C:\\Users\\Jay\\AppData\\Local\\Temp\\.tmpu0XIJ9",
+      "exists": false
+    }
+  ],
+  "source_restored_to": "80455ffa2efec14de5a1571e411a618994b26083",
+  "source_diff": "git diff --exit-code 80455ffa -- src crates Cargo.toml Cargo.lock .codex: exit0",
+  "publication_module_absent": true,
+  "preserved_patch_apply_check": "PASS",
+  "permission_review": "Initial automatic rejection for potential user changes; same scoped rollback accepted after exact current/tested/baseline hashes, empty index and preservation checks."
+}

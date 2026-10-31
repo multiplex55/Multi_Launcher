@@ -1,0 +1,10 @@
+{
+  "artifact": "full unselected Nextest list JSON",
+  "source_path": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G05/roles/implementer/verification/n0-r1/correction-list.stdout.json",
+  "ignored_target_path": "G:\\Repos\\rust\\Multi_Launcher\\target\\productivity_expansion\\hotfolder_native\\evidence\\g05-n0-r1\\correction-list.stdout.json",
+  "target_is_ignored": true,
+  "byte_length": 1192791,
+  "sha256_before": "f93ac021cbd8cc6fcecf652376a634103f57f424c3b2a406c9663cf174ff5460",
+  "sha256_after": "f93ac021cbd8cc6fcecf652376a634103f57f424c3b2a406c9663cf174ff5460",
+  "selected_four_case_inventory": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G05/roles/implementer/verification/n0-r1/selected-inventory.json"
+}

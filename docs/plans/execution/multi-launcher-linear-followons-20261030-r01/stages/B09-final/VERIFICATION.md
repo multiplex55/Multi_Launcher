@@ -1,0 +1,7 @@
+# B9 final verification
+
+Fresh fetch origin/master succeeded and equals run-startf28355df5e210cfc1633284b0b80c7f156090245. Every B1-B8 closing branch was verified against its origin ref; each stage's first commit parent equals exact prior closing commit, B9 first commit parent equals B8 closing4bc5c4b1. No chain merge/rebase/cherry-pick or force push. All committed changes are under this run's execution directory; no production/Cargo/.codex delta or untracked source.
+
+Independent cumulative review accepted at89a345d9 after verifying65typed JSON files,111relative links,14candidate entries/12physical paths, source/archive/log hashes and all4patch reapply checks. The sole empty G05 raw stdout is an explicit non-typed-JSON exception. Invalid empty derived G07 inventory preserved as text with a reconciliation receipt. Subsequent changes are review/publication metadata and pinned links only; final scope check records the latest snapshot. No new Cargo/native/fullsuite/clippy/install campaign.
+
+One GitHub PR1460 created, no merge. Publication snapshot reported open/unmerged/mergeable=true, base masterf28355df, head B9e77d6924; statuses/workflows/reviews arrays empty => UNKNOWN. Required review policy not exposed. Final docs-only reporting push updates head; final actual live metadata is queried after that push and reported in the handoff, avoiding recursive containing-commit SHA assertions.

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "file_operations::tests::g05_native_pending_regular_read_cancellation_retires_owned_source",
+    "ignored": false,
+    "kind": "test",
+    "filter_status": "matches"
+  },
+  {
+    "name": "file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture",
+    "ignored": false,
+    "kind": "test",
+    "filter_status": "matches"
+  },
+  {
+    "name": "hotfolder::capability::tests::enabled_condition_rules_fail_closed_until_the_shared_evaluator_is_installed",
+    "ignored": false,
+    "kind": "test",
+    "filter_status": "matches"
+  },
+  {
+    "name": "hotfolder::execution::tests::hotfolder_condition_metadata_conditioned_execution_stays_refused",
+    "ignored": false,
+    "kind": "test",
+    "filter_status": "matches"
+  }
+]

@@ -1,0 +1,106 @@
+{
+  "accepted_new_source_files": 0,
+  "excluded_owner_path_entries": 14,
+  "excluded_physical_paths": 12,
+  "baseline": "f28355df5e210cfc1633284b0b80c7f156090245",
+  "entries": [
+    {
+      "owner": "G02",
+      "path": "src/file_operations.rs",
+      "excluded_blob": "4742aa14a51e1c27bdfbbdaa815e267ceb7e99b6",
+      "preservation": "stages/G02/PRESERVATION_RECEIPT.json",
+      "current_baseline_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b"
+    },
+    {
+      "owner": "G02",
+      "path": "src/table_utility_session.rs",
+      "excluded_blob": "83ecd7be538cbbe29985007de76ba0523599fc06",
+      "preservation": "stages/G02/PRESERVATION_RECEIPT.json",
+      "current_baseline_blob": "b7f5bb8b525d0786067fb30d6d25199c6fb5ce4d"
+    },
+    {
+      "owner": "G02",
+      "path": "src/table_utility_session/publication.rs",
+      "excluded_blob": "3b87dc6ab0a7e1277a6307e4fe141dea1b4fdf0c",
+      "preservation": "stages/G02/PRESERVATION_RECEIPT.json",
+      "current_baseline_blob": "absent"
+    },
+    {
+      "owner": "G02",
+      "path": "crates/multi_launcher_table_core/src/lib.rs",
+      "excluded_blob": "0e4dccc43056ac0a4e29b4329dac5626cf784d5b",
+      "preservation": "stages/G02/PRESERVATION_RECEIPT.json",
+      "current_baseline_blob": "0cba07df6636a0922ac7ad815c80918f54ce10d5"
+    },
+    {
+      "owner": "G02",
+      "path": "crates/multi_launcher_table_core/src/resource.rs",
+      "excluded_blob": "b10c0b880b129a7902369c5af4490e21c1342a6d",
+      "preservation": "stages/G02/PRESERVATION_RECEIPT.json",
+      "current_baseline_blob": "74def7e006cffddff576bab08563bd284c52374b"
+    },
+    {
+      "owner": "G05",
+      "path": "src/file_operations.rs",
+      "excluded_blob": "1b78081c87f2ead7c0930b63f21a334e82b93835",
+      "preservation": "stages/G05/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b"
+    },
+    {
+      "owner": "G08 History",
+      "path": "src/mkmacro/runtime/summary.rs",
+      "excluded_blob": "871f7ba002a199660c55e693cf7799c9473632cd",
+      "preservation": "stages/G08-history/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "269d50f56344620fd59b0d4976077a821e725e2a"
+    },
+    {
+      "owner": "G08 History",
+      "path": "src/mkmacro/runtime.rs",
+      "excluded_blob": "6cd60c4ec58fbbdff72dff69c7b10c221ec106bd",
+      "preservation": "stages/G08-history/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "3a454dfc77b4a5572bf0250ac6a4d1d661290ccd"
+    },
+    {
+      "owner": "G08 History",
+      "path": "src/gui/mkmacro_dialog/history.rs",
+      "excluded_blob": "1dc0ab489a0e6bd3386c2f35914e405278ef879c",
+      "preservation": "stages/G08-history/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "absent"
+    },
+    {
+      "owner": "G08 History",
+      "path": "src/gui/mkmacro_dialog/mod.rs",
+      "excluded_blob": "715b089db6a88b65ad4ea2600c4bf1d21ae9b3cb",
+      "preservation": "stages/G08-history/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "a9f2335418f69f72dc407a686f6ca4f8956a4960"
+    },
+    {
+      "owner": "G08 History",
+      "path": "src/gui/mkmacro_dialog/toolbar.rs",
+      "excluded_blob": "03093248e4bb30f7b8de95b43887d7c17bfe3f67",
+      "preservation": "stages/G08-history/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "4cf3875d7014fd443916987b34f97978035907f3"
+    },
+    {
+      "owner": "G07",
+      "path": "src/file_operations.rs",
+      "excluded_blob": "0f362f2994c8decbf2f0c88b36ac6e9360f3b386",
+      "preservation": "stages/G07/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b"
+    },
+    {
+      "owner": "G07",
+      "path": "src/archive/preparation.rs",
+      "excluded_blob": "8c657ec60557ac37252ff457184f7bb37d0c5d0f",
+      "preservation": "stages/G07/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "absent"
+    },
+    {
+      "owner": "G07",
+      "path": "src/archive/mod.rs",
+      "excluded_blob": "ba84fd5ca01d55bee053a1c927cc0165612efb6c",
+      "preservation": "stages/G07/PRESERVATION_AND_ROLLBACK_PRECHECK.json",
+      "current_baseline_blob": "267a87a87552d63c5f8c67d76448a43c01eeccee"
+    }
+  ]
+}

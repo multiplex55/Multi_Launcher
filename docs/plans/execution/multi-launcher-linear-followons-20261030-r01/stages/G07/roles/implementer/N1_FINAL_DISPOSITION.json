@@ -1,0 +1,126 @@
+{
+  "status": "FAILED_VERIFICATION_NATIVE_PROOF_DEFERRED",
+  "source_accepted": false,
+  "matching_test_run_started": false,
+  "current_native_observation": false,
+  "base_head": "d62ac109d27c2810ba097c04cae562185ee2c0f7",
+  "tested_candidate_source": {
+    "src/file_operations.rs": {
+      "sha256": "5f84de133eb13f246d206cac3a41fe5e5bca15f557e571953dd77c1b07439800",
+      "git_blob": "0f362f2994c8decbf2f0c88b36ac6e9360f3b386"
+    },
+    "src/archive/preparation.rs": {
+      "sha256": "553495e03d202f4065f81910b17f861a75066fa1ce5e00867626668093384836",
+      "git_blob": "8c657ec60557ac37252ff457184f7bb37d0c5d0f"
+    },
+    "src/archive/mod.rs": {
+      "sha256": "35d434dad9c45353f0f6b311cbccff42cd469ca48ed826ff4786e5a537041098",
+      "git_blob": "ba84fd5ca01d55bee053a1c927cc0165612efb6c"
+    }
+  },
+  "current_workspace_after_parent_rollback": {
+    "head": "d62ac109d27c2810ba097c04cae562185ee2c0f7",
+    "src/file_operations.rs": {
+      "sha256": "b88bd57c493406acbdd39681782637890cc0334e02053fb57ced024a53bd814a",
+      "git_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b"
+    },
+    "src/archive/preparation.rs": "absent",
+    "src/archive/mod.rs": {
+      "sha256": "6122c11351ad17ae64a109a8b21743d038968f5228a7761dd82cfcec0a97528a",
+      "git_blob": "267a87a87552d63c5f8c67d76448a43c01eeccee"
+    },
+    "rollback_receipt": "../../ROLLBACK_AND_CLEANUP.json"
+  },
+  "list_attempts": [
+    {
+      "phase": "initial",
+      "receipt": "N1_list.receipt.json",
+      "pid": 34332,
+      "started_utc": "2026-10-31T03:36:13.3537605+00:00",
+      "elapsed_seconds": 150.544,
+      "cap_seconds": 1200,
+      "direct_exit": 101,
+      "timed_out": false,
+      "output_drained": true,
+      "child_tree": "UNVERIFIED",
+      "stdout_path": "target/productivity_expansion/archive_native/g07-list.stdout.json",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_path": "N1_list.stderr.log",
+      "stderr_sha256": "408ad652f42a1f4b0ed50cdbbc88020d801218d1aa4cb275773680d4b5797220",
+      "stderr_gzip_path": "N1_list.stderr.log.gz",
+      "stderr_gzip_sha256": "fe4baee3b69a7f952e2ec21c77071971dae8e22f9ad136dedac57a11ca3716b7",
+      "first_diagnostic": "E0364 helper visibility; E0433 missing SelectionTarget; three E0599 file_attributes trait-scope errors; E0277 BackendFailure conversion"
+    },
+    {
+      "phase": "corrected_list_1",
+      "receipt": "N1_list_correction.receipt.json",
+      "pid": 4140,
+      "started_utc": "2026-10-31T03:40:08.3711019+00:00",
+      "elapsed_seconds": 114.438,
+      "cap_seconds": 600,
+      "direct_exit": 101,
+      "timed_out": false,
+      "output_drained": true,
+      "child_tree": "UNVERIFIED",
+      "stdout_path": "target/productivity_expansion/archive_native/g07-list-correction.stdout.json",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_path": "N1_list_correction.stderr.log",
+      "stderr_sha256": "fdfe1b1776961e22c0ca5fa1e7596c0110f79e2dfce7ccb5169f44638a0230aa",
+      "stderr_gzip_path": "N1_list_correction.stderr.log.gz",
+      "stderr_gzip_sha256": "938486411fc957866eac7e575d8d24a8dcf007dd6376b7b002b72692c7c3ab9a",
+      "first_diagnostic": "E0282 explicit type required for archive ancestor chain Vec"
+    },
+    {
+      "phase": "corrected_list_2_final",
+      "receipt": "N1_list_correction2.receipt.json",
+      "pid": 39128,
+      "started_utc": "2026-10-31T03:42:50.4047648+00:00",
+      "elapsed_seconds": 486.248,
+      "effective_cap_seconds": 485.5,
+      "direct_exit": -1,
+      "timed_out": true,
+      "output_drained": true,
+      "process_tree_kill_invoked": true,
+      "process_tree_kill_exception": null,
+      "child_tree": "UNVERIFIED",
+      "stdout_path": "target/productivity_expansion/archive_native/g07-list-correction2.stdout.json",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_path": "N1_list_correction2.stderr.log",
+      "stderr_sha256": "46348c252a8d518e3209fc8b8aeba82c132720135747fa6a1973d63f0f771b5e",
+      "stderr_gzip_path": "N1_list_correction2.stderr.log.gz",
+      "stderr_gzip_sha256": "ac302807ed1c34ce174e427ee1babc34e1fcb486b6b0d4c1a95b0e69d9f940d3",
+      "last_diagnostic": "Compiling multi_launcher; no compiler error was reported before timeout"
+    }
+  ],
+  "correction_budget": {
+    "budget_seconds": 600,
+    "first_correction_elapsed_seconds": 114.438,
+    "remaining_before_final_list_seconds": 485.562,
+    "final_effective_cap_seconds": 485.5,
+    "configured_cap_sum_seconds": 599.938,
+    "measured_supervisor_elapsed_sum_seconds": 600.686,
+    "overage_including_stop_and_drain_seconds": 0.686,
+    "note": "Final receipt duration includes bounded timeout kill/wait/output drain; exact child compiler stop time and descendant status were not separately observed."
+  },
+  "inventory": {
+    "selected_count": null,
+    "exact_12_validated": false,
+    "reason": "All three list stdout streams were empty; empty derived arrays are nonqualifying and do not represent a completed inventory."
+  },
+  "native_fixtures": {
+    "tests_executed": false,
+    "owned_fixture_root": "target/productivity_expansion/archive_native",
+    "contents_at_final_inspection": [
+      "g07-list.stdout.json (empty)",
+      "g07-list-correction.stdout.json (empty)",
+      "g07-list-correction2.stdout.json (empty)"
+    ]
+  },
+  "known_direct_pids_absent": [
+    34332,
+    4140,
+    39128
+  ],
+  "child_tree_status": "UNVERIFIED",
+  "no_os32_or_alias_claim": true
+}

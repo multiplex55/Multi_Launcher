@@ -1,0 +1,37 @@
+{
+  "utc": "2026-10-31T03:51:45.982292+00:00",
+  "base_head": "d62ac109d27c2810ba097c04cae562185ee2c0f7",
+  "index_empty": true,
+  "scope_verified": true,
+  "source_matches_final_preparation_before_after": true,
+  "patch_reverse_check_pass": true,
+  "patch_raw_sha256": "b1e3516612a5bde33b11e1462cecabf8d8de4d12e26d94f41b6aebb8e0cbdd60",
+  "patch_gzip_sha256": "7ddb45f54619e6915d49b1cf3a1e49b881d64ea70f186dac805aa1057c46cdb5",
+  "source": [
+    {
+      "path": "src/file_operations.rs",
+      "raw_sha256": "5f84de133eb13f246d206cac3a41fe5e5bca15f557e571953dd77c1b07439800",
+      "canonical_blob": "0f362f2994c8decbf2f0c88b36ac6e9360f3b386",
+      "baseline_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+      "preserved": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G07/unaccepted/src__file_operations.rs.gz",
+      "gzip_sha256": "cf653e45b8f5917f27547ac82375920623e8eef79d26dbd9c443099806b43276"
+    },
+    {
+      "path": "src/archive/preparation.rs",
+      "raw_sha256": "553495e03d202f4065f81910b17f861a75066fa1ce5e00867626668093384836",
+      "canonical_blob": "8c657ec60557ac37252ff457184f7bb37d0c5d0f",
+      "baseline_blob": null,
+      "preserved": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G07/unaccepted/src__archive__preparation.rs.gz",
+      "gzip_sha256": "1ba6fd4dbf9495efcd95200439896b77253e05e236139dbed2ddab08e6b74cd7"
+    },
+    {
+      "path": "src/archive/mod.rs",
+      "raw_sha256": "35d434dad9c45353f0f6b311cbccff42cd469ca48ed826ff4786e5a537041098",
+      "canonical_blob": "ba84fd5ca01d55bee053a1c927cc0165612efb6c",
+      "baseline_blob": "267a87a87552d63c5f8c67d76448a43c01eeccee",
+      "preserved": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G07/unaccepted/src__archive__mod.rs.gz",
+      "gzip_sha256": "f4ba97088193bb2b80c7cbe05f5c370eb4b3a0605b312b446af5006572e39205"
+    }
+  ],
+  "authorization": "Current user Goal/Kickstart section5 explicitly requires failed task-authored candidate isolation. Exact raw source archives verified before scoped restore/removal; no user source edits involved."
+}

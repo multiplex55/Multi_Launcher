@@ -1,0 +1,10 @@
+{
+  "utc": "2026-10-31T03:57:59.353490+00:00",
+  "failed_derived_inventory_original": "stages/G07/roles/implementer/N1_selected_inventory.json",
+  "preserved_as": "stages/G07/roles/implementer/N1_selected_inventory.failed-empty.txt",
+  "bytes": 0,
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "reason": "Failed derived parser wrote an empty file, not typed JSON or qualifying inventory. Exact bytes preserved with truthful extension; original command receipts remain unchanged.",
+  "g07_arithmetic": "Actual600.686 minus authorized600 =0.686; minus configured599.938 =0.748. Corrected human role narrative only; raw receipts unchanged.",
+  "g05_empty_raw_stdout": "stages/G05/roles/implementer/verification/n0-r1/list.stdout.json is an intentionally preserved raw failed-command empty output, not typed JSON."
+}

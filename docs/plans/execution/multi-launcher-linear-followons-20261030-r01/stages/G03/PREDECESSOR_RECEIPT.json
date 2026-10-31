@@ -1,0 +1,9 @@
+{
+  "observed_utc": "2026-10-31T01:46:41.1805272+00:00",
+  "prior_branch": "codex/linear-02-g05-hotfolder-20261030",
+  "prior_closing_tip": "c6019ac581fbc409a24a7c9693efc7ff660e1549",
+  "push": "SUCCESS",
+  "next_branch": "codex/linear-03-g03-table-full-file-20261030",
+  "clean_worktree": true,
+  "process_status": "B2 direct PIDs/test PID absent; output drained; child-tree limitation retained"
+}

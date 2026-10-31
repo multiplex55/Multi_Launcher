@@ -1,0 +1,33 @@
+{
+  "phase": "correction_list_preparation",
+  "command": "cargo nextest list -p multi_launcher --lib --features perf-harness --cargo-profile fast-dev --offline --locked --message-format json -E \"test(=file_operations::tests::g05_native_pending_regular_read_cancellation_retires_owned_source) | test(=file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture) | test(=hotfolder::execution::tests::hotfolder_condition_metadata_conditioned_execution_stays_refused) | test(=hotfolder::capability::tests::enabled_condition_rules_fail_closed_until_the_shared_evaluator_is_installed)\"",
+  "started_utc": "2026-10-31T01:25:16.738899Z",
+  "ended_utc": "2026-10-31T01:34:17.0489344Z",
+  "direct_pid": 27844,
+  "direct_process": "rustup",
+  "direct_pid_exit": 0,
+  "cap_seconds": 600,
+  "elapsed_seconds": 540.31,
+  "timed_out": false,
+  "output_drained": true,
+  "childtree": "UNVERIFIED",
+  "test_count_all_package": 6504,
+  "selected_count": 4,
+  "selected_nonignored_count": 4,
+  "selected_names": [
+    "file_operations::tests::g05_native_pending_regular_read_cancellation_retires_owned_source",
+    "file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture",
+    "hotfolder::capability::tests::enabled_condition_rules_fail_closed_until_the_shared_evaluator_is_installed",
+    "hotfolder::execution::tests::hotfolder_condition_metadata_conditioned_execution_stays_refused"
+  ],
+  "stdout_sha256": "f93ac021cbd8cc6fcecf652376a634103f57f424c3b2a406c9663cf174ff5460",
+  "stderr_sha256": "c7aea410353c142eeaf484e4ddc6744b177fe617a86062ab5750a86de747aaed",
+  "source_sha256": "8703eec28b47679fd04bbee28e892dc7984db80247ce73e19ef2305e0b12c29f",
+  "source_git_blob": "17373039280b9f597853f7c59c9d6ab74edc9ab2",
+  "base_head": "0c6f2b0624be4c43a3d69e455072a04f08d79f2d",
+  "base_source_git_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+  "correction": "localized format capture + nonblocking unbounded start marker",
+  "source_git_blob_mode": "Original source_git_blob/source_file_git_blob is raw unfiltered content; core.autocrlf=true produces a separate canonical LF Git blob. SHA256 identifies actual compiled working bytes.",
+  "canonical_source_git_blob": "1b78081c87f2ead7c0930b63f21a334e82b93835",
+  "raw_source_git_blob": "17373039280b9f597853f7c59c9d6ab74edc9ab2"
+}

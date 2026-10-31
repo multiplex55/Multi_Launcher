@@ -1,0 +1,17 @@
+{
+  "utc": "2026-10-31T03:00:04.468129+00:00",
+  "source_restored_to": "7d3adf75e2282ed4c5b6afb2010e62357578628f",
+  "run_start_source_parity": true,
+  "patch_reapply_check": true,
+  "new_file_absent": true,
+  "raw_source_archives_verified": true,
+  "known_direct_pids_absent": [
+    23012,
+    30380,
+    15308
+  ],
+  "output_drained": true,
+  "child_tree_status": "UNVERIFIED",
+  "native_app_not_run": true,
+  "source_accepted": false
+}

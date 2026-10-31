@@ -1,0 +1,42 @@
+{
+  "phase": "N0_LIST",
+  "started_utc": "2026-10-31T02:38:10.2501168Z",
+  "ended_utc": "2026-10-31T02:42:03.7550288Z",
+  "pid": 23012,
+  "direct_pid_exit": null,
+  "direct_pid_exit_observed": false,
+  "direct_pid_observed_absent": true,
+  "elapsed_seconds": 233.5,
+  "cap_seconds": 1200,
+  "timed_out": false,
+  "output_drained": true,
+  "child_tree_status": "UNVERIFIED",
+  "first_failure": "Rust test compilation failed in the G08 runtime tests inside facade_tests: helper/type scope errors; see stderr.log",
+  "stdout_bytes": 0,
+  "stderr_bytes": 16972,
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "e857d1f729efbeb60b94c20caaaa063ac990701eb27dd903bee0b77493c62fa5",
+  "argv": [
+    "nextest",
+    "list",
+    "--locked",
+    "--offline",
+    "-p",
+    "multi_launcher",
+    "--lib",
+    "--cargo-profile",
+    "fast-dev",
+    "-E",
+    "test(g08_history_) | test(row_and_history_caps_preserve_totals_and_evict_oldest_completed) | test(active_byte_pressure_evicts_old_rows_before_growth_and_keeps_current_terminal) | test(failure_summary_keeps_only_safe_location_not_diagnostic_payload) | test(admitted_macro_summary_records_source_subset_and_only_safe_visit_metadata) | test(stop_after_execution_uses_one_terminal_classification_for_snapshot_and_summary) | test(running_and_paused_controls_are_deterministic) | test(minimum_size_main_layout_keeps_toolbar_and_steps_reachable_without_mutation)",
+    "--message-format",
+    "json"
+  ],
+  "source_before_hashes": {
+    "src/gui/mkmacro_dialog/history.rs": "a31b727bdfdc207a61f4c54c4eb32f5825d8ee35dc93204db70a857bc29ede54",
+    "src/mkmacro/runtime.rs": "d190d741ebc4345b309c2fb6509f4b6ea8d60ac236ef7ffce47b7df45cdf76df",
+    "src/mkmacro/runtime/summary.rs": "a6ba6c6d61b4ac1a00b0885837802909826ae5e7b385a11532c568f25758bbb5",
+    "src/gui/mkmacro_dialog/mod.rs": "b9dfc5a1119d8629bbd5058994bafd20fababc52d97154df75b8d759917d25d6",
+    "src/gui/mkmacro_dialog/toolbar.rs": "b44d3161cfd2978b7c77ad75245fd1f6c9e607e47698e413bda009ebf3bff8a2"
+  },
+  "base_head": "7d3adf75e2282ed4c5b6afb2010e62357578628f"
+}

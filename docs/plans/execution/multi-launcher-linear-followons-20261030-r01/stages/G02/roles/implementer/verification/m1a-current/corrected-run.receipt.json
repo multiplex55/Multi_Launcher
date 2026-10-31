@@ -1,0 +1,94 @@
+{
+  "phase": "corrected-run",
+  "verb": "cargo nextest run",
+  "command_arguments": [
+    "nextest",
+    "run",
+    "-p",
+    "multi_launcher",
+    "-p",
+    "multi_launcher_table_core",
+    "--cargo-profile",
+    "fast-dev",
+    "--lib",
+    "--offline",
+    "--locked",
+    "--color",
+    "never",
+    "-E",
+    "test(table_publication_) | test(resource_pool_leases_share_usage_and_release_on_last_owner) | test(partial_temp_append_failure_keeps_charge_until_owned_file_is_removed) | test(failed_temp_deletion_keeps_a_retryable_charge_until_removed) | test(cloned_snapshot_handles_keep_each_allocation_charged_after_session_drop) | test(pending_job_releases_its_resource_leases_before_confirmed_activity_retirement) | test(file_page_failure_and_cancellation_preserve_the_last_good_page) | test(file_page_completion_from_closed_lifetime_is_ignored_after_reopen) | test(table_session_draft_edits_revoke_queued_export_receipts) | test(table_file_save_refuses_to_replace_the_opened_source) | test(table_file_save_requires_confirmation_and_publishes_the_captured_output)",
+    "--retries",
+    "0",
+    "--no-fail-fast",
+    "--status-level",
+    "pass",
+    "--final-status-level",
+    "fail"
+  ],
+  "filter": "test(table_publication_) | test(resource_pool_leases_share_usage_and_release_on_last_owner) | test(partial_temp_append_failure_keeps_charge_until_owned_file_is_removed) | test(failed_temp_deletion_keeps_a_retryable_charge_until_removed) | test(cloned_snapshot_handles_keep_each_allocation_charged_after_session_drop) | test(pending_job_releases_its_resource_leases_before_confirmed_activity_retirement) | test(file_page_failure_and_cancellation_preserve_the_last_good_page) | test(file_page_completion_from_closed_lifetime_is_ignored_after_reopen) | test(table_session_draft_edits_revoke_queued_export_receipts) | test(table_file_save_refuses_to_replace_the_opened_source) | test(table_file_save_requires_confirmation_and_publishes_the_captured_output)",
+  "head": "80455ffa2efec14de5a1571e411a618994b26083",
+  "branch": "codex/linear-01-g02-table-publication-20261030",
+  "source_identities": [
+    {
+      "path": "src/file_operations.rs",
+      "git_blob": "4742aa14a51e1c27bdfbbdaa815e267ceb7e99b6",
+      "sha256": "70ad643d6518e50cd41d4918b7b1e6131c02b5332689d86064ae02e891ee80d6"
+    },
+    {
+      "path": "src/table_utility_session.rs",
+      "git_blob": "83ecd7be538cbbe29985007de76ba0523599fc06",
+      "sha256": "81607e1f9d24ba2470e08684273f61cdc5358b1cbcee784a2f54532cfd5de7c1"
+    },
+    {
+      "path": "src/table_utility_session/publication.rs",
+      "git_blob": "3b87dc6ab0a7e1277a6307e4fe141dea1b4fdf0c",
+      "sha256": "ecdb625972fdd9df02b3b5d473dcd477eb8b90d86426b3ab49e1100551aaaa21"
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/lib.rs",
+      "git_blob": "0e4dccc43056ac0a4e29b4329dac5626cf784d5b",
+      "sha256": "eda9adebb919b2cc52ed4062913575f12ea02c0e014849266543f163ca8c28c2"
+    },
+    {
+      "path": "crates/multi_launcher_table_core/src/resource.rs",
+      "git_blob": "b10c0b880b129a7902369c5af4490e21c1342a6d",
+      "sha256": "2ce1f1bb3a9e9d373253dba1ae67bbb5778216f8645853c5cb611aaf493ce583"
+    }
+  ],
+  "git_status_short_at_start": [
+    " M crates/multi_launcher_table_core/src/lib.rs",
+    " M crates/multi_launcher_table_core/src/resource.rs",
+    " M docs/plans/execution/multi-launcher-linear-followons-20261030-r01/PROGRAM_STATUS.md",
+    " M docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G02/VERIFICATION.md",
+    " M src/file_operations.rs",
+    " M src/table_utility_session.rs",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/ACCEPTED_SOURCE_MANIFEST.md",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/DEPENDENCY_MAP.md",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/RISKS_AND_DECISIONS.md",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/roles/orchestrator/PREPARATION_OBSERVATIONS.md",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/roles/planner/",
+    "?? docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G02/roles/",
+    "?? src/table_utility_session/"
+  ],
+  "started_utc": "2026-10-31T01:03:05.2441089+00:00",
+  "finished_utc": "2026-10-31T01:04:09.7338335+00:00",
+  "elapsed_seconds": 64.49,
+  "cap_seconds": 180,
+  "cargo_pid": 38764,
+  "observed_process_tree_pids": [
+    38764
+  ],
+  "process_tree_inventory_status": "limited",
+  "process_tree_inventory_errors": [
+    "Access denied "
+  ],
+  "live_owned_pids_at_drain": [],
+  "timed_out": false,
+  "exit_code": 100,
+  "stdout_path": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\roles\\implementer\\verification\\m1a-current\\corrected-run.stdout.log",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_path": "G:\\Repos\\rust\\Multi_Launcher\\docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G02\\roles\\implementer\\verification\\m1a-current\\corrected-run.stderr.log",
+  "stderr_sha256": "7189e09629f5711b4c832137855c09eae3b2f2666d35a3b606b900961336024a",
+  "output_drained": true,
+  "supervisor_pid": 31660
+}

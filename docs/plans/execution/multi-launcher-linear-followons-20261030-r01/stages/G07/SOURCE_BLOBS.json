@@ -1,0 +1,32 @@
+[
+  {
+    "path": "src/file_operations.rs",
+    "current_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+    "donor_preimplementation_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+    "equal": true
+  },
+  {
+    "path": "src/archive/mod.rs",
+    "current_blob": "267a87a87552d63c5f8c67d76448a43c01eeccee",
+    "donor_preimplementation_blob": "267a87a87552d63c5f8c67d76448a43c01eeccee",
+    "equal": true
+  },
+  {
+    "path": "src/archive/catalog.rs",
+    "current_blob": "9981d9ccadb53c31c189dca10c33dfae877a6139",
+    "donor_preimplementation_blob": "9981d9ccadb53c31c189dca10c33dfae877a6139",
+    "equal": true
+  },
+  {
+    "path": "src/archive/model.rs",
+    "current_blob": "dac974cf472245266d7796cdc93f1b59ebfc3c97",
+    "donor_preimplementation_blob": "dac974cf472245266d7796cdc93f1b59ebfc3c97",
+    "equal": true
+  },
+  {
+    "path": "src/archive/plan.rs",
+    "current_blob": "9a166aa3ebc2fe8dcf854fbd674b63fca2b3e60c",
+    "donor_preimplementation_blob": "9a166aa3ebc2fe8dcf854fbd674b63fca2b3e60c",
+    "equal": true
+  }
+]

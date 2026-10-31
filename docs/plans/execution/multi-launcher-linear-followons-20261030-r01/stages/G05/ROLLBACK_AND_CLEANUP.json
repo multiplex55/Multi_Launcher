@@ -1,0 +1,25 @@
+{
+  "observed_utc": "2026-10-31T01:42:49.3431463+00:00",
+  "restored_source": "src/file_operations.rs",
+  "restored_to": "0c6f2b0624be4c43a3d69e455072a04f08d79f2d",
+  "restored_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+  "source_diff": "git diff --exit-code 0c6f2b06 -- src crates Cargo.toml Cargo.lock .codex: exit0",
+  "preserved_patch_reapply_check": "PASS",
+  "recorded_pids": [
+    29432,
+    27844,
+    20632,
+    34576
+  ],
+  "recorded_pids_absent": true,
+  "child_tree": "UNVERIFIED: CIM enumeration denied",
+  "worker_native_thread": 16672,
+  "native_worker_join": "test code joins before identity/sharing/fresh-read/cleanup and failure assertion; review confirmed",
+  "fixture_root": "G:/Repos/rust/Multi_Launcher/target/productivity_expansion/hotfolder_native",
+  "fixture_prefix": "case-g05-pending-read-",
+  "exact_suffix": "UNKNOWN: not logged",
+  "remaining_matching_directories": 0,
+  "native_cleanup": "source_cleanup=true and TempDir.close/fixture_cleanup=true in actual run",
+  "receipt_repair": "Raw malformed enrichment text and hash retained; valid initial receipt reconstructed from exact original JSON fields previously read by orchestrator",
+  "no_additional_run": true
+}

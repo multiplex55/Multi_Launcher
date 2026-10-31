@@ -1,0 +1,127 @@
+{
+  "observed_utc": "2026-10-31T01:52:37.1396277+00:00",
+  "base_head": "5638e107df2e09bbf4f86a622af3cc15205b3af2",
+  "reused_evidence": "Archived G06 R1 run-r1.receipt.json,29/29 accepted (26lib+3binary); not newly executed",
+  "source_manifest_entries": [
+    {
+      "path": "Cargo.toml",
+      "accepted_blob": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+      "current_blob": "994a55fea039ca79614fbb019ac1b05cfab7381b",
+      "matches": true
+    },
+    {
+      "path": "Cargo.lock",
+      "accepted_blob": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+      "current_blob": "648e143ad2ca902e04ae9b7d4cf57899a2db8380",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor.rs",
+      "accepted_blob": "aeff64e58ea0ae323891a11420ea1fdf541e84f7",
+      "current_blob": "aeff64e58ea0ae323891a11420ea1fdf541e84f7",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/state.rs",
+      "accepted_blob": "981e8d23308ea121cba97ece47138d07836d8237",
+      "current_blob": "981e8d23308ea121cba97ece47138d07836d8237",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/mapping.rs",
+      "accepted_blob": "9ba092473a809f25536b2ed4e846f893f2586dd4",
+      "current_blob": "9ba092473a809f25536b2ed4e846f893f2586dd4",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/render.rs",
+      "accepted_blob": "5bc4d19a6bc7acaae8f15cebe062f73b45867bec",
+      "current_blob": "5bc4d19a6bc7acaae8f15cebe062f73b45867bec",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/catalog.rs",
+      "accepted_blob": "d7efb88647716a987b2015b5ab5c80019c9c8eda",
+      "current_blob": "d7efb88647716a987b2015b5ab5c80019c9c8eda",
+      "matches": true
+    },
+    {
+      "path": "src/settings_editor/save.rs",
+      "accepted_blob": "482da92cdb0c1bf07751502c75c9fcfcbfe61f82",
+      "current_blob": "482da92cdb0c1bf07751502c75c9fcfcbfe61f82",
+      "matches": true
+    },
+    {
+      "path": "src/settings_save.rs",
+      "accepted_blob": "443d33aaa82cf3fad6eca2559ccab4163ebc469b",
+      "current_blob": "443d33aaa82cf3fad6eca2559ccab4163ebc469b",
+      "matches": true
+    },
+    {
+      "path": "src/hotkey/validation.rs",
+      "accepted_blob": "acaeccaca9b7e923af40585df9a050d22b32eeb3",
+      "current_blob": "acaeccaca9b7e923af40585df9a050d22b32eeb3",
+      "matches": true
+    },
+    {
+      "path": "tests/settings_editor.rs",
+      "accepted_blob": "8ab1163c63889beebf622d5d47303fd97ce97306",
+      "current_blob": "8ab1163c63889beebf622d5d47303fd97ce97306",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode/config.rs",
+      "accepted_blob": "5edbb7cad9642199fd551e7fff1fb74fd07476e2",
+      "current_blob": "5edbb7cad9642199fd551e7fff1fb74fd07476e2",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode.rs",
+      "accepted_blob": "c915e7bfa9bb2d115ef3593c411c6286b6fd2ee5",
+      "current_blob": "c915e7bfa9bb2d115ef3593c411c6286b6fd2ee5",
+      "matches": true
+    },
+    {
+      "path": "src/gui/jump_mode/ui.rs",
+      "accepted_blob": "5c21156851248de651638f750a462c1424171715",
+      "current_blob": "5c21156851248de651638f750a462c1424171715",
+      "matches": true
+    },
+    {
+      "path": "src/gui/render.rs",
+      "accepted_blob": "178f7b20c2f7a49d2bcbae2ee68ee7c6ee83391b",
+      "current_blob": "178f7b20c2f7a49d2bcbae2ee68ee7c6ee83391b",
+      "matches": true
+    },
+    {
+      "path": "src/settings/model.rs",
+      "accepted_blob": "d62e3166b9a489025fa783f28877dad4c2585c34",
+      "current_blob": "d62e3166b9a489025fa783f28877dad4c2585c34",
+      "matches": true
+    },
+    {
+      "path": "src/main.rs",
+      "accepted_blob": "b5306acb3060edf0cd189c111b9dc4e611dec6de",
+      "current_blob": "b5306acb3060edf0cd189c111b9dc4e611dec6de",
+      "matches": true
+    }
+  ],
+  "current_app_source_differs_from_old_native_build": [
+    "src/diff/file_ops.rs",
+    "src/diff/folder_runtime.rs",
+    "src/duplicate_finder/tests.rs",
+    "src/gui/diff_dialog/mod.rs",
+    "src/gui/diff_dialog/operation_preview.rs",
+    "src/gui/screenshot_capture.rs",
+    "src/hotfolder/conditions.rs",
+    "src/hotfolder/execution.rs",
+    "src/hotfolder/mod.rs",
+    "src/hotfolder/model.rs",
+    "src/thread_reaper.rs"
+  ],
+  "normal_app_build_required": true,
+  "supported_runtime": "@oai/sky initialized via node_repl; list_apps succeeds, MultiLauncher.MultiLnchr isRunning=false/windows=[]",
+  "discovery": "No app launched/window targeted yet",
+  "settings_boundary": "main derives AppDataRoot from cwd/settings.json before persistent reads; SingleInstanceGuard key uses canonical data root",
+  "fixture_plan": "Fresh owned cwd under target/linear-followons-20261030-r01/G06; no user profile copy; Paste next/cancel null before app construction; index/plugin dirs and enabled plugins empty"
+}

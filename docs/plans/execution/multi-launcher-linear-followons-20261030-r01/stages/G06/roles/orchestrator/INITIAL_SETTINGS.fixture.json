@@ -1,0 +1,26 @@
+{
+  "hotkey": "Ctrl+Alt+F8",
+  "quit_hotkey": "Ctrl+Alt+F9",
+  "help_hotkey": null,
+  "paste_sequence": {
+    "next_hotkey": null,
+    "cancel_hotkey": null
+  },
+  "index_paths": [],
+  "plugin_dirs": [],
+  "enabled_plugins": [],
+  "enabled_capabilities": {},
+  "radial": {
+    "enabled": false
+  },
+  "experimental_jump_mode_enabled": false,
+  "jump_mode_activation_chord": "Shift+Space",
+  "jump_mode_hint_alphabet": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  "follow_mouse": false,
+  "show_launcher_icon": true,
+  "show_launcher_title": true,
+  "window_size": [
+    1000,
+    760
+  ]
+}

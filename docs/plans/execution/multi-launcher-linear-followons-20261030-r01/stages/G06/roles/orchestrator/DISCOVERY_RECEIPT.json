@@ -1,0 +1,27 @@
+{
+  "observed_utc": "2026-10-30T22:01:54.4257109-04:00",
+  "app_pid": 27080,
+  "current_process_title": "Multi Lnchr",
+  "current_process_reported_handle": 661236,
+  "process_metadata_is_not_tool_window_authority": true,
+  "first_discovery": "sky.list_windows returned0matching candidates",
+  "supported_recovery": "one refresh of sky.list_apps plus sky.list_windows",
+  "recovery_apps": [
+    {
+      "id": "MultiLauncher.MultiLnchr",
+      "isRunning": false,
+      "windows": []
+    }
+  ],
+  "recovery_candidates": [],
+  "get_window_called": false,
+  "state_capture_called": false,
+  "activation_or_input_called": false,
+  "supported_target_count": 0,
+  "native_behavior": "NOT_RUN",
+  "result": "NATIVE_PROOF_DEFERRED",
+  "owned_stop_requested": true,
+  "clipboard_action_issued": false,
+  "clipboard_scope": "No clipboard action was invoked by test/tools; no global claim about internal application startup reads",
+  "retained_snapshot_owner_crosscheck": "Both saved returned-window arrays also contain0matches for owned PID27080 or reported window id661236; memory-only check, no new OS discovery/input/recovery."
+}
