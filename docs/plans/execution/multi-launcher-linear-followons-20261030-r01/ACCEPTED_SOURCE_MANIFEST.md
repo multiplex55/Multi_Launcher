@@ -14,7 +14,7 @@ All5paths remain UNACCEPTED. Exact working bytes tested are in [run receipt](sta
 | crates/multi_launcher_table_core/src/lib.rs |0e4dccc43056ac0a4e29b4329dac5626cf784d5b|baseline 0cba07df6636a0922ac7ad815c80918f54ce10d5|
 | crates/multi_launcher_table_core/src/resource.rs |b10c0b880b129a7902369c5af4490e21c1342a6d|baseline 74def7e006cffddff576bab08563bd284c52374b|
 
-No historical donor branch was modified/imported wholesale. G07 historical prototype remains excluded as recorded in the archived closeout manifest; current program has not attempted G07 source yet. Current G08 attempt is recorded below and remains excluded.
+No historical donor branch was modified/imported wholesale. G07 historical prototype remains excluded as recorded in the archived closeout manifest; current program attempted both G07 and G08 below; both remain excluded.
 
 ## G05 N0 candidate excluded
 
@@ -33,3 +33,15 @@ Five additional owner/path entries, all UNACCEPTED after final preparation TIMEO
 |src/gui/mkmacro_dialog/toolbar.rs|03093248e4bb30f7b8de95b43887d7c17bfe3f67|
 
 Run exclusions so far11owner/path entries over10physical paths; new accepted source0. No History/recipe UI or runtime source carried.
+
+## G07 R1 candidate excluded
+
+Three additional owner/path entries, all UNACCEPTED after final preparation TIMEOUT with no12case inventory/run or fresh native observations. [Preservation](stages/G07/PRESERVATION_AND_ROLLBACK_PRECHECK.json) binds exact raw SHA256/canonical/base blobs to [all3raw gzip copies](stages/G07/unaccepted) and [reversible patch](stages/G07/UNACCEPTED_SOURCE.patch.gz); [rollback](stages/G07/ROLLBACK_AND_CLEANUP.json) verifies baseline source parity and patch reapply. No archive extraction source carried.
+
+| Path | Excluded canonical blob |
+|---|---|
+|src/file_operations.rs|0f362f2994c8decbf2f0c88b36ac6e9360f3b386|
+|src/archive/preparation.rs|8c657ec60557ac37252ff457184f7bb37d0c5d0f|
+|src/archive/mod.rs|ba84fd5ca01d55bee053a1c927cc0165612efb6c|
+
+Current run total:14owner/path candidate entries across12physical paths, all excluded. New accepted Rust/test source files0. All source/manifests/.codex equal run-start baseline.

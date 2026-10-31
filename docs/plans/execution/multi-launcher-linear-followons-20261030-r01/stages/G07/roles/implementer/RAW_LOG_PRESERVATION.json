@@ -1,0 +1,26 @@
+{
+  "reason": "Raw stderr preserved byte-exactly as gzip and ignored raw copies. Legitimate trailing blank lines and CRLF bytes retained; redundant plain role copies removed so git diff --check passes without trimming evidence.",
+  "logs": [
+    {
+      "original_capture_path": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G07/roles/implementer/N1_list.stderr.log",
+      "raw_sha256": "408ad652f42a1f4b0ed50cdbbc88020d801218d1aa4cb275773680d4b5797220",
+      "raw_ignored_copy": "target/productivity_expansion/archive_native/evidence/g07-raw-logs/N1_list.stderr.log",
+      "preserved_gzip": "N1_list.stderr.log.gz",
+      "gzip_sha256": "fe4baee3b69a7f952e2ec21c77071971dae8e22f9ad136dedac57a11ca3716b7"
+    },
+    {
+      "original_capture_path": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G07/roles/implementer/N1_list_correction.stderr.log",
+      "raw_sha256": "fdfe1b1776961e22c0ca5fa1e7596c0110f79e2dfce7ccb5169f44638a0230aa",
+      "raw_ignored_copy": "target/productivity_expansion/archive_native/evidence/g07-raw-logs/N1_list_correction.stderr.log",
+      "preserved_gzip": "N1_list_correction.stderr.log.gz",
+      "gzip_sha256": "938486411fc957866eac7e575d8d24a8dcf007dd6376b7b002b72692c7c3ab9a"
+    },
+    {
+      "original_capture_path": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G07/roles/implementer/N1_list_correction2.stderr.log",
+      "raw_sha256": "46348c252a8d518e3209fc8b8aeba82c132720135747fa6a1973d63f0f771b5e",
+      "raw_ignored_copy": "target/productivity_expansion/archive_native/evidence/g07-raw-logs/N1_list_correction2.stderr.log",
+      "preserved_gzip": "N1_list_correction2.stderr.log.gz",
+      "gzip_sha256": "ac302807ed1c34ce174e427ee1babc34e1fcb486b6b0d4c1a95b0e69d9f940d3"
+    }
+  ]
+}

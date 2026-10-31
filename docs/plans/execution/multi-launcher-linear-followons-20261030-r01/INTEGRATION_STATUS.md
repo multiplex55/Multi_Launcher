@@ -9,3 +9,5 @@ Earlier native limits: [G06](stalls/G06-native-20261031T020638Z.md). No native f
 B5 [stop report](stalls/G08-history-verification-20261031T030129Z.md).
 
 B6 screenshot NATIVE_PROOF_DEFERRED at preflight, no build/launch/source; [stop](stalls/G04-capability-20261031T030513Z.md), [verification](stages/G04/VERIFICATION.md).
+
+B7 ZIP FAILED_VERIFICATION, exact candidate excluded, no native run. [Stop](stalls/G07-verification-20261031T035252Z.md), [verification](stages/G07/VERIFICATION.md). Next B8 dependency-only decision and B9.

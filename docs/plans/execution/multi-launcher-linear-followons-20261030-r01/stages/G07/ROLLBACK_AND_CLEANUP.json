@@ -1,0 +1,18 @@
+{
+  "utc": "2026-10-31T03:51:57.297719+00:00",
+  "restored_to": "d62ac109d27c2810ba097c04cae562185ee2c0f7",
+  "run_start_source_parity": true,
+  "new_preparation_file_absent": true,
+  "raw_source_archives_verified": true,
+  "patch_reapply_check": true,
+  "known_direct_pids_absent": [
+    34332,
+    4140,
+    39128
+  ],
+  "streams_drained": true,
+  "tree_kill_no_exception": true,
+  "all_descendants_status": "UNVERIFIED",
+  "native_tests": "NOT_RUN",
+  "source_accepted": false
+}

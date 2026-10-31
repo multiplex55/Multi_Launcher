@@ -13,3 +13,5 @@ G06 current exact-source app build passed250.980s; supported owned-window discov
 G08 History qualifying preparation timed out; exact corrected source statically reviewed but no inventory/run, so all five paths excluded/restored. Raw timeout flag and stricter427s cap are reconciled;547.8/600s actual correction command time, two retries consumed. Existing canonical restart/R1 remains sole continuation. Recipes blocked, no new execution/storage policy.
 
 B6 current computer-use26.1027.30824 still lacks documented held secondary drag and clipboard-image observation/restoration; preflight stops before build/launch, native/output NOT_RUN, no source defect inferred.
+
+G07 final preparation TIMEOUT; no current native effects or12case inventory/run. Old OS32/alias ambiguity remains historical, not a current host diagnosis. All3source paths excluded/restored; read-only ZIP foundation intact. Actual correction600.686s includes retirement overhead, configured caps within600; no renewal.
