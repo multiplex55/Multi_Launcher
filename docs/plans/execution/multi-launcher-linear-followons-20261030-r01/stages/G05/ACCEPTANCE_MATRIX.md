@@ -1,12 +1,15 @@
-# G05 acceptance matrix
+# G05 acceptance matrix — B02 close
 
-| Gate | Observation |
-|---|---|
-| Current source / accepted foundations |four foundation paths equal accepted donor; source-inspected |
-| Actual pending regular read then cancellation/terminal retirement/fresh operation |NOT_RUN |
-| N0 independent native review |pending |
-| N1 source retained through bounded evaluator/effect |NOT_RUN, N0 gated |
-| N2 actual queued launcher/MkMacro start binding |NOT_RUN |
-| N3 editor/Test Rule/final activation |NOT_RUN; all refusals retained |
+| Gate | Observation | State |
+|---|---|---|
+| Accepted metadata/literal foundations |source parity to accepted donor; unchanged |preserved, historical19/22 evidence only |
+| Exact N0 inventory/compile |4nonignored, correction list exit0 |BUILD_PASSED |
+| Fail-closed controls + native baseline control |3/3passed |SCOPED_TESTS_PASSED for controls only |
+| Real pending regular read then cancellation/995 |no pending observed; natural65536, no cancellation |FAILED mandatory N0 gate |
+| Reader join, source/fresh read/fixture retirement |actual narrower trace/checks passed |not cancellation proof |
+| N0 source acceptance |candidate preserved and restored |UNACCEPTED / NATIVE_PROOF_DEFERRED |
+| N1 retained bounded source/effect |NOT_RUN |N0 dependent |
+| N2 actual queued launcher/MkMacro binding |NOT_RUN |deferred |
+| N3 editor/Test Rule/activation |NOT_RUN |all production refusals retained |
 
-No whole G05 acceptance from accepted19/22 foundations or a future N0 pass alone.
+Independent docs-only disposition ACCEPTED; source remains UNACCEPTED. No whole G05 acceptance.

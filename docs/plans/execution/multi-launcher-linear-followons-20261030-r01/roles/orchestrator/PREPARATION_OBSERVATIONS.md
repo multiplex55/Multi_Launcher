@@ -18,3 +18,5 @@ Opened official Microsoft ReadFile, CancelIoEx, CancelSynchronousIo and cancelin
 ## Contracts already read in preparation
 
 Full original G02/G05/G03/G06/G04 pairs and respective native follow-on pairs/safety. G08 history restart/R1 pairs and roles/planner/HISTORY_CONTRACT.md read; original G08 still must be read at B5. G07 native follow-on pair read; originals/security/receipts still must be read at B7. Recipes/final later. All adopted historical contracts relocated to docs/archive by f28355df; original program Goal/Kickstart remain docs/plans.
+
+GitHub integration read-only preflight: repository multiplex55/Multi_Launcher id918448387, default branch master, clone URL matches origin, push permission true, repository not archived. create_pull_request/get_pr_info/status/review tools available. No PR created; B9 only, no auto-merge.

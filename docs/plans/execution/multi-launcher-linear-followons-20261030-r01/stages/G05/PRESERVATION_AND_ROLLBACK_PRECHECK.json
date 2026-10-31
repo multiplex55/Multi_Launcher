@@ -1,0 +1,24 @@
+{
+  "observed_utc": "2026-10-30T21:39:41.6626615-04:00",
+  "base_head": "0c6f2b0624be4c43a3d69e455072a04f08d79f2d",
+  "base_source_blob": "b7d67bf4d49f81a8c4492991a95892a8dda4835b",
+  "candidate_source_git_blob": "1b78081c87f2ead7c0930b63f21a334e82b93835",
+  "candidate_source_sha256": "8703eec28b47679fd04bbee28e892dc7984db80247ce73e19ef2305e0b12c29f",
+  "tracked_patch_gzip": "docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G05\\roles\\implementer\\verification\\n0-r1\\candidate-source.patch.gz",
+  "gzip_sha256": "61c800a75af0d837eab69277a00c4b4a67e859ccae38670a6c25a25af67e8328",
+  "raw_patch": "target\\linear-followons-20261030-r01\\G05\\candidate-source.patch",
+  "raw_patch_sha256": "c3232d033d03f369946d74e928bab903c9d0c5ce40319bc6edf8bc921468f4ef",
+  "reverse_apply_check": "PASS",
+  "staged_paths": [],
+  "source_diff_paths": [
+    "src/file_operations.rs"
+  ],
+  "native_proof": "UNACCEPTED: natural65536, no pending observation, no cancel, no995",
+  "receipt_repair": "Malformed enriched receipt copied/hashed then reconstructed from original valid JSON previously observed; original raw logs unchanged",
+  "raw_source_gzip": "docs\\plans\\execution\\multi-launcher-linear-followons-20261030-r01\\stages\\G05\\roles\\implementer\\verification\\n0-r1\\candidate-file_operations.rs.gz",
+  "raw_source_gzip_sha256": "58b635310f07289a78c078d2031734f68106e558e06d7186492845559e7f9682",
+  "raw_source_roundtrip_sha256": "8703eec28b47679fd04bbee28e892dc7984db80247ce73e19ef2305e0b12c29f",
+  "raw_source_git_blob": "17373039280b9f597853f7c59c9d6ab74edc9ab2",
+  "canonical_source_git_blob": "1b78081c87f2ead7c0930b63f21a334e82b93835",
+  "line_ending_note": "Both raw1737303 and canonical1b78081 identities verified with git hash-object --no-filters / --path under unchanged core.autocrlf=true. Exact raw tested bytes additionally archived; source has not changed."
+}

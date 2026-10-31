@@ -1,0 +1,217 @@
+warning: variant `Unknown` is never constructed
+   --> vendor\epaint\src\text\font.rs:361:5
+    |
+357 | pub(crate) enum ShapeBufferProvenance {
+    |                 --------------------- variant in this enum
+...
+361 |     Unknown,
+    |     ^^^^^^^
+    |
+    = note: `ShapeBufferProvenance` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `epaint` (lib) generated 1 warning
+warning: use of deprecated constant `std::f32::EPSILON`: replaced by the `EPSILON` associated constant on `f32`
+  --> vendor\egui\src\containers\scene.rs:79:42
+   |
+79 |             zoom_range: Rangef::new(f32::EPSILON, 1.0),
+   |                                          ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `egui` (lib) generated 1 warning
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:720:19
+    |
+720 |     pub fn pixels(&self) -> Pixels<P> {
+    |                   ^^^^^     ^^^^^^^^^ the same lifetime is hidden here
+    |                   |
+    |                   the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+720 |     pub fn pixels(&self) -> Pixels<'_, P> {
+    |                                    +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:733:17
+    |
+733 |     pub fn rows(&self) -> Rows<P> {
+    |                 ^^^^^     ^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+733 |     pub fn rows(&self) -> Rows<'_, P> {
+    |                                +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:742:29
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<P> {
+    |                             ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                             |
+    |                             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+742 |     pub fn enumerate_pixels(&self) -> EnumeratePixels<'_, P> {
+    |                                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:754:27
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<P> {
+    |                           ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                           |
+    |                           the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+754 |     pub fn enumerate_rows(&self) -> EnumerateRows<'_, P> {
+    |                                                   +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:898:23
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<P> {
+    |                       ^^^^^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+898 |     pub fn pixels_mut(&mut self) -> PixelsMut<'_, P> {
+    |                                               +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:911:21
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<P> {
+    |                     ^^^^^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                     |
+    |                     the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+911 |     pub fn rows_mut(&mut self) -> RowsMut<'_, P> {
+    |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:918:33
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<P> {
+    |                                 ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                 |
+    |                                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+918 |     pub fn enumerate_pixels_mut(&mut self) -> EnumeratePixelsMut<'_, P> {
+    |                                                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\buffer.rs:931:31
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<P> {
+    |                               ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                               |
+    |                               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+931 |     pub fn enumerate_rows_mut(&mut self) -> EnumerateRowsMut<'_, P> {
+    |                                                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\image\src\image.rs:932:15
+    |
+932 |     fn pixels(&self) -> Pixels<Self>
+    |               ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |               |
+    |               the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+932 |     fn pixels(&self) -> Pixels<'_, Self>
+    |                                +++
+
+warning: `image` (lib) generated 9 warnings (run `cargo fix --lib -p image` to apply 9 suggestions)
+warning: constant `SCANNER_CANCELLATION_INTERVAL` is never used
+  --> crates\multi_launcher_table_core\src\lib.rs:53:7
+   |
+53 | const SCANNER_CANCELLATION_INTERVAL: usize = 4096;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scanner_cancellation_checkpoint` is never used
+    --> crates\multi_launcher_table_core\src\lib.rs:1031:4
+     |
+1031 | fn scanner_cancellation_checkpoint(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `end_offset` is never read
+  --> crates\multi_launcher_table_core\src\stream_scan.rs:25:9
+   |
+22 | pub(crate) struct StreamRecord {
+   |                   ------------ field in this struct
+...
+25 |     pub end_offset: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `multi_launcher_table_core` (lib) generated 3 warnings
+warning: unused variable: `replaced_scan_job`
+    --> src\table_utility_session.rs:3521:13
+     |
+3521 |         let replaced_scan_job = session.active_key.expect("the replaceable scan has a key");
+     |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_replaced_scan_job`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi_launcher` (lib test) generated 1 warning (run `cargo fix --lib -p multi_launcher --tests` to apply 1 suggestion)
+    Finished `fast-dev` profile [unoptimized + debuginfo] target(s) in 8.37s
+────────────
+ Nextest run ID b2045430-bb69-4a25-9dba-50e52977f645 with nextest profile: default
+    Starting 4 tests across 1 binary (6500 tests skipped)
+        PASS [   0.030s] (1/4) multi_launcher hotfolder::capability::tests::enabled_condition_rules_fail_closed_until_the_shared_evaluator_is_installed
+        PASS [   0.045s] (2/4) multi_launcher hotfolder::execution::tests::hotfolder_condition_metadata_conditioned_execution_stays_refused
+        FAIL [   0.298s] (3/4) multi_launcher file_operations::tests::g05_native_pending_regular_read_cancellation_retires_owned_source
+  stdout ───
+
+    running 1 test
+    test file_operations::tests::g05_native_pending_regular_read_cancellation_retires_owned_source ... FAILED
+
+    failures:
+
+    failures:
+        file_operations::tests::g05_native_pending_regular_read_cancellation_retires_owned_source
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6503 filtered out; finished in 0.27s
+
+  stderr ───
+    G05_N0 process_id=34576 native_thread_id=16672 pending_observed=false pending_queries=70 pending_window_ms=0 pending_query_hresult=None cancel_attempted=false cancel_hresult=None read_bytes=65536 read_terminal_hresult=None read_prefix_matches=true held_identity_matches=true write_share_refused=true delete_share_refused=true source_present_while_held=true fresh_identity_matches=true fresh_hash_matches=true fresh_read_hresult=None fresh_read_matches=true volume_serial=12837577387797144463 file_id=adc80500000004000000000000000000 source_sha256=be52904a058b062aac55808cae437e2275ca10a521657b0006ca5005888020c0 source_cleanup=true fixture_cleanup=true
+    G05_N0 caps fixture_bytes=2097152 read_bytes=65536 fresh_read_bytes=65536
+
+    thread 'file_operations::tests::g05_native_pending_regular_read_cancellation_retires_owned_source' (33136) panicked at src\file_operations.rs:11366:9:
+    GetThreadIOPendingFlag did not observe TRUE within the single 100 ms window; no retry was attempted (terminal HRESULT: None)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.399s] (4/4) multi_launcher file_operations::tests::m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture
+────────────
+     Summary [   0.411s] 4 tests run: 3 passed, 1 failed, 6500 skipped
+        FAIL [   0.298s] (3/4) multi_launcher file_operations::tests::g05_native_pending_regular_read_cancellation_retires_owned_source
+error: test run failed

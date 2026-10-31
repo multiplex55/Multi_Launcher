@@ -15,3 +15,7 @@ All5paths remain UNACCEPTED. Exact working bytes tested are in [run receipt](sta
 | crates/multi_launcher_table_core/src/resource.rs |b10c0b880b129a7902369c5af4490e21c1342a6d|baseline 74def7e006cffddff576bab08563bd284c52374b|
 
 No historical donor branch was modified/imported wholesale. G07/G08 historical prototypes remain excluded as recorded in the archived closeout manifest; current program has not attempted those source stages yet.
+
+## G05 N0 candidate excluded
+
+One additional owner/path entry, src/file_operations.rs test-only candidate. Raw tested blob17373039280b9f597853f7c59c9d6ab74edc9ab2; canonical LF blob1b78081c87f2ead7c0930b63f21a334e82b93835; working SHA2568703eec28b47679fd04bbee28e892dc7984db80247ce73e19ef2305e0b12c29f. No source accepted. [Exact raw source and patch preservation](stages/G05/PRESERVATION_AND_ROLLBACK_PRECHECK.json) and [rollback](stages/G05/ROLLBACK_AND_CLEANUP.json) record gzip hashes and baseline restoration. Production blob restored to b7d67bf4d49f81a8c4492991a95892a8dda4835b. G05 four accepted foundation paths and every refusal remain unchanged. Current run exclusions so far:6owner/path entries across5physical paths; accepted new source files0.
