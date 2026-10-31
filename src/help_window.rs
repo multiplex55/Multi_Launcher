@@ -154,6 +154,20 @@ impl HelpWindow {
                                 "Read Clipboard Text reads into a named String variable when its step runs. Write Clipboard Text writes an exact literal or String variable only when its step runs; neither action pastes text or restores earlier clipboard contents.",
                             );
                             ui.separator();
+                            ui.label(egui::RichText::new("Diff text workflows").strong());
+                            ui.label(
+                                "In Diff, choose Compare Text… to type both sides or use Paste Left/Paste Right for explicit clipboard input. Text input is limited to 8 MiB and 100,000 lines per side. Edit Inputs… changes that memory comparison; Save Left As… and Save Right As… choose explicit destinations, while file comparisons keep their ordinary Save behavior.",
+                            );
+                            ui.label(
+                                "To align, select a source line and choose Align from selected line, then select a line in the other pane and confirm. A multi-line selection uses its focused line. Cancel abandons the pending endpoint; accepted Left ↔ Right alignments can be revealed or removed. Alignment changes layout only and never edits or saves text. A hidden alignment target reveals the full row view.",
+                            );
+                            ui.label(
+                                "Ignore selected lines adds reversible whole-line ranges; regex rules can instead mark matching differences unimportant. Raw equality describes the original text, while effective equality reflects comparison rules and ignored ranges. Bookmarks belong to the current comparison. Identical only and the Differences only context control change the view; navigation to a hidden target reveals all rows.",
+                            );
+                            ui.label(
+                                "Compare selected lines with Clipboard reads plain text once, only after you choose it, and opens a temporary memory comparison with the captured source on the left. Back returns to the original comparison with its edits and annotations. The clipboard text is not added to recents or saved history.",
+                            );
+                            ui.separator();
                             ui.label(egui::RichText::new("Screenshot pinboard").strong());
                             ui.label(
                                 "Each session-only pin has an Opacity control from 10% to 100% (default 100%) in its toolbar and Pin List row. Pending and failed requests are distinguished from the confirmed native value. Opacity changes the displayed window, not the source image used by Copy Image or Save As.",

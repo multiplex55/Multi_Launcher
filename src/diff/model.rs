@@ -1118,6 +1118,69 @@ struct CompareMessage {
     result: TextComparisonResult,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CurrentTextRowIdentity {
+    left_source_id: u64,
+    right_source_id: u64,
+    left_revision: u64,
+    right_revision: u64,
+    source_rows: (Option<usize>, Option<usize>),
+}
+
+fn current_text_row_identity(
+    comparison: &TextComparisonResult,
+    row_index: usize,
+) -> Option<CurrentTextRowIdentity> {
+    let row = comparison.rows.get(row_index)?;
+    Some(CurrentTextRowIdentity {
+        left_source_id: comparison.left_source_id,
+        right_source_id: comparison.right_source_id,
+        left_revision: comparison.left_revision,
+        right_revision: comparison.right_revision,
+        source_rows: (row.left, row.right),
+    })
+}
+
+fn hunk_range_for_row(
+    comparison: &TextComparisonResult,
+    row_index: usize,
+) -> Option<std::ops::Range<usize>> {
+    let hunk = comparison
+        .navigation
+        .row_to_hunk
+        .get(row_index)
+        .and_then(|hunk_index| *hunk_index)
+        .and_then(|hunk_index| comparison.hunks.get(hunk_index))?;
+    (hunk.start_row <= row_index && row_index < hunk.end_row)
+        .then_some(hunk.start_row..hunk.end_row)
+}
+
+fn same_hunk_source_membership(
+    old: &TextComparisonResult,
+    old_row: usize,
+    new: &TextComparisonResult,
+    new_row: usize,
+) -> bool {
+    match (
+        hunk_range_for_row(old, old_row),
+        hunk_range_for_row(new, new_row),
+    ) {
+        (Some(old_range), Some(new_range)) => {
+            let (Some(old_rows), Some(new_rows)) =
+                (old.rows.get(old_range), new.rows.get(new_range))
+            else {
+                return false;
+            };
+            old_rows.len() == new_rows.len()
+                && old_rows.iter().zip(new_rows).all(|(old, new)| {
+                    (old.left, old.right, old.kind) == (new.left, new.right, new.kind)
+                })
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceLineSelection {
     pub source_id: u64,
@@ -1157,6 +1220,9 @@ pub struct TextViewModel {
     pub rules: TextComparisonRules,
     pub active_side: DiffSide,
     pub current_row: Option<usize>,
+    /// Source-coordinate identity for the current comparison row and, when it
+    /// belongs to a difference, the complete source membership of that hunk.
+    current_row_identity: Option<CurrentTextRowIdentity>,
     /// A model-row navigation target waiting to be consumed by the view.
     pub pending_scroll_row: Option<usize>,
     pending_scroll_generation: u64,
@@ -1256,6 +1322,12 @@ impl TextViewModel {
             self.manual_alignment_source_revisions.1,
             self.manual_alignment_source_revisions.0,
         );
+        if self.current_row.is_some() {
+            self.invalidate_current_row_identity();
+        } else {
+            self.current_row_identity = None;
+        }
+        self.request_scroll_row(None);
         self.current_intraline = None;
         self.comparison = None;
         self.row_measurements = Default::default();
@@ -1290,6 +1362,7 @@ impl TextViewModel {
         let right = load(self.right_path.as_ref())?;
         let cleared_bookmarks =
             !self.left.bookmarks().is_empty() || !self.right.bookmarks().is_empty();
+        let cleared_active_difference = self.current_row.is_some();
         let cleared_annotations = !self.left.ignored_line_ranges().is_empty()
             || !self.right.ignored_line_ranges().is_empty()
             || !self.manual_alignments.is_empty()
@@ -1301,12 +1374,14 @@ impl TextViewModel {
         self.manual_alignments.clear();
         self.pending_alignment = None;
         self.source_line_selection = None;
+        self.current_row = None;
+        self.current_row_identity = None;
         self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
         self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
         self.annotation_revision = self.annotation_revision.wrapping_add(1);
-        if cleared_annotations || cleared_bookmarks {
+        if cleared_annotations || cleared_bookmarks || cleared_active_difference {
             self.annotation_notice = Some(
-                "Reload cleared source annotations, bookmarks, selections, or anchors for the replaced sources."
+                "Reload cleared source annotations, bookmarks, selections, anchors, or the active difference for the replaced sources."
                     .into(),
             );
         }
@@ -1340,6 +1415,7 @@ impl TextViewModel {
             || self
                 .pending_alignment
                 .is_some_and(|pending| pending.side == side);
+        let had_active_difference = self.current_row.is_some();
         let document = match side {
             DiffSide::Left => &mut self.left,
             DiffSide::Right => &mut self.right,
@@ -1365,9 +1441,9 @@ impl TextViewModel {
         self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
         self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
         self.annotation_revision = self.annotation_revision.wrapping_add(1);
-        if had_ignored || had_selection || had_bookmarks {
+        if had_ignored || had_selection || had_bookmarks || had_active_difference {
             self.annotation_notice = Some(
-                "Reload cleared ignored-line ranges, bookmarks, or source selection for the reloaded source."
+                "Reload cleared ignored-line ranges, bookmarks, source selection, or the active difference for the reloaded source."
                     .into(),
             );
         }
@@ -1454,6 +1530,7 @@ impl TextViewModel {
             rules: TextComparisonRules::default(),
             active_side: DiffSide::Left,
             current_row: None,
+            current_row_identity: None,
             pending_scroll_row: None,
             pending_scroll_generation: 0,
             scroll: TextScrollState::default(),
@@ -1517,6 +1594,7 @@ impl TextViewModel {
         let mut next_left = self.left.clone();
         let mut next_right = self.right.clone();
         let had_alignments = !self.manual_alignments.is_empty();
+        let had_active_difference = self.current_row.is_some();
         let left_changed = next_left.replace_source(left)?;
         let right_changed = next_right.replace_source(right)?;
         if !left_changed && !right_changed {
@@ -1581,12 +1659,18 @@ impl TextViewModel {
         if cleared_bookmarks {
             notices.push("Replacing text inputs cleared bookmarks for the changed source.");
         }
+        if had_active_difference {
+            notices.push(
+                "Replacing text inputs cleared the active difference for the changed source.",
+            );
+        }
         if !notices.is_empty() {
             self.annotation_notice = Some(notices.join(" "));
         }
         self.current_intraline = None;
         self.cursor = None;
         self.current_row = None;
+        self.current_row_identity = None;
         self.pending_scroll_row = None;
         self.row_measurements = Default::default();
         self.find_matches.clear();
@@ -1609,6 +1693,78 @@ impl TextViewModel {
         self.recalculate_at = Some(Instant::now() + Duration::from_millis(250));
         self.recalculating = true;
     }
+
+    fn invalidate_current_row_identity(&mut self) {
+        self.current_row = None;
+        self.current_row_identity = None;
+        self.current_intraline = None;
+        let notice = "The active difference changed with the source or comparison rows; select a difference again before copying.";
+        self.annotation_notice = Some(match self.annotation_notice.take() {
+            Some(previous) => format!("{previous} {notice}"),
+            None => notice.to_string(),
+        });
+    }
+
+    fn reconcile_current_row(&mut self, comparison: &TextComparisonResult) {
+        let Some(identity) = self.current_row_identity.take() else {
+            if self.current_row.is_some() {
+                self.invalidate_current_row_identity();
+            }
+            return;
+        };
+        if identity.left_source_id != comparison.left_source_id
+            || identity.right_source_id != comparison.right_source_id
+            || identity.left_revision != comparison.left_revision
+            || identity.right_revision != comparison.right_revision
+        {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        let Some(previous_comparison) = self.comparison.as_ref() else {
+            self.invalidate_current_row_identity();
+            return;
+        };
+        if previous_comparison.left_source_id != identity.left_source_id
+            || previous_comparison.right_source_id != identity.right_source_id
+            || previous_comparison.left_revision != identity.left_revision
+            || previous_comparison.right_revision != identity.right_revision
+        {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        let Some(previous_row) = self.current_row else {
+            self.invalidate_current_row_identity();
+            return;
+        };
+        if previous_comparison
+            .rows
+            .get(previous_row)
+            .is_none_or(|row| (row.left, row.right) != identity.source_rows)
+        {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        let mut matching_rows = comparison
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| (row.left, row.right) == identity.source_rows);
+        let Some((row_index, _)) = matching_rows.next() else {
+            self.invalidate_current_row_identity();
+            return;
+        };
+        if matching_rows.next().is_some() {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        if !same_hunk_source_membership(previous_comparison, previous_row, comparison, row_index) {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        self.current_row = Some(row_index);
+        self.current_row_identity = current_text_row_identity(comparison, row_index);
+    }
+
     pub fn poll(&mut self) {
         if self.recalculate_at.is_some_and(|t| Instant::now() >= t) {
             self.start_compare();
@@ -1625,14 +1781,7 @@ impl TextViewModel {
                 self.annotation_revision,
             )
         {
-            let anchor = self.cursor.map(|p| ScrollAnchor {
-                side: p.side,
-                source_line: p.line,
-                offset: 0.0,
-            });
-            self.current_row = anchor
-                .map(|a| restore_anchor(&m.result.rows, a))
-                .or(self.current_row);
+            self.reconcile_current_row(&m.result);
             self.comparison = Some(m.result);
             self.recalculating = false;
             if let Some(row) = self.pending_scroll_row {
@@ -1762,18 +1911,17 @@ impl TextViewModel {
     pub fn navigate(&mut self, direction: NavigationDirection) {
         if let Some(c) = &self.comparison {
             let row = c.navigate(self.current_row, direction, false, true);
-            self.current_row = row;
-            self.request_scroll_row(row);
+            self.set_current_row(row);
         }
     }
     pub fn navigate_intraline(&mut self, direction: NavigationDirection) {
-        if let Some(c) = &self.comparison {
-            self.current_intraline = c.navigate_intraline(self.current_intraline, direction, false);
-            if let Some(location) = self.current_intraline {
-                self.active_side = location.side;
-                self.current_row = Some(location.row);
-                self.request_scroll_row(Some(location.row));
-            }
+        let location = self.comparison.as_ref().and_then(|comparison| {
+            comparison.navigate_intraline(self.current_intraline, direction, false)
+        });
+        if let Some(location) = location {
+            self.current_intraline = Some(location);
+            self.active_side = location.side;
+            self.set_current_row(Some(location.row));
         }
     }
     pub fn select_source_line(&mut self, side: DiffSide, line: usize, extend: bool) -> bool {
@@ -2070,24 +2218,153 @@ impl TextViewModel {
         changed
     }
 
-    pub fn begin_manual_alignment(&mut self, side: DiffSide, source_line: usize) {
+    fn validate_manual_alignment_endpoint(
+        &self,
+        side: DiffSide,
+        source_id: u64,
+        revision: u64,
+        source_line: usize,
+    ) -> Result<(), String> {
         let document = match side {
             DiffSide::Left => &self.left,
             DiffSide::Right => &self.right,
         };
+        if document.source_id() != source_id || document.revision != revision {
+            return Err("Alignment endpoint is stale; select a current source line again".into());
+        }
+        self.fresh_comparison()?;
+        let line_count =
+            text_compare::source_line_count(document.source(), self.rules.line_ending_equivalence);
+        if source_line >= line_count {
+            return Err("Alignment endpoint is outside the current source".into());
+        }
         if text_compare::line_is_ignored(document.ignored_line_ranges(), source_line) {
-            self.alignment_error = Some(
+            return Err(
                 "Ignored source lines cannot be manual-alignment endpoints; restore the line first."
                     .into(),
             );
-            return;
         }
+        Ok(())
+    }
+
+    /// Starts an alignment from the focused line of a current source selection.
+    /// A multi-line selection is allowed, but only its focus line is the endpoint.
+    pub fn begin_manual_alignment_from_selection(&mut self) -> Result<(), String> {
+        let selection = self.fresh_source_selection()?;
+        self.validate_manual_alignment_endpoint(
+            selection.side,
+            selection.source_id,
+            selection.revision,
+            selection.focus_line,
+        )?;
         self.pending_alignment = Some(PendingTextAlignment {
-            source_id: document.source_id(),
-            revision: document.revision,
-            side,
-            source_line,
+            source_id: selection.source_id,
+            revision: selection.revision,
+            side: selection.side,
+            source_line: selection.focus_line,
         });
+        self.alignment_error = None;
+        Ok(())
+    }
+
+    /// Whether the current fresh selection can complete the pending alignment.
+    pub fn can_complete_manual_alignment_from_selection(&self) -> bool {
+        let Some(pending) = self.pending_alignment else {
+            return false;
+        };
+        let Ok(selection) = self.fresh_source_selection() else {
+            return false;
+        };
+        selection.side != pending.side
+            && self
+                .validate_manual_alignment_endpoint(
+                    pending.side,
+                    pending.source_id,
+                    pending.revision,
+                    pending.source_line,
+                )
+                .is_ok()
+            && self
+                .validate_manual_alignment_endpoint(
+                    selection.side,
+                    selection.source_id,
+                    selection.revision,
+                    selection.focus_line,
+                )
+                .is_ok()
+    }
+
+    /// Completes a pending alignment with the focused line on the opposite side.
+    pub fn complete_manual_alignment_from_selection(
+        &mut self,
+    ) -> Result<ManualTextAlignment, String> {
+        let pending = self
+            .pending_alignment
+            .ok_or_else(|| "Start an alignment from a source line first".to_string())?;
+        self.validate_manual_alignment_endpoint(
+            pending.side,
+            pending.source_id,
+            pending.revision,
+            pending.source_line,
+        )?;
+        let selection = self.fresh_source_selection()?;
+        if selection.side == pending.side {
+            return Err("Select a source line on the other side to confirm alignment".into());
+        }
+        self.validate_manual_alignment_endpoint(
+            selection.side,
+            selection.source_id,
+            selection.revision,
+            selection.focus_line,
+        )?;
+        let anchor = ManualTextAlignment {
+            left_line: if pending.side == DiffSide::Left {
+                pending.source_line
+            } else {
+                selection.focus_line
+            },
+            right_line: if pending.side == DiffSide::Right {
+                pending.source_line
+            } else {
+                selection.focus_line
+            },
+        };
+        self.add_manual_alignment(anchor)?;
+        self.pending_alignment = None;
+        Ok(anchor)
+    }
+
+    pub fn cancel_manual_alignment(&mut self) -> bool {
+        let cancelled = self.pending_alignment.take().is_some();
+        if cancelled {
+            self.alignment_error = None;
+        }
+        cancelled
+    }
+
+    pub fn reveal_pending_manual_alignment_origin(&mut self) -> Result<(), String> {
+        let pending = self
+            .pending_alignment
+            .ok_or_else(|| "There is no pending alignment endpoint to reveal".to_string())?;
+        self.validate_manual_alignment_endpoint(
+            pending.side,
+            pending.source_id,
+            pending.revision,
+            pending.source_line,
+        )?;
+        let comparison = self.fresh_comparison()?;
+        let row = comparison
+            .rows
+            .iter()
+            .position(|row| match pending.side {
+                DiffSide::Left => row.left == Some(pending.source_line),
+                DiffSide::Right => row.right == Some(pending.source_line),
+            })
+            .ok_or_else(|| {
+                "Alignment origin no longer maps to a current comparison row".to_string()
+            })?;
+        self.request_scroll_row(Some(row));
+        Ok(())
     }
 
     pub fn set_manual_alignments(
@@ -2116,7 +2393,6 @@ impl TextViewModel {
         self.alignment_error = None;
         self.annotation_revision = self.annotation_revision.wrapping_add(1);
         self.row_measurements = Default::default();
-        self.pending_scroll_row = self.current_row.or(Some(self.scroll.aligned_row));
         self.schedule_compare();
         Ok(())
     }
@@ -2137,8 +2413,36 @@ impl TextViewModel {
             false
         }
     }
+
+    /// Reveals an accepted alignment using its exact current comparison row.
+    /// This changes projection/scroll only; it leaves the active hunk untouched.
+    pub fn reveal_manual_alignment(&mut self, anchor: ManualTextAlignment) -> Result<(), String> {
+        if !self.manual_alignments.contains(&anchor)
+            || self.manual_alignment_source_ids != (self.left.source_id(), self.right.source_id())
+            || self.manual_alignment_source_revisions != (self.left.revision, self.right.revision)
+        {
+            return Err("Manual alignment is stale or no longer present".into());
+        }
+        let comparison = self.fresh_comparison()?;
+        let row = comparison
+            .rows
+            .iter()
+            .position(|row| {
+                row.left == Some(anchor.left_line) && row.right == Some(anchor.right_line)
+            })
+            .ok_or_else(|| {
+                "Manual alignment no longer maps to a current comparison row".to_string()
+            })?;
+        self.request_scroll_row(Some(row));
+        Ok(())
+    }
     pub fn set_current_row(&mut self, row: Option<usize>) {
         self.current_row = row;
+        self.current_row_identity = row.and_then(|row| {
+            self.comparison
+                .as_ref()
+                .and_then(|comparison| current_text_row_identity(comparison, row))
+        });
         self.request_scroll_row(row);
     }
     pub fn pending_scroll_request(&self) -> Option<PendingScrollRequest> {
@@ -3251,6 +3555,365 @@ mod tests {
             model.comparison.as_ref().unwrap().left_source_id,
             model.left.source_id()
         );
+    }
+
+    #[test]
+    fn m3d_alignment_begin_cancel_and_opposite_side_confirm_preserve_text_and_hunk() {
+        let mut model = TextViewModel::new_memory(
+            "head\nleft\nend".into(),
+            "head\nright\nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let modified_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.kind == text_compare::DiffRowKind::Modified)
+            .unwrap();
+        model.set_current_row(Some(modified_row));
+        let original = (
+            model.left.source().to_owned(),
+            model.right.source().to_owned(),
+            model.left.revision,
+            model.right.revision,
+            model.left.is_dirty(),
+            model.right.is_dirty(),
+            model.annotation_revision,
+            model.current_row,
+        );
+
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert_eq!(
+            model.pending_alignment,
+            Some(PendingTextAlignment {
+                source_id: model.left.source_id(),
+                revision: model.left.revision,
+                side: DiffSide::Left,
+                source_line: 0,
+            })
+        );
+        assert!(model.cancel_manual_alignment());
+        assert_eq!(model.pending_alignment, None);
+        assert_eq!(model.annotation_revision, original.6);
+        assert_eq!(model.current_row, original.7);
+        assert_eq!(model.left.source(), original.0);
+        assert_eq!(model.right.source(), original.1);
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        assert!(!model.can_complete_manual_alignment_from_selection());
+        assert!(
+            model
+                .complete_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("other side")
+        );
+        assert!(model.manual_alignments.is_empty());
+        assert!(model.pending_alignment.is_some());
+
+        assert!(model.select_source_line(DiffSide::Right, 0, false));
+        assert!(model.can_complete_manual_alignment_from_selection());
+        let accepted = model.complete_manual_alignment_from_selection().unwrap();
+        assert_eq!(accepted.left_line, 0);
+        assert_eq!(accepted.right_line, 0);
+        assert_eq!(model.manual_alignments, vec![accepted]);
+        assert_eq!(model.pending_alignment, None);
+        assert_eq!(model.current_row, original.7);
+        assert_eq!(model.left.source(), original.0);
+        assert_eq!(model.right.source(), original.1);
+        assert_eq!(model.left.revision, original.2);
+        assert_eq!(model.right.revision, original.3);
+        assert_eq!(model.left.is_dirty(), original.4);
+        assert_eq!(model.right.is_dirty(), original.5);
+        assert!(model.annotation_revision > original.6);
+
+        wait_for_text_comparison(&mut model);
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        let accepted_before_cancel = model.manual_alignments.clone();
+        assert!(model.cancel_manual_alignment());
+        assert_eq!(model.manual_alignments, accepted_before_cancel);
+        assert_eq!(model.current_row, original.7);
+        assert_eq!(model.left.source(), original.0);
+        assert_eq!(model.right.source(), original.1);
+        assert_eq!(model.left.revision, original.2);
+        assert_eq!(model.right.revision, original.3);
+    }
+
+    #[test]
+    fn m3d_alignment_rejects_ignored_stale_and_out_of_bounds_endpoints() {
+        let mut model = TextViewModel::new_memory(
+            "head\nleft\nend".into(),
+            "head\nright\nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.schedule_compare();
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        assert!(
+            model
+                .begin_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("calculating")
+        );
+        assert_eq!(model.pending_alignment, None);
+        wait_for_text_comparison(&mut model);
+        let existing = ManualTextAlignment {
+            left_line: 0,
+            right_line: 0,
+        };
+        model.set_manual_alignments(vec![existing]).unwrap();
+        wait_for_text_comparison(&mut model);
+        for side in [DiffSide::Left, DiffSide::Right] {
+            assert!(model.select_source_line(side, 1, false));
+            model.ignore_selected_lines().unwrap();
+            wait_for_text_comparison(&mut model);
+        }
+        let comparison = model.comparison.as_ref().unwrap();
+        assert!(!comparison.raw_equal);
+        assert!(comparison.equal_under_rules);
+
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert!(model.select_source_line(DiffSide::Right, 1, false));
+        assert!(!model.can_complete_manual_alignment_from_selection());
+        assert!(
+            model
+                .complete_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("Ignored source lines")
+        );
+        assert_eq!(model.manual_alignments, vec![existing]);
+        assert_eq!(model.current_row, None);
+
+        assert!(
+            model
+                .validate_manual_alignment_endpoint(
+                    DiffSide::Left,
+                    model.left.source_id(),
+                    model.left.revision,
+                    3,
+                )
+                .unwrap_err()
+                .contains("outside the current source")
+        );
+        let pending = model.pending_alignment.unwrap();
+        model.pending_alignment = Some(PendingTextAlignment {
+            revision: pending.revision.wrapping_add(1),
+            ..pending
+        });
+        assert!(model.select_source_line(DiffSide::Right, 0, false));
+        assert!(
+            model
+                .complete_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("stale")
+        );
+        assert_eq!(model.manual_alignments, vec![existing]);
+        assert_eq!(model.current_row, None);
+        assert!(model.cancel_manual_alignment());
+    }
+
+    #[test]
+    fn m3d_alignment_reveal_uses_exact_hidden_row_and_pending_source_follows_swap() {
+        let mut model = TextViewModel::new_memory(
+            "same\nleft\nend".into(),
+            "same\nright\nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let anchor = ManualTextAlignment {
+            left_line: 0,
+            right_line: 0,
+        };
+        model.set_manual_alignments(vec![anchor]).unwrap();
+        wait_for_text_comparison(&mut model);
+        let modified_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.kind == text_compare::DiffRowKind::Modified)
+            .unwrap();
+        model.set_current_row(Some(modified_row));
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        assert!(!model.projected_rows().contains(&0));
+        model.reveal_manual_alignment(anchor).unwrap();
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert_eq!(model.pending_scroll_row, Some(0));
+        assert_eq!(model.current_row, Some(modified_row));
+        assert!(
+            model
+                .projection_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Showing all rows"))
+        );
+
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        model.reveal_pending_manual_alignment_origin().unwrap();
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert_eq!(model.pending_scroll_row, Some(0));
+        assert_eq!(model.current_row, Some(modified_row));
+        assert!(model.cancel_manual_alignment());
+
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        let pending_source_id = model.pending_alignment.unwrap().source_id;
+        model.swap_sides();
+        assert_eq!(model.pending_alignment.unwrap().side, DiffSide::Right);
+        assert_eq!(
+            model.pending_alignment.unwrap().source_id,
+            pending_source_id
+        );
+        assert_eq!(
+            model.pending_alignment.unwrap().source_id,
+            model.right.source_id()
+        );
+        wait_for_text_comparison(&mut model);
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        let swapped_anchor = model.complete_manual_alignment_from_selection().unwrap();
+        assert_eq!(
+            swapped_anchor,
+            ManualTextAlignment {
+                left_line: 2,
+                right_line: 2,
+            }
+        );
+
+        wait_for_text_comparison(&mut model);
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        model
+            .replace_memory_sources("replacement\nleft\nend".into(), "same\nright\nend".into())
+            .unwrap();
+        assert_eq!(model.pending_alignment, None);
+        assert!(model.manual_alignments.is_empty());
+        assert!(
+            model
+                .alignment_error
+                .as_deref()
+                .is_some_and(|message| message.contains("Replacing a source"))
+        );
+    }
+
+    #[test]
+    fn m3d_active_hunk_identity_survives_earlier_ignored_rows_before_copy() {
+        let left = "same 0\nleft A\nsame 2\nleft B\nsame 4\nleft C\nend";
+        let right = "same 0\nright A\nsame 2\nright B\nsame 4\nright C\nend";
+        let mut model =
+            TextViewModel::new_memory(left.into(), right.into(), &Default::default()).unwrap();
+        wait_for_text_comparison(&mut model);
+        let target_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.left == Some(5) && row.right == Some(5))
+            .unwrap();
+        model.set_current_row(Some(target_row));
+
+        for line in [0, 2] {
+            for side in [DiffSide::Left, DiffSide::Right] {
+                assert!(model.select_source_line(side, line, false));
+                model.ignore_selected_lines().unwrap();
+            }
+        }
+        wait_for_text_comparison(&mut model);
+
+        let ignored_row = model
+            .current_row
+            .expect("the unchanged source hunk maps through ignored-row insertion");
+        assert_ne!(ignored_row, target_row);
+        for line in [0, 2] {
+            for side in [DiffSide::Left, DiffSide::Right] {
+                assert!(model.select_source_line(side, line, false));
+                model.restore_selected_ignored_lines().unwrap();
+            }
+        }
+        wait_for_text_comparison(&mut model);
+        assert_eq!(model.current_row, Some(target_row));
+        assert!(model.left.ignored_line_ranges().is_empty());
+        assert!(model.right.ignored_line_ranges().is_empty());
+
+        for line in [0, 2] {
+            for side in [DiffSide::Left, DiffSide::Right] {
+                assert!(model.select_source_line(side, line, false));
+                model.ignore_selected_lines().unwrap();
+            }
+        }
+        wait_for_text_comparison(&mut model);
+
+        let current_row = model
+            .current_row
+            .expect("the unchanged source hunk has one exact identity match");
+        let comparison = model.comparison.as_ref().unwrap();
+        assert_eq!(
+            (
+                comparison.rows[current_row].left,
+                comparison.rows[current_row].right
+            ),
+            (Some(5), Some(5)),
+            "the same complete source hunk survives preceding ignored-row insertions"
+        );
+        assert_ne!(current_row, target_row);
+        model.copy_hunk(DiffSide::Left).unwrap();
+        assert_eq!(
+            model.right.source(),
+            "same 0\nright A\nsame 2\nright B\nsame 4\nleft C\nend"
+        );
+        assert_eq!(model.left.source(), left);
+    }
+
+    #[test]
+    fn m3d_active_hunk_invalidation_rejects_copy_after_membership_changes() {
+        let left = "head\nleft one\nleft two\ntail";
+        let right = "head\nright one\nright two\ntail";
+        let mut model =
+            TextViewModel::new_memory(left.into(), right.into(), &Default::default()).unwrap();
+        wait_for_text_comparison(&mut model);
+        let comparison = model.comparison.as_ref().unwrap();
+        let first = comparison
+            .rows
+            .iter()
+            .position(|row| row.left == Some(1) && row.right == Some(1))
+            .unwrap();
+        let second = comparison
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        assert_eq!(
+            comparison.navigation.row_to_hunk[first], comparison.navigation.row_to_hunk[second],
+            "adjacent changes start in the same logical hunk"
+        );
+        model.set_current_row(Some(second));
+
+        for side in [DiffSide::Left, DiffSide::Right] {
+            assert!(model.select_source_line(side, 1, false));
+            model.ignore_selected_lines().unwrap();
+        }
+        wait_for_text_comparison(&mut model);
+        assert_eq!(model.current_row, None);
+        assert!(
+            model
+                .annotation_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("active difference changed"))
+        );
+        assert!(model.copy_hunk(DiffSide::Left).is_err());
+        assert_eq!(model.left.source(), left);
+        assert_eq!(model.right.source(), right);
     }
 
     #[test]

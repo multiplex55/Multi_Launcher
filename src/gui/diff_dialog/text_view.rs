@@ -113,6 +113,7 @@ pub fn show(
                 Err(error) => model.annotation_notice = Some(error),
             }
         }
+        alignment_controls(ui, model);
         ui.menu_button("Ignored lines", |ui| {
             let selected = model.source_line_selection.is_some();
             if ui
@@ -491,6 +492,104 @@ pub fn show(
     action
 }
 
+fn alignment_controls(ui: &mut egui::Ui, model: &mut TextViewModel) {
+    if let Some(pending) = model.pending_alignment {
+        ui.label(format!(
+            "Alignment started at {} line {}; select a line on the other side",
+            side_name(pending.side),
+            pending.source_line + 1
+        ));
+        if ui.button("Reveal alignment origin").clicked()
+            && let Err(error) = model.reveal_pending_manual_alignment_origin()
+        {
+            model.alignment_error = Some(error);
+        }
+        if ui
+            .add_enabled(
+                model.can_complete_manual_alignment_from_selection(),
+                egui::Button::new("Confirm alignment from selected line"),
+            )
+            .clicked()
+            && let Err(error) = model.complete_manual_alignment_from_selection()
+        {
+            model.alignment_error = Some(error);
+        }
+        if ui.button("Cancel alignment").clicked() {
+            model.cancel_manual_alignment();
+        }
+    } else if ui
+        .add_enabled(
+            model.has_fresh_source_selection(),
+            egui::Button::new("Align from selected line"),
+        )
+        .clicked()
+        && let Err(error) = model.begin_manual_alignment_from_selection()
+    {
+        model.alignment_error = Some(error);
+    }
+
+    ui.menu_button(
+        format!("Alignments ({})", model.manual_alignments.len()),
+        |ui| {
+            if model.manual_alignments.is_empty() {
+                ui.label("No accepted manual alignments");
+            }
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    for anchor in model.manual_alignments.clone() {
+                        ui.push_id((anchor.left_line, anchor.right_line), |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "Left {} ↔ Right {}",
+                                    anchor.left_line + 1,
+                                    anchor.right_line + 1
+                                ));
+                                if ui
+                                    .button(format!(
+                                        "Reveal Left {} ↔ Right {}",
+                                        anchor.left_line + 1,
+                                        anchor.right_line + 1
+                                    ))
+                                    .clicked()
+                                {
+                                    if let Err(error) = model.reveal_manual_alignment(anchor) {
+                                        model.alignment_error = Some(error);
+                                    }
+                                    ui.close();
+                                }
+                                if ui
+                                    .button(format!(
+                                        "Remove Left {} ↔ Right {}",
+                                        anchor.left_line + 1,
+                                        anchor.right_line + 1
+                                    ))
+                                    .clicked()
+                                {
+                                    if model.remove_manual_alignment(anchor) {
+                                        model.annotation_notice = Some(format!(
+                                            "Removed alignment: Left {} ↔ Right {}.",
+                                            anchor.left_line + 1,
+                                            anchor.right_line + 1
+                                        ));
+                                    }
+                                    ui.close();
+                                }
+                            });
+                        });
+                    }
+                });
+        },
+    );
+}
+
+fn side_name(side: DiffSide) -> &'static str {
+    match side {
+        DiffSide::Left => "Left",
+        DiffSide::Right => "Right",
+    }
+}
+
 pub(super) fn save_side(model: &mut TextViewModel, side: DiffSide) -> bool {
     let name = match side {
         DiffSide::Left => "left.txt",
@@ -800,7 +899,7 @@ fn render_pane_contents(
     let mut selected_row = None;
     let mut selection_action: Option<(usize, bool)> = None;
     let mut begin_alignment_action = None;
-    let mut alignment_action: Option<usize> = None;
+    let mut confirm_alignment_action: Option<usize> = None;
     let mut remove_anchor = None;
     let mut render_range = |ui: &mut egui::Ui, range: std::ops::Range<usize>| {
         if !wrapped {
@@ -1010,24 +1109,26 @@ fn render_pane_contents(
                             }
                             response.context_menu(|ui| {
                                 if let Some(pending) = model.pending_alignment {
-                                    let source_is_current = match pending.side {
-                                        DiffSide::Left => {
-                                            pending.source_id == model.left.source_id()
-                                                && pending.revision == model.left.revision
-                                        }
-                                        DiffSide::Right => {
-                                            pending.source_id == model.right.source_id()
-                                                && pending.revision == model.right.revision
-                                        }
-                                    };
-                                    if source_is_current
-                                        && pending.side != side
-                                        && ui.button("Preview / confirm alignment").clicked()
+                                    if pending.side != side
+                                        && ui
+                                            .button(format!(
+                                                "Confirm alignment with {} line {}",
+                                                side_name(side),
+                                                n + 1
+                                            ))
+                                            .clicked()
                                     {
-                                        alignment_action = Some(n);
+                                        confirm_alignment_action = Some(n);
+                                        ui.close();
+                                    } else if pending.side == side
+                                        && ui
+                                            .button("Restart first endpoint from this line")
+                                            .clicked()
+                                    {
+                                        begin_alignment_action = Some(n);
                                         ui.close();
                                     }
-                                } else if ui.button("Align With…").clicked() {
+                                } else if ui.button("Start alignment from this line").clicked() {
                                     begin_alignment_action = Some(n);
                                     ui.close();
                                 }
@@ -1145,42 +1246,17 @@ fn render_pane_contents(
         model.select_source_line(side, line, extend);
     }
     if let Some(line) = begin_alignment_action {
-        model.begin_manual_alignment(side, line);
+        if model.select_source_line(side, line, false)
+            && let Err(error) = model.begin_manual_alignment_from_selection()
+        {
+            model.alignment_error = Some(error);
+        }
     }
-    if let Some(target_line) = alignment_action {
-        if let Some(pending) = model.pending_alignment.take() {
-            let source_is_current = match pending.side {
-                DiffSide::Left => {
-                    pending.source_id == model.left.source_id()
-                        && pending.revision == model.left.revision
-                }
-                DiffSide::Right => {
-                    pending.source_id == model.right.source_id()
-                        && pending.revision == model.right.revision
-                }
-            };
-            if !source_is_current || model.source_line_is_ignored(side, target_line) {
-                model.alignment_error = Some(
-                    "Alignment was cancelled because a source changed or an endpoint is ignored."
-                        .into(),
-                );
-                return true;
-            }
-            let anchor = crate::diff::text_compare::ManualTextAlignment {
-                left_line: if pending.side == DiffSide::Left {
-                    pending.source_line
-                } else {
-                    target_line
-                },
-                right_line: if pending.side == DiffSide::Right {
-                    pending.source_line
-                } else {
-                    target_line
-                },
-            };
-            if let Err(error) = model.add_manual_alignment(anchor) {
-                model.alignment_error = Some(error);
-            }
+    if let Some(target_line) = confirm_alignment_action {
+        if model.select_source_line(side, target_line, false)
+            && let Err(error) = model.complete_manual_alignment_from_selection()
+        {
+            model.alignment_error = Some(error);
         }
     }
     if let Some(anchor) = remove_anchor {
@@ -1551,6 +1627,113 @@ mod tests {
             1..3
         );
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn m3d_alignment_controls_are_reachable_while_anchors_are_filtered() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut model = TextViewModel::new_memory(
+            "same\nleft\nend".into(),
+            "same\nright\nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_test_comparison(&mut model);
+        let accepted = crate::diff::text_compare::ManualTextAlignment {
+            left_line: 0,
+            right_line: 0,
+        };
+        model.set_manual_alignments(vec![accepted]).unwrap();
+        wait_for_test_comparison(&mut model);
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert!(model.select_source_line(DiffSide::Right, 2, false));
+        assert!(model.can_complete_manual_alignment_from_selection());
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 720.0));
+        let render = |events: Vec<egui::Event>, model: &mut TextViewModel| {
+            context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| show(ui, 7, 11, model));
+                },
+            )
+        };
+        let output = render(Vec::new(), &mut model);
+        let alignments = accessible_widget_bounds(
+            &output,
+            egui::accesskit::Role::Button,
+            Some("Alignments (1)"),
+            None,
+        )
+        .expect("the accepted alignments menu is keyboard and screen-reader reachable");
+        for label in [
+            "Reveal alignment origin",
+            "Confirm alignment from selected line",
+            "Cancel alignment",
+        ] {
+            assert!(
+                accessible_widget_bounds(
+                    &output,
+                    egui::accesskit::Role::Button,
+                    Some(label),
+                    None,
+                )
+                .is_some(),
+                "{label} is reachable"
+            );
+        }
+        output.drop_without_applying_deltas();
+
+        let position = alignments.center();
+        for events in [
+            vec![egui::Event::PointerMoved(position)],
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            render(events, &mut model).drop_without_applying_deltas();
+        }
+        let output = render(Vec::new(), &mut model);
+        assert!(
+            accessible_widget_bounds(
+                &output,
+                egui::accesskit::Role::Button,
+                Some("Reveal Left 1 ↔ Right 1"),
+                None,
+            )
+            .is_some(),
+            "the filtered accepted endpoint can be revealed from the anchor list"
+        );
+        assert!(
+            accessible_widget_bounds(
+                &output,
+                egui::accesskit::Role::Button,
+                Some("Remove Left 1 ↔ Right 1"),
+                None,
+            )
+            .is_some(),
+            "the filtered accepted endpoint can be removed from the anchor list"
+        );
+        output.drop_without_applying_deltas();
+        assert_eq!(model.manual_alignments, vec![accepted]);
+        assert_eq!(model.pending_alignment.unwrap().side, DiffSide::Left);
     }
 
     #[test]
