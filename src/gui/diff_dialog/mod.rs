@@ -1677,6 +1677,20 @@ impl DiffDialogState {
 
     /// The single Back transition used by both keyboard and button activation.
     fn navigate_back(&mut self) -> bool {
+        let current_view_id = self.workspace.current_view.id;
+        if matches!(
+            &self.workspace.current_view.view,
+            DiffView::TextCompare(state) if state.origin == TextCompareOrigin::Memory
+        ) && self
+            .text_views
+            .get(&current_view_id)
+            .is_some_and(|model| model.has_dirty())
+        {
+            self.workspace.error = Some(
+                "Going Back would discard edited in-memory text. Save As first, or close Diff and choose Save modified, Discard, or Cancel.".into(),
+            );
+            return false;
+        }
         let changed_relative = match &self.workspace.current_view.view {
             DiffView::TextCompare(state) => self
                 .text_views
@@ -2087,6 +2101,18 @@ mod tests {
             .unwrap();
         let view_id = dialog.workspace.current_view.id;
         (dialog, view_id)
+    }
+
+    fn push_memory_child(dialog: &mut DiffDialogState, left: &str, right: &str) -> u64 {
+        let view_id = dialog.workspace.push_memory_text_compare();
+        let model = crate::diff::model::TextViewModel::new_memory(
+            left.to_owned(),
+            right.to_owned(),
+            &dialog.workspace.settings,
+        )
+        .unwrap();
+        dialog.text_views.insert(view_id, model);
+        view_id
     }
 
     fn folder_dialog(id: u64) -> DiffDialogState {
@@ -4197,6 +4223,146 @@ mod tests {
         assert_eq!(model.left.revision, revision);
         assert!(model.left.is_dirty());
         assert!(model.left.can_undo());
+    }
+
+    #[test]
+    fn memory_text_back_refuses_dirty_child_but_allows_clean_child_to_dirty_parent() {
+        let (mut dialog, parent_id) = dirty_memory_dialog();
+        let parent_source = dialog.text_views[&parent_id].left.source().to_owned();
+        let parent_revision = dialog.text_views[&parent_id].left.revision;
+        let child_id = push_memory_child(&mut dialog, "child left\nend", "child right\nend");
+        dialog
+            .text_views
+            .get_mut(&child_id)
+            .unwrap()
+            .replace_memory_sources(
+                "edited child left\nend".into(),
+                "edited child right\nend".into(),
+            )
+            .unwrap();
+        {
+            let child = dialog.text_views.get_mut(&child_id).unwrap();
+            for _ in 0..500 {
+                child.poll();
+                if !child.recalculating
+                    && (child.comparison_is_fresh() || child.comparison_error.is_some())
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(child.comparison_is_fresh());
+            assert!(child.select_source_line(crate::diff::model::DiffSide::Left, 0, false));
+            child.toggle_bookmark_at_selection().unwrap();
+            assert!(child.select_source_line(crate::diff::model::DiffSide::Left, 1, false));
+            child.ignore_selected_lines().unwrap();
+            for _ in 0..500 {
+                child.poll();
+                if child.comparison_is_fresh() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            child
+                .set_manual_alignments(vec![crate::diff::text_compare::ManualTextAlignment {
+                    left_line: 0,
+                    right_line: 0,
+                }])
+                .unwrap();
+            for _ in 0..500 {
+                child.poll();
+                if child.comparison_is_fresh() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(child.comparison_is_fresh());
+        }
+
+        let current = dialog.workspace.current_view.clone();
+        let stack = dialog.workspace.navigation_stack.clone();
+        let settings = dialog.workspace.settings.clone();
+        let persistence = dialog.persistence.clone();
+        let child_documents_before = {
+            let child = &dialog.text_views[&child_id];
+            (
+                child.left.source().to_owned(),
+                child.right.source().to_owned(),
+                child.left.revision,
+                child.right.revision,
+                child.left.saved_revision,
+                child.right.saved_revision,
+                child.left.can_undo(),
+                child.right.can_undo(),
+            )
+        };
+        let child_annotations_before = {
+            let child = &dialog.text_views[&child_id];
+            (
+                child.left.ignored_line_ranges().to_vec(),
+                child.left.bookmarks().to_vec(),
+                child.manual_alignments.clone(),
+                child.annotation_revision,
+                child.source_line_selection,
+            )
+        };
+        assert!(dialog.text_views[&child_id].has_dirty());
+        assert!(!dialog.navigate_back());
+        assert_eq!(dialog.workspace.current_view, current);
+        assert_eq!(dialog.workspace.navigation_stack, stack);
+        assert_eq!(dialog.workspace.settings, settings);
+        assert_eq!(dialog.persistence, persistence);
+        assert!(
+            dialog
+                .workspace
+                .error
+                .as_deref()
+                .is_some_and(|error| { error.contains("Save As") && error.contains("close Diff") })
+        );
+        let child = &dialog.text_views[&child_id];
+        assert_eq!(
+            (
+                child.left.source().to_owned(),
+                child.right.source().to_owned(),
+                child.left.revision,
+                child.right.revision,
+                child.left.saved_revision,
+                child.right.saved_revision,
+                child.left.can_undo(),
+                child.right.can_undo(),
+            ),
+            child_documents_before
+        );
+        assert_eq!(
+            (
+                child.left.ignored_line_ranges().to_vec(),
+                child.left.bookmarks().to_vec(),
+                child.manual_alignments.clone(),
+                child.annotation_revision,
+                child.source_line_selection,
+            ),
+            child_annotations_before
+        );
+        assert_eq!(dialog.text_views[&parent_id].left.source(), parent_source);
+        assert_eq!(dialog.text_views[&parent_id].left.revision, parent_revision);
+        assert!(dialog.text_views[&parent_id].has_dirty());
+
+        let (mut clean_dialog, dirty_parent_id) = dirty_memory_dialog();
+        let dirty_parent_source = clean_dialog.text_views[&dirty_parent_id]
+            .left
+            .source()
+            .to_owned();
+        let clean_child_id =
+            push_memory_child(&mut clean_dialog, "clean child left", "clean child right");
+        assert!(!clean_dialog.text_views[&clean_child_id].has_dirty());
+        assert!(clean_dialog.navigate_back());
+        assert_eq!(clean_dialog.workspace.current_view.id, dirty_parent_id);
+        assert!(!clean_dialog.text_views.contains_key(&clean_child_id));
+        assert!(clean_dialog.text_views[&dirty_parent_id].has_dirty());
+        assert_eq!(
+            clean_dialog.text_views[&dirty_parent_id].left.source(),
+            dirty_parent_source
+        );
     }
 
     #[test]

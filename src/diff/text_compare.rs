@@ -674,22 +674,126 @@ pub fn compare_with_annotations(
     let right_count = split_lines(right, c.rules.line_ending_equivalence).len();
     let left_ignored = normalize_ignored_ranges(left_ignored, left_count)?;
     let right_ignored = normalize_ignored_ranges(right_ignored, right_count)?;
-    let lp = project(left, c);
-    let rp = project(right, c);
-    let lp: Vec<_> = lp
-        .lines
-        .into_iter()
-        .filter(|line| !line_is_ignored(&left_ignored, line.source_line))
-        .collect();
-    let rp: Vec<_> = rp
-        .lines
-        .into_iter()
-        .filter(|line| !line_is_ignored(&right_ignored, line.source_line))
-        .collect();
+    compare_projected_annotations(
+        left,
+        right,
+        left_source_id,
+        right_source_id,
+        left_revision,
+        right_revision,
+        c,
+        intraline_limit,
+        anchors,
+        &left_ignored,
+        &right_ignored,
+        annotation_revision,
+        project(left, c).lines,
+        project(right, c).lines,
+    )
+}
+
+/// Compares using the existing rules projection while removing anchors whose
+/// endpoints have become excluded by those rules. Explicitly ignored anchors
+/// and malformed anchors remain errors. The removed anchors are returned so
+/// the model can update annotation ownership and explain the change.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compare_with_annotations_pruning_excluded_anchors(
+    left: &str,
+    right: &str,
+    left_source_id: u64,
+    right_source_id: u64,
+    left_revision: u64,
+    right_revision: u64,
+    c: &CompiledRules,
+    intraline_limit: usize,
+    anchors: &[ManualTextAlignment],
+    left_ignored: &[IgnoredLineRange],
+    right_ignored: &[IgnoredLineRange],
+    annotation_revision: u64,
+) -> Result<(TextComparisonResult, Vec<ManualTextAlignment>), String> {
+    let left_count = split_lines(left, c.rules.line_ending_equivalence).len();
+    let right_count = split_lines(right, c.rules.line_ending_equivalence).len();
+    let left_ignored = normalize_ignored_ranges(left_ignored, left_count)?;
+    let right_ignored = normalize_ignored_ranges(right_ignored, right_count)?;
     let anchors = validate_manual_alignments(anchors, left_count, right_count)?;
     for anchor in &anchors {
         if line_is_ignored(&left_ignored, anchor.left_line)
             || line_is_ignored(&right_ignored, anchor.right_line)
+        {
+            return Err(format!(
+                "manual alignment at lines {} and {} uses an ignored source line; restore the line before aligning it",
+                anchor.left_line + 1,
+                anchor.right_line + 1
+            ));
+        }
+    }
+    let left_projection = project(left, c).lines;
+    let right_projection = project(right, c).lines;
+    let mut excluded = Vec::new();
+    let mut retained = Vec::with_capacity(anchors.len());
+    for anchor in anchors {
+        let left_present = left_projection
+            .binary_search_by_key(&anchor.left_line, |line| line.source_line)
+            .is_ok();
+        let right_present = right_projection
+            .binary_search_by_key(&anchor.right_line, |line| line.source_line)
+            .is_ok();
+        if left_present && right_present {
+            retained.push(anchor);
+        } else {
+            excluded.push(anchor);
+        }
+    }
+    let result = compare_projected_annotations(
+        left,
+        right,
+        left_source_id,
+        right_source_id,
+        left_revision,
+        right_revision,
+        c,
+        intraline_limit,
+        &retained,
+        &left_ignored,
+        &right_ignored,
+        annotation_revision,
+        left_projection,
+        right_projection,
+    )?;
+    Ok((result, excluded))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_projected_annotations(
+    left: &str,
+    right: &str,
+    left_source_id: u64,
+    right_source_id: u64,
+    left_revision: u64,
+    right_revision: u64,
+    c: &CompiledRules,
+    intraline_limit: usize,
+    anchors: &[ManualTextAlignment],
+    left_ignored: &[IgnoredLineRange],
+    right_ignored: &[IgnoredLineRange],
+    annotation_revision: u64,
+    left_projection: Vec<ProjectedLine>,
+    right_projection: Vec<ProjectedLine>,
+) -> Result<TextComparisonResult, String> {
+    let left_count = split_lines(left, c.rules.line_ending_equivalence).len();
+    let right_count = split_lines(right, c.rules.line_ending_equivalence).len();
+    let lp: Vec<_> = left_projection
+        .into_iter()
+        .filter(|line| !line_is_ignored(left_ignored, line.source_line))
+        .collect();
+    let rp: Vec<_> = right_projection
+        .into_iter()
+        .filter(|line| !line_is_ignored(right_ignored, line.source_line))
+        .collect();
+    let anchors = validate_manual_alignments(anchors, left_count, right_count)?;
+    for anchor in &anchors {
+        if line_is_ignored(left_ignored, anchor.left_line)
+            || line_is_ignored(right_ignored, anchor.right_line)
         {
             return Err(format!(
                 "manual alignment at lines {} and {} uses an ignored source line; restore the line before aligning it",
@@ -762,8 +866,8 @@ pub fn compare_with_annotations(
         left,
         right,
         c.rules.line_ending_equivalence,
-        &left_ignored,
-        &right_ignored,
+        left_ignored,
+        right_ignored,
     );
     Ok(finish_comparison(
         left,

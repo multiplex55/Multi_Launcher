@@ -1113,9 +1113,48 @@ pub fn restore_anchor(rows: &[AlignedDiffRow], anchor: ScrollAnchor) -> usize {
         .unwrap_or_else(|| rows.len().saturating_sub(1))
 }
 
-struct CompareMessage {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompareRequestStamp {
     generation: u64,
+    left_source_id: u64,
+    right_source_id: u64,
+    left_revision: u64,
+    right_revision: u64,
+    rules_revision: u64,
+    annotation_revision: u64,
+}
+
+impl CompareRequestStamp {
+    fn matches_model(self, model: &TextViewModel) -> bool {
+        self.generation == model.generation
+            && self.left_source_id == model.left.source_id()
+            && self.right_source_id == model.right.source_id()
+            && self.left_revision == model.left.revision
+            && self.right_revision == model.right.revision
+            && self.rules_revision == model.rules.revision
+            && self.annotation_revision == model.annotation_revision
+    }
+
+    fn matches_result(self, result: &TextComparisonResult) -> bool {
+        !result.is_stale(
+            self.left_source_id,
+            self.right_source_id,
+            self.left_revision,
+            self.right_revision,
+            self.rules_revision,
+            self.annotation_revision,
+        )
+    }
+}
+
+struct CompareOutput {
     result: TextComparisonResult,
+    excluded_alignments: Vec<ManualTextAlignment>,
+}
+
+struct CompareMessage {
+    stamp: CompareRequestStamp,
+    result: Result<CompareOutput, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1226,6 +1265,7 @@ pub struct TextViewModel {
     /// A model-row navigation target waiting to be consumed by the view.
     pub pending_scroll_row: Option<usize>,
     pending_scroll_generation: u64,
+    pending_find_scroll_request: Option<PendingScrollRequest>,
     pub scroll: TextScrollState,
     pub row_measurements: RowMeasurementCache,
     pub projection_mode: RowProjectionMode,
@@ -1259,6 +1299,7 @@ pub struct TextViewModel {
     pub splitter: f32,
     pub recalculate_at: Option<Instant>,
     pub recalculating: bool,
+    pub comparison_error: Option<String>,
     pub left_error: Option<String>,
     pub right_error: Option<String>,
     pub external_conflict: [bool; 2],
@@ -1533,6 +1574,7 @@ impl TextViewModel {
             current_row_identity: None,
             pending_scroll_row: None,
             pending_scroll_generation: 0,
+            pending_find_scroll_request: None,
             scroll: TextScrollState::default(),
             row_measurements: RowMeasurementCache::default(),
             projection_mode: RowProjectionMode::All,
@@ -1566,6 +1608,7 @@ impl TextViewModel {
             splitter: validated_splitter(settings.pane_split),
             recalculate_at: Some(Instant::now()),
             recalculating: true,
+            comparison_error: None,
             left_error: None,
             right_error: None,
             external_conflict: [false, false],
@@ -1690,8 +1733,19 @@ impl TextViewModel {
         Ok(true)
     }
     pub fn schedule_compare(&mut self) {
+        self.cancel_pending_find_scroll();
+        self.find_matches.clear();
+        self.current_find_match = None;
         self.recalculate_at = Some(Instant::now() + Duration::from_millis(250));
         self.recalculating = true;
+        self.comparison_error = None;
+    }
+
+    fn cancel_pending_find_scroll(&mut self) {
+        let request = self.pending_find_scroll_request.take();
+        if request.is_some_and(|request| self.pending_scroll_request() == Some(request)) {
+            self.request_scroll_row(None);
+        }
     }
 
     fn invalidate_current_row_identity(&mut self) {
@@ -1769,23 +1823,61 @@ impl TextViewModel {
         if self.recalculate_at.is_some_and(|t| Instant::now() >= t) {
             self.start_compare();
         }
-        if let Some(rx) = &self.receiver
-            && let Ok(m) = rx.try_recv()
-            && m.generation == self.generation
-            && !m.result.is_stale(
-                self.left.source_id(),
-                self.right.source_id(),
-                self.left.revision,
-                self.right.revision,
-                self.rules.revision,
-                self.annotation_revision,
-            )
+        let message = self.receiver.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(message) = message
+            && message.stamp.matches_model(self)
         {
-            self.reconcile_current_row(&m.result);
-            self.comparison = Some(m.result);
-            self.recalculating = false;
-            if let Some(row) = self.pending_scroll_row {
-                self.request_scroll_row(Some(row));
+            match message.result {
+                Ok(mut output) if message.stamp.matches_result(&output.result) => {
+                    let mut annotation_changed = false;
+                    if !output.excluded_alignments.is_empty() {
+                        let old_count = self.manual_alignments.len();
+                        self.manual_alignments
+                            .retain(|anchor| !output.excluded_alignments.contains(anchor));
+                        annotation_changed = self.manual_alignments.len() != old_count;
+                        if annotation_changed {
+                            self.alignment_error = Some(
+                                "Manual alignments were cleared because their endpoints are excluded by the current comparison rules.".into(),
+                            );
+                        }
+                    }
+                    if self.pending_alignment.is_some_and(|pending| {
+                        let still_compared =
+                            output.result.rows.iter().any(|row| match pending.side {
+                                DiffSide::Left => row.left == Some(pending.source_line),
+                                DiffSide::Right => row.right == Some(pending.source_line),
+                            });
+                        !still_compared
+                    }) {
+                        self.pending_alignment = None;
+                        self.alignment_error = Some(
+                            "The pending alignment endpoint was excluded by the current comparison rules; select a visible source line again.".into(),
+                        );
+                    }
+                    if annotation_changed {
+                        self.annotation_revision = self.annotation_revision.wrapping_add(1);
+                        output.result.annotation_revision = self.annotation_revision;
+                        self.row_measurements = Default::default();
+                    }
+                    self.reconcile_current_row(&output.result);
+                    self.comparison = Some(output.result);
+                    self.comparison_error = None;
+                    self.recalculating = false;
+                    self.refresh_find();
+                    if let Some(row) = self.pending_scroll_row {
+                        self.request_scroll_row(Some(row));
+                    }
+                }
+                Ok(_) => {
+                    self.comparison_error = Some(
+                        "Text comparison produced a result for different source or rule versions. Please compare again.".into(),
+                    );
+                    self.recalculating = false;
+                }
+                Err(error) => {
+                    self.comparison_error = Some(format!("Text comparison failed: {error}"));
+                    self.recalculating = false;
+                }
             }
         }
     }
@@ -1831,28 +1923,42 @@ impl TextViewModel {
             self.right.ignored_line_ranges().to_vec(),
             self.annotation_revision,
         );
+        let stamp = CompareRequestStamp {
+            generation,
+            left_source_id: left_id,
+            right_source_id: right_id,
+            left_revision: lr,
+            right_revision: rr,
+            rules_revision: rules.revision,
+            annotation_revision,
+        };
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
         self.recalculating = true;
         std::thread::spawn(move || {
-            if let Ok(c) = CompiledRules::compile(&rules)
-                && let Ok(result) = text_compare::compare_with_annotations(
-                    &l,
-                    &r,
-                    left_id,
-                    right_id,
-                    lr,
-                    rr,
-                    &c,
-                    4096,
-                    &anchors,
-                    &left_ignored,
-                    &right_ignored,
-                    annotation_revision,
-                )
-            {
-                let _ = tx.send(CompareMessage { generation, result });
-            }
+            let result = CompiledRules::compile(&rules)
+                .map_err(|errors| errors.join("; "))
+                .and_then(|compiled| {
+                    text_compare::compare_with_annotations_pruning_excluded_anchors(
+                        &l,
+                        &r,
+                        left_id,
+                        right_id,
+                        lr,
+                        rr,
+                        &compiled,
+                        4096,
+                        &anchors,
+                        &left_ignored,
+                        &right_ignored,
+                        annotation_revision,
+                    )
+                })
+                .map(|(result, excluded_alignments)| CompareOutput {
+                    result,
+                    excluded_alignments,
+                });
+            let _ = tx.send(CompareMessage { stamp, result });
         });
     }
     pub fn projected_rows(&self) -> Vec<usize> {
@@ -1876,6 +1982,12 @@ impl TextViewModel {
         }
     }
     pub fn refresh_find(&mut self) {
+        self.cancel_pending_find_scroll();
+        if !self.comparison_is_fresh() {
+            self.find_matches.clear();
+            self.current_find_match = None;
+            return;
+        }
         let projection = self.find_projection_only.then(|| self.projected_rows());
         self.find_matches = self.comparison.as_ref().map_or_else(Vec::new, |c| {
             text_compare::find_matches(
@@ -1892,6 +2004,10 @@ impl TextViewModel {
         self.current_find_match = None;
     }
     pub fn navigate_find(&mut self, forward: bool) {
+        if !self.comparison_is_fresh() {
+            self.cancel_pending_find_scroll();
+            return;
+        }
         self.current_find_match =
             text_compare::navigate_match(&self.find_matches, self.current_find_match, forward);
         if let Some(m) = self
@@ -1900,6 +2016,7 @@ impl TextViewModel {
         {
             self.active_side = m.side;
             self.request_scroll_row(Some(m.row));
+            self.pending_find_scroll_request = self.pending_scroll_request();
         }
     }
     pub fn request_overview_scroll(&mut self, y: f32, height: f32) {
@@ -2232,7 +2349,7 @@ impl TextViewModel {
         if document.source_id() != source_id || document.revision != revision {
             return Err("Alignment endpoint is stale; select a current source line again".into());
         }
-        self.fresh_comparison()?;
+        let comparison = self.fresh_comparison()?;
         let line_count =
             text_compare::source_line_count(document.source(), self.rules.line_ending_equivalence);
         if source_line >= line_count {
@@ -2241,6 +2358,16 @@ impl TextViewModel {
         if text_compare::line_is_ignored(document.ignored_line_ranges(), source_line) {
             return Err(
                 "Ignored source lines cannot be manual-alignment endpoints; restore the line first."
+                    .into(),
+            );
+        }
+        let compared = comparison.rows.iter().any(|row| match side {
+            DiffSide::Left => row.left == Some(source_line),
+            DiffSide::Right => row.right == Some(source_line),
+        });
+        if !compared {
+            return Err(
+                "Source lines excluded by the current comparison rules cannot be alignment endpoints."
                     .into(),
             );
         }
@@ -2387,6 +2514,25 @@ impl TextViewModel {
                     .into(),
             );
         }
+        if !anchors.is_empty() {
+            let comparison = self.fresh_comparison()?;
+            for anchor in &anchors {
+                let left_compared = comparison
+                    .rows
+                    .iter()
+                    .any(|row| row.left == Some(anchor.left_line));
+                let right_compared = comparison
+                    .rows
+                    .iter()
+                    .any(|row| row.right == Some(anchor.right_line));
+                if !left_compared || !right_compared {
+                    return Err(
+                        "Manual alignment endpoints excluded by the current comparison rules cannot be accepted."
+                            .into(),
+                    );
+                }
+            }
+        }
         self.manual_alignments = anchors;
         self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
         self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
@@ -2469,9 +2615,13 @@ impl TextViewModel {
             return false;
         }
         self.pending_scroll_row = None;
+        if self.pending_find_scroll_request == Some(request) {
+            self.pending_find_scroll_request = None;
+        }
         true
     }
     pub fn request_scroll_row(&mut self, row: Option<usize>) {
+        self.pending_find_scroll_request = None;
         self.pending_scroll_generation = self.pending_scroll_generation.wrapping_add(1);
         if let Some(row) = row
             && let Some(comparison) = self.comparison.as_ref()
@@ -2503,17 +2653,16 @@ impl TextViewModel {
         }
     }
     pub fn set_ignore_all_whitespace(&mut self, value: bool) {
-        if self.rules.ignore_all_whitespace != value {
-            self.rules.ignore_all_whitespace = value;
-            self.rules.revision = self.rules.revision.wrapping_add(1);
-            self.schedule_compare();
-        }
+        let mut rules = self.rules.clone();
+        rules.ignore_all_whitespace = value;
+        self.set_rules(rules);
     }
     pub fn set_rules(&mut self, mut rules: TextComparisonRules) {
         rules.revision = self.rules.revision;
         if rules != self.rules {
             rules.revision = self.rules.revision.wrapping_add(1);
             self.rules = rules;
+            self.row_measurements = Default::default();
             self.schedule_compare();
         }
     }
@@ -2874,12 +3023,18 @@ mod tests {
     fn wait_for_text_comparison(model: &mut TextViewModel) {
         for _ in 0..500 {
             model.poll();
-            if model.comparison.is_some() && !model.recalculating {
+            if !model.recalculating
+                && (model.comparison_is_fresh() || model.comparison_error.is_some())
+            {
                 return;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert!(model.comparison.is_some(), "text comparison completed");
+        assert!(
+            !model.recalculating
+                && (model.comparison_is_fresh() || model.comparison_error.is_some()),
+            "text comparison reached a terminal state"
+        );
     }
 
     #[test]
@@ -3322,6 +3477,103 @@ mod tests {
     }
 
     #[test]
+    fn m3c_find_matches_refresh_after_annotation_publication_and_stale_targets_are_cancelled() {
+        let source = "head\nnoise\nsentinel";
+        let mut model =
+            TextViewModel::new_memory(source.into(), source.into(), &DiffConfigV1::default())
+                .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.find_query = "sentinel".into();
+        model.refresh_find();
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(model.find_matches.iter().all(|matched| matched.row == 2));
+        model.navigate_find(true);
+        assert_eq!(model.pending_scroll_request().unwrap().row(), 2);
+
+        let mut invalid_rules = model.rules.clone();
+        invalid_rules.unimportant_sections.push("(".into());
+        model.set_rules(invalid_rules);
+        assert!(model.find_matches.is_empty());
+        assert!(model.pending_scroll_request().is_none());
+        model.navigate_find(true);
+        assert!(model.pending_scroll_request().is_none());
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_error.is_some());
+        model.navigate_find(true);
+        assert!(model.pending_scroll_request().is_none());
+
+        let mut valid_rules = model.rules.clone();
+        valid_rules.unimportant_sections.clear();
+        model.set_rules(valid_rules);
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(model.find_matches.iter().all(|matched| matched.row == 2));
+
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        model.ignore_selected_lines().unwrap();
+        assert!(model.pending_scroll_request().is_none());
+        model.navigate_find(true);
+        assert!(model.pending_scroll_request().is_none());
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        assert_eq!(model.find_matches.len(), 2);
+        assert_eq!(model.find_query, "sentinel");
+        assert!(model.find_matches.iter().all(|matched| matched.row == 3));
+
+        assert!(model.select_source_line(DiffSide::Right, 1, false));
+        model.ignore_selected_lines().unwrap();
+        wait_for_text_comparison(&mut model);
+        let sentinel_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        assert_eq!(sentinel_row, 3);
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(
+            model
+                .find_matches
+                .iter()
+                .all(|matched| matched.row == sentinel_row)
+        );
+        model.navigate_find(true);
+        assert_eq!(model.pending_scroll_request().unwrap().row(), sentinel_row);
+
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        model.restore_selected_ignored_lines().unwrap();
+        assert!(model.pending_scroll_request().is_none());
+        wait_for_text_comparison(&mut model);
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(model.find_matches.iter().all(|matched| matched.row == 3));
+        assert!(model.select_source_line(DiffSide::Right, 1, false));
+        model.restore_selected_ignored_lines().unwrap();
+        assert!(model.pending_scroll_request().is_none());
+        wait_for_text_comparison(&mut model);
+        let restored_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        assert_eq!(restored_row, 2);
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(
+            model
+                .find_matches
+                .iter()
+                .all(|matched| matched.row == restored_row)
+        );
+        model.navigate_find(true);
+        assert_eq!(model.pending_scroll_request().unwrap().row(), restored_row);
+    }
+
+    #[test]
     fn m3c_scroll_reveal_requires_exact_measurements_and_preserves_newer_requests() {
         let mut model = TextViewModel::new_memory(
             "same\nleft change".into(),
@@ -3718,6 +3970,152 @@ mod tests {
         assert_eq!(model.manual_alignments, vec![existing]);
         assert_eq!(model.current_row, None);
         assert!(model.cancel_manual_alignment());
+    }
+
+    #[test]
+    fn m3d_rule_excluded_blank_lines_reject_pending_and_direct_anchors() {
+        let mut model = TextViewModel::new_memory(
+            "head\n\nend".into(),
+            "head\n \nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        let mut rules = model.rules.clone();
+        rules.ignore_blank_lines = true;
+        model.set_rules(rules);
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        let comparison = model.comparison.as_ref().unwrap();
+        assert!(!comparison.raw_equal);
+        assert!(comparison.equal_under_rules);
+
+        let existing = ManualTextAlignment {
+            left_line: 0,
+            right_line: 0,
+        };
+        model.set_manual_alignments(vec![existing]).unwrap();
+        wait_for_text_comparison(&mut model);
+
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        assert!(
+            model
+                .begin_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("excluded by the current comparison rules")
+        );
+        assert_eq!(model.pending_alignment, None);
+
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert!(model.select_source_line(DiffSide::Right, 1, false));
+        assert!(
+            model
+                .complete_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("excluded by the current comparison rules")
+        );
+        assert_eq!(model.pending_alignment.unwrap().source_line, 0);
+
+        let error = model
+            .set_manual_alignments(vec![ManualTextAlignment {
+                left_line: 1,
+                right_line: 1,
+            }])
+            .unwrap_err();
+        assert!(error.contains("excluded by the current comparison rules"));
+        assert_eq!(model.manual_alignments, vec![existing]);
+        assert_eq!(model.left.source(), "head\n\nend");
+        assert_eq!(model.right.source(), "head\n \nend");
+    }
+
+    #[test]
+    fn m3d_rule_change_clears_excluded_anchors_and_publishes_fresh_comparison() {
+        let mut model = TextViewModel::new_memory(
+            "head\n\nend".into(),
+            "head\n \nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let anchor = ManualTextAlignment {
+            left_line: 1,
+            right_line: 1,
+        };
+        model.set_manual_alignments(vec![anchor]).unwrap();
+        wait_for_text_comparison(&mut model);
+        assert_eq!(model.manual_alignments, vec![anchor]);
+
+        let raw_sources = (
+            model.left.source().to_owned(),
+            model.right.source().to_owned(),
+        );
+        let mut rules = model.rules.clone();
+        rules.ignore_blank_lines = true;
+        model.set_rules(rules);
+        wait_for_text_comparison(&mut model);
+
+        assert!(model.comparison_is_fresh());
+        assert!(!model.recalculating);
+        assert!(model.comparison_error.is_none());
+        assert!(model.manual_alignments.is_empty());
+        assert!(
+            model
+                .alignment_error
+                .as_deref()
+                .is_some_and(|error| error.contains("excluded by the current comparison rules"))
+        );
+        assert_eq!(model.left.source(), raw_sources.0);
+        assert_eq!(model.right.source(), raw_sources.1);
+        let result = model.comparison.as_ref().unwrap();
+        assert!(!result.raw_equal);
+        assert!(result.equal_under_rules);
+        assert_eq!(result.annotation_revision, model.annotation_revision);
+    }
+
+    #[test]
+    fn m3d_compare_errors_are_terminal_and_stale_errors_are_ignored() {
+        let mut model = TextViewModel::from_test_text("left".into(), "right".into());
+        let mut invalid_rules = model.rules.clone();
+        invalid_rules.unimportant_sections.push("(".into());
+        model.set_rules(invalid_rules);
+        wait_for_text_comparison(&mut model);
+        assert!(!model.recalculating);
+        assert!(
+            model
+                .comparison_error
+                .as_deref()
+                .is_some_and(|error| error.contains("unimportant expression"))
+        );
+
+        let stale_stamp = CompareRequestStamp {
+            generation: model.generation,
+            left_source_id: model.left.source_id(),
+            right_source_id: model.right.source_id(),
+            left_revision: model.left.revision,
+            right_revision: model.right.revision,
+            rules_revision: model.rules.revision,
+            annotation_revision: model.annotation_revision,
+        };
+        let mut current_rules = model.rules.clone();
+        current_rules.unimportant_sections.clear();
+        model.set_rules(current_rules);
+        assert!(model.recalculating);
+        assert!(model.comparison_error.is_none());
+
+        let (tx, rx) = mpsc::channel();
+        model.receiver = Some(rx);
+        tx.send(CompareMessage {
+            stamp: stale_stamp,
+            result: Err("stale test error".into()),
+        })
+        .unwrap();
+        model.poll();
+        assert!(model.recalculating);
+        assert!(model.comparison_error.is_none());
+
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        assert!(model.comparison_error.is_none());
     }
 
     #[test]

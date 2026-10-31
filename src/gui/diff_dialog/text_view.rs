@@ -310,10 +310,17 @@ pub fn show(
             if changed {
                 model.refresh_find();
             }
-            if ui.button("Previous").clicked() {
+            let find_enabled = model.comparison_is_fresh() && !model.find_matches.is_empty();
+            if ui
+                .add_enabled(find_enabled, egui::Button::new("Previous"))
+                .clicked()
+            {
                 model.navigate_find(false);
             }
-            if ui.button("Next").clicked() {
+            if ui
+                .add_enabled(find_enabled, egui::Button::new("Next"))
+                .clicked()
+            {
                 model.navigate_find(true);
             }
             ui.label(format!("{} matches", model.find_matches.len()));
@@ -345,6 +352,9 @@ pub fn show(
         );
         if model.recalculating {
             ui.label("⏳ Recalculating… (showing last valid alignment)");
+        }
+        if let Some(error) = model.comparison_error.as_deref() {
+            semantic_status(ui, StatusTone::Error, error, None);
         }
         ui.label(model.large_file_tier.explanation());
         if model.comparison_is_fresh()
@@ -1734,6 +1744,41 @@ mod tests {
         output.drop_without_applying_deltas();
         assert_eq!(model.manual_alignments, vec![accepted]);
         assert_eq!(model.pending_alignment.unwrap().side, DiffSide::Left);
+    }
+
+    #[test]
+    fn m3d_comparison_failure_is_announced_in_the_text_view() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut model = TextViewModel::from_test_text("left".into(), "right".into());
+        let message = "Text comparison failed: invalid comparison rule";
+        model.comparison_error = Some(message.into());
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| show(ui, 1, 2, &mut model));
+            },
+        );
+        let status_is_announced = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| {
+                update.nodes.iter().any(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Label && node.value() == Some(message)
+                })
+            });
+        output.drop_without_applying_deltas();
+        assert!(
+            status_is_announced,
+            "comparison errors are accessible labels"
+        );
     }
 
     #[test]
