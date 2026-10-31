@@ -3252,7 +3252,7 @@ impl SettingsEditor {
             ui,
             &mut self.experimental_jump_mode_enabled,
             setting_ids::LAUNCHER_JUMP_MODE,
-            "Experimental Jump Mode",
+            "Jump Mode",
         );
         crate::gui::theme::widgets::labeled_form_row(ui, "Jump activation chord", |ui| {
             targets.text_edit_singleline(
@@ -6290,11 +6290,11 @@ mod settings_shell_tests {
             &mut app,
             &mut jump,
             targets,
-            "Experimental Jump Mode",
+            "Jump Mode",
             SettingsScrollDirection::Later,
         );
-        assert!(target_by_label(&targets, "Experimental Jump Mode").eligible());
-        let jump_mode_toggle = target_by_label(&targets, "Experimental Jump Mode").clone();
+        assert!(target_by_label(&targets, "Jump Mode").eligible());
+        let jump_mode_toggle = target_by_label(&targets, "Jump Mode").clone();
         settings_jump_frame(
             &ctx,
             &mut app,
