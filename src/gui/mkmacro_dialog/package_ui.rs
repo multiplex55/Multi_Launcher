@@ -494,6 +494,10 @@ fn help(ui: &mut egui::Ui) {
     ui.heading("Editing");
     ui.label("Ctrl+C / Ctrl+X / Ctrl+V copy, cut, and paste complete structured steps. Ctrl+D duplicates with fresh step IDs. Drag the primary selected row to reorder; all selected rows move together.");
     ui.label("Ctrl+F finds fields, Ctrl+H performs schema-aware replacement, and Ctrl+G jumps to a step. Fold block rows, add labels/comments/accent colors, bookmark steps, and use the Outline to navigate structure.");
+    ui.heading("Direct opens");
+    ui.label("Choose Add Action → Programs & Launcher → Open Folder or Open URL. Browse fills the folder path; Run opens it in Explorer. No folder or bookmark record is created. Folder example: C:\\Users\\You\\AppData\\Local\\Temp\\DirectOpenDemo. URL example: https://example.test/; only explicit HTTP(S) URLs are accepted.");
+    ui.label("Templates use ${name} for a current runtime value and $${name} for the literal text ${name}. String, Number, Boolean, and Point values use shared formatting; Null is rejected. Folder existence and access are checked when the step runs.");
+    ui.label("Direct opens hand off to Windows; a URL handoff does not confirm that remote content loaded. Canceling after handoff does not close the external window. These actions are unavailable in unattended Hot Folder runs.");
     ui.heading("Reusable macros");
     ui.label("Parameters and named outputs are typed. Call Macro binds arguments explicitly and maps outputs explicitly; Return publishes declared outputs. Each call gets an isolated local-variable frame, while nested calls remain visible in the Runtime Inspector call stack.");
     ui.label("In the Signature Editor, String parameters can use Text, File picker, Folder picker, or an ordered Choice list with an optional default. Browse fills a file or folder path, and selecting a choice fills its value; neither runs the macro. Review or edit the invocation form, then choose Run separately. If a chooser is canceled or unavailable, its path remains editable.");

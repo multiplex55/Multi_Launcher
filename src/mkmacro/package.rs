@@ -1031,6 +1031,85 @@ mod tests {
     }
 
     #[test]
+    fn direct_open_package_preview_and_apply_preserve_independent_targets() {
+        let source_directory = tempdir().unwrap();
+        let (source_store, _) = MkMacroStore::open(source_directory.path()).unwrap();
+        let source = MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            macros: vec![macro_with(
+                7,
+                "Direct Open Source",
+                None,
+                vec![
+                    step(
+                        71,
+                        MkAction::OpenFolder(MkOpenFolderPayload {
+                            path: r"C:\Temp\space ü\${current_folder}".into(),
+                        }),
+                    ),
+                    step(
+                        72,
+                        MkAction::OpenUrl(MkOpenUrlPayload {
+                            url: "https://example.test/path?page=${current_page}#section".into(),
+                        }),
+                    ),
+                ],
+            )],
+            ..Default::default()
+        };
+        let expected_actions = source.macros[0]
+            .steps
+            .iter()
+            .map(|step| step.action.clone())
+            .collect::<Vec<_>>();
+        let bytes = export_package(&source_store, &source, &[7]).unwrap();
+
+        let destination_directory = tempdir().unwrap();
+        let (destination, _) = MkMacroStore::open(destination_directory.path()).unwrap();
+        let local = MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            macros: vec![macro_with(
+                7,
+                "Direct Open Source",
+                None,
+                vec![step(70, MkAction::Delay(Default::default()))],
+            )],
+            ..Default::default()
+        };
+        let persisted = destination.save(local.clone()).unwrap();
+        let preview = plan_package_import(&destination, &bytes, &local, 4, &persisted).unwrap();
+        assert_eq!(preview.imported_root_ids.len(), 1);
+        let imported_root_id = preview.imported_root_ids[0];
+        assert_ne!(imported_root_id, 7);
+        let preview_root = preview
+            .candidate()
+            .macros
+            .iter()
+            .find(|macro_| macro_.id == imported_root_id)
+            .unwrap();
+        assert_ne!(preview_root.steps[0].id, 71);
+        assert_ne!(preview_root.steps[1].id, 72);
+        assert_eq!(
+            preview_root
+                .steps
+                .iter()
+                .map(|step| step.action.clone())
+                .collect::<Vec<_>>(),
+            expected_actions
+        );
+        assert_eq!(destination.snapshot().as_ref(), persisted.as_ref());
+        assert_eq!(source.macros[0].steps[0].id, 71);
+        assert_eq!(source.macros[0].steps[1].id, 72);
+
+        let applied = preview.apply(&destination, &local, 4).unwrap();
+        assert_eq!(applied.as_ref(), preview.candidate());
+        assert_eq!(destination.snapshot().as_ref(), preview.candidate());
+        assert_eq!(local.macros[0].steps[0].id, 70);
+        assert_eq!(source.macros[0].steps[0].action, expected_actions[0]);
+        assert_eq!(source.macros[0].steps[1].action, expected_actions[1]);
+    }
+
+    #[test]
     fn schema_twelve_package_preserves_representative_legacy_content_on_reexport() {
         let directory = tempdir().unwrap();
         let (store, _) = MkMacroStore::open(directory.path()).unwrap();

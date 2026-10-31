@@ -106,8 +106,7 @@ pub enum EditorKind {
 }
 
 impl EditorKind {
-    /// Returns the routed editor contract, including read-only persisted
-    /// actions which are intentionally unavailable from the palette.
+    /// Returns the routed editor contract for this action kind.
     pub fn contract(self) -> Option<EditorContract> {
         editor_contract(self)
     }
@@ -634,6 +633,26 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             })
         ),
         d!(
+            ProgramsLauncher,
+            "Open Folder",
+            "Open a folder in File Explorer",
+            &["folder", "directory", "browse", "explorer", "path"],
+            OpenFolder,
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: r"C:\Temp\DirectOpenDemo".into(),
+            })
+        ),
+        d!(
+            ProgramsLauncher,
+            "Open URL",
+            "Open an HTTP or HTTPS URL in the default browser",
+            &["url", "http", "https", "browser", "website", "direct"],
+            OpenUrl,
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://example.test/".into(),
+            })
+        ),
+        d!(
             Variables,
             "Set Variable",
             "Store a value",
@@ -1030,7 +1049,6 @@ pub fn editor_route_recognizes(action: &MkAction, editor: EditorKind) -> bool {
 pub enum EditorContract {
     Configurable { field_count: usize },
     DirectInsert { context: InsertionContextRoute },
-    ExistingActionReadOnly,
 }
 
 /// Static completeness declaration for a configurable editor.  This is kept
@@ -1046,7 +1064,7 @@ pub struct EditorCompleteness {
 
 pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
     match editor {
-        EditorKind::General | EditorKind::OpenFolder | EditorKind::OpenUrl => None,
+        EditorKind::General => None,
         EditorKind::DirectInsert => Some(EditorCompleteness {
             has_primary_control: false,
             intentionally_disabled: false,
@@ -1063,6 +1081,8 @@ pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
         | EditorKind::Window
         | EditorKind::Process
         | EditorKind::Launcher
+        | EditorKind::OpenFolder
+        | EditorKind::OpenUrl
         | EditorKind::Image
         | EditorKind::OcrSearch
         | EditorKind::OcrRead
@@ -1176,16 +1196,13 @@ pub fn contains_placeholder_wording(value: &str) -> bool {
 }
 
 /// Authoritative routing contract. Every configurable value listed here has a
-/// concrete `action_ui` branch; read-only routes cannot create new actions.
+/// concrete `action_ui` branch.
 pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
     match editor {
         EditorKind::DirectInsert => Some(EditorContract::DirectInsert {
             context: InsertionContextRoute::CompileCheckedStructuralPosition,
         }),
         EditorKind::General => None,
-        EditorKind::OpenFolder | EditorKind::OpenUrl => {
-            Some(EditorContract::ExistingActionReadOnly)
-        }
         EditorKind::Keyboard
         | EditorKind::Text
         | EditorKind::Timing
@@ -1196,7 +1213,9 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         | EditorKind::VirtualDesktop
         | EditorKind::Condition
         | EditorKind::Repeat
-        | EditorKind::Variable => Some(EditorContract::Configurable { field_count: 1 }),
+        | EditorKind::Variable
+        | EditorKind::OpenFolder
+        | EditorKind::OpenUrl => Some(EditorContract::Configurable { field_count: 1 }),
         EditorKind::PromptInput => Some(EditorContract::Configurable { field_count: 5 }),
         EditorKind::ReadClipboardText | EditorKind::WriteClipboardText => {
             Some(EditorContract::Configurable { field_count: 1 })

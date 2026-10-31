@@ -1519,6 +1519,10 @@ impl ActionEditorState {
             self.capture_message = Some(diagnostic.message);
             return None;
         }
+        if let Some(message) = direct_open_validation_error(&self.draft.as_ref()?.action) {
+            self.capture_message = Some(message.into());
+            return None;
+        }
         self.sync_search_region_to_draft();
         let mut step = self.draft.take()?;
         normalize_optional_outputs(&mut step.action);
@@ -2125,6 +2129,10 @@ impl ActionEditorState {
         .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Fatal)
         {
             self.capture_message = Some(diagnostic.message);
+            return None;
+        }
+        if let Some(message) = direct_open_validation_error(&self.draft.as_ref()?.action) {
+            self.capture_message = Some(message.into());
             return None;
         }
         let owner_id = self.owner_macro_id.or(dialog.selected_macro_id)?;
@@ -3447,6 +3455,7 @@ fn action_ui(
     caller_id: u64,
     call_target_search: &mut String,
     pending_call_target: &mut Option<u64>,
+    browse_message: &mut Option<String>,
     ocr_languages: super::ocr_controls::OcrLanguageCapability<'_>,
     ocr_condition_regions: &mut HashMap<
         super::condition_editor::ConditionPath,
@@ -4127,15 +4136,50 @@ fn action_ui(
         }
         MkAction::OpenFolder(payload) => {
             ui.heading("Open Folder");
-            ui.label("Folder path");
-            ui.monospace(&payload.path);
-            ui.weak("This saved direct-open value is read-only in this editor.");
+            ui.horizontal(|ui| {
+                ui.label("Folder path");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut payload.path)
+                        .desired_width(360.0)
+                        .hint_text(r"C:\Users\You\Documents"),
+                );
+                if response.changed() {
+                    *browse_message = None;
+                }
+                if ui.button("Browse…").clicked() {
+                    let selected = rfd::FileDialog::new().pick_folder();
+                    match apply_open_folder_picker_choice(payload, selected.as_deref()) {
+                        Ok(true) => *browse_message = None,
+                        Ok(false) => {}
+                        Err(message) => *browse_message = Some(message.into()),
+                    }
+                }
+            });
+            ui.weak("Use an absolute folder path. Browse fills this field; it does not open the folder. The path is checked when the macro runs.");
+            if let Some(message) = open_folder_validation_error(&payload.path) {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+            direct_open_template_help(ui);
         }
         MkAction::OpenUrl(payload) => {
             ui.heading("Open URL");
-            ui.label("HTTP or HTTPS URL");
-            ui.monospace(&payload.url);
-            ui.weak("This saved direct-open value is read-only in this editor.");
+            ui.horizontal(|ui| {
+                ui.label("HTTP or HTTPS URL");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut payload.url)
+                        .desired_width(420.0)
+                        .hint_text("https://example.test/"),
+                );
+                if response.changed() {
+                    *browse_message = None;
+                }
+            });
+            ui.weak("Only explicit HTTP and HTTPS URLs are accepted. Run hands the URL to the default browser; it does not confirm that remote content loaded.");
+            if let Some(message) = open_url_validation_error(&payload.url) {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+            ui.small("Example: https://example.test/");
+            direct_open_template_help(ui);
         }
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => {}
         MkAction::OcrFindText(p) => {
@@ -4916,6 +4960,69 @@ fn draft_apply_valid(
         && ocr_draft_validation_error(step).is_none()
         && clipboard_draft_validation_diagnostic(&step.action, variable_catalog)
             .is_none_or(|diagnostic| diagnostic.severity != DiagnosticSeverity::Fatal)
+        && direct_open_validation_error(&step.action).is_none()
+}
+
+fn direct_open_validation_error(action: &MkAction) -> Option<&'static str> {
+    match action {
+        MkAction::OpenFolder(payload) => open_folder_validation_error(&payload.path),
+        MkAction::OpenUrl(payload) => open_url_validation_error(&payload.url),
+        _ => None,
+    }
+}
+
+fn open_folder_validation_error(path: &str) -> Option<&'static str> {
+    crate::mkmacro::direct_open::validate_open_folder_template(path)
+        .err()
+        .map(|error| error.safe_message(crate::mkmacro::direct_open::DirectOpenField::FolderPath))
+}
+
+fn open_url_validation_error(url: &str) -> Option<&'static str> {
+    crate::mkmacro::direct_open::validate_open_url_template(url)
+        .err()
+        .map(|error| error.safe_message(crate::mkmacro::direct_open::DirectOpenField::Url))
+}
+
+fn direct_open_template_help(ui: &mut egui::Ui) {
+    ui.small(
+        "Templates use ${name} for a runtime value and $${name} for the literal text ${name}.",
+    );
+    ui.small("Values use the shared String, Number, Boolean, and Point formatting. Null values are rejected.");
+}
+
+fn apply_open_folder_picker_choice(
+    payload: &mut MkOpenFolderPayload,
+    selected: Option<&std::path::Path>,
+) -> Result<bool, &'static str> {
+    let Some(selected) = selected else {
+        return Ok(false);
+    };
+    if !selected.is_absolute() {
+        return Err("The selected folder path is not absolute.");
+    }
+    let Some(selected_text) = selected.to_str() else {
+        return Err("The selected folder path cannot be represented as Unicode text.");
+    };
+
+    // A path selected in the native dialog is literal input. Escape every
+    // interpolation opener using the existing shared grammar so a folder name
+    // such as `${work}` is not evaluated when the macro later runs.
+    let escaped = selected_text.replace("${", "$${");
+    for part in crate::mkmacro::interpolation::scan_template(&escaped) {
+        match part {
+            Err(_) | Ok(crate::mkmacro::interpolation::TemplatePart::Reference(_)) => {
+                return Err(
+                    "The selected folder contains interpolation text that cannot be represented; choose another folder or edit the path.",
+                );
+            }
+            Ok(
+                crate::mkmacro::interpolation::TemplatePart::Text(_)
+                | crate::mkmacro::interpolation::TemplatePart::EscapedReference(_),
+            ) => {}
+        }
+    }
+    payload.path = escaped;
+    Ok(true)
 }
 
 /// Validate the exact prospective Call/Return document through the central
@@ -5571,6 +5678,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 caller_id,
                 &mut state.call_target_search,
                 &mut state.pending_call_target,
+                &mut state.capture_message,
                 installed_languages,
                 &mut state.ocr_condition_regions,
             );
@@ -7718,10 +7826,7 @@ mod tests {
         (dir, dialog, fixture)
     }
 
-    fn render_clipboard_action_editor(
-        context: &egui::Context,
-        dialog: &mut MkMacroDialog,
-    ) -> String {
+    fn render_action_editor(context: &egui::Context, dialog: &mut MkMacroDialog) -> String {
         fn collect_text(shape: &egui::epaint::Shape, text: &mut String) {
             match shape {
                 egui::epaint::Shape::Text(shape) => {
@@ -7797,7 +7902,7 @@ mod tests {
         let original_draft = dialog.draft.clone();
         let original_revision = dialog.draft_revision();
         let context = egui::Context::default();
-        let rendered = render_clipboard_action_editor(&context, &mut dialog);
+        let rendered = render_action_editor(&context, &mut dialog);
         assert!(rendered.contains("Write Clipboard Text"), "{rendered}");
         assert!(rendered.contains("Literal"), "{rendered}");
         assert!(rendered.contains("Variable"), "{rendered}");
@@ -7868,7 +7973,7 @@ mod tests {
         dialog.action_editor = state;
         let read_draft = dialog.draft.clone();
         let read_revision = dialog.draft_revision();
-        let rendered = render_clipboard_action_editor(&context, &mut dialog);
+        let rendered = render_action_editor(&context, &mut dialog);
         assert!(rendered.contains("Read Clipboard Text"), "{rendered}");
         assert!(rendered.contains("Destination variable"), "{rendered}");
         assert_eq!(dialog.draft, read_draft);
@@ -7889,7 +7994,7 @@ mod tests {
             source: MkValueSource::Literal(MkValue::String(String::new())),
         }));
         dialog.action_editor = state;
-        let rendered = render_clipboard_action_editor(&context, &mut dialog);
+        let rendered = render_action_editor(&context, &mut dialog);
         assert!(
             rendered.contains("Writes the selected String exactly"),
             "{rendered}"
@@ -12110,6 +12215,265 @@ mod tests {
                 desktop: 3
             }))
         ));
+    }
+
+    #[test]
+    fn direct_open_editor_renders_editable_controls_and_valid_templates() {
+        let (_directory, mut dialog, _fixture) = shared_dialog();
+        dialog.save().unwrap();
+        let persisted = dialog.store.snapshot();
+        let draft_before = dialog.draft.clone();
+        let context = egui::Context::default();
+
+        dialog
+            .action_editor
+            .begin_new(MkAction::OpenFolder(MkOpenFolderPayload {
+                path: r"C:\Temp\${unfinished".into(),
+            }));
+        let rendered = render_action_editor(&context, &mut dialog);
+        assert!(rendered.contains("Open Folder"), "{rendered}");
+        assert!(rendered.contains("Folder path"), "{rendered}");
+        assert!(rendered.contains("Browse"), "{rendered}");
+        assert!(rendered.contains("Templates use"), "{rendered}");
+        assert!(!rendered.contains("read-only"), "{rendered}");
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(dialog.store.snapshot().as_ref(), persisted.as_ref());
+        assert!(!draft_apply_valid(
+            dialog.action_editor.draft.as_ref().unwrap(),
+            None,
+            &dialog.action_editor.variable_catalog
+        ));
+        dialog.action_editor.cancel();
+
+        dialog
+            .action_editor
+            .begin_new(MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "file:///private/path".into(),
+            }));
+        let rendered = render_action_editor(&context, &mut dialog);
+        assert!(rendered.contains("Open URL"), "{rendered}");
+        assert!(rendered.contains("HTTP or HTTPS URL"), "{rendered}");
+        assert!(rendered.contains("https://example.test/"), "{rendered}");
+        assert!(
+            rendered.contains("valid absolute HTTP or HTTPS URL"),
+            "{rendered}"
+        );
+        assert!(!draft_apply_valid(
+            dialog.action_editor.draft.as_ref().unwrap(),
+            None,
+            &dialog.action_editor.variable_catalog
+        ));
+        dialog.action_editor.cancel();
+
+        for action in [
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: r"C:\Temp\${current_folder}".into(),
+            }),
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://example.test/?page=${current_page}".into(),
+            }),
+        ] {
+            let step = MkStep {
+                metadata: Default::default(),
+                id: 0,
+                enabled: true,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: MkErrorPolicy::Stop,
+                action,
+            };
+            assert!(direct_open_validation_error(&step.action).is_none());
+            assert!(draft_apply_valid(
+                &step,
+                None,
+                &dialog.action_editor.variable_catalog
+            ));
+        }
+    }
+
+    #[test]
+    fn folder_picker_choice_is_literal_cancel_safe_and_has_no_launch_side_effect() {
+        let selected = std::path::Path::new(r"C:\Temp\space ü\${folder}\$${literal}");
+        let selected_text = selected.to_str().unwrap();
+        let mut payload = MkOpenFolderPayload {
+            path: "previous draft".into(),
+        };
+        let before = payload.clone();
+        assert!(!apply_open_folder_picker_choice(&mut payload, None).unwrap());
+        assert_eq!(payload, before, "cancel must preserve the input exactly");
+
+        assert!(apply_open_folder_picker_choice(&mut payload, Some(selected)).unwrap());
+        assert_eq!(payload.path, selected_text.replace("${", "$${"));
+        assert_eq!(
+            crate::mkmacro::interpolation::interpolate(
+                &payload.path,
+                &crate::mkmacro::RuntimeVariables::default()
+            )
+            .unwrap(),
+            selected_text,
+            "picked interpolation markers must remain literal at run time"
+        );
+
+        for invalid in [
+            std::path::Path::new("relative folder"),
+            std::path::Path::new(r"C:\Temp\${unclosed"),
+        ] {
+            let before = payload.clone();
+            assert!(apply_open_folder_picker_choice(&mut payload, Some(invalid)).is_err());
+            assert_eq!(payload, before, "failed choices must not alter the draft");
+        }
+    }
+
+    #[test]
+    fn direct_open_invalid_templates_cannot_bypass_editor_or_review_apply() {
+        let (_directory, mut dialog, _fixture) = shared_dialog();
+        dialog.save().unwrap();
+        let owner_id = dialog.selected_macro_id.unwrap();
+        let original_draft = dialog.draft.clone();
+        let original_persisted = dialog.store.snapshot();
+
+        let mut editor = dialog.take_action_editor();
+        editor.begin_new(MkAction::OpenUrl(MkOpenUrlPayload {
+            url: "file:///private/sensitive-target".into(),
+        }));
+        assert!(!draft_apply_valid(
+            editor.draft.as_ref().unwrap(),
+            None,
+            &editor.variable_catalog
+        ));
+        assert_eq!(editor.apply(&mut dialog), None);
+        assert!(editor.draft.is_some());
+        let message = editor.capture_message.as_deref().unwrap();
+        assert!(message.contains("valid absolute HTTP or HTTPS URL"));
+        assert!(!message.contains("sensitive-target"));
+        assert_eq!(dialog.draft, original_draft);
+        assert_eq!(
+            dialog.store.snapshot().as_ref(),
+            original_persisted.as_ref()
+        );
+        dialog.action_editor = editor;
+
+        let review_step = MkStep {
+            metadata: Default::default(),
+            id: 0,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action: MkAction::OpenFolder(MkOpenFolderPayload {
+                path: r"C:\Temp\${unfinished".into(),
+            }),
+        };
+        let mut editor = dialog.take_action_editor();
+        editor.begin_review_edit(owner_id, crate::mkmacro::ReviewStepId(77), &review_step);
+        assert_eq!(editor.take_review_edited_step(), None);
+        assert!(editor.draft.is_some());
+        assert!(
+            editor
+                .capture_message
+                .as_deref()
+                .is_some_and(|message| message.contains("template is malformed"))
+        );
+        assert_eq!(dialog.draft, original_draft);
+        assert_eq!(
+            dialog.store.snapshot().as_ref(),
+            original_persisted.as_ref()
+        );
+    }
+
+    #[test]
+    fn direct_open_editor_and_parent_save_reload_cancel_are_transactional() {
+        let (_directory, mut dialog, _fixture) = shared_dialog();
+        dialog.save().unwrap();
+        let owner_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps.push(MkStep {
+            metadata: Default::default(),
+            id: 0,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action: MkAction::OpenFolder(MkOpenFolderPayload {
+                path: r"C:\Temp\Original".into(),
+            }),
+        });
+        dialog.mark_dirty();
+        dialog.save().unwrap();
+        let original_document = dialog.store.snapshot();
+        let original_step = dialog.selected_macro().unwrap().steps[0].clone();
+
+        dialog
+            .action_editor
+            .begin_edit_in_macro(Some(owner_id), &original_step);
+        let MkAction::OpenFolder(payload) =
+            &mut dialog.action_editor.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        payload.path = r"C:\Temp\Cancelled".into();
+        dialog.action_editor.cancel();
+        assert_eq!(dialog.selected_macro().unwrap().steps[0], original_step);
+        assert_eq!(dialog.store.snapshot().as_ref(), original_document.as_ref());
+
+        dialog
+            .action_editor
+            .begin_edit_in_macro(Some(owner_id), &original_step);
+        let MkAction::OpenFolder(payload) =
+            &mut dialog.action_editor.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        payload.path = r"C:\Temp\${current_folder}".into();
+        let mut editor = dialog.take_action_editor();
+        assert_eq!(editor.apply(&mut dialog), Some(original_step.id));
+        dialog.action_editor = editor;
+        assert!(matches!(
+            &dialog.selected_macro().unwrap().steps[0].action,
+            MkAction::OpenFolder(payload) if payload.path == r"C:\Temp\${current_folder}"
+        ));
+        assert_eq!(dialog.store.snapshot().as_ref(), original_document.as_ref());
+        assert!(!dialog.reload_with_decision(super::super::DirtyDecision::KeepEditing));
+        assert!(dialog.reload_with_decision(super::super::DirtyDecision::Discard));
+        assert_eq!(dialog.selected_macro().unwrap().steps[0], original_step);
+
+        let mut editor = dialog.take_action_editor();
+        editor.begin_new(MkAction::OpenUrl(MkOpenUrlPayload {
+            url: "https://example.test/?page=${current_page}".into(),
+        }));
+        assert!(editor.apply(&mut dialog).is_some());
+        dialog.action_editor = editor;
+        assert_eq!(dialog.store.snapshot().as_ref(), original_document.as_ref());
+        dialog.save().unwrap();
+        let saved_document = dialog.store.snapshot();
+        assert!(dialog.selected_macro().unwrap().steps.iter().any(|step| {
+            matches!(
+                &step.action,
+                MkAction::OpenUrl(payload)
+                    if payload.url == "https://example.test/?page=${current_page}"
+            )
+        }));
+        assert!(!dialog.dirty);
+        assert!(dialog.reload_with_decision(super::super::DirtyDecision::Discard));
+        assert_eq!(dialog.store.snapshot().as_ref(), saved_document.as_ref());
+
+        let saved_step = dialog.selected_macro().unwrap().steps[1].clone();
+        dialog
+            .action_editor
+            .begin_edit_in_macro(Some(owner_id), &saved_step);
+        let MkAction::OpenUrl(payload) = &mut dialog.action_editor.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        payload.url = "https://example.test/unsaved".into();
+        let mut editor = dialog.take_action_editor();
+        assert!(editor.apply(&mut dialog).is_some());
+        dialog.action_editor = editor;
+        assert!(!dialog.close_with_decision(super::super::DirtyDecision::KeepEditing));
+        assert!(dialog.close_with_decision(super::super::DirtyDecision::Discard));
+        assert_eq!(dialog.store.snapshot().as_ref(), saved_document.as_ref());
     }
 
     #[test]

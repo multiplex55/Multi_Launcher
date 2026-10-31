@@ -222,7 +222,10 @@ fn persist_catalog(path: &std::path::Path, catalog: &MkMacroTemplateCatalog) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkAction, MkHotkey, MkKey, MkMacro, MkMacroDocument, MkStep};
+    use crate::mkmacro::{
+        MkAction, MkHotkey, MkKey, MkMacro, MkMacroDocument, MkOpenFolderPayload, MkOpenUrlPayload,
+        MkStep,
+    };
 
     fn document() -> MkMacroDocument {
         let dependency = MkMacro {
@@ -273,15 +276,94 @@ mod tests {
         }
     }
 
+    fn document_with_direct_open_actions() -> MkMacroDocument {
+        let mut document = document();
+        let root = document
+            .macros
+            .iter_mut()
+            .find(|macro_| macro_.id == 1)
+            .unwrap();
+        root.steps.extend([
+            MkStep {
+                id: 2,
+                enabled: true,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                metadata: Default::default(),
+                action: MkAction::OpenFolder(MkOpenFolderPayload {
+                    path: r"C:\Temp\space ü\${current_folder}".into(),
+                }),
+            },
+            MkStep {
+                id: 3,
+                enabled: true,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                metadata: Default::default(),
+                action: MkAction::OpenUrl(MkOpenUrlPayload {
+                    url: "https://example.test/?page=${current_page}".into(),
+                }),
+            },
+        ]);
+        document
+    }
+
+    fn root_direct_open_actions(document: &MkMacroDocument) -> Vec<(u64, MkAction)> {
+        document
+            .macros
+            .iter()
+            .find(|macro_| macro_.name == "Root")
+            .unwrap()
+            .steps
+            .iter()
+            .filter(|step| matches!(step.action, MkAction::OpenFolder(_) | MkAction::OpenUrl(_)))
+            .map(|step| (step.id, step.action.clone()))
+            .collect()
+    }
+
+    fn direct_open_actions_for_macro(
+        document: &MkMacroDocument,
+        macro_id: u64,
+    ) -> Vec<(u64, MkAction)> {
+        document
+            .macros
+            .iter()
+            .find(|macro_| macro_.id == macro_id)
+            .unwrap()
+            .steps
+            .iter()
+            .filter(|step| matches!(step.action, MkAction::OpenFolder(_) | MkAction::OpenUrl(_)))
+            .map(|step| (step.id, step.action.clone()))
+            .collect()
+    }
+
     #[test]
     fn templates_survive_reload_and_capture_the_full_draft_closure() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        let source = document();
+        let source = document_with_direct_open_actions();
+        let expected_actions = root_direct_open_actions(&source);
         let saved = store
             .save_macro_template(&source, 1, "Reusable root", "Description")
             .unwrap();
         assert_eq!(saved.templates[0].package.manifest.macros.len(), 2);
+        assert_eq!(
+            root_direct_open_actions(&MkMacroDocument {
+                macros: saved.templates[0].package.manifest.macros.clone(),
+                ..Default::default()
+            })
+            .into_iter()
+            .map(|(_, action)| action)
+            .collect::<Vec<_>>(),
+            expected_actions
+                .iter()
+                .map(|(_, action)| action.clone())
+                .collect::<Vec<_>>()
+        );
         let loaded = store.load_template_catalog().unwrap();
         assert_eq!(loaded, saved);
         assert_eq!(*store.snapshot(), MkMacroDocument::default());
@@ -311,10 +393,11 @@ mod tests {
     fn template_instances_are_fresh_independent_and_clear_every_hotkey() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        let source = document();
+        let source = document_with_direct_open_actions();
         let catalog = store
             .save_macro_template(&source, 1, "Reusable root", "")
             .unwrap();
+        let expected_actions = root_direct_open_actions(&source);
         let baseline = store.snapshot();
         let first =
             plan_template_instantiation(&store, &catalog.templates[0], &baseline, 0, &baseline)
@@ -326,6 +409,18 @@ mod tests {
                 .iter()
                 .all(|macro_| macro_.hotkey.is_none())
         );
+        assert_eq!(
+            direct_open_actions_for_macro(first.candidate(), first.imported_root_ids[0])
+                .into_iter()
+                .map(|(_, action)| action)
+                .collect::<Vec<_>>(),
+            expected_actions
+                .iter()
+                .map(|(_, action)| action.clone())
+                .collect::<Vec<_>>()
+        );
+        let first_direct_steps =
+            direct_open_actions_for_macro(first.candidate(), first.imported_root_ids[0]);
         let first_snapshot = first.apply(&store, &baseline, 0).unwrap();
         let mut edited_instance = (*first_snapshot).clone();
         edited_instance.macros[0].name = "Edited instance".into();
@@ -361,6 +456,24 @@ mod tests {
             .map(|m| m.id)
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(ids.len(), 4);
+        let second_direct_steps =
+            direct_open_actions_for_macro(second_snapshot.as_ref(), second.imported_root_ids[0]);
+        assert_eq!(
+            second_direct_steps
+                .iter()
+                .map(|(_, action)| action)
+                .collect::<Vec<_>>(),
+            expected_actions
+                .iter()
+                .map(|(_, action)| action)
+                .collect::<Vec<_>>()
+        );
+        assert_ne!(
+            first.imported_root_ids[0], second.imported_root_ids[0],
+            "each instance must have its own macro identity"
+        );
+        assert_eq!(first_direct_steps.len(), 2);
+        assert_eq!(second_direct_steps.len(), 2);
         assert!(
             second_snapshot
                 .macros

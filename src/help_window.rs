@@ -145,6 +145,12 @@ impl HelpWindow {
                                 "In the Signature Editor, String parameters can be Text, File picker, Folder picker, or an ordered Choice list with an optional default. Browse fills a path, and selecting a choice fills its value; neither runs the macro. Review the values and choose Run separately. Canceled or unavailable file and folder choosers leave the path editable.",
                             );
                             ui.label(
+                                "Add Action → Programs & Launcher → Open Folder or Open URL to author a direct open. Folder Browse only fills the path; Run opens it in Explorer. No folder or bookmark record is created. For example, use C:\\Users\\You\\AppData\\Local\\Temp\\DirectOpenDemo or https://example.test/. URLs must be explicit HTTP(S).",
+                            );
+                            ui.label(
+                                "Templates use ${name} for a current runtime value and $${name} for literal ${name}. String, Number, Boolean, and Point values use the shared formatting; Null is rejected. Folder existence and access are checked when the step runs. A URL handoff to Windows does not prove the site loaded, and canceling after handoff does not close the external window. Direct opens are unavailable in unattended Hot Folder runs.",
+                            );
+                            ui.label(
                                 "Read Clipboard Text reads into a named String variable when its step runs. Write Clipboard Text writes an exact literal or String variable only when its step runs; neither action pastes text or restores earlier clipboard contents.",
                             );
                             ui.separator();

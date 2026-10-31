@@ -271,7 +271,9 @@ pub(super) fn finish_drag(d: &mut MkMacroDialog, anchor: InsertionAnchor) -> any
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkAction, MkCondition, MkMacroStore};
+    use crate::mkmacro::{
+        MkAction, MkCondition, MkMacroStore, MkOpenFolderPayload, MkOpenUrlPayload,
+    };
     use eframe::egui::{Event, InputState, Key, Modifiers};
 
     fn step(id: u64, action: MkAction) -> MkStep {
@@ -440,6 +442,85 @@ mod tests {
         let inserted = &d.selected_macro().unwrap().steps[6..11];
         assert_eq!(d.selection.ids, inserted.iter().map(|s| s.id).collect());
         assert_eq!(d.selection.primary, Some(inserted[0].id));
+    }
+
+    #[test]
+    fn direct_open_copy_paste_and_duplicate_preserve_payloads_and_clipboard_ownership() {
+        let folder = step(
+            11,
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: r"C:\Temp\space ü\${folder}".into(),
+            }),
+        );
+        let url = step(
+            12,
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://example.test/path?page=${page}#section".into(),
+            }),
+        );
+        let (_directory, mut dialog) = dialog(vec![folder.clone(), url.clone()]);
+        let source_macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selection.replace([folder.id, url.id]);
+
+        clipboard(&mut dialog, ClipboardCommand::Copy).unwrap();
+        let clipboard_snapshot = dialog.editor_state.clipboard.clone();
+        assert_eq!(
+            clipboard_snapshot
+                .iter()
+                .map(|step| step.action.clone())
+                .collect::<Vec<_>>(),
+            [folder.action.clone(), url.action.clone()]
+        );
+        assert_eq!(
+            dialog.selected_macro().unwrap().steps,
+            [folder.clone(), url.clone()]
+        );
+
+        clipboard(&mut dialog, ClipboardCommand::Duplicate).unwrap();
+        assert_eq!(dialog.editor_state.clipboard, clipboard_snapshot);
+        let duplicates = dialog.selected_macro().unwrap().steps[2..4].to_vec();
+        assert_eq!(duplicates.len(), 2);
+        for (duplicate, original) in duplicates.iter().zip([&folder, &url]) {
+            assert_ne!(duplicate.id, original.id);
+            assert_eq!(duplicate.action, original.action);
+        }
+        assert_eq!(
+            dialog.selected_macro().unwrap().steps[..2],
+            [folder.clone(), url.clone()]
+        );
+
+        dialog.create_macro();
+        let destination_macro_id = dialog.selected_macro_id.unwrap();
+        clipboard(&mut dialog, ClipboardCommand::Paste).unwrap();
+        let pasted = &dialog.selected_macro().unwrap().steps;
+        assert_eq!(pasted.len(), 2);
+        let pasted_ids = pasted.iter().map(|step| step.id).collect::<BTreeSet<_>>();
+        assert_eq!(pasted_ids.len(), pasted.len());
+        for (inserted, original) in pasted.iter().zip([&folder, &url]) {
+            assert_ne!(inserted.id, original.id);
+            assert_eq!(inserted.action, original.action);
+        }
+        assert_eq!(dialog.editor_state.clipboard, clipboard_snapshot);
+        dialog.set_selected_macro(Some(source_macro_id));
+        assert_eq!(
+            dialog.selected_macro().unwrap().steps[..2],
+            [folder, url],
+            "copy and duplicate leave the source actions unchanged"
+        );
+        dialog.set_selected_macro(Some(destination_macro_id));
+        assert_eq!(
+            dialog
+                .selected_macro()
+                .unwrap()
+                .steps
+                .iter()
+                .map(|step| step.action.clone())
+                .collect::<Vec<_>>(),
+            clipboard_snapshot
+                .iter()
+                .map(|step| step.action.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
