@@ -14,8 +14,22 @@ All5paths remain UNACCEPTED. Exact working bytes tested are in [run receipt](sta
 | crates/multi_launcher_table_core/src/lib.rs |0e4dccc43056ac0a4e29b4329dac5626cf784d5b|baseline 0cba07df6636a0922ac7ad815c80918f54ce10d5|
 | crates/multi_launcher_table_core/src/resource.rs |b10c0b880b129a7902369c5af4490e21c1342a6d|baseline 74def7e006cffddff576bab08563bd284c52374b|
 
-No historical donor branch was modified/imported wholesale. G07/G08 historical prototypes remain excluded as recorded in the archived closeout manifest; current program has not attempted those source stages yet.
+No historical donor branch was modified/imported wholesale. G07 historical prototype remains excluded as recorded in the archived closeout manifest; current program has not attempted G07 source yet. Current G08 attempt is recorded below and remains excluded.
 
 ## G05 N0 candidate excluded
 
 One additional owner/path entry, src/file_operations.rs test-only candidate. Raw tested blob17373039280b9f597853f7c59c9d6ab74edc9ab2; canonical LF blob1b78081c87f2ead7c0930b63f21a334e82b93835; working SHA2568703eec28b47679fd04bbee28e892dc7984db80247ce73e19ef2305e0b12c29f. No source accepted. [Exact raw source and patch preservation](stages/G05/PRESERVATION_AND_ROLLBACK_PRECHECK.json) and [rollback](stages/G05/ROLLBACK_AND_CLEANUP.json) record gzip hashes and baseline restoration. Production blob restored to b7d67bf4d49f81a8c4492991a95892a8dda4835b. G05 four accepted foundation paths and every refusal remain unchanged. Current run exclusions so far:6owner/path entries across5physical paths; accepted new source files0.
+
+## G08 History candidate excluded
+
+Five additional owner/path entries, all UNACCEPTED after final preparation TIMEOUT and no15case run. [Preservation precheck](stages/G08-history/PRESERVATION_AND_ROLLBACK_PRECHECK.json) binds final raw SHA256/canonical blobs/baseline blobs to [five exact raw gzip copies](stages/G08-history/unaccepted) and [reversible patch](stages/G08-history/UNACCEPTED_SOURCE.patch.gz). [Rollback](stages/G08-history/ROLLBACK_AND_CLEANUP.json) proves baseline source parity and patch reapply. Static named R1 correction confirmation is not test/source acceptance.
+
+| Path | Excluded canonical blob |
+|---|---|
+|src/mkmacro/runtime/summary.rs|871f7ba002a199660c55e693cf7799c9473632cd|
+|src/mkmacro/runtime.rs|6cd60c4ec58fbbdff72dff69c7b10c221ec106bd|
+|src/gui/mkmacro_dialog/history.rs|1dc0ab489a0e6bd3386c2f35914e405278ef879c|
+|src/gui/mkmacro_dialog/mod.rs|715b089db6a88b65ad4ea2600c4bf1d21ae9b3cb|
+|src/gui/mkmacro_dialog/toolbar.rs|03093248e4bb30f7b8de95b43887d7c17bfe3f67|
+
+Run exclusions so far11owner/path entries over10physical paths; new accepted source0. No History/recipe UI or runtime source carried.

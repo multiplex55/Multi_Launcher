@@ -1,0 +1,20 @@
+[
+  {
+    "raw_log": "N0_list_initial.stderr.log",
+    "source_path": "target/g08-history-20261030/n0-list/stderr.log",
+    "bytes": 16972,
+    "sha256": "e857d1f729efbeb60b94c20caaaa063ac990701eb27dd903bee0b77493c62fa5"
+  },
+  {
+    "raw_log": "N0_list_corrected.stderr.log",
+    "source_path": "target/g08-history-20261030/n0-list-corrected/stderr.log",
+    "bytes": 8654,
+    "sha256": "c95b135aa1c049950dfebe5fa9a63def8ce1eedba3d011cb887d8edf6a1a0f6c"
+  },
+  {
+    "raw_log": "N0_list_final.stderr.log",
+    "source_path": "target/g08-history-20261030/n0-list-final/stderr.log",
+    "bytes": 8690,
+    "sha256": "71c0ffc3344b72919ac075139302ff2e39f0046d0c89799fcb80db5af3ff4761"
+  }
+]

@@ -1,0 +1,16 @@
+{
+  "phase": "N0_LIST_CORRECTED_CAP_ENFORCEMENT",
+  "direct_pid": 30380,
+  "actual_started_utc": "2026-10-31T02:48:30.6251755+00:00",
+  "watcher_started_utc": "2026-10-31T02:49:19.4040374+00:00",
+  "finished_utc": "2026-10-31T02:50:31.7419924+00:00",
+  "original_supervisor_configured_cap_seconds": 1200,
+  "effective_cap_seconds": 600,
+  "effective_deadline_utc": "2026-10-31T02:58:30.6251755+00:00",
+  "elapsed_from_actual_start_seconds": 121.1,
+  "timed_out": false,
+  "kill_denied": false,
+  "direct_pid_exit": null,
+  "output_drained": true,
+  "child_tree_status": "UNVERIFIED"
+}

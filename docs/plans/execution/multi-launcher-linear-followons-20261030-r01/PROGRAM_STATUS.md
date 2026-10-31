@@ -4,9 +4,9 @@ Program: multi-launcher-linear-followons-20261030-r01
 Run-start fetched origin/master: f28355df5e210cfc1633284b0b80c7f156090245
 Active branch: codex/linear-05-g08-mkmacro-history-20261030
 B3 closing HEAD:5638e107df2e09bbf4f86a622af3cc15205b3af2 normally pushed; B4 created at that exact SHA.
-State: B5 History M0 established; B4 docs-only review ACCEPTED and closing commit pushed; no new source accepted.
-Active source writer: designated Luna/max implementer, after M0 commit.
-Next: B5 bounded History reconstruction and qualifying privacy proof.
+State: B5 History FAILED_VERIFICATION; candidate preserved/excluded; documentation review ACCEPTED; new accepted source0.
+Active source writer: none; B5 source/Cargo work stopped.
+Next: B5 docs-only review/close/push, then B6 capability disposition.
 
 | Stage | State |
 |---|---|
@@ -14,7 +14,7 @@ Next: B5 bounded History reconstruction and qualifying privacy proof.
 | B2 G05 | NATIVE_PROOF_DEFERRED;4run3pass1fail, natural read/no pending/no cancel; N1–N3 NOT_RUN; refusals intact |
 | B3 G03 | DEFERRED_DEPENDENCY; G02 native M1-A unaccepted and M1-B NOT_RUN; no source/tests |
 | B4 G06 | NATIVE_PROOF_DEFERRED; current build passed, owned window0afterone recovery; no input/state/Save/focus |
-| B5 G08 history | M0 established |
+| B5 G08 history | FAILED_VERIFICATION; final list TIMEOUT, no15run; all5source excluded |
 | B6 G04 | pending capability receipt; documented secondary-drag/clipboard support missing |
 | B7 G07 | pending |
 | B8 recipes | pending, requires accepted history |

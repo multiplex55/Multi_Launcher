@@ -1,0 +1,54 @@
+{
+  "utc": "2026-10-31T02:59:46.832233+00:00",
+  "branch": "codex/linear-05-g08-mkmacro-history-20261030",
+  "base_head": "7d3adf75e2282ed4c5b6afb2010e62357578628f",
+  "index_empty": true,
+  "scope_verified": true,
+  "source_matches_final_tested_receipt": true,
+  "patch_reverse_check_pass": true,
+  "patch_raw_sha256": "7152bf437e83d265137de6860aa42ed6fd94ef83ecd7f9b1781c0f191038590f",
+  "patch_gzip_sha256": "0260e88a6cf198d48680df3a20448193d50ca810c4a3b3eb7145caf3706cc05c",
+  "source": [
+    {
+      "path": "src/mkmacro/runtime/summary.rs",
+      "raw_sha256": "81b7b69de39968a88f09d957fd5f6d61b5986e534319bd1544bc6925f6ed1cac",
+      "canonical_blob": "871f7ba002a199660c55e693cf7799c9473632cd",
+      "baseline_blob": "269d50f56344620fd59b0d4976077a821e725e2a",
+      "preserved": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G08-history/unaccepted/src__mkmacro__runtime__summary.rs.gz",
+      "gzip_sha256": "a1f9dc451baec24ad36a6b2bbe89c947be1cac1d9d69048678a05b814133ac48"
+    },
+    {
+      "path": "src/mkmacro/runtime.rs",
+      "raw_sha256": "085696757fec976a80d138d0336aa965573e4378b48b13745f3aa025a6ccdde0",
+      "canonical_blob": "6cd60c4ec58fbbdff72dff69c7b10c221ec106bd",
+      "baseline_blob": "3a454dfc77b4a5572bf0250ac6a4d1d661290ccd",
+      "preserved": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G08-history/unaccepted/src__mkmacro__runtime.rs.gz",
+      "gzip_sha256": "4bbebe25f2b8ad652ed6a546647f2b32fe3d38c991a307f66b7acecf8c03bca4"
+    },
+    {
+      "path": "src/gui/mkmacro_dialog/history.rs",
+      "raw_sha256": "468f8e4efd461619894b8a96070d4dcb9677134cd0d726859ee79f0d173c21c8",
+      "canonical_blob": "1dc0ab489a0e6bd3386c2f35914e405278ef879c",
+      "baseline_blob": null,
+      "preserved": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G08-history/unaccepted/src__gui__mkmacro_dialog__history.rs.gz",
+      "gzip_sha256": "cc148fb14dbabd6ff548bd7dd39f03aa450729df1dc21549441d213bde064f72"
+    },
+    {
+      "path": "src/gui/mkmacro_dialog/mod.rs",
+      "raw_sha256": "b9dfc5a1119d8629bbd5058994bafd20fababc52d97154df75b8d759917d25d6",
+      "canonical_blob": "715b089db6a88b65ad4ea2600c4bf1d21ae9b3cb",
+      "baseline_blob": "a9f2335418f69f72dc407a686f6ca4f8956a4960",
+      "preserved": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G08-history/unaccepted/src__gui__mkmacro_dialog__mod.rs.gz",
+      "gzip_sha256": "eabb78cb84c34976532da0433b5d9d4b0ae8531ebc68ddb8f48d20bda0ac4722"
+    },
+    {
+      "path": "src/gui/mkmacro_dialog/toolbar.rs",
+      "raw_sha256": "da053d8c0a25342d12d22066b25678690aa338136004de27930ade9784cc2d34",
+      "canonical_blob": "03093248e4bb30f7b8de95b43887d7c17bfe3f67",
+      "baseline_blob": "4cf3875d7014fd443916987b34f97978035907f3",
+      "preserved": "docs/plans/execution/multi-launcher-linear-followons-20261030-r01/stages/G08-history/unaccepted/src__gui__mkmacro_dialog__toolbar.rs.gz",
+      "gzip_sha256": "515f554077f1b959137ec91f82151e23ad380eccfdc4be1709bb1a1331f6c46a"
+    }
+  ],
+  "authorization": "Current user Goal/Kickstart section5 failed prototype isolation; only these verified task-authored paths may be restored. Newhistory file preserved identically before removal. No user changes involved."
+}

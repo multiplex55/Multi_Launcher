@@ -1,0 +1,19 @@
+{
+  "phase": "N0_LIST_FINAL_TREE_ENFORCEMENT",
+  "direct_pid": 15308,
+  "actual_started_utc": "2026-10-31T02:51:23.6070296+00:00",
+  "watch_started_utc": "2026-10-31T02:58:29.3160529+00:00",
+  "finished_utc": "2026-10-31T02:58:30.4433595+00:00",
+  "aggregate_cap_seconds": 600,
+  "effective_deadline_utc": "2026-10-31T02:58:30.6251755+00:00",
+  "tree_kill_scheduled_utc": "2026-10-31T02:58:28.6251755+00:00",
+  "elapsed_from_actual_start_seconds": 426.8,
+  "timed_out": true,
+  "kill_tree_supported": true,
+  "kill_tree_attempted": true,
+  "kill_denied": false,
+  "kill_exception": null,
+  "direct_pid_exit": null,
+  "output_drained": true,
+  "child_tree_status": "UNVERIFIED"
+}
