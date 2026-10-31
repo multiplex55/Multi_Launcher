@@ -35,7 +35,7 @@ Use Goal H bounds: first necessary preparation 30 minutes; subsequent preparatio
 
 ## Checkpoints
 
-M0-B complete (`010cb970a01f2b81a705f61b9870b29b2e8ef1ed`, pushed). M1-A complete; M1-B–M1-C pending. C02–C07 implementation and final review pending. No feature or speedup claimed.
+M0-B complete (`010cb970a01f2b81a705f61b9870b29b2e8ef1ed`, pushed). M1-A complete (`46a1afe827a421e7cc4a1fb16c99c5ef2d4c6ef6`, pushed); M1-B assessed_no_accepted_optimization; M1-C pending. C02–C07 implementation and final review pending. No feature or speedup claimed.
 
 ### M0-B owner map and command selection (complete)
 
@@ -74,6 +74,6 @@ Three unchanged six-test execution samples:16.536532/17.516866/16.242799s runner
 
 ### Bounded C01 remaining plan
 
-M1-B: assess measured root compilation without duplicating existing fast-dev profiles/grouped targets/metadata preparation or extracting a crate on size alone. A no-accepted-optimization outcome is allowed and must remain explicit.
+M1-B disposition: **assessed_no_accepted_optimization**. Controlled root checks14.31–17.24s and edited selected-test preparation58.90s establish cost, not proof of an actionable narrow compile boundary. Existing fast-dev reduced symbols, grouped explicit targets, gated developer bins, table-core boundary, and reusable metadata already cover the obvious low-risk options. A further profile would change comparability; a new crate needs evidence of cohesive production ownership and dominant saved work beyond this bounded investigation. No speculative production extraction, dependency change, or linker switch retained. Zero candidate source changes; no new tests needed for this no-change assessment. Baseline passing checks/tests reused unchanged and labeled above. This delivers baseline/command guidance, **not faster compilation or preparation**; that optimization request remains partially fulfilled. Reliable selected command is target-first library preparation and prepared metadata execution in the M0-B table, with the exact nonempty M1-A selectors; name filtering alone is not compile reduction. M1-B checkpoint closes the assessment without asserting a numerical gain.
 
 M1-C candidate1 (planner handoff): retain a dedicated independent default-font/DPI `egui::Context` inside the test-only reusable eager-oracle cache in `src/gui/render.rs`; reuse its text caches on key misses while recomputing all expected rows. Keep production `state.ctx` independent, full cache key (actions/aliases/path mode/width/style/scale), FreshPerFrame historical mode, all100/1k/10k scenarios, viewport ticks, corruption detection, and complete assertions. Extend existing eager-cache invalidation test to compare reused-context geometry against fresh-context results across changed inputs. No global cache, source ownership migration, worker, dependency, or production shortcut. Relevant tests: existing oracle, `track_c2g_eager_layout_cache_invalidates_changed_inputs`, `track_c2g_validator_rejects_offscreen_geometry_popup_and_painted_row_corruption`, plus four isolated GUI fixtures above. Measure families individually and together at normal concurrency; retain only a gain beyond variation (up to3 samples/condition). Preserve preconstruction shortcut disabling and app-first teardown. Do not extract the small dashboard predicate for marginal fixture savings without a meaningful domain boundary.
