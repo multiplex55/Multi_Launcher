@@ -17,6 +17,10 @@ B4 predecessor receipt: [B3 to B4](stages/G06/PREDECESSOR_RECEIPT.json).
 
 B5 predecessor: [B4 to B5](stages/G08-history/PREDECESSOR_RECEIPT.json).
 
-| B6 codex/linear-06-g04-screenshot-native-20261030 |0bc964572f38c7b18cc790e7fa9da0f48df469ef|in progress|initial HEAD equality and ancestor PASS|
+| B6 codex/linear-06-g04-screenshot-native-20261030 |0bc964572f38c7b18cc790e7fa9da0f48df469ef|b00365b30cee011a049fd836260d720372b35f02|M0/M3 pushed; ancestor PASS|
 
 B6 predecessor: [B5 to B6](stages/G04/PREDECESSOR_RECEIPT.json).
+
+| B7 codex/linear-07-g07-zip-extraction-20261030 |b00365b30cee011a049fd836260d720372b35f02|in progress|initial HEAD equality and ancestor PASS|
+
+B7 predecessor: [B6 to B7](stages/G07/PREDECESSOR_RECEIPT.json).
