@@ -7,6 +7,24 @@ use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use eframe::egui::{self, Color32, RichText};
 use std::hash::{Hash, Hasher};
 
+fn equality_status_labels(
+    raw_equal: bool,
+    effectively_equal: bool,
+) -> (&'static str, &'static str) {
+    (
+        if raw_equal {
+            "Raw: identical"
+        } else {
+            "Raw: different"
+        },
+        if effectively_equal {
+            "Effective: equal under current rules and ignored ranges"
+        } else {
+            "Effective: different under current rules and ignored ranges"
+        },
+    )
+}
+
 pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewModel) {
     model.poll();
     shortcuts(ui, model);
@@ -39,6 +57,41 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         if ui.button("Find").clicked() {
             model.find_open = true;
         }
+        ui.menu_button("Ignored lines", |ui| {
+            let selected = model.source_line_selection.is_some();
+            if ui
+                .add_enabled(selected, egui::Button::new("Ignore selected lines"))
+                .clicked()
+            {
+                if let Err(error) = model.ignore_selected_lines() {
+                    model.annotation_notice = Some(error);
+                }
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    selected,
+                    egui::Button::new("Restore selected ignored lines"),
+                )
+                .clicked()
+            {
+                if let Err(error) = model.restore_selected_ignored_lines() {
+                    model.annotation_notice = Some(error);
+                }
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    !model.left.ignored_line_ranges().is_empty()
+                        || !model.right.ignored_line_ranges().is_empty(),
+                    egui::Button::new("Clear ignored ranges"),
+                )
+                .clicked()
+            {
+                model.clear_ignored_ranges();
+                ui.close();
+            }
+        });
         let mut sync = model.scroll.sync_vertical && model.scroll.sync_horizontal;
         if ui.checkbox(&mut sync, "Sync Scroll").changed() {
             model.scroll.set_sync(sync, sync);
@@ -216,6 +269,57 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             ui.label("⏳ Recalculating… (showing last valid alignment)");
         }
         ui.label(model.large_file_tier.explanation());
+        if model.comparison_is_fresh()
+            && let Some(comparison) = model.comparison.as_ref()
+        {
+            let (raw_equality, effective_equality) =
+                equality_status_labels(comparison.raw_equal, comparison.equal_under_rules);
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(raw_equality);
+                ui.label(effective_equality);
+            });
+            if let Some(selection) = model.source_line_selection {
+                let (source_id, revision) = match selection.side {
+                    DiffSide::Left => (model.left.source_id(), model.left.revision),
+                    DiffSide::Right => (model.right.source_id(), model.right.revision),
+                };
+                if source_id == selection.source_id && revision == selection.revision {
+                    let projection = model.projected_rows();
+                    let visible_lines: std::collections::HashSet<_> = projection
+                        .iter()
+                        .filter_map(|row| {
+                            crate::diff::model::visual_to_source(
+                                &comparison.rows[*row],
+                                selection.side,
+                            )
+                        })
+                        .collect();
+                    let hidden =
+                        (selection.start..selection.end).any(|line| !visible_lines.contains(&line));
+                    ui.label(format!(
+                        "{} lines {}–{} selected{}",
+                        if selection.side == DiffSide::Left {
+                            "Left"
+                        } else {
+                            "Right"
+                        },
+                        selection.start + 1,
+                        selection.end,
+                        if hidden {
+                            " (some selected lines are hidden by the current row filter)"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+            }
+        }
+        if let Some(notice) = model.annotation_notice.as_deref() {
+            semantic_status(ui, StatusTone::Info, notice, None);
+        }
+        if let Some(error) = model.alignment_error.as_deref() {
+            semantic_status(ui, StatusTone::Warning, error, None);
+        }
     });
     ui.separator();
     let available = ui.available_width().max(0.0);
@@ -255,6 +359,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                 let color = c.rows[a..b]
                     .iter()
                     .find_map(|r| match (r.kind, r.importance) {
+                        (DiffRowKind::Ignored, _) => Some(Color32::from_rgb(85, 110, 145)),
                         (_, ChangeImportance::Unimportant) => Some(Color32::YELLOW),
                         (DiffRowKind::Modified, _) => Some(Color32::from_rgb(240, 180, 40)),
                         (DiffRowKind::Deleted, _) => Some(Color32::RED),
@@ -377,9 +482,12 @@ fn prepare_row_measurements(
     row_height.to_bits().hash(&mut identity);
     ui.ctx().pixels_per_point().to_bits().hash(&mut identity);
     let key = crate::diff::model::RowMeasureKey {
+        left_source_id: model.left.source_id(),
+        right_source_id: model.right.source_id(),
         left_revision: model.left.revision,
         right_revision: model.right.revision,
         comparison_revision: c.rules_revision,
+        annotation_revision: c.annotation_revision,
         left_text_width_bits: left_width.to_bits(),
         right_text_width_bits: right_width.to_bits(),
         font_theme: identity.finish(),
@@ -533,6 +641,10 @@ fn render_pane_contents(
         DiffSide::Left => model.left.source(),
         DiffSide::Right => model.right.source(),
     };
+    let ignored_ranges = match side {
+        DiffSide::Left => model.left.ignored_line_ranges().to_vec(),
+        DiffSide::Right => model.right.ignored_line_ranges().to_vec(),
+    };
     let projected = crate::diff::text_compare::row_projection(
         c,
         model.projection_mode,
@@ -577,7 +689,9 @@ fn render_pane_contents(
     // Defer model mutation until after the scroll callback releases its
     // immutable borrow of the retained comparison.
     let mut selected_row = None;
-    let mut alignment_action: Option<(DiffSide, usize)> = None;
+    let mut selection_action: Option<(usize, bool)> = None;
+    let mut begin_alignment_action = None;
+    let mut alignment_action: Option<usize> = None;
     let mut remove_anchor = None;
     let mut render_range = |ui: &mut egui::Ui, range: std::ops::Range<usize>| {
         if !wrapped {
@@ -591,14 +705,41 @@ fn render_pane_contents(
             let i = projected[projected_i];
             let row = &rows[i];
             let current = model.current_row == Some(i);
+            let line = crate::diff::model::visual_to_source(row, side);
+            let selected = line.is_some_and(|line| {
+                model.source_line_selection.is_some_and(|selection| {
+                    selection.side == side
+                        && selection.source_id
+                            == if side == DiffSide::Left {
+                                model.left.source_id()
+                            } else {
+                                model.right.source_id()
+                            }
+                        && selection.revision
+                            == if side == DiffSide::Left {
+                                model.left.revision
+                            } else {
+                                model.right.revision
+                            }
+                        && (selection.start..selection.end).contains(&line)
+                })
+            });
             let bg = match (row.kind, row.importance) {
+                (DiffRowKind::Ignored, _) => Color32::from_rgb(35, 49, 69),
                 (_, ChangeImportance::Unimportant) => Color32::from_rgb(70, 65, 35),
                 (DiffRowKind::Equal, _) => Color32::TRANSPARENT,
                 (DiffRowKind::Inserted, _) => Color32::from_rgb(28, 70, 42),
                 (DiffRowKind::Deleted, _) => Color32::from_rgb(80, 35, 35),
                 (DiffRowKind::Modified, _) => Color32::from_rgb(65, 55, 25),
             };
-            let frame = egui::Frame::NONE.fill(if current { bg.gamma_multiply(1.5) } else { bg });
+            let fill = if selected {
+                Color32::from_rgb(30, 75, 105)
+            } else if current {
+                bg.gamma_multiply(1.5)
+            } else {
+                bg
+            };
+            let frame = egui::Frame::NONE.fill(fill);
             frame.show(ui, |ui| {
                 ui.set_min_height(if wrapped {
                     measured_heights
@@ -609,7 +750,6 @@ fn render_pane_contents(
                     row_height
                 });
                 ui.horizontal(|ui| {
-                    let line = crate::diff::model::visual_to_source(row, side);
                     ui.label(
                         RichText::new(line.map_or("·".into(), |n| (n + 1).to_string()))
                             .monospace()
@@ -620,6 +760,7 @@ fn render_pane_contents(
                         DiffRowKind::Inserted => "inserted",
                         DiffRowKind::Deleted => "deleted",
                         DiffRowKind::Modified => "modified",
+                        DiffRowKind::Ignored => "ignored source line",
                     };
                     ui.label(
                         RichText::new(match side {
@@ -630,6 +771,10 @@ fn render_pane_contents(
                     )
                     .on_hover_text(semantic);
                     if let Some(n) = line {
+                        if crate::diff::text_compare::line_is_ignored(&ignored_ranges, n) {
+                            ui.label(RichText::new("⊘").color(Color32::LIGHT_BLUE))
+                                .on_hover_text("Ignored in the effective comparison");
+                        }
                         let text = source.lines().nth(n).unwrap_or("");
                         let ranges = match side {
                             DiffSide::Left => &row.left_ranges,
@@ -713,13 +858,33 @@ fn render_pane_contents(
                                 // wrapped content never negotiates a wider pane.
                                 job.wrap.max_width = ui.available_width().max(1.0);
                             }
-                            let response = ui
+                            let label = ui
                                 .add(egui::Label::new(job).wrap_mode(if wrapped {
                                     egui::TextWrapMode::Wrap
                                 } else {
                                     egui::TextWrapMode::Extend
                                 }))
                                 .on_hover_text(format!("{semantic} line"));
+                            let response = ui.interact(
+                                label.rect,
+                                label.id.with("source-line-selection"),
+                                egui::Sense::click_and_drag(),
+                            );
+                            if response.clicked() {
+                                selection_action = Some((n, ui.input(|i| i.modifiers.shift)));
+                            } else if response.drag_started() {
+                                selection_action = Some((n, false));
+                            } else if model.source_line_selection.is_some()
+                                && ui.input(|input| {
+                                    input.pointer.primary_down()
+                                        && input
+                                            .pointer
+                                            .interact_pos()
+                                            .is_some_and(|pointer| response.rect.contains(pointer))
+                                })
+                            {
+                                selection_action = Some((n, true));
+                            }
                             if model.manual_alignments.iter().any(|a| match side {
                                 DiffSide::Left => a.left_line == n,
                                 DiffSide::Right => a.right_line == n,
@@ -727,18 +892,26 @@ fn render_pane_contents(
                                 ui.label(RichText::new("⚓").color(Color32::LIGHT_BLUE));
                             }
                             response.context_menu(|ui| {
-                                if let Some((origin_side, _origin_line)) = model.pending_alignment {
-                                    if origin_side != side
+                                if let Some(pending) = model.pending_alignment {
+                                    let source_is_current = match pending.side {
+                                        DiffSide::Left => {
+                                            pending.source_id == model.left.source_id()
+                                                && pending.revision == model.left.revision
+                                        }
+                                        DiffSide::Right => {
+                                            pending.source_id == model.right.source_id()
+                                                && pending.revision == model.right.revision
+                                        }
+                                    };
+                                    if source_is_current
+                                        && pending.side != side
                                         && ui.button("Preview / confirm alignment").clicked()
                                     {
-                                        alignment_action = Some(match side {
-                                            DiffSide::Left => (DiffSide::Left, n),
-                                            DiffSide::Right => (DiffSide::Right, n),
-                                        });
+                                        alignment_action = Some(n);
                                         ui.close();
                                     }
                                 } else if ui.button("Align With…").clicked() {
-                                    model.pending_alignment = Some((side, n));
+                                    begin_alignment_action = Some(n);
                                     ui.close();
                                 }
                                 if let Some(anchor) =
@@ -757,6 +930,9 @@ fn render_pane_contents(
                                 }
                             });
                         });
+                    } else if row.kind == DiffRowKind::Ignored {
+                        ui.label(RichText::new("ignored line on other side").weak())
+                            .on_hover_text("This row is excluded from navigation and hunk copy");
                     } else if ui
                         .button("＋ Insert line")
                         .on_hover_text("Missing on this side; insert real source text")
@@ -789,6 +965,21 @@ fn render_pane_contents(
     let pane_response = ui.interact(output.inner_rect, focus_id, egui::Sense::click_and_drag());
     if pane_response.clicked() {
         pane_response.request_focus();
+    }
+    if pane_response.has_focus()
+        && let Some((delta, extend)) = ui.input_mut(|input| {
+            for (key, delta) in [(egui::Key::ArrowUp, -1), (egui::Key::ArrowDown, 1)] {
+                if input.consume_key(egui::Modifiers::SHIFT, key) {
+                    return Some((delta, true));
+                }
+                if input.consume_key(egui::Modifiers::NONE, key) {
+                    return Some((delta, false));
+                }
+            }
+            None
+        })
+    {
+        model.move_source_selection(side, delta, extend);
     }
     let offset_changed =
         (new_y - stored_y).abs() > 0.25 || (!wrapped && (new_x - stored_x).abs() > 0.25);
@@ -833,16 +1024,39 @@ fn render_pane_contents(
         model.active_side = side;
         model.set_current_row(Some(row));
     }
-    if let Some((target_side, target_line)) = alignment_action {
-        if let Some((origin_side, origin_line)) = model.pending_alignment.take() {
+    if let Some((line, extend)) = selection_action {
+        model.select_source_line(side, line, extend);
+    }
+    if let Some(line) = begin_alignment_action {
+        model.begin_manual_alignment(side, line);
+    }
+    if let Some(target_line) = alignment_action {
+        if let Some(pending) = model.pending_alignment.take() {
+            let source_is_current = match pending.side {
+                DiffSide::Left => {
+                    pending.source_id == model.left.source_id()
+                        && pending.revision == model.left.revision
+                }
+                DiffSide::Right => {
+                    pending.source_id == model.right.source_id()
+                        && pending.revision == model.right.revision
+                }
+            };
+            if !source_is_current || model.source_line_is_ignored(side, target_line) {
+                model.alignment_error = Some(
+                    "Alignment was cancelled because a source changed or an endpoint is ignored."
+                        .into(),
+                );
+                return true;
+            }
             let anchor = crate::diff::text_compare::ManualTextAlignment {
-                left_line: if origin_side == DiffSide::Left {
-                    origin_line
+                left_line: if pending.side == DiffSide::Left {
+                    pending.source_line
                 } else {
                     target_line
                 },
-                right_line: if origin_side == DiffSide::Right {
-                    origin_line
+                right_line: if pending.side == DiffSide::Right {
+                    pending.source_line
                 } else {
                     target_line
                 },
@@ -851,7 +1065,6 @@ fn render_pane_contents(
                 model.alignment_error = Some(error);
             }
         }
-        let _ = target_side;
     }
     if let Some(anchor) = remove_anchor {
         model.remove_manual_alignment(anchor);
@@ -1167,6 +1380,82 @@ mod tests {
             f32::from_bits(model.row_measurements.key.as_ref().unwrap().text_style as u32),
             14.0,
             "diff content keeps its installed Mono role despite an unrelated style override"
+        );
+    }
+
+    #[test]
+    fn ignored_lines_controls_render_with_a_source_coordinate_selection() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut model = TextViewModel::from_test_text(
+            "first\nsecond\nthird".into(),
+            "first\nsecond\nthird".into(),
+        );
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        assert!(model.move_source_selection(DiffSide::Left, 1, true));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0));
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| show(ui, 7, 11, &mut model));
+            },
+        );
+        assert!(
+            accessible_widget_bounds(
+                &output,
+                egui::accesskit::Role::Button,
+                Some("Ignored lines"),
+                None,
+            )
+            .is_some()
+        );
+        assert_eq!(
+            model.source_line_selection.unwrap().start..model.source_line_selection.unwrap().end,
+            1..3
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn ignored_lines_raw_identical_status_can_have_an_effective_difference() {
+        let compiled = crate::diff::text_compare::CompiledRules::compile(
+            &crate::diff::text_compare::TextComparisonRules::default(),
+        )
+        .unwrap();
+        let comparison = crate::diff::text_compare::compare_with_annotations(
+            "same\nignored\nend",
+            "same\nignored\nend",
+            1,
+            2,
+            0,
+            0,
+            &compiled,
+            100,
+            &[],
+            &[crate::diff::text_compare::IgnoredLineRange { start: 1, end: 2 }],
+            &[],
+            1,
+        )
+        .unwrap();
+
+        assert!(comparison.raw_equal);
+        assert!(!comparison.equal_under_rules);
+        assert_eq!(
+            equality_status_labels(comparison.raw_equal, comparison.equal_under_rules),
+            (
+                "Raw: identical",
+                "Effective: different under current rules and ignored ranges"
+            )
+        );
+        assert_eq!(
+            equality_status_labels(false, true),
+            (
+                "Raw: different",
+                "Effective: equal under current rules and ignored ranges"
+            )
         );
     }
 

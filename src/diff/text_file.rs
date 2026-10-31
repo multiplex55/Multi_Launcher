@@ -5,13 +5,21 @@
 //! as a binary digest/length, rather than being reported as an I/O failure.
 
 use crate::common::atomic_file::save_atomic;
+use crate::diff::text_compare::{IgnoredLineRange, normalize_ignored_ranges};
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+
+static NEXT_TEXT_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_text_source_id() -> u64 {
+    NEXT_TEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextEncoding {
@@ -260,10 +268,13 @@ pub struct LineEdit {
 struct UndoRecord {
     before: String,
     after: String,
+    ignored_before: Vec<IgnoredLineRange>,
+    ignored_after: Vec<IgnoredLineRange>,
 }
 
 #[derive(Clone)]
 pub struct TextDocument {
+    source_id: u64,
     source: String,
     pub revision: u64,
     pub saved_revision: u64,
@@ -275,12 +286,15 @@ pub struct TextDocument {
     preserve_source_line_endings: bool,
     undo: Vec<UndoRecord>,
     redo: Vec<UndoRecord>,
+    ignored_line_ranges: Vec<IgnoredLineRange>,
+    ignored_range_invalidation: bool,
 }
 
 impl fmt::Debug for TextDocument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TextDocument")
             .field("source", &"<redacted>")
+            .field("source_id", &self.source_id)
             .field("revision", &self.revision)
             .field("saved_revision", &self.saved_revision)
             .field("read_only", &self.read_only)
@@ -294,6 +308,7 @@ impl fmt::Debug for TextDocument {
             )
             .field("undo_depth", &self.undo.len())
             .field("redo_depth", &self.redo.len())
+            .field("ignored_range_count", &self.ignored_line_ranges.len())
             .finish()
     }
 }
@@ -302,6 +317,7 @@ impl TextDocument {
     /// Creates an editable, UTF-8 document for a side which does not exist yet.
     pub fn empty() -> Self {
         Self {
+            source_id: next_text_source_id(),
             source: String::new(),
             revision: 0,
             saved_revision: 0,
@@ -313,6 +329,8 @@ impl TextDocument {
             preserve_source_line_endings: false,
             undo: vec![],
             redo: vec![],
+            ignored_line_ranges: vec![],
+            ignored_range_invalidation: false,
         }
     }
 
@@ -322,6 +340,7 @@ impl TextDocument {
         let (line_ending, trailing_newline) =
             content_text_policy(&LoadedContent::Text(source.clone()));
         Self {
+            source_id: next_text_source_id(),
             source,
             revision: 0,
             saved_revision: 0,
@@ -333,6 +352,8 @@ impl TextDocument {
             preserve_source_line_endings: true,
             undo: vec![],
             redo: vec![],
+            ignored_line_ranges: vec![],
+            ignored_range_invalidation: false,
         }
     }
     #[cfg(test)]
@@ -343,6 +364,7 @@ impl TextDocument {
     }
     pub fn from_loaded(file: &LoadedTextFile) -> Option<Self> {
         Some(Self {
+            source_id: next_text_source_id(),
             source: file.text()?.into(),
             revision: 0,
             saved_revision: 0,
@@ -354,10 +376,33 @@ impl TextDocument {
             preserve_source_line_endings: false,
             undo: vec![],
             redo: vec![],
+            ignored_line_ranges: vec![],
+            ignored_range_invalidation: false,
         })
     }
     pub fn source(&self) -> &str {
         &self.source
+    }
+    pub fn source_id(&self) -> u64 {
+        self.source_id
+    }
+    pub fn ignored_line_ranges(&self) -> &[IgnoredLineRange] {
+        &self.ignored_line_ranges
+    }
+    pub(crate) fn set_ignored_line_ranges(
+        &mut self,
+        ranges: Vec<IgnoredLineRange>,
+    ) -> Result<bool, String> {
+        let normalized = normalize_ignored_ranges(&ranges, usize::MAX)?;
+        if self.ignored_line_ranges == normalized {
+            return Ok(false);
+        }
+        self.ignored_line_ranges = normalized;
+        self.ignored_range_invalidation = false;
+        Ok(true)
+    }
+    pub(crate) fn take_ignored_range_invalidation(&mut self) -> bool {
+        std::mem::take(&mut self.ignored_range_invalidation)
     }
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
@@ -372,10 +417,14 @@ impl TextDocument {
             return Ok(false);
         }
         let before = std::mem::replace(&mut self.source, source);
+        let ignored_before = std::mem::take(&mut self.ignored_line_ranges);
+        self.ignored_range_invalidation = false;
         self.revision += 1;
         self.undo.push(UndoRecord {
             before,
             after: self.source.clone(),
+            ignored_before,
+            ignored_after: self.ignored_line_ranges.clone(),
         });
         self.redo.clear();
         Ok(true)
@@ -391,6 +440,8 @@ impl TextDocument {
             return Err("document is read-only".into());
         }
         let before = self.source.clone();
+        let ignored_before = self.ignored_line_ranges.clone();
+        let (mapped_ignored, invalidated) = map_ignored_ranges(&self.ignored_line_ranges, edits)?;
         self.source = if self.preserve_source_line_endings {
             apply_memory_line_edits(&self.source, edits)?
         } else {
@@ -408,10 +459,14 @@ impl TextDocument {
         if self.source == before {
             return Ok(());
         }
+        self.ignored_line_ranges = mapped_ignored;
+        self.ignored_range_invalidation = invalidated;
         self.revision += 1;
         self.undo.push(UndoRecord {
             before,
             after: self.source.clone(),
+            ignored_before,
+            ignored_after: self.ignored_line_ranges.clone(),
         });
         self.redo.clear();
         Ok(())
@@ -421,6 +476,8 @@ impl TextDocument {
             return false;
         };
         self.source = r.before.clone();
+        self.ignored_line_ranges = r.ignored_before.clone();
+        self.ignored_range_invalidation = false;
         self.revision += 1;
         self.redo.push(r);
         true
@@ -430,6 +487,8 @@ impl TextDocument {
             return false;
         };
         self.source = r.after.clone();
+        self.ignored_line_ranges = r.ignored_after.clone();
+        self.ignored_range_invalidation = false;
         self.revision += 1;
         self.undo.push(r);
         true
@@ -601,6 +660,55 @@ fn apply_memory_line_edits(source: &str, edits: &[LineEdit]) -> Result<String, S
     Ok(output)
 }
 
+fn map_ignored_ranges(
+    ranges: &[IgnoredLineRange],
+    edits: &[LineEdit],
+) -> Result<(Vec<IgnoredLineRange>, bool), String> {
+    let mut ordered = edits.to_vec();
+    ordered.sort_by_key(|edit| edit.start);
+    let mut mapped = Vec::with_capacity(ranges.len());
+    let mut invalidated = false;
+    for range in ranges {
+        let mut shift: isize = 0;
+        let mut intersects = false;
+        for edit in &ordered {
+            let edit_end = edit
+                .start
+                .checked_add(edit.delete_count)
+                .ok_or_else(|| "line edit is out of bounds".to_string())?;
+            if edit.start == edit_end {
+                if edit.start > range.start && edit.start < range.end {
+                    intersects = true;
+                    break;
+                }
+                if edit.start <= range.start {
+                    shift += edit.replacement.len() as isize;
+                }
+                continue;
+            }
+            if edit.start < range.end && edit_end > range.start {
+                intersects = true;
+                break;
+            }
+            if edit_end <= range.start {
+                shift += edit.replacement.len() as isize - edit.delete_count as isize;
+            }
+        }
+        if intersects {
+            invalidated = true;
+            continue;
+        }
+        let start = (range.start as isize + shift)
+            .try_into()
+            .map_err(|_| "line edit moved an ignored range out of bounds".to_string())?;
+        let end = (range.end as isize + shift)
+            .try_into()
+            .map_err(|_| "line edit moved an ignored range out of bounds".to_string())?;
+        mapped.push(IgnoredLineRange { start, end });
+    }
+    Ok((mapped, invalidated))
+}
+
 fn source_lines(s: &str) -> Vec<String> {
     // `str::lines` treats CRLF as one delimiter (splitting on either byte
     // independently would manufacture a blank line between CR and LF).
@@ -647,6 +755,7 @@ mod tests {
     #[test]
     fn grouped_revision() {
         let mut d = TextDocument {
+            source_id: next_text_source_id(),
             source: "a\nb".into(),
             revision: 0,
             saved_revision: 0,
@@ -658,6 +767,8 @@ mod tests {
             preserve_source_line_endings: false,
             undo: vec![],
             redo: vec![],
+            ignored_line_ranges: vec![],
+            ignored_range_invalidation: false,
         };
         d.apply_edits(&[
             LineEdit {
@@ -676,6 +787,55 @@ mod tests {
         assert_eq!(d.source(), "x\ny");
         assert!(d.undo());
         assert_eq!(d.source(), "a\nb")
+    }
+
+    #[test]
+    fn ignored_lines_shift_or_invalidate_inside_the_existing_undo_record() {
+        let mut document = TextDocument::from_memory_source("a\nb\nc\nd".into());
+        document
+            .set_ignored_line_ranges(vec![IgnoredLineRange { start: 2, end: 3 }])
+            .unwrap();
+        document
+            .apply_edits(&[LineEdit {
+                start: 0,
+                delete_count: 0,
+                replacement: vec!["before".into()],
+            }])
+            .unwrap();
+        assert_eq!(
+            document.ignored_line_ranges(),
+            &[IgnoredLineRange { start: 3, end: 4 }]
+        );
+        assert!(!document.take_ignored_range_invalidation());
+        assert!(document.undo());
+        assert_eq!(
+            document.ignored_line_ranges(),
+            &[IgnoredLineRange { start: 2, end: 3 }]
+        );
+        assert!(document.redo());
+        assert_eq!(
+            document.ignored_line_ranges(),
+            &[IgnoredLineRange { start: 3, end: 4 }]
+        );
+
+        let mut document = TextDocument::from_memory_source("a\nb\nc\nd".into());
+        document
+            .set_ignored_line_ranges(vec![IgnoredLineRange { start: 1, end: 3 }])
+            .unwrap();
+        document
+            .apply_edits(&[LineEdit {
+                start: 2,
+                delete_count: 1,
+                replacement: vec!["changed".into()],
+            }])
+            .unwrap();
+        assert!(document.ignored_line_ranges().is_empty());
+        assert!(document.take_ignored_range_invalidation());
+        assert!(document.undo());
+        assert_eq!(
+            document.ignored_line_ranges(),
+            &[IgnoredLineRange { start: 1, end: 3 }]
+        );
     }
 
     #[test]

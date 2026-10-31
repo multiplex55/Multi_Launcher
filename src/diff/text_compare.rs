@@ -104,6 +104,54 @@ pub struct TextProjection {
     pub lines: Vec<ProjectedLine>,
 }
 
+/// A half-open range of zero-based source line coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IgnoredLineRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Validate and coalesce overlapping or adjacent source-line ranges.
+pub fn normalize_ignored_ranges(
+    ranges: &[IgnoredLineRange],
+    source_line_count: usize,
+) -> Result<Vec<IgnoredLineRange>, String> {
+    let mut ordered = ranges.to_vec();
+    ordered.sort_unstable();
+    let mut normalized: Vec<IgnoredLineRange> = Vec::with_capacity(ordered.len());
+    for range in ordered {
+        if range.start >= range.end || range.end > source_line_count {
+            return Err(format!(
+                "ignored line range {}..{} is outside the {source_line_count} source lines",
+                range.start + 1,
+                range.end + 1
+            ));
+        }
+        if let Some(last) = normalized.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            normalized.push(range);
+        }
+    }
+    Ok(normalized)
+}
+
+pub fn line_is_ignored(ranges: &[IgnoredLineRange], source_line: usize) -> bool {
+    ranges
+        .binary_search_by(|range| {
+            if source_line < range.start {
+                std::cmp::Ordering::Greater
+            } else if source_line >= range.end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
 /// A user supplied, presentation-only constraint saying that two source lines
 /// must occupy the same aligned row. Line numbers are zero based.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -209,6 +257,10 @@ fn split_lines(text: &str, equivalent: bool) -> Vec<String> {
     }
 }
 
+pub fn source_line_count(text: &str, line_ending_equivalence: bool) -> usize {
+    split_lines(text, line_ending_equivalence).len()
+}
+
 /// Expands otherwise invisible characters for display only. The returned text
 /// must never be written back to a document or used as a comparison key.
 pub fn visible_whitespace(text: &str, show_line_ending: bool) -> String {
@@ -238,6 +290,8 @@ pub enum DiffRowKind {
     Modified,
     Deleted,
     Inserted,
+    /// Source content excluded by an explicit whole-line ignore annotation.
+    Ignored,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeImportance {
@@ -286,9 +340,12 @@ pub struct IntralineLocation {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextComparisonResult {
+    pub left_source_id: u64,
+    pub right_source_id: u64,
     pub left_revision: u64,
     pub right_revision: u64,
     pub rules_revision: u64,
+    pub annotation_revision: u64,
     pub rows: Vec<AlignedDiffRow>,
     pub hunks: Vec<DiffHunk>,
     pub navigation: NavigationIndex,
@@ -296,8 +353,21 @@ pub struct TextComparisonResult {
     pub equal_under_rules: bool,
 }
 impl TextComparisonResult {
-    pub fn is_stale(&self, l: u64, r: u64, rules: u64) -> bool {
-        self.left_revision != l || self.right_revision != r || self.rules_revision != rules
+    pub fn is_stale(
+        &self,
+        left_source_id: u64,
+        right_source_id: u64,
+        left_revision: u64,
+        right_revision: u64,
+        rules_revision: u64,
+        annotation_revision: u64,
+    ) -> bool {
+        self.left_source_id != left_source_id
+            || self.right_source_id != right_source_id
+            || self.left_revision != left_revision
+            || self.right_revision != right_revision
+            || self.rules_revision != rules_revision
+            || self.annotation_revision != annotation_revision
     }
     pub fn difference_number(&self, row: usize, important_only: bool) -> Option<(usize, usize)> {
         let v = if important_only {
@@ -550,19 +620,72 @@ pub fn compare_with_alignments(
     intraline_limit: usize,
     anchors: &[ManualTextAlignment],
 ) -> Result<TextComparisonResult, String> {
-    let lp = project(left, c);
-    let rp = project(right, c);
+    compare_with_annotations(
+        left,
+        right,
+        0,
+        0,
+        left_revision,
+        right_revision,
+        c,
+        intraline_limit,
+        anchors,
+        &[],
+        &[],
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compare_with_annotations(
+    left: &str,
+    right: &str,
+    left_source_id: u64,
+    right_source_id: u64,
+    left_revision: u64,
+    right_revision: u64,
+    c: &CompiledRules,
+    intraline_limit: usize,
+    anchors: &[ManualTextAlignment],
+    left_ignored: &[IgnoredLineRange],
+    right_ignored: &[IgnoredLineRange],
+    annotation_revision: u64,
+) -> Result<TextComparisonResult, String> {
     let left_count = split_lines(left, c.rules.line_ending_equivalence).len();
     let right_count = split_lines(right, c.rules.line_ending_equivalence).len();
+    let left_ignored = normalize_ignored_ranges(left_ignored, left_count)?;
+    let right_ignored = normalize_ignored_ranges(right_ignored, right_count)?;
+    let lp = project(left, c);
+    let rp = project(right, c);
+    let lp: Vec<_> = lp
+        .lines
+        .into_iter()
+        .filter(|line| !line_is_ignored(&left_ignored, line.source_line))
+        .collect();
+    let rp: Vec<_> = rp
+        .lines
+        .into_iter()
+        .filter(|line| !line_is_ignored(&right_ignored, line.source_line))
+        .collect();
     let anchors = validate_manual_alignments(anchors, left_count, right_count)?;
-    let lk: Vec<_> = lp.lines.iter().map(|x| x.key.as_str()).collect();
-    let rk: Vec<_> = rp.lines.iter().map(|x| x.key.as_str()).collect();
+    for anchor in &anchors {
+        if line_is_ignored(&left_ignored, anchor.left_line)
+            || line_is_ignored(&right_ignored, anchor.right_line)
+        {
+            return Err(format!(
+                "manual alignment at lines {} and {} uses an ignored source line; restore the line before aligning it",
+                anchor.left_line + 1,
+                anchor.right_line + 1
+            ));
+        }
+    }
+    let lk: Vec<_> = lp.iter().map(|x| x.key.as_str()).collect();
+    let rk: Vec<_> = rp.iter().map(|x| x.key.as_str()).collect();
     let mut rows = vec![];
     let mut old_start = 0;
     let mut new_start = 0;
     for anchor in anchors.iter().copied() {
         let old_anchor = lp
-            .lines
             .iter()
             .position(|l| l.source_line == anchor.left_line)
             .ok_or_else(|| {
@@ -572,7 +695,6 @@ pub fn compare_with_alignments(
                 )
             })?;
         let new_anchor = rp
-            .lines
             .iter()
             .position(|l| l.source_line == anchor.right_line)
             .ok_or_else(|| {
@@ -583,23 +705,23 @@ pub fn compare_with_alignments(
             })?;
         append_ops(
             &mut rows,
-            &lp.lines,
-            &rp.lines,
+            &lp,
+            &rp,
             old_start,
             old_anchor,
             new_start,
             new_anchor,
             intraline_limit,
         );
-        let kind = if lp.lines[old_anchor].raw == rp.lines[new_anchor].raw {
+        let kind = if lp[old_anchor].raw == rp[new_anchor].raw {
             DiffRowKind::Equal
         } else {
             DiffRowKind::Modified
         };
         push_row(
             &mut rows,
-            Some(&lp.lines[old_anchor]),
-            Some(&rp.lines[new_anchor]),
+            Some(&lp[old_anchor]),
+            Some(&rp[new_anchor]),
             kind,
             intraline_limit,
         );
@@ -608,24 +730,136 @@ pub fn compare_with_alignments(
     }
     append_ops(
         &mut rows,
-        &lp.lines,
-        &rp.lines,
+        &lp,
+        &rp,
         old_start,
-        lp.lines.len(),
+        lp.len(),
         new_start,
-        rp.lines.len(),
+        rp.len(),
         intraline_limit,
+    );
+    reinsert_ignored_rows(
+        &mut rows,
+        left,
+        right,
+        c.rules.line_ending_equivalence,
+        &left_ignored,
+        &right_ignored,
     );
     Ok(finish_comparison(
         left,
         right,
+        left_source_id,
+        right_source_id,
         left_revision,
         right_revision,
         c,
+        annotation_revision,
         lk,
         rk,
         rows,
     ))
+}
+
+fn reinsert_ignored_rows(
+    rows: &mut Vec<AlignedDiffRow>,
+    left: &str,
+    right: &str,
+    line_ending_equivalence: bool,
+    left_ignored: &[IgnoredLineRange],
+    right_ignored: &[IgnoredLineRange],
+) {
+    #[derive(Clone, Copy)]
+    struct Insertion {
+        before_row: usize,
+        side: crate::diff::model::DiffSide,
+        source_line: usize,
+    }
+    let mut side_insertions: [Vec<Insertion>; 2] = [Vec::new(), Vec::new()];
+    for (side_index, (side, text, ranges)) in [
+        (crate::diff::model::DiffSide::Left, left, left_ignored),
+        (crate::diff::model::DiffSide::Right, right, right_ignored),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source_line_count = split_lines(text, line_ending_equivalence).len();
+        let mut row_cursor = 0;
+        // Ranges are normalized and visited in source order, so each cursor only advances.
+        // Each row is inspected at most once per side, plus one check per ignored line.
+        for source_line in ranges
+            .iter()
+            .flat_map(|range| range.start..range.end)
+            .filter(|line| *line < source_line_count)
+        {
+            while row_cursor < rows.len() {
+                let coordinate = match side {
+                    crate::diff::model::DiffSide::Left => rows[row_cursor].left,
+                    crate::diff::model::DiffSide::Right => rows[row_cursor].right,
+                };
+                if coordinate.is_some_and(|line| line >= source_line) {
+                    break;
+                }
+                row_cursor += 1;
+            }
+            side_insertions[side_index].push(Insertion {
+                before_row: row_cursor,
+                side,
+                source_line,
+            });
+        }
+    }
+    let insertion_key = |insertion: &Insertion| {
+        (
+            insertion.before_row,
+            match insertion.side {
+                crate::diff::model::DiffSide::Left => 0,
+                crate::diff::model::DiffSide::Right => 1,
+            },
+            insertion.source_line,
+        )
+    };
+    let mut left_insertions = side_insertions[0].iter().copied().peekable();
+    let mut right_insertions = side_insertions[1].iter().copied().peekable();
+    let mut insertions = Vec::with_capacity(side_insertions[0].len() + side_insertions[1].len());
+    loop {
+        match (left_insertions.peek(), right_insertions.peek()) {
+            (Some(left), Some(right)) if insertion_key(left) <= insertion_key(right) => {
+                insertions.push(left_insertions.next().unwrap());
+            }
+            (Some(_), Some(_)) => {
+                insertions.push(right_insertions.next().unwrap());
+            }
+            (Some(_), None) => insertions.push(left_insertions.next().unwrap()),
+            (None, Some(_)) => insertions.push(right_insertions.next().unwrap()),
+            (None, None) => break,
+        }
+    }
+    let mut merged = Vec::with_capacity(rows.len() + insertions.len());
+    let mut insertions = insertions.into_iter().peekable();
+    for before_row in 0..=rows.len() {
+        while insertions
+            .peek()
+            .is_some_and(|insertion| insertion.before_row == before_row)
+        {
+            let insertion = insertions.next().unwrap();
+            merged.push(AlignedDiffRow {
+                id: 0,
+                left: (insertion.side == crate::diff::model::DiffSide::Left)
+                    .then_some(insertion.source_line),
+                right: (insertion.side == crate::diff::model::DiffSide::Right)
+                    .then_some(insertion.source_line),
+                kind: DiffRowKind::Ignored,
+                importance: ChangeImportance::Equal,
+                left_ranges: Vec::new(),
+                right_ranges: Vec::new(),
+            });
+        }
+        if let Some(row) = rows.get(before_row) {
+            merged.push(row.clone());
+        }
+    }
+    *rows = merged;
 }
 
 fn append_ops(
@@ -747,9 +981,12 @@ fn append_ops(
 fn finish_comparison(
     left: &str,
     right: &str,
+    left_source_id: u64,
+    right_source_id: u64,
     left_revision: u64,
     right_revision: u64,
     c: &CompiledRules,
+    annotation_revision: u64,
     lk: Vec<&str>,
     rk: Vec<&str>,
     mut rows: Vec<AlignedDiffRow>,
@@ -760,12 +997,12 @@ fn finish_comparison(
     let mut hunks = vec![];
     let mut i = 0;
     while i < rows.len() {
-        if rows[i].kind == DiffRowKind::Equal {
+        if matches!(rows[i].kind, DiffRowKind::Equal | DiffRowKind::Ignored) {
             i += 1;
             continue;
         }
         let start = i;
-        while i < rows.len() && rows[i].kind != DiffRowKind::Equal {
+        while i < rows.len() && !matches!(rows[i].kind, DiffRowKind::Equal | DiffRowKind::Ignored) {
             i += 1
         }
         let important = rows[start..i]
@@ -809,9 +1046,12 @@ fn finish_comparison(
         }
     }
     TextComparisonResult {
+        left_source_id,
+        right_source_id,
         left_revision,
         right_revision,
         rules_revision: c.revision,
+        annotation_revision,
         raw_equal: left == right,
         equal_under_rules: lk == rk,
         rows,
@@ -956,6 +1196,289 @@ mod tests {
         assert_eq!(visible_whitespace(source, true), "a·b→   c¶");
         assert_eq!(source, "a b\tc");
     }
+
+    #[test]
+    fn ignored_lines_keep_raw_equality_separate_from_effective_comparison() {
+        let c = CompiledRules::compile(&TextComparisonRules::default()).unwrap();
+        let range = |start, end| IgnoredLineRange { start, end };
+
+        let one_sided = compare_with_annotations(
+            "keep\nextra\nend",
+            "keep\nend",
+            10,
+            11,
+            2,
+            3,
+            &c,
+            4096,
+            &[],
+            &[range(1, 2)],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert!(one_sided.equal_under_rules);
+        assert!(!one_sided.raw_equal);
+        assert!(one_sided.rows.iter().any(|row| {
+            row.kind == DiffRowKind::Ignored && row.left == Some(1) && row.right.is_none()
+        }));
+        assert!(one_sided.navigation.all_difference_rows.is_empty());
+
+        let both_sides = compare_with_annotations(
+            "keep\nold\nend",
+            "keep\nnew\nend",
+            10,
+            11,
+            2,
+            3,
+            &c,
+            4096,
+            &[],
+            &[range(1, 2)],
+            &[range(1, 2)],
+            1,
+        )
+        .unwrap();
+        assert!(both_sides.equal_under_rules);
+        assert!(!both_sides.raw_equal);
+        assert_eq!(
+            both_sides
+                .rows
+                .iter()
+                .filter(|row| row.kind == DiffRowKind::Ignored)
+                .count(),
+            2
+        );
+
+        let one_side_only = compare_with_annotations(
+            "keep\nold\nend",
+            "keep\nnew\nend",
+            10,
+            11,
+            2,
+            3,
+            &c,
+            4096,
+            &[],
+            &[range(1, 2)],
+            &[],
+            1,
+        )
+        .unwrap();
+        assert!(!one_side_only.equal_under_rules);
+        assert!(one_side_only.rows.iter().any(|row| {
+            row.right == Some(1)
+                && matches!(row.kind, DiffRowKind::Inserted | DiffRowKind::Modified)
+                && row.kind != DiffRowKind::Ignored
+        }));
+
+        let real_change_after_gap = compare_with_annotations(
+            "keep\nnoise\nleft",
+            "keep\nother\nright",
+            10,
+            11,
+            2,
+            3,
+            &c,
+            4096,
+            &[],
+            &[range(1, 2)],
+            &[range(1, 2)],
+            1,
+        )
+        .unwrap();
+        assert!(!real_change_after_gap.equal_under_rules);
+        assert_eq!(real_change_after_gap.hunks.len(), 1);
+        let final_difference = real_change_after_gap
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        assert_eq!(
+            real_change_after_gap.navigation.row_to_hunk[final_difference],
+            Some(0)
+        );
+        assert!(
+            real_change_after_gap
+                .navigation
+                .all_difference_rows
+                .contains(&final_difference)
+        );
+    }
+
+    #[test]
+    fn ignored_lines_ranges_normalize_and_anchor_endpoints_are_rejected() {
+        let normalized = normalize_ignored_ranges(
+            &[
+                IgnoredLineRange { start: 3, end: 4 },
+                IgnoredLineRange { start: 1, end: 3 },
+                IgnoredLineRange { start: 7, end: 8 },
+            ],
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            normalized,
+            [
+                IgnoredLineRange { start: 1, end: 4 },
+                IgnoredLineRange { start: 7, end: 8 }
+            ]
+        );
+        assert!(normalize_ignored_ranges(&[IgnoredLineRange { start: 4, end: 4 }], 8).is_err());
+        assert!(normalize_ignored_ranges(&[IgnoredLineRange { start: 0, end: 9 }], 8).is_err());
+
+        let rules = CompiledRules::compile(&TextComparisonRules::default()).unwrap();
+        let error = compare_with_annotations(
+            "a\nb",
+            "a\nb",
+            1,
+            2,
+            0,
+            0,
+            &rules,
+            10,
+            &[ManualTextAlignment {
+                left_line: 1,
+                right_line: 1,
+            }],
+            &[IgnoredLineRange { start: 1, end: 2 }],
+            &[],
+            1,
+        )
+        .unwrap_err();
+        assert!(error.contains("ignored source line"));
+    }
+
+    #[test]
+    fn ignored_lines_remain_distinct_from_regex_unimportant_rows_and_cover_empty_text() {
+        let rules = TextComparisonRules {
+            unimportant_sections: vec!["noise|other".into()],
+            ..Default::default()
+        };
+        let compiled = CompiledRules::compile(&rules).unwrap();
+        let mixed = compare_with_annotations(
+            "noise\nignored\nleft",
+            "other\nignored\nright",
+            4,
+            5,
+            0,
+            0,
+            &compiled,
+            100,
+            &[],
+            &[IgnoredLineRange { start: 1, end: 2 }],
+            &[IgnoredLineRange { start: 1, end: 2 }],
+            1,
+        )
+        .unwrap();
+        assert!(mixed.rows.iter().any(|row| {
+            row.kind == DiffRowKind::Modified && row.importance == ChangeImportance::Unimportant
+        }));
+        assert_eq!(
+            mixed
+                .rows
+                .iter()
+                .filter(|row| row.kind == DiffRowKind::Ignored)
+                .count(),
+            2
+        );
+
+        let empty =
+            compare_with_annotations("", "", 1, 2, 0, 0, &compiled, 100, &[], &[], &[], 0).unwrap();
+        assert!(empty.raw_equal);
+        assert!(empty.equal_under_rules);
+        assert!(empty.rows.is_empty());
+
+        let all_ignored = compare_with_annotations(
+            "a\nb\n",
+            "a\nc\n",
+            1,
+            2,
+            0,
+            0,
+            &CompiledRules::compile(&TextComparisonRules::default()).unwrap(),
+            100,
+            &[],
+            &[IgnoredLineRange { start: 0, end: 2 }],
+            &[IgnoredLineRange { start: 0, end: 2 }],
+            1,
+        )
+        .unwrap();
+        assert!(all_ignored.equal_under_rules);
+        assert!(all_ignored.hunks.is_empty());
+        assert!(all_ignored.navigation.all_difference_rows.is_empty());
+        assert!(
+            all_ignored
+                .rows
+                .iter()
+                .all(|row| row.kind == DiffRowKind::Ignored)
+        );
+    }
+
+    #[test]
+    fn ignored_lines_reinsertion_handles_large_ranges_in_source_order() {
+        const PAIRS: usize = 8_192;
+        let mut source_lines = Vec::with_capacity(PAIRS * 2);
+        let mut ignored = Vec::with_capacity(PAIRS);
+        for pair in 0..PAIRS {
+            source_lines.push(format!("noise-{pair}"));
+            source_lines.push(format!("visible-{pair}"));
+            ignored.push(IgnoredLineRange {
+                start: pair * 2,
+                end: pair * 2 + 1,
+            });
+        }
+        let source = source_lines.join("\n");
+        let compiled = CompiledRules::compile(&TextComparisonRules::default()).unwrap();
+
+        let comparison = compare_with_annotations(
+            &source,
+            &source,
+            20,
+            21,
+            0,
+            0,
+            &compiled,
+            100,
+            &[],
+            &ignored,
+            &ignored,
+            1,
+        )
+        .unwrap();
+
+        assert!(comparison.raw_equal);
+        assert!(comparison.equal_under_rules);
+        assert!(comparison.hunks.is_empty());
+        assert!(comparison.navigation.all_difference_rows.is_empty());
+        assert_eq!(comparison.rows.len(), PAIRS * 3);
+        assert_eq!(
+            comparison
+                .rows
+                .iter()
+                .filter(|row| row.kind == DiffRowKind::Ignored)
+                .count(),
+            PAIRS * 2
+        );
+        for side in [
+            crate::diff::model::DiffSide::Left,
+            crate::diff::model::DiffSide::Right,
+        ] {
+            let mut previous = None;
+            for row in &comparison.rows {
+                let source_line = match side {
+                    crate::diff::model::DiffSide::Left => row.left,
+                    crate::diff::model::DiffSide::Right => row.right,
+                };
+                if let Some(source_line) = source_line {
+                    assert!(previous.is_none_or(|previous| source_line > previous));
+                    previous = Some(source_line);
+                }
+            }
+            assert_eq!(previous, Some(PAIRS * 2 - 1));
+        }
+    }
+
     #[test]
     fn projection_does_not_mutate() {
         let s = " A \n\nB".to_string();

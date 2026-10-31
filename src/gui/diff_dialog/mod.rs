@@ -102,8 +102,23 @@ struct TextInputDraft {
     purpose: TextInputPurpose,
     left: String,
     right: String,
-    expected_revisions: Option<(u64, u64)>,
+    expected_sources: Option<(TextInputSourceSnapshot, TextInputSourceSnapshot)>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextInputSourceSnapshot {
+    source_id: u64,
+    revision: u64,
+}
+
+impl TextInputSourceSnapshot {
+    fn capture(document: &crate::diff::text_file::TextDocument) -> Self {
+        Self {
+            source_id: document.source_id(),
+            revision: document.revision,
+        }
+    }
 }
 
 fn paste_memory_input(
@@ -282,7 +297,7 @@ impl DiffDialogState {
     }
 
     fn begin_text_input(&mut self, purpose: TextInputPurpose) {
-        let (left, right, expected_revisions) = match purpose {
+        let (left, right, expected_sources) = match purpose {
             TextInputPurpose::NewComparison => (String::new(), String::new(), None),
             TextInputPurpose::EditInputs { view_id } => {
                 let Some(model) = self.text_views.get(&view_id) else {
@@ -297,7 +312,10 @@ impl DiffDialogState {
                 (
                     model.left.source().to_owned(),
                     model.right.source().to_owned(),
-                    Some((model.left.revision, model.right.revision)),
+                    Some((
+                        TextInputSourceSnapshot::capture(&model.left),
+                        TextInputSourceSnapshot::capture(&model.right),
+                    )),
                 )
             }
         };
@@ -305,7 +323,7 @@ impl DiffDialogState {
             purpose,
             left,
             right,
-            expected_revisions,
+            expected_sources,
             error: None,
         });
     }
@@ -348,16 +366,20 @@ impl DiffDialogState {
                         "The in-memory text view is no longer available".into(),
                     ));
                 };
-                let Some(expected_revisions) = draft.expected_revisions else {
+                let Some(expected_sources) = draft.expected_sources else {
                     return Err((
                         draft,
-                        "The Edit Inputs draft is no longer tied to a source revision. Reopen it to continue.".into(),
+                        "The Edit Inputs draft is no longer tied to its source documents. Reopen it to continue.".into(),
                     ));
                 };
-                if (model.left.revision, model.right.revision) != expected_revisions {
+                let current_sources = (
+                    TextInputSourceSnapshot::capture(&model.left),
+                    TextInputSourceSnapshot::capture(&model.right),
+                );
+                if current_sources != expected_sources {
                     return Err((
                         draft,
-                        "The comparison text changed while Edit Inputs was open. Reopen it to review the latest text.".into(),
+                        "The comparison sources changed while Edit Inputs was open. Reopen it to review the latest text.".into(),
                     ));
                 }
                 match model.replace_memory_sources(draft.left.clone(), draft.right.clone()) {
@@ -3578,6 +3600,60 @@ mod tests {
     }
 
     #[test]
+    fn memory_text_edit_inputs_reject_equal_revision_swapped_sources() {
+        let mut dialog = DiffDialogState::default();
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "initial left".into();
+        draft.right = "initial right".into();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let view_id = dialog.workspace.current_view.id;
+
+        let model = dialog.text_views.get_mut(&view_id).unwrap();
+        model.left.replace_source("edited left".into()).unwrap();
+        model.right.replace_source("edited right".into()).unwrap();
+        assert_eq!(model.left.revision, model.right.revision);
+        assert!(model.left.can_undo());
+        assert!(model.right.can_undo());
+        let original_left_source_id = model.left.source_id();
+        let original_right_source_id = model.right.source_id();
+
+        dialog.begin_text_input(TextInputPurpose::EditInputs { view_id });
+        let mut stale_draft = dialog.text_input.take().unwrap();
+        stale_draft.left = "draft left".into();
+        stale_draft.right = "draft right".into();
+
+        dialog.swap_sides();
+        let model = dialog.text_views.get(&view_id).unwrap();
+        assert_eq!(model.left.source_id(), original_right_source_id);
+        assert_eq!(model.right.source_id(), original_left_source_id);
+        assert_eq!(model.left.revision, model.right.revision);
+        assert_eq!(model.left.source(), "edited right");
+        assert_eq!(model.right.source(), "edited left");
+
+        let (stale_draft, error) = dialog.apply_text_input(stale_draft).unwrap_err();
+        assert!(error.contains("sources changed while Edit Inputs was open"));
+        assert_eq!(stale_draft.left, "draft left");
+        assert_eq!(stale_draft.right, "draft right");
+
+        let model = dialog.text_views.get_mut(&view_id).unwrap();
+        assert_eq!(model.left.source_id(), original_right_source_id);
+        assert_eq!(model.right.source_id(), original_left_source_id);
+        assert_eq!(model.left.source(), "edited right");
+        assert_eq!(model.right.source(), "edited left");
+        assert!(model.left.can_undo());
+        assert!(model.right.can_undo());
+
+        model.active_side = crate::diff::model::DiffSide::Left;
+        assert!(model.undo());
+        assert_eq!(model.left.source(), "initial right");
+        assert_eq!(model.right.source(), "edited left");
+    }
+
+    #[test]
     fn memory_text_dirty_replacement_routes_preserve_retained_document_and_preferences() {
         let directory = tempfile::tempdir().unwrap();
         let left_path = directory.path().join("left.txt");
@@ -3745,18 +3821,24 @@ mod tests {
         assert_eq!(model.rules.revision, 1);
         assert!(model.recalculating);
         assert!(model.comparison.as_ref().unwrap().is_stale(
+            model.left.source_id(),
+            model.right.source_id(),
             model.left.revision,
             model.right.revision,
-            model.rules.revision
+            model.rules.revision,
+            model.annotation_revision,
         ));
 
         for _ in 0..1000 {
             model.poll();
             if model.comparison.as_ref().is_some_and(|result| {
                 !result.is_stale(
+                    model.left.source_id(),
+                    model.right.source_id(),
                     model.left.revision,
                     model.right.revision,
                     model.rules.revision,
+                    model.annotation_revision,
                 )
             }) && !model.recalculating
             {
