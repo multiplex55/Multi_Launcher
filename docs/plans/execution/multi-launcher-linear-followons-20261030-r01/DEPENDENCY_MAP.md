@@ -7,3 +7,5 @@
 - G07 native guard/no-replace compatibility acceptance -> Stored writer -> minimal UI. Pure tests alone insufficient.
 
 Branch order remains B1..B9 even for independent stages. Every next branch begins at previous exact closing commit, including docs-only deferrals.
+
+Current enforced outcomes: G02 incomplete -> G03 deferred. G05 N0 unproved -> N1-N3 refused. History unaccepted -> B8 R0/R1 deferred. G04 capability absent -> no build/launch. G07 qualifying preparation failed -> native R1/writer/UI unaccepted and not run.
