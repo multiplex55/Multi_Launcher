@@ -7,3 +7,5 @@ B5 History: failed qualifying preparation, exact candidate preserved/excluded, p
 Earlier native limits: [G06](stalls/G06-native-20261031T020638Z.md). No native feature activation inferred from deterministic/static evidence.
 
 B5 [stop report](stalls/G08-history-verification-20261031T030129Z.md).
+
+B6 screenshot NATIVE_PROOF_DEFERRED at preflight, no build/launch/source; [stop](stalls/G04-capability-20261031T030513Z.md), [verification](stages/G04/VERIFICATION.md).
