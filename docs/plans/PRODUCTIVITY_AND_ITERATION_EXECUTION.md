@@ -35,7 +35,7 @@ Use Goal H bounds: first necessary preparation 30 minutes; subsequent preparatio
 
 ## Checkpoints
 
-M0-B and M1-A–M1-C pending. C02–C07 implementation and final review pending. No feature, speedup, test, or native acceptance claimed by this baseline.
+M0-B complete (`010cb970a01f2b81a705f61b9870b29b2e8ef1ed`, pushed). M1-A complete; M1-B–M1-C pending. C02–C07 implementation and final review pending. No feature or speedup claimed.
 
 ### M0-B owner map and command selection (complete)
 
@@ -54,3 +54,26 @@ Initial measurement selections (runtime inventory still required): library `hist
 | Native/UI | Build current app `cargo build --locked --profile fast-dev -p multi_launcher --bin multi_launcher`, then isolated profile via explicit CWD/settings/data-root conventions and note/template overrides as demonstrated in `dev/jump_mode`; target owned process/window only |
 
 Existing `IsolatedAppWorkspace`/`IsolatedWorkspace` own unique roots and app-before-environment teardown; isolated constructor disables both Paste Sequence shortcuts before construction. Do not invoke historical `developer_loop.ps1` unchanged (hardcoded old SHA/protocol). M1-A uses byte-saved/restored comment edits to `src/history.rs` and `src/gui/mod.rs`, one at a time, no optimization yet. Preparation/execution/timing and cleanup outcomes will be recorded separately. M0-B is intake only, not an app/test/native pass.
+
+### M1-A measurements (complete)
+
+Evidence root: `C:\Users\Jay\AppData\Local\Temp\Multi_Launcher\productivity-iteration-20261031`. Each scenario directory contains `measurement.json`, command/source fingerprint, stdout/stderr `.bin` text, and owned-process retirement/output-drain details. Source `010cb970`; unchanged application source inherited from `d6541edd`. Windows MSVC toolchain/profile above, existing warm cache, normal Nextest concurrency. One sample so far per condition; no speedup claimed.
+
+| Scenario prefix | Result | Wall seconds / observations |
+| --- | --- | --- |
+| `c01-m1a-lib-preparation_20261031T113621818Z` | Cargo exit 0; overall runner failed | Cargo 4m38s; runner 339.582325s, owned descendants survived root (observed vctip). Cleanup verified, output drain verified, every recorded owned identity absent. Not relabeled a pass. Reuse successfully prepared binary metadata. Subsequent compile measurements use existing verified-MSVC-vctip policy, not a name-based kill or security change. |
+| `c01-m1a-selected-inventory_20261031T114227646Z` | pass | 1.752764s; 6 exact selected tests / 1 library binary, nonempty asserted; 6492 excluded. |
+| `c01-m1a-selected-execution_20261031T114240550Z` | pass | 16.536532s runner / 15.747s Nextest; 6 passed, 0 failed/timeouts. Custom local Nextest profile `productivity` sets supported slow-timeout period 100s/terminate-after 1; outer owned deadline 600s. |
+| `c01-m1a-lib-noop_20261031T114308989Z` | pass | 1.702950s; warm unchanged test preparation, not edited incremental. |
+
+Selected runtime breakdown: History pin test .106s; activation .474s; dashboard predicate .474s; unwind .477s; profile isolation .542s; GUI oracle 15.724s. Fixture construction activation366.7705ms/dashboard357.5732ms, drops44.1437/45.1189ms, root cleanup4.0042/3.0438ms; profile A/B construction354.2219/16.3717ms, combined drop74.7594ms. Root removal/CWD restoration asserted; deliberate unwind and subsequent fixture reuse passed. Oracle retains 100, 1,000 and 10,000-row cases and interaction assertions.
+
+Further baseline samples (same evidence root, exact command in receipt): `c01-m1a-check-preparation_20261031T114320016Z` passed121.410246s (Cargo1m51s, preparation included missing check artifacts); `c01-m1a-check-noop_20261031T114542426Z` passed0.908375s; `c01-m1a-check-leaf-edit_20261031T114544294Z` passed17.240388s; `c01-m1a-gui-edit-check_20261031T114644451Z` passed14.305147s. One sample each. Edited selected-test preparation `c01-m1a-gui-edit-test-preparation_20261031T114701081Z` passed58.896280s (Cargo47.97s). Byte-restoration verified History SHA256 `2B14DC9C9F0E6F06ED61F0BBDC00E8A2A06C0391079E4C29E907280BE4FBDDEE` and GUI SHA256 `2411C1D13DC60AC3BCFE75162C927D8BB6BB50AB218A22EED7BF7B9C94DBD88B`. These check samples are not application link/build or executed tests.
+
+Three unchanged six-test execution samples:16.536532/17.516866/16.242799s runner (median16.536532, range16.242799–17.516866); Nextest15.747/15.766/15.396s; oracle15.724/15.753/15.379s. All18 case executions passed, no failures/timeouts, same selectors/workload/profile/concurrency. Samples2/3 used the semantically identical comment-only rebuilt binary; original bytes restored before execution, no behavior change. Additional receipts `c01-m1a-selected-execution-2_20261031T114857545Z` and `-3_20261031T114915758Z`. Expensive oracle width-change validation (~2.72/2.63s for10k rows) and repeated full-fixture construction (~.35s) identified; no unsupported optimization claim. All owned processes retired with output drained; only intentional ledger diff remains. M1-A acceptance met.
+
+### Bounded C01 remaining plan
+
+M1-B: assess measured root compilation without duplicating existing fast-dev profiles/grouped targets/metadata preparation or extracting a crate on size alone. A no-accepted-optimization outcome is allowed and must remain explicit.
+
+M1-C candidate1 (planner handoff): retain a dedicated independent default-font/DPI `egui::Context` inside the test-only reusable eager-oracle cache in `src/gui/render.rs`; reuse its text caches on key misses while recomputing all expected rows. Keep production `state.ctx` independent, full cache key (actions/aliases/path mode/width/style/scale), FreshPerFrame historical mode, all100/1k/10k scenarios, viewport ticks, corruption detection, and complete assertions. Extend existing eager-cache invalidation test to compare reused-context geometry against fresh-context results across changed inputs. No global cache, source ownership migration, worker, dependency, or production shortcut. Relevant tests: existing oracle, `track_c2g_eager_layout_cache_invalidates_changed_inputs`, `track_c2g_validator_rejects_offscreen_geometry_popup_and_painted_row_corruption`, plus four isolated GUI fixtures above. Measure families individually and together at normal concurrency; retain only a gain beyond variation (up to3 samples/condition). Preserve preconstruction shortcut disabling and app-first teardown. Do not extract the small dashboard predicate for marginal fixture savings without a meaningful domain boundary.
