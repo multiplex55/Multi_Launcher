@@ -21,6 +21,10 @@ B5 predecessor: [B4 to B5](stages/G08-history/PREDECESSOR_RECEIPT.json).
 
 B6 predecessor: [B5 to B6](stages/G04/PREDECESSOR_RECEIPT.json).
 
-| B7 codex/linear-07-g07-zip-extraction-20261030 |b00365b30cee011a049fd836260d720372b35f02|in progress|initial HEAD equality and ancestor PASS|
+| B7 codex/linear-07-g07-zip-extraction-20261030 |b00365b30cee011a049fd836260d720372b35f02|ee59a328a490b73589243e7c1acdb58fb763055b|M0/M3 pushed; ancestor PASS|
 
 B7 predecessor: [B6 to B7](stages/G07/PREDECESSOR_RECEIPT.json).
+
+| B8 codex/linear-08-g08-recipes-policy-20261030 |ee59a328a490b73589243e7c1acdb58fb763055b|in progress|initial HEAD equality and ancestor PASS|
+
+B8 predecessor: [B7 to B8](stages/G08-recipes/PREDECESSOR_RECEIPT.json).
