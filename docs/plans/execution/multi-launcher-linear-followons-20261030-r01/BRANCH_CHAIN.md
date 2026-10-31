@@ -12,7 +12,7 @@ One straight chain from fetched master. Each first stage commit has the exact pr
 |B6|codex/linear-06-g04-screenshot-native-20261030|0bc964572f38c7b18cc790e7fa9da0f48df469ef|b00365b30cee011a049fd836260d720372b35f02|pushed; PASS|
 |B7|codex/linear-07-g07-zip-extraction-20261030|b00365b30cee011a049fd836260d720372b35f02|ee59a328a490b73589243e7c1acdb58fb763055b|pushed; PASS|
 |B8|codex/linear-08-g08-recipes-policy-20261030|ee59a328a490b73589243e7c1acdb58fb763055b|4bc5c4b156936135c0d3f5421512a7ceeb57b4b3|pushed; PASS|
-|B9|codex/linear-09-final-review-20261030|4bc5c4b156936135c0d3f5421512a7ceeb57b4b3|pending B9 close|B9 push pending; PASS|
+|B9|codex/linear-09-final-review-20261030|4bc5c4b156936135c0d3f5421512a7ceeb57b4b3|pending publication close|review checkpoint89a345d9 pushed; PASS|
 
 [Machine proof](stages/B09-final/BRANCH_PROOF.json), [B9 predecessor receipt](stages/B09-final/PREDECESSOR_RECEIPT.json). Closing B9 SHA is reported by the Git ref/PR receipt after commit; this file cannot contain its own containing commit SHA. Historical predecessor receipts are retained under each stage.
 

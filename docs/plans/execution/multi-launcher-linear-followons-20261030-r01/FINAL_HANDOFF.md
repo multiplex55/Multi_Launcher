@@ -1,6 +1,6 @@
 # Final handoff
 
-The bounded follow-on attempts are finished. **No new production or test source is accepted.** Existing accepted behavior remains at master `f28355df5e210cfc1633284b0b80c7f156090245`. Four candidates (14 owner/path entries over12 physical paths) are preserved as exact evidence and excluded from production. B9 review/publication remains pending at this snapshot.
+The bounded follow-on attempts are finished. **No new production or test source is accepted.** Existing accepted behavior remains at master `f28355df5e210cfc1633284b0b80c7f156090245`. Four candidates (14 owner/path entries over12 physical paths) are preserved as exact evidence and excluded from production. Independent cumulative review ACCEPTED at89a345d9; actual PR publication remains pending at this snapshot.
 
 | Stage | Verification actually performed | Result / not run |
 |---|---|---|
