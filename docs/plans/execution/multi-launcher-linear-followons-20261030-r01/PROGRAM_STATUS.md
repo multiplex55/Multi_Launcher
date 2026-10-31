@@ -1,21 +1,20 @@
 # Program status
 
-Program: multi-launcher-linear-followons-20261030-r01
-Run-start fetched origin/master: f28355df5e210cfc1633284b0b80c7f156090245
-Active branch: codex/linear-08-g08-recipes-policy-20261030
-State: B8 recipe M0 DEFERRED_DEPENDENCY; B7 docs-only close ee59a328 pushed. New accepted source0.
-Next: B8 docs-only review/close/push, then B9 cumulative review/one PR.
+Program: `multi-launcher-linear-followons-20261030-r01`
+Run-start and freshly fetched master: `f28355df5e210cfc1633284b0b80c7f156090245`.
+Active branch: `codex/linear-09-final-review-20261030`, created at exact B8 closing `4bc5c4b156936135c0d3f5421512a7ceeb57b4b3`.
+State: B1-B8 truthfully dispositioned and pushed; B9 cumulative review and one PR pending. New accepted source: **0**. No active source writer, Cargo process or native scenario.
 
-| Stage | State |
-|---|---|
-| B1 G02 | NATIVE_PROOF_DEFERRED;19run15pass4fail; OS5 at C:/Users/Jay; M1-B NOT_RUN; all5candidate paths excluded |
-| B2 G05 | NATIVE_PROOF_DEFERRED;4run3pass1fail; no actual pending read/cancel; N1-N3 NOT_RUN; refusals intact |
-| B3 G03 | DEFERRED_DEPENDENCY; G02 native M1-A not accepted and M1-B NOT_RUN; no source/tests |
-| B4 G06 | NATIVE_PROOF_DEFERRED; exact current build passed, no supported owned window after one recovery; UI NOT_RUN |
-| B5 G08 history | FAILED_VERIFICATION; final preparation TIMEOUT, no15run; all5candidate paths excluded |
-| B6 G04 | NATIVE_PROOF_DEFERRED; mandatory secondary-drag/clipboard API absent; no build/launch |
-| B7 G07 | FAILED_VERIFICATION; final preparation TIMEOUT, no12run; all3source excluded |
-| B8 recipes | DEFERRED_DEPENDENCY; History source/test acceptance missing; R0/R1 NOT_RUN |
-| B9 final review/PR | pending |
+| Stage | Final disposition | Evidence and limit |
+|---|---|---|
+| B1 G02 Table publication | NATIVE_PROOF_DEFERRED |19 run,15 pass,4 fail; OS5 at C:/Users/Jay before CREATE_NEW; M1-B not run;5 source paths excluded|
+| B2 G05 Hot Folder | NATIVE_PROOF_DEFERRED |4 run,3 pass,1 fail; read completed naturally, no actual pending/cancel proof; N1-N3 not run; refusal intact|
+| B3 G03 full-file Table | DEFERRED_DEPENDENCY |entire G02 contract unaccepted; no source/tests|
+| B4 G06 Jump | NATIVE_PROOF_DEFERRED |exact build passed; no supported owned window after one recovery; UI/Save/focus not run|
+| B5 G08 History | FAILED_VERIFICATION |final preparation timeout; no qualifying inventory/15-case run;5 source paths excluded|
+| B6 G04 Screenshot | NATIVE_PROOF_DEFERRED |mandatory secondary-drag/clipboard API absent; stopped before build/launch|
+| B7 G07 ZIP | FAILED_VERIFICATION |final preparation timeout; no qualifying inventory/12-case run or fresh native observation;3 source paths excluded|
+| B8 G08 recipes | DEFERRED_DEPENDENCY |History unaccepted; R0/R1 not run; no policy/source change|
+| B9 review/PR | IN_PROGRESS |source/branch/artifact reconciliation prepared; independent cumulative review and PR pending|
 
-Source, tests, native effects and static review remain separate. [Baseline](SOURCE_BASELINE.md), [chain](BRANCH_CHAIN.md), [manifest](ACCEPTED_SOURCE_MANIFEST.md), [integration status](INTEGRATION_STATUS.md).
+[Manifest](ACCEPTED_SOURCE_MANIFEST.md), [branch chain](BRANCH_CHAIN.md), [verification summary](FINAL_HANDOFF.md), [single human review checklist](MANUAL_REVIEW_CHECKLIST.md). Program completion with limitations requires final independent acceptance and an actual unmerged PR publication receipt.

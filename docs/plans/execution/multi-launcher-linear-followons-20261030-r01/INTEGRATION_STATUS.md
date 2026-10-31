@@ -1,15 +1,5 @@
-# Integration status index
+# Integration status
 
-Authoritative [PROGRAM_STATUS](PROGRAM_STATUS.md). B1 G02 f26ba48e, B2 G05 c6019ac5, B3 G03 5638e107 and B4 G06 16564925 closing commits pushed. New accepted source0.
+B1-B8 final dispositions are independently reviewed and pushed. All attempted new source is excluded; new accepted source0. B9 created from exact B8 closing4bc5c4b156936135c0d3f5421512a7ceeb57b4b3; refreshed origin/master unchanged atf28355df. Cumulative documentation review and one PR are pending.
 
-B5 History: failed qualifying preparation, exact candidate preserved/excluded, production restored to run-start source. Docs-only review/M3push pending. [Verification](stages/G08-history/VERIFICATION.md). Next B6 from exact B5 closing SHA; recipes depend on unaccepted History.
-
-Earlier native limits: [G06](stalls/G06-native-20261031T020638Z.md). No native feature activation inferred from deterministic/static evidence.
-
-B5 [stop report](stalls/G08-history-verification-20261031T030129Z.md).
-
-B6 screenshot NATIVE_PROOF_DEFERRED at preflight, no build/launch/source; [stop](stalls/G04-capability-20261031T030513Z.md), [verification](stages/G04/VERIFICATION.md).
-
-B7 ZIP FAILED_VERIFICATION, exact candidate excluded, no native run. [Stop](stalls/G07-verification-20261031T035252Z.md), [verification](stages/G07/VERIFICATION.md). Next B8 dependency-only decision and B9.
-
-B8 recipes DEFERRED_DEPENDENCY, no source/R0/Cargo. [Stop](stalls/G08-recipes-dependency-20261031T035554Z.md), [verification](stages/G08-recipes/VERIFICATION.md). Next B9 review/one PR.
+Authoritative [program status](PROGRAM_STATUS.md), [branch chain](BRANCH_CHAIN.md), [manifest](ACCEPTED_SOURCE_MANIFEST.md), [final handoff](FINAL_HANDOFF.md), [single review checklist](MANUAL_REVIEW_CHECKLIST.md). Exact per-stage stop reports remain under stalls/ and are linked from stage verification records. No automatic merge or further source attempt.

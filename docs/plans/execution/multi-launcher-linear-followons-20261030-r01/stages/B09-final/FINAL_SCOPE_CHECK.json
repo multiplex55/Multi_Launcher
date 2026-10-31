@@ -1,0 +1,53 @@
+{
+  "utc": "2026-10-31T04:01:50.263437+00:00",
+  "checked_head": "4bc5c4b156936135c0d3f5421512a7ceeb57b4b3",
+  "run_start_master": "f28355df5e210cfc1633284b0b80c7f156090245",
+  "typed_json_parsed": 64,
+  "raw_json_exceptions": [
+    {
+      "path": "stages/G05/roles/implementer/verification/n0-r1/list.stdout.json",
+      "reason": "Raw empty failed-command stdout, not typed JSON",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "relative_markdown_links_checked": 111,
+  "invalid_json_or_links": [],
+  "all_markdown_utf8": true,
+  "cumulative_committed_changed_paths": 168,
+  "all_committed_changes_under_execution_root": true,
+  "production_source_manifest_config_parity": true,
+  "untracked_source_paths": [],
+  "excluded_new_modules_absent": true,
+  "patches": [
+    {
+      "owner": "G02",
+      "patch": "stages/G02/UNACCEPTED_SOURCE.patch.gz",
+      "gzip_sha256": "1aadc2f2fae25712ed3026c3ea9bd132620c8c6c67bd98934a58f67d2eb40e97",
+      "raw_sha256": "bfb32591a85b0637efffc762fb738756c20878f87ffecf2ffd6c1e8535d1fcb0",
+      "reapply_check": true
+    },
+    {
+      "owner": "G05",
+      "patch": "stages/G05/roles/implementer/verification/n0-r1/candidate-source.patch.gz",
+      "gzip_sha256": "61c800a75af0d837eab69277a00c4b4a67e859ccae38670a6c25a25af67e8328",
+      "raw_sha256": "c3232d033d03f369946d74e928bab903c9d0c5ce40319bc6edf8bc921468f4ef",
+      "reapply_check": true
+    },
+    {
+      "owner": "History",
+      "patch": "stages/G08-history/UNACCEPTED_SOURCE.patch.gz",
+      "gzip_sha256": "0260e88a6cf198d48680df3a20448193d50ca810c4a3b3eb7145caf3706cc05c",
+      "raw_sha256": "7152bf437e83d265137de6860aa42ed6fd94ef83ecd7f9b1781c0f191038590f",
+      "reapply_check": true
+    },
+    {
+      "owner": "G07",
+      "patch": "stages/G07/UNACCEPTED_SOURCE.patch.gz",
+      "gzip_sha256": "7ddb45f54619e6915d49b1cf3a1e49b881d64ea70f186dac805aa1057c46cdb5",
+      "raw_sha256": "b1e3516612a5bde33b11e1462cecabf8d8de4d12e26d94f41b6aebb8e0cbdd60",
+      "reapply_check": true
+    }
+  ],
+  "checks": "READ_ONLY_SCOPE_CHECKS_PASSED; not Cargo/native/feature acceptance",
+  "review_status": "pending"
+}

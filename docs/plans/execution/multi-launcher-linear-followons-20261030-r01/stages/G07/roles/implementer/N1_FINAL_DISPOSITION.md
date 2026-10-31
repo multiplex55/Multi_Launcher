@@ -12,7 +12,7 @@ Base HEAD: `d62ac109d27c2810ba097c04cae562185ee2c0f7`.
 | `src/archive/preparation.rs` | `553495e03d202f4065f81910b17f861a75066fa1ce5e00867626668093384836` | `8c657ec60557ac37252ff457184f7bb37d0c5d0f` |
 | `src/archive/mod.rs` | `35d434dad9c45353f0f6b311cbccff42cd469ca48ed826ff4786e5a537041098` | `ba84fd5ca01d55bee053a1c927cc0165612efb6c` |
 
-All three candidate hashes match the last list supervisor's before/after receipt. The parent verified candidate gzip preservation and patch reverse-check, then restored `src/file_operations.rs` and `src/archive/mod.rs` to M0 and removed the task-created preparation module. Current workspace HEAD is still `d62ac109d27c2810ba097c04cae562185ee2c0f7`; current `file_operations.rs` SHA-256 is `b88bd57c493406acbdd39681782637890cc0334e02053fb57ced024a53bd814a` (baseline blob `b7d67bf4d49f81a8c4492991a95892a8dda4835b`), `src/archive/preparation.rs` is absent, and `src/archive/mod.rs` is baseline SHA-256 `6122c11351ad17ae64a109a8b21743d038968f5228a7761dd82cfcec0a97528a` (blob `267a87a87552d63c5f8c67d76448a43c01eeccee`).
+All three candidate hashes match the last list supervisor's before/after receipt. The parent verified candidate gzip preservation and patch reverse-check, then restored `src/file_operations.rs` and `src/archive/mod.rs` to M0 and removed the task-created preparation module. At role handoff before the B7 closing commit, workspace HEAD was `d62ac109d27c2810ba097c04cae562185ee2c0f7`; current `file_operations.rs` SHA-256 is `b88bd57c493406acbdd39681782637890cc0334e02053fb57ced024a53bd814a` (baseline blob `b7d67bf4d49f81a8c4492991a95892a8dda4835b`), `src/archive/preparation.rs` is absent, and `src/archive/mod.rs` is baseline SHA-256 `6122c11351ad17ae64a109a8b21743d038968f5228a7761dd82cfcec0a97528a` (blob `267a87a87552d63c5f8c67d76448a43c01eeccee`).
 
 ## Bounded list attempts
 
@@ -22,7 +22,7 @@ All commands used the same exact packet filter and `cargo nextest list -p multi_
 2. Corrected list: PID `4140`, start `2026-10-31T03:40:08.3711019+00:00`, elapsed `114.438s` / cap `600s`, direct exit `101`, streams drained. Stdout was empty (same SHA-256); stderr SHA-256 `fdfe1b1776961e22c0ca5fa1e7596c0110f79e2dfce7ccb5169f44638a0230aa`. First remaining compiler diagnostic was E0282 for the archive directory-chain vector.
 3. Final correction list: PID `39128`, start `2026-10-31T03:42:50.4047648+00:00`, effective cap `485.5s` after `114.438s` prior correction-command time, supervisor elapsed `486.248s`, timeout disposition, direct exit reported `-1`, streams drained. `Process.Kill(true)` was invoked and returned without exception; descendant status remains UNVERIFIED. Stdout was empty (same SHA-256); stderr SHA-256 `46348c252a8d518e3209fc8b8aeba82c132720135747fa6a1973d63f0f771b5e`. Stderr ended after `Compiling multi_launcher` with warnings and no reported compiler error before the cap.
 
-The remaining correction budget calculation was `600.000s - 114.438s = 485.562s`; the final effective cap was set to `485.5s`. Configured/effective sum was `599.938s`. Recorded supervisor elapsed including bounded stop/drain was `600.686s` across the two correction attempts, `0.686s` beyond that sum. No claim is made that the child compiler tree was independently absent.
+The remaining correction budget calculation was `600.000s - 114.438s = 485.562s`; the final effective cap was set to `485.5s`. Configured/effective sum was `599.938s`. Recorded supervisor elapsed including bounded stop/drain was `600.686s` across the two correction attempts, `0.686s` beyond the 600s aggregate allowance (`0.748s` beyond the configured/effective sum). No claim is made that the child compiler tree was independently absent.
 
 ## Selection and fixtures
 
@@ -30,4 +30,4 @@ No Nextest JSON inventory was emitted, so the packet's exact 12 nonignored names
 
 The owned `target/productivity_expansion/archive_native` root contained only the three empty list stdout files at final inspection; the G07 native tests did not execute and created no test fixtures.
 
-Known direct PIDs `34332`, `4140`, and `39128` were absent on exact-PID checks after their owned supervisors drained. Raw stderr logs and byte-exact gzip copies are retained with hashes in `N1_FINAL_DISPOSITION.json`. No source acceptance claim is made.
+Known direct PIDs `34332`, `4140`, and `39128` were absent on exact-PID checks after their owned supervisors drained. Byte-exact stderr gzip copies and ignored raw copies are retained; `RAW_LOG_PRESERVATION.json` maps the original capture paths and hashes. No source acceptance claim is made.
