@@ -5,7 +5,7 @@ use crate::gui::theme::{
     chrome_small_icon_button, effective_color_scheme, resolve_theme, text_style_for_role,
 };
 use crate::settings::{
-    ColorScheme, Settings, ThemeColor, ThemeMode, ThemePreferences, ThemeSettings,
+    ColorScheme, Settings, ThemeColor, ThemeDensity, ThemeMode, ThemePreferences, ThemeSettings,
 };
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -28,6 +28,8 @@ pub struct ThemeSettingsDialogState {
     pub(crate) saw_noninteractive_window_pass: bool,
     #[cfg(test)]
     pub(crate) test_scroll_area_history: Vec<String>,
+    #[cfg(test)]
+    density_option_rects: [egui::Rect; 2],
 }
 
 impl Default for ThemeSettingsDialogState {
@@ -49,6 +51,8 @@ impl Default for ThemeSettingsDialogState {
             saw_noninteractive_window_pass: false,
             #[cfg(test)]
             test_scroll_area_history: Vec::new(),
+            #[cfg(test)]
+            density_option_rects: [egui::Rect::NOTHING; 2],
         }
     }
 }
@@ -817,6 +821,8 @@ fn render_theme_primary_sections(
         state.base_mode_changed(previous_mode);
     }
     ui.separator();
+    changed |= section_density(ui, state);
+    ui.separator();
     changed |= section_presets(ui, state);
 
     let mut scheme = state.effective_scheme(appearance);
@@ -901,6 +907,51 @@ fn section_base_mode(ui: &mut egui::Ui, mode: &mut ThemeMode) -> bool {
         changed |= ui
             .selectable_value(mode, ThemeMode::Custom, "Custom")
             .changed();
+    });
+    changed
+}
+
+fn section_density(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> bool {
+    section_heading(
+        ui,
+        "Interface density",
+        Some("Compact fits more controls. Comfortable adds spacing; text size is separate."),
+    );
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        let compact = ui.radio_value(
+            &mut state.draft.preferences.density,
+            ThemeDensity::Compact,
+            "Compact",
+        );
+        observe_theme_control(
+            ui,
+            &compact,
+            "theme.density.compact",
+            crate::gui::jump_mode::TargetKind::Selectable,
+        );
+        #[cfg(test)]
+        {
+            state.density_option_rects[0] = compact.rect;
+        }
+        changed |= compact.changed();
+
+        let comfortable = ui.radio_value(
+            &mut state.draft.preferences.density,
+            ThemeDensity::Comfortable,
+            "Comfortable",
+        );
+        observe_theme_control(
+            ui,
+            &comfortable,
+            "theme.density.comfortable",
+            crate::gui::jump_mode::TargetKind::Selectable,
+        );
+        #[cfg(test)]
+        {
+            state.density_option_rects[1] = comfortable.rect;
+        }
+        changed |= comfortable.changed();
     });
     changed
 }
@@ -1489,6 +1540,72 @@ mod tests {
         path.to_str().unwrap().to_owned()
     }
 
+    fn render_theme_sections_frame(
+        ctx: &egui::Context,
+        state: &mut ThemeSettingsDialogState,
+        width: f32,
+        frame: usize,
+        events: Vec<egui::Event>,
+    ) -> (bool, egui::Rect) {
+        let mut changed = false;
+        let mut clip_rect = egui::Rect::NOTHING;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 700.0),
+                )),
+                time: Some(frame as f64 / 60.0),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(width);
+                clip_rect = ui.clip_rect();
+                changed = render_theme_sections(ui, state, SystemAppearance::Dark);
+            },
+        );
+        output.drop_without_applying_deltas();
+        (changed, clip_rect)
+    }
+
+    fn click_density_option(
+        ctx: &egui::Context,
+        state: &mut ThemeSettingsDialogState,
+        frame: &mut usize,
+        option: usize,
+    ) -> bool {
+        *frame += 1;
+        let _ = render_theme_sections_frame(ctx, state, 386.0, *frame, Vec::new());
+        let point = state.density_option_rects[option].center();
+        let mut changed = false;
+        for events in [
+            vec![egui::Event::PointerMoved(point)],
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            *frame += 1;
+            let (frame_changed, _) = render_theme_sections_frame(ctx, state, 386.0, *frame, events);
+            changed |= frame_changed;
+            if frame_changed {
+                state.dirty = true;
+                crate::gui::theme::publish_preview(ctx, &state.draft);
+            }
+        }
+        changed
+    }
+
     #[test]
     fn theme_editor_reflows_without_mutating_the_draft_and_keeps_actions_visible() {
         assert!(theme_editor_uses_two_columns(THEME_TWO_COLUMN_MIN_WIDTH));
@@ -1749,6 +1866,124 @@ mod tests {
         assert_eq!(ctx.theme(), egui::Theme::Light);
         assert_eq!(state.draft.mode, ThemeMode::Light);
         assert_eq!(Settings::load(&path).unwrap().theme.mode, ThemeMode::Light);
+    }
+
+    #[test]
+    fn density_selector_publishes_saves_cancels_resets_and_loads_legacy_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = Settings::default();
+        stored.theme.mode = ThemeMode::Dark;
+        stored.theme.preferences.typography_scale = 2.0;
+        let path = settings_path(&directory, &stored);
+
+        let ctx = egui::Context::default();
+        crate::gui::theme::initialize_runtime(&ctx, &stored.theme);
+        let mut state = ThemeSettingsDialogState::default();
+        state.begin_session(&ctx, &path);
+        assert_eq!(state.draft.preferences.density, ThemeDensity::Compact);
+
+        let initial_metrics = crate::gui::theme::resolved_for_current_context(&ctx)
+            .unwrap()
+            .metrics_identity;
+        let initial_text_size =
+            ctx.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size;
+        assert_eq!(initial_text_size, 28.0);
+
+        let (changed, clip_rect) =
+            render_theme_sections_frame(&ctx, &mut state, 386.0, 1, Vec::new());
+        assert!(!changed);
+        assert!(
+            state
+                .density_option_rects
+                .iter()
+                .all(|rect| rect.is_positive() && clip_rect.contains_rect(*rect))
+        );
+        assert!(!state.density_option_rects[0].intersects(state.density_option_rects[1]));
+
+        let mut frame = 1;
+        assert!(click_density_option(&ctx, &mut state, &mut frame, 1));
+        let comfortable_metrics = crate::gui::theme::resolved_for_current_context(&ctx)
+            .unwrap()
+            .metrics_identity;
+        assert_ne!(comfortable_metrics, initial_metrics);
+        assert_eq!(state.draft.preferences.density, ThemeDensity::Comfortable);
+        assert_eq!(state.draft.preferences.typography_scale, 2.0);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size,
+            initial_text_size,
+            "changing density keeps the independently selected text size"
+        );
+
+        assert!(click_density_option(&ctx, &mut state, &mut frame, 0));
+        assert_eq!(state.draft.preferences.density, ThemeDensity::Compact);
+        assert_eq!(
+            crate::gui::theme::resolved_for_current_context(&ctx)
+                .unwrap()
+                .metrics_identity,
+            initial_metrics,
+            "returning to Compact reuses its metric identity"
+        );
+        assert!(click_density_option(&ctx, &mut state, &mut frame, 1));
+        assert_eq!(
+            crate::gui::theme::resolved_for_current_context(&ctx)
+                .unwrap()
+                .metrics_identity,
+            comfortable_metrics,
+            "repeated toggles publish the matching metrics identity"
+        );
+
+        state.save_to_path(&ctx, &path).unwrap();
+        let committed = Settings::load(&path).unwrap();
+        assert_eq!(
+            committed.theme.preferences.density,
+            ThemeDensity::Comfortable
+        );
+        assert_eq!(committed.theme.preferences.typography_scale, 2.0);
+        assert_eq!(
+            crate::gui::theme::resolved_for_current_context(&ctx)
+                .unwrap()
+                .metrics_identity,
+            comfortable_metrics
+        );
+
+        state.begin_session(&ctx, &path);
+        assert_eq!(state.draft.preferences.density, ThemeDensity::Comfortable);
+        assert!(click_density_option(&ctx, &mut state, &mut frame, 0));
+        state.end_session(&ctx);
+        assert!(!state.dirty);
+        assert_eq!(
+            crate::gui::theme::resolved_for_current_context(&ctx)
+                .unwrap()
+                .metrics_identity,
+            comfortable_metrics,
+            "Cancel clears the Compact draft preview and restores the saved density"
+        );
+
+        state.begin_session(&ctx, &path);
+        reset_draft_preserving_saved_palettes(&mut state);
+        assert_eq!(state.draft.preferences.density, ThemeDensity::Compact);
+        assert_eq!(state.draft.preferences.typography_scale, 1.0);
+        crate::gui::theme::publish_preview(&ctx, &state.draft);
+        state.reload_from_path(&ctx, &path);
+        assert_eq!(state.draft.preferences.density, ThemeDensity::Comfortable);
+        assert_eq!(state.draft.preferences.typography_scale, 2.0);
+        assert_eq!(
+            crate::gui::theme::resolved_for_current_context(&ctx)
+                .unwrap()
+                .metrics_identity,
+            comfortable_metrics,
+            "reload discards the reset preview and restores persisted preferences"
+        );
+
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy["theme"]["preferences"]
+            .as_object_mut()
+            .unwrap()
+            .remove("density");
+        let legacy_path = directory.path().join("legacy-settings.json");
+        std::fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        state.begin_session(&ctx, legacy_path.to_str().unwrap());
+        assert_eq!(state.draft.preferences.density, ThemeDensity::Compact);
     }
 
     #[test]
