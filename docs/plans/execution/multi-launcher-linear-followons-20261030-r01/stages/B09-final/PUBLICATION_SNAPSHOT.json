@@ -1,0 +1,35 @@
+{
+  "observed_utc": "2026-10-31 04:07:31 UTC",
+  "phase": "PR created; snapshot before final reporting commit",
+  "repository": "multiplex55/Multi_Launcher",
+  "url": "https://github.com/multiplex55/Multi_Launcher/pull/1460",
+  "number": 1460,
+  "state": "open",
+  "merged": false,
+  "draft": false,
+  "mergeable": true,
+  "head": "codex/linear-09-final-review-20261030",
+  "head_sha": "e77d6924388148b84c8836494a525c07817e1af3",
+  "base": "master",
+  "base_sha": "f28355df5e210cfc1633284b0b80c7f156090245",
+  "prospective_github_merge_commit_sha": "6c29d59bc60f9d761295fa3e71eb8833dd57f9a4",
+  "merge_performed": false,
+  "pr_body_sha256": "f31cafb2f30ab0749b0cec9db7a0a958c5b9b292385d2a5caa8314eec385c506",
+  "created_pr_count": 1,
+  "open_pr_preflight": {
+    "pull_requests": []
+  },
+  "statuses": {
+    "statuses": []
+  },
+  "workflow_runs": {
+    "workflow_runs": []
+  },
+  "reviews": {
+    "reviews": []
+  },
+  "ci_interpretation": "UNKNOWN: no checks or workflow runs returned, not PASSED",
+  "formal_review_interpretation": "UNKNOWN: no reviews returned, not approval",
+  "required_review_policy": "UNKNOWN: branch rules are not exposed by these tool results",
+  "closing_commit_note": "This snapshot precedes the final docs-only reporting commit. The live PR/ref and final handoff observation resolve the final SHA; a file cannot embed its own containing commit SHA."
+}

@@ -1,6 +1,6 @@
 # Final handoff
 
-The bounded follow-on attempts are finished. **No new production or test source is accepted.** Existing accepted behavior remains at master `f28355df5e210cfc1633284b0b80c7f156090245`. Four candidates (14 owner/path entries over12 physical paths) are preserved as exact evidence and excluded from production. Independent cumulative review ACCEPTED at89a345d9; actual PR publication remains pending at this snapshot.
+The bounded follow-on attempts are finished. **No new production or test source is accepted.** Existing accepted behavior remains at master `f28355df5e210cfc1633284b0b80c7f156090245`. Four candidates (14 owner/path entries over12 physical paths) are preserved as exact evidence and excluded from production. Independent cumulative review ACCEPTED at89a345d9. [PR #1460](https://github.com/multiplex55/Multi_Launcher/pull/1460) is open and unmerged; all required stages are dispositioned: **PROGRAM_COMPLETE_WITH_LIMITATIONS**.
 
 | Stage | Verification actually performed | Result / not run |
 |---|---|---|
@@ -20,3 +20,5 @@ All recorded direct Cargo/app PIDs were checked absent and recorded output drain
 Evidence caveats are explicit: G05 raw/canonical source line endings and initial receipt enrichment repair; History raw primary timeout flag vs earlier tree-watch enforcement and stricter427s cap; ZIP's0.686s retirement/drain budget overrun; failed parser empty outputs are not inventories. Exact archives/patches/receipt links are in the [manifest](ACCEPTED_SOURCE_MANIFEST.md). No permissions, sharing, guard or privacy workaround enabled unsafe effects.
 
 Next action is one human review of the cumulative documentation PR, without automatic merge. [Checklist](MANUAL_REVIEW_CHECKLIST.md), [canonical future pairs](FOLLOW_ON_CATALOG.md), [branch proof](BRANCH_CHAIN.md). Further implementation is a newly authorized bounded continuation, not an automatic retry of this completed attempt.
+
+Publication: [snapshot](stages/B09-final/PUBLICATION_SNAPSHOT.json) observed head e77d6924388148b84c8836494a525c07817e1af3/base f28355df, mergeable=true, no checks/workflows/reviews returned. CI and formal approval are UNKNOWN; required review rules are not exposed by those results. This snapshot precedes the final docs-only reporting commit; [live B9 ref](https://github.com/multiplex55/Multi_Launcher/tree/codex/linear-09-final-review-20261030) and the PR resolve final head. No merge action was performed.
