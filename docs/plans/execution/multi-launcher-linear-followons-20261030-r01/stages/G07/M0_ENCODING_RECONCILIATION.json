@@ -1,0 +1,11 @@
+{
+  "initial_checkpoint": "c01bc07cdc68327e21ff7fd0999c284dd1211e13",
+  "packet_correction": "b7e216a346f5e66441c27b4a9504da519bc31f96",
+  "invalid_utf8_task_markdown_normalized_from_cp1252": [
+    "PROGRAM_STATUS.md"
+  ],
+  "raw_source_or_log_receipts_modified": false,
+  "application_source_modified": false,
+  "packet_verified_nonempty": true,
+  "source_dispatch": "Only after final corrected ledger commit"
+}
