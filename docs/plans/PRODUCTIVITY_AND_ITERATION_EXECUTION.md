@@ -13,7 +13,7 @@ Started 2026-10-31 in the single existing `G:\Repos\rust\Multi_Launcher` checkou
 | C04 | `feat/utility-ui-usability-20261031` | `feat/diff-text-workflows-20261031` / `d7f00fdfb738b99f3ddc1b9ed8e6658a26174d22` | `9364c1a1b882b1aa82e5051306c276bf201f4ff9` | M0-A complete; M4-A/M4-B implemented_pending_verification (native blocked); M4-C blocked (restore/resize attempt cap) |
 | C05 | `feat/unicode-inspector-20261031` | `feat/utility-ui-usability-20261031` / `39a45573d0dc5021a8fca15e4f580bda8162d58d` | `d2b52b341ed90700fb3b65d9384947fd0a2b0c7a` | partial: M5-A complete; M5-B blocked (themed final-row visibility attempt cap), candidate preserved and absent |
 | C06 | `feat/zip-extraction-20261031` | `feat/unicode-inspector-20261031` / `5640d3754876801d4fc017e1277dfad41f2ce0ea` | `b1619aaf8cc9a6c9b693ad7ef89170ea0e5791d2` | M0-A complete; M6-A blocked; M6-B/C dependent blocked; candidate removed |
-| C07 | `perf/large-data-startup-20261031` | `feat/zip-extraction-20261031` / `c01719d93ef45da341a810b7234e0051ffe4c130` | `63d495aa36a8718042bbe8fdd3302bb8a500067c` | M0-A complete; M7-A assessed_no_accepted_optimization; M7-B/M8-A pending |
+| C07 | `perf/large-data-startup-20261031` | `feat/zip-extraction-20261031` / `c01719d93ef45da341a810b7234e0051ffe4c130` | `63d495aa36a8718042bbe8fdd3302bb8a500067c` | M0-A complete; M7-A assessed_no_accepted_optimization; M7-B complete with native-startup limitation; M8-A pending |
 
 ## C01/M0-A
 
@@ -562,3 +562,21 @@ Disposition: assessed_no_accepted_optimization. Notes disk load dominates this w
 Configured focused review confirmed both workspace/index-config findings resolved and final timestamp/query correction at measurement SHA63F94EBF...9DB30830; no unresolved prior findings. Review was source-only, distinct from above passing execution.
 
 Binary-owned preparation173.352620s passed; inventory exactly3nonignored and execution `c07-m7a-binary-execution_20261031T223219459Z_4bb35d0bb8b34e728417dfef6534c930` passed3/3 (Nextest.048s/runner.808913s), cleanup/drain true. Covers complete acknowledged catalog transfer, empty-root/scan-failure behavior and exact startup owner oracle. It does not execute the historical startup benchmark. Five unchanged library profile/recovery passes and two3-sample measurement runs above are reused explicitly, not inflated into a unique-test aggregate. M7-A scoped verification complete; native full-input-ready remains unverified and no optimization is accepted. Source changes are test-only profile/harness/constructor/history-loader seams plus shared test fixture fallible-cleanup forwarding, with unchanged production behavior. Diff inspected, no obsolete alternate runtime path, no active owned job. M7-A commit/push follows; M7-B retains identical startup workload/source behavior and reuses these three-per-scale measurements rather than exceeding the comparable-sample budget.
+
+### C07 / M7-B final iteration comparison
+
+M7-A checkpoint `0aa782953f98af334832984693f5bcd30ab35ef0`, pushed. M7-B uses that accepted source/fast-dev Windows MSVC toolchain, warmed existing artifacts, same target-first check/preparation and exact six C01 selectors, normal concurrency, productivity100s/test/600s/run. Current history/gui bytes saved before each appended no-op comment and restored under SHA256 guards; final tracked source diff/status clean. GUI comment remained present during preparation/execution as declared controlled metadata, semantically equivalent to restored final source. No historical source blob was restored.
+
+| Whole-command seconds | C01 baseline | Final C07 | Samples/interpretation |
+| --- | --- | --- | --- |
+| Warm no-op check |.908375|.879325|1 each, not a speedup claim|
+| Leaf comment check |17.240388|17.613431|1 each|
+| GUI comment check |14.305147|13.845793|1 each|
+| GUI-edited library test preparation |58.896280|58.612809|1 each|
+| No-op library test preparation |1.702950|1.653780|1 each, not edited compilation|
+| Same six tests median [range] |16.536532 [16.242799–17.516866]|16.163532 [16.123129–16.347564]|3 each; overlapping ranges|
+| Unchanged 100/1000/10000 GUI oracle |15.724/15.753/15.379|15.357/15.368/15.542|3 each; assertions retained|
+
+Final first necessary check-artifact preparation100.846893s passed, separate from warm no-op measurement. First driver stopped BEFORE launching edited stage because required controlled-change ID/path metadata was absent; finally restored source and verified clean. Corrected only external driver metadata/output handling, reused the two successful stages and resumed remaining stages once. Refused input is not a compiler/test failure or accepted measurement. All10actual M7-B receipts exit0, cleanup/drain true, no timeouts; their exact argv/source/changed-path records are indexed by evidence-root `c07-m7b-driver-summary.json`. Edited test preparation58.612809s and no-op1.653780s passed; inventory exactly6nonignored. Three runs each passed6/6;18executions of SAME6cases, no inflated unique coverage. Oracle per-run values above; fixture teardown asserted root_removed/cwd_restored including deliberate unwind. Activation construction327.7384/281.4919/287.5660ms; empty-query329.6713/295.6288/285.0912ms; single-app drops44.0381–47.2207ms, paired-profile drops77.7262–85.5241ms. Constructor/cache/load variance prevents attributing a new optimization. No accepted compile/fixture/GUI speedup and no material measured regression in this selected workload.
+
+M7-A's final small/large three-per-scale startup measurements are reused unchanged: no production/source behavior or workload changed, no fourth sample or repeated native capture attempt. They remain headless action-only and cannot prove normal input-ready/full-startup performance. End-to-end startup regression/gain is unverified. M7-B closes as a completed bounded comparison with that limitation; overall mandatory feature/native blockers keep the Goal partial. No current owned process remains. M8-A current application build, end-only first-party Clippy and final handoff remain.
