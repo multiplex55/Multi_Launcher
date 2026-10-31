@@ -43,6 +43,8 @@ pub mod image_compare_smoke;
 pub mod image_crop_editor;
 mod image_panel;
 mod indexing;
+#[cfg(test)]
+mod m7_startup_measurement;
 mod json_utility_dialog;
 pub(crate) mod jump_mode;
 pub use jump_mode::ui::JumpModeScope;
@@ -3054,6 +3056,44 @@ impl LauncherApp {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             init_policy,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_isolated_for_startup_measurement_at(
+        ctx: &egui::Context,
+        root: &Path,
+        actions: Arc<Vec<Action>>,
+        custom_len: usize,
+        mut settings: Settings,
+        desired_index_config: crate::indexer::coordinator::IndexConfig,
+    ) -> Self {
+        let index_paths = desired_index_config.roots().to_vec();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.index_paths = Some(index_paths.clone());
+        settings.max_indexed_items = desired_index_config.max_items();
+        settings.dashboard.config_path =
+            Some(root.join("dashboard.json").to_string_lossy().into_owned());
+        // This preserves the startup configuration identity without starting
+        // another scan; the already-acknowledged coordinator is installed
+        // after construction by the measurement owner.
+        Self::new_with_policy(
+            ctx,
+            actions,
+            custom_len,
+            PluginManager::new_inert_for_test_at(root),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            Some(index_paths),
+            Some(HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            LauncherInitPolicy::IsolatedTest,
         )
     }
 
