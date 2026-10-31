@@ -8,7 +8,8 @@ Started 2026-10-31 in the single existing `G:\Repos\rust\Multi_Launcher` checkou
 | Category | Branch | Parent branch / tip | Baseline | Status |
 | --- | --- | --- | --- | --- |
 | C01 | `perf/productivity-iteration-20261031` | `master` / `d6541edd5f89c7dc04de8c68b65e2b9247978163` | `a8a6aa8e62012b83f1e99098c442654cb8ef6778` | M0-A/M0-B/M1-A complete; M1-B/M1-C assessed_no_accepted_optimization |
-| C02–C07 | Not started | Must use immediately preceding actual final tip | pending | pending |
+| C02 | `feat/mkmacro-direct-open-20261031` | `perf/productivity-iteration-20261031` / `f0fb5adede067774ae06752fc3573c6724100fb5` | Recorded after commit | M0-A in_progress |
+| C03–C07 | Not started | Must use immediately preceding actual final tip | pending | pending |
 
 ## C01/M0-A
 
@@ -87,3 +88,9 @@ Comparable same-six-test candidate execution receipts: `c01-m1c-candidate1-execu
 Planner independently assessed measurements: runner median difference.387541s is below baseline1.274067s spread; oracle median difference.453s is below combined observed spreads.530s, with overlapping samples. Gain beyond variation is inconclusive. One candidate, no fourth sample or unjustified second candidate. Existing fixture setup/lifecycle is already isolated and constructor-dominated; no additional safe fixture improvement accepted. Extra standalone-family runs were unnecessary after rejection; candidate is not promoted on correctness alone.
 
 Preserved candidate patch at evidence root `candidate1-unaccepted.diff` (candidate blob `73c608e70f60c51cdb52298d53905877fcb03d13`), then restored **only** this task's candidate file. Verified working and HEAD render blobs both `178f7b20c2f7a49d2bcbae2ee68ee7c6ee83391b`; no application/test source changes remain. Baseline six-test behavior evidence is reused for unchanged accepted source, not represented as a rerun. No application/native build required for this rejected test-only candidate. C01 closes as a bounded assessment with useful baselines, preserved isolation, and **no delivered compile/fixture/GUI speedup**. Overall optimization fulfillment remains partial. Category independent review and actual closing tip are recorded at successor bootstrap; current intended diff is ledger only.
+
+## C02/M0-A
+
+C01 final tip `f0fb5adede067774ae06752fc3573c6724100fb5`, checkpoint `docs: [C01/M1-C] close bounded GUI and fixture optimization assessment`, pushed and clean. Independent configured reviewer inspected this exact revision, receipts and ancestry: **no substantive findings**, honest no-speedup assessment confirmed; no review builds/mutations. All17 owned measurement receipts show cleanup/output drain verified; first runner failure preserved. No live owned jobs remain. C01 final intended diff is ledger only; independent optimization work may safely continue.
+
+Transition read-only Git inspection confirmed clean predecessor, upstream equals local tip, same verified origin/integration branch, no conflicting ancestry or user files. Instructions/config unchanged (C01 accepted diff only ledger), reused previously read current instructions. New unique C02 branch created with `git switch -c feat/mkmacro-direct-open-20261031 f0fb5ade...`; initial HEAD equals exact parent. No worktrees, auxiliary checkout, merge/rebase/cherry-pick, or uncommitted partial work crossed the boundary. This task-owned ledger baseline precedes all C02 source work. Baseline SHA/direct-parent proof and initial push result follow in next ordinary update. M2-A/M2-B pending; no direct-open behavior claimed yet.
