@@ -11,6 +11,7 @@ use crate::gui::jump_mode::{
     TargetKind,
     ui::{FocusDirective, JumpModeScope, RegistrationResult},
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::settings::NoteViewMode;
 use eframe::egui;
@@ -1370,211 +1371,226 @@ impl SettingsEditor {
             .resizable(true)
             .default_size(Self::settings_window_default_size(ctx))
             .min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                #[cfg(test)]
-                {
-                    test_window_state =
-                        Some((ui.is_sizing_pass(), ui.is_visible(), ui.is_enabled()));
-                }
-                let settings_content_height = Self::settings_content_height(
-                    ui.available_height(),
-                    settings_footer_reserved_height(ui),
-                );
-                egui::ScrollArea::vertical()
-                    .min_scrolled_height(0.0)
-                    .max_height(settings_content_height)
-                    .show(ui, |ui| {
-                        let activated_result = self.render_settings_search(
-                            ctx,
-                            ui,
-                            app,
-                            settings_owner_instance,
-                            jump_mode_active,
-                            first_ui_pass,
-                            &mut jump_targets,
-                        );
-                        if let Some(control_id) = activated_result
-                            && let Some(entry) = self.search_catalog.entry(&control_id).cloned()
-                        {
-                            reveal_section = Some(entry.section.clone());
-                            self.activate_settings_search_result(
+            .show_utility(
+                ctx,
+                "settings",
+                egui::Id::new("Settings"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from(Self::settings_window_default_size(ctx)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT),
+                |ui| {
+                    #[cfg(test)]
+                    {
+                        test_window_state =
+                            Some((ui.is_sizing_pass(), ui.is_visible(), ui.is_enabled()));
+                    }
+                    let settings_content_height = Self::settings_content_height(
+                        ui.available_height(),
+                        settings_footer_reserved_height(ui),
+                    );
+                    egui::ScrollArea::vertical()
+                        .min_scrolled_height(0.0)
+                        .max_height(settings_content_height)
+                        .show(ui, |ui| {
+                            let activated_result = self.render_settings_search(
+                                ctx,
+                                ui,
                                 app,
                                 settings_owner_instance,
-                                entry,
+                                jump_mode_active,
+                                first_ui_pass,
+                                &mut jump_targets,
                             );
-                        }
-                        if let Some(observer) = jump_targets.navigation_observer.as_ref()
-                            && !self.settings_navigation_observer_is_authoritative(observer)
-                        {
-                            observer.invalidate();
-                        }
-
-                        let top_level_expand_request = ui
-                            .horizontal(|ui| {
-                                let mut request = None;
-                                let expand = jump_targets.button(
-                                    ui,
-                                    setting_ids::SECTIONS_EXPAND_ALL,
-                                    "Expand all",
-                                );
-                                if jump_targets.clicked(&expand) {
-                                    request = Some(true);
-                                }
-                                let collapse = jump_targets.button(
-                                    ui,
-                                    setting_ids::SECTIONS_COLLAPSE_ALL,
-                                    "Collapse all",
-                                );
-                                if jump_targets.clicked(&collapse) {
-                                    request = Some(false);
-                                }
-                                request
-                            })
-                            .inner;
-                        if let Some(open) = top_level_expand_request {
-                            set_all_settings_sections_open(ui, open);
-                        }
-
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::Hotkeys,
-                            reveal_request(
-                                TopLevelSettingsSection::Hotkeys,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_hotkey_section(ui, app, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::PasteSequences,
-                            reveal_request(
-                                TopLevelSettingsSection::PasteSequences,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| {
-                                ui.label(app.paste_sequence_shortcut_summary());
-                                ui.separator();
-                                self.render_paste_sequence_section(ui, targets);
-                            },
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::LauncherWindow,
-                            reveal_request(
-                                TopLevelSettingsSection::LauncherWindow,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_launcher_window_section(ui, app, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::SearchResults,
-                            reveal_request(
-                                TopLevelSettingsSection::SearchResults,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_search_results_section(ui, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::ActionsFeedback,
-                            reveal_request(
-                                TopLevelSettingsSection::ActionsFeedback,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_actions_safety_feedback_section(ui, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::Dashboard,
-                            reveal_request(
-                                TopLevelSettingsSection::Dashboard,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_dashboard_section(ui, app, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::Radial,
-                            reveal_request(
-                                TopLevelSettingsSection::Radial,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_radial_section(ui, app, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::Plugins,
-                            reveal_request(
-                                TopLevelSettingsSection::Plugins,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| {
-                                self.render_plugin_sections(
-                                    ui,
+                            if let Some(control_id) = activated_result
+                                && let Some(entry) = self.search_catalog.entry(&control_id).cloned()
+                            {
+                                reveal_section = Some(entry.section.clone());
+                                self.activate_settings_search_result(
                                     app,
-                                    targets,
-                                    reveal_section.as_ref(),
-                                )
-                            },
-                        );
-                        self.expand_request = None;
-                    });
+                                    settings_owner_instance,
+                                    entry,
+                                );
+                            }
+                            if let Some(observer) = jump_targets.navigation_observer.as_ref()
+                                && !self.settings_navigation_observer_is_authoritative(observer)
+                            {
+                                observer.invalidate();
+                            }
 
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    let pending = app.settings_save_pending();
-                    let save = ui.add_enabled(!pending, egui::Button::new("Save"));
-                    let save = crate::gui::theme::widgets::with_button_emphasis(
-                        ui,
-                        save,
-                        crate::gui::theme::widgets::ButtonEmphasis::Primary,
-                    );
-                    jump_targets.response(
-                        ui,
-                        &save,
-                        setting_ids::FOOTER_SAVE,
-                        "Save",
-                        TargetKind::Button,
-                    );
-                    if jump_targets.clicked(&save) {
-                        self.save_settings(ctx, app);
-                    }
-                    let cancel_button = ui.add_enabled(!pending, egui::Button::new("Cancel"));
-                    jump_targets.register(
-                        ui,
-                        &cancel_button,
-                        setting_ids::FOOTER_CANCEL,
-                        "Cancel",
-                        TargetKind::Button,
-                    );
-                    if jump_targets.clicked(&cancel_button) {
-                        cancel = true;
-                    }
-                    if app.settings_save_reconciliation_required() {
-                        ui.label("Hotkey state needs reconciliation; saving is disabled.");
-                    } else if pending {
-                        ui.label("Saving settings…");
-                    }
-                });
-            });
+                            let top_level_expand_request = ui
+                                .horizontal(|ui| {
+                                    let mut request = None;
+                                    let expand = jump_targets.button(
+                                        ui,
+                                        setting_ids::SECTIONS_EXPAND_ALL,
+                                        "Expand all",
+                                    );
+                                    if jump_targets.clicked(&expand) {
+                                        request = Some(true);
+                                    }
+                                    let collapse = jump_targets.button(
+                                        ui,
+                                        setting_ids::SECTIONS_COLLAPSE_ALL,
+                                        "Collapse all",
+                                    );
+                                    if jump_targets.clicked(&collapse) {
+                                        request = Some(false);
+                                    }
+                                    request
+                                })
+                                .inner;
+                            if let Some(open) = top_level_expand_request {
+                                set_all_settings_sections_open(ui, open);
+                            }
+
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::Hotkeys,
+                                reveal_request(
+                                    TopLevelSettingsSection::Hotkeys,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_hotkey_section(ui, app, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::PasteSequences,
+                                reveal_request(
+                                    TopLevelSettingsSection::PasteSequences,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| {
+                                    ui.label(app.paste_sequence_shortcut_summary());
+                                    ui.separator();
+                                    self.render_paste_sequence_section(ui, targets);
+                                },
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::LauncherWindow,
+                                reveal_request(
+                                    TopLevelSettingsSection::LauncherWindow,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_launcher_window_section(ui, app, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::SearchResults,
+                                reveal_request(
+                                    TopLevelSettingsSection::SearchResults,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_search_results_section(ui, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::ActionsFeedback,
+                                reveal_request(
+                                    TopLevelSettingsSection::ActionsFeedback,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| {
+                                    self.render_actions_safety_feedback_section(ui, targets)
+                                },
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::Dashboard,
+                                reveal_request(
+                                    TopLevelSettingsSection::Dashboard,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_dashboard_section(ui, app, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::Radial,
+                                reveal_request(
+                                    TopLevelSettingsSection::Radial,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_radial_section(ui, app, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::Plugins,
+                                reveal_request(
+                                    TopLevelSettingsSection::Plugins,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| {
+                                    self.render_plugin_sections(
+                                        ui,
+                                        app,
+                                        targets,
+                                        reveal_section.as_ref(),
+                                    )
+                                },
+                            );
+                            self.expand_request = None;
+                        });
+
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        let pending = app.settings_save_pending();
+                        let save = ui.add_enabled(!pending, egui::Button::new("Save"));
+                        let save = crate::gui::theme::widgets::with_button_emphasis(
+                            ui,
+                            save,
+                            crate::gui::theme::widgets::ButtonEmphasis::Primary,
+                        );
+                        jump_targets.response(
+                            ui,
+                            &save,
+                            setting_ids::FOOTER_SAVE,
+                            "Save",
+                            TargetKind::Button,
+                        );
+                        if jump_targets.clicked(&save) {
+                            self.save_settings(ctx, app);
+                        }
+                        let cancel_button = ui.add_enabled(!pending, egui::Button::new("Cancel"));
+                        jump_targets.register(
+                            ui,
+                            &cancel_button,
+                            setting_ids::FOOTER_CANCEL,
+                            "Cancel",
+                            TargetKind::Button,
+                        );
+                        if jump_targets.clicked(&cancel_button) {
+                            cancel = true;
+                        }
+                        if app.settings_save_reconciliation_required() {
+                            ui.label("Hotkey state needs reconciliation; saving is disabled.");
+                        } else if pending {
+                            ui.label("Saving settings…");
+                        }
+                    });
+                },
+            );
         #[cfg(test)]
         let navigation_outcome = jump_targets
             .navigation_observer

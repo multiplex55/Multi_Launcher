@@ -1,6 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::gui::Panel;
 use crate::gui::theme::widgets::{ButtonEmphasis, with_button_emphasis};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::note::{assets_dir, unused_assets};
 use eframe::egui;
 
@@ -67,100 +68,117 @@ impl UnusedAssetsDialog {
         #[cfg(test)]
         let mut last_asset_rect = None;
         let window_output = egui::Window::new("Unused Note Assets")
-            .open(&mut open_flag)
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
             .max_height(ctx.content_rect().height().max(1.0))
             .default_size((300.0, 200.0))
-            .show(ctx, |ui| {
-                let footer_height =
-                    unused_assets_footer_reserved_height(ui, &["Delete Selected", "Close"]);
-                let list_height = (ui.available_height() - footer_height).max(0.0);
-                let _list = egui::ScrollArea::vertical()
-                    .id_salt("unused_note_assets_list")
-                    .auto_shrink([false, false])
-                    .min_scrolled_height(0.0)
-                    .max_height(list_height)
-                    .show(ui, |ui| {
-                        if self.assets.is_empty() {
-                            ui.label("No unused assets found");
-                        } else {
-                            for (idx, asset) in self.assets.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    let _selection = ui.checkbox(&mut self.selected[idx], "");
-                                    #[cfg(test)]
-                                    if idx == 0 {
-                                        first_selection = Some((_selection.id, _selection.rect));
-                                    }
-                                    let label = ui.add(
-                                        egui::Label::new(asset).wrap_mode(egui::TextWrapMode::Wrap),
-                                    );
-                                    #[cfg(test)]
-                                    if idx + 1 == self.assets.len() {
-                                        last_asset_rect = Some(label.rect);
-                                    }
-                                    #[cfg(not(test))]
-                                    let _ = label;
-                                });
+            .show_utility(
+                ctx,
+                "unused-note-assets",
+                egui::Id::new("Unused Note Assets"),
+                Some(&mut open_flag),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((300.0, 200.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_max_width(ctx.content_rect().width().max(1.0))
+                .with_max_height(ctx.content_rect().height().max(1.0)),
+                |ui| {
+                    let footer_height =
+                        unused_assets_footer_reserved_height(ui, &["Delete Selected", "Close"]);
+                    let list_height = (ui.available_height() - footer_height).max(0.0);
+                    let _list = egui::ScrollArea::vertical()
+                        .id_salt("unused_note_assets_list")
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(0.0)
+                        .max_height(list_height)
+                        .show(ui, |ui| {
+                            if self.assets.is_empty() {
+                                ui.label("No unused assets found");
+                            } else {
+                                for (idx, asset) in self.assets.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        let _selection = ui.checkbox(&mut self.selected[idx], "");
+                                        #[cfg(test)]
+                                        if idx == 0 {
+                                            first_selection =
+                                                Some((_selection.id, _selection.rect));
+                                        }
+                                        let label = ui.add(
+                                            egui::Label::new(asset)
+                                                .wrap_mode(egui::TextWrapMode::Wrap),
+                                        );
+                                        #[cfg(test)]
+                                        if idx + 1 == self.assets.len() {
+                                            last_asset_rect = Some(label.rect);
+                                        }
+                                        #[cfg(not(test))]
+                                        let _ = label;
+                                    });
+                                }
                             }
-                        }
-                    });
-                ui.separator();
-                #[cfg(test)]
-                let mut delete_response = None;
-                #[cfg(test)]
-                let mut close_response = None;
-                ui.horizontal_wrapped(|ui| {
-                    let response = ui.button("Delete Selected");
-                    let response = with_button_emphasis(ui, response, ButtonEmphasis::Destructive);
-                    if response.clicked() {
-                        for i in (0..self.assets.len()).rev() {
-                            if self.selected[i] {
-                                let path = assets_dir().join(&self.assets[i]);
-                                if let Err(e) = std::fs::remove_file(&path) {
-                                    app.report_error_message(
-                                        "ui operation",
-                                        format!("Failed to delete {}: {e}", self.assets[i]),
-                                    );
-                                } else {
-                                    self.assets.remove(i);
-                                    self.selected.remove(i);
+                        });
+                    ui.separator();
+                    #[cfg(test)]
+                    let mut delete_response = None;
+                    #[cfg(test)]
+                    let mut close_response = None;
+                    ui.horizontal_wrapped(|ui| {
+                        let response = ui.button("Delete Selected");
+                        let response =
+                            with_button_emphasis(ui, response, ButtonEmphasis::Destructive);
+                        if response.clicked() {
+                            for i in (0..self.assets.len()).rev() {
+                                if self.selected[i] {
+                                    let path = assets_dir().join(&self.assets[i]);
+                                    if let Err(e) = std::fs::remove_file(&path) {
+                                        app.report_error_message(
+                                            "ui operation",
+                                            format!("Failed to delete {}: {e}", self.assets[i]),
+                                        );
+                                    } else {
+                                        self.assets.remove(i);
+                                        self.selected.remove(i);
+                                    }
                                 }
                             }
                         }
-                    }
-                    #[cfg(test)]
-                    {
-                        delete_response = Some(response);
-                    }
-                    let response = ui.button("Close");
-                    if response.clicked() {
-                        close = true;
-                    }
-                    #[cfg(test)]
-                    {
-                        close_response = Some(response);
-                    }
-                });
-                #[cfg(test)]
-                if let (Some(delete), Some(close)) = (delete_response, close_response) {
-                    test_layout = Some(UnusedAssetsLayoutObservation {
-                        window_rect: None,
-                        scroll_id: _list.id,
-                        scroll_rect: _list.inner_rect,
-                        content_size: _list.content_size,
-                        scroll_offset: _list.state.offset,
-                        footer_reserved_height: footer_height,
-                        delete_id: delete.id,
-                        delete_rect: delete.rect,
-                        close_id: close.id,
-                        close_rect: close.rect,
-                        selection: first_selection,
-                        last_asset_rect,
-                        close_requested: false,
+                        #[cfg(test)]
+                        {
+                            delete_response = Some(response);
+                        }
+                        let response = ui.button("Close");
+                        if response.clicked() {
+                            close = true;
+                        }
+                        #[cfg(test)]
+                        {
+                            close_response = Some(response);
+                        }
                     });
-                }
-            });
+                    #[cfg(test)]
+                    if let (Some(delete), Some(close)) = (delete_response, close_response) {
+                        test_layout = Some(UnusedAssetsLayoutObservation {
+                            window_rect: None,
+                            scroll_id: _list.id,
+                            scroll_rect: _list.inner_rect,
+                            content_size: _list.content_size,
+                            scroll_offset: _list.state.offset,
+                            footer_reserved_height: footer_height,
+                            delete_id: delete.id,
+                            delete_rect: delete.rect,
+                            close_id: close.id,
+                            close_rect: close.rect,
+                            selection: first_selection,
+                            last_asset_rect,
+                            close_requested: false,
+                        });
+                    }
+                },
+            );
         #[cfg(test)]
         {
             self.test_layout = test_layout.map(|mut layout: UnusedAssetsLayoutObservation| {

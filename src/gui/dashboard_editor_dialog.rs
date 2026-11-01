@@ -5,6 +5,7 @@ use crate::dashboard::widgets::{
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::gui::jump_mode::ui::DashboardEditorConfirmationKind;
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use eframe::egui::collapsing_header::CollapsingState;
 use serde_json::Value;
@@ -430,9 +431,9 @@ impl DashboardEditorDialog {
         let mut reset_result = ConfirmationResult::None;
         let mut confirmation_opened_this_pass = false;
         egui::Window::new("Dashboard Editor")
-            .open(&mut open)
+
             .resizable(true)
-            .show(ctx, |ui| {
+            .show_utility(ctx, "dashboard-editor", egui::Id::new("Dashboard Editor"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
                 authorized_visible_pass = native_ui_owner
                     && first_ui_pass
                     && ui.is_visible()

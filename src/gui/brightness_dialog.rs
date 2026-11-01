@@ -3,6 +3,7 @@ use crate::brightness_service::{
     BrightnessService, BrightnessSetDisposition, BrightnessWakeCallback, MonitorInventory,
     MonitorInventoryEntry, MonitorTarget, PhysicalMonitorIdentity,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -478,8 +479,8 @@ impl BrightnessDialog {
 
         egui::Window::new("Brightness")
             .resizable(true)
-            .open(&mut window_open)
-            .show(ctx, |ui| {
+
+            .show_utility(ctx, "brightness", egui::Id::new("Brightness"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
                 ui.horizontal(|ui| {
                     let refresh = ui.add_enabled(
                         !request_pending && !self.service_closing,

@@ -3,6 +3,7 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
     semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::snippet_template::{TemplateError, parse_template};
 use crate::plugins::snippets::{
     MAX_SNIPPET_TAG_CHARS, MAX_SNIPPET_TAGS, SNIPPETS_FILE, SnippetEntry, SnippetFieldDefinition,
@@ -1245,8 +1246,8 @@ impl SnippetDialog {
             .min_width(160.0)
             .min_height(160.0)
             .resizable(true)
-            .open(&mut window_open)
-            .show(ctx, |ui| {
+
+            .show_utility(ctx, "snippets", egui::Id::new("Snippets"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((600.0, 500.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(160.0, 160.0)), |ui| {
                 ui.add_enabled_ui(native_ui_owner, |ui| {
                 // Resize follows content in egui. Bound both axes here so overflow
                 // scrolls inside the user's chosen size instead of enlarging it.

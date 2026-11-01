@@ -5,6 +5,7 @@ use crate::graph::note_graph::{
 };
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::note::Note;
 use crate::settings::{NoteGraphSettings, Settings};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
@@ -225,48 +226,61 @@ impl NoteGraphDialog {
             620.0_f32.min(max_window_size.y),
         );
         egui::Window::new("Note Graph")
-            .open(&mut window_open)
             .resizable(true)
             .default_size(default_window_size)
             .max_size(max_window_size)
-            .show(ctx, |ui| {
-                persist_requested |= self.top_bar(ui, app);
-                ui.separator();
-                persist_requested |= self.filters_top_panel(ui, &notes);
-                ui.separator();
+            .show_utility(
+                ctx,
+                "note-graph",
+                egui::Id::new("Note Graph"),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from(default_window_size),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_maximum(egui::Vec2::from(max_window_size)),
+                |ui| {
+                    persist_requested |= self.top_bar(ui, app);
+                    ui.separator();
+                    persist_requested |= self.filters_top_panel(ui, &notes);
+                    ui.separator();
 
-                let available_rect = ui.available_rect_before_wrap();
-                let total_width = available_rect.width();
-                let total_height = available_rect.height().max(MIN_CANVAS_HEIGHT);
-                let panel_rect = Rect::from_min_size(
-                    available_rect.min,
-                    egui::vec2(total_width.max(MIN_CANVAS_WIDTH), total_height),
-                );
-                ui.allocate_rect(panel_rect, Sense::hover());
+                    let available_rect = ui.available_rect_before_wrap();
+                    let total_width = available_rect.width();
+                    let total_height = available_rect.height().max(MIN_CANVAS_HEIGHT);
+                    let panel_rect = Rect::from_min_size(
+                        available_rect.min,
+                        egui::vec2(total_width.max(MIN_CANVAS_WIDTH), total_height),
+                    );
+                    ui.allocate_rect(panel_rect, Sense::hover());
 
-                let (canvas_width, details_width) =
-                    compute_graph_layout(panel_rect.width(), self.show_details_panel);
-                let canvas_rect =
-                    Rect::from_min_size(panel_rect.min, egui::vec2(canvas_width, total_height));
-                let details_rect = details_width.map(|width| {
-                    Rect::from_min_size(
-                        Pos2::new(canvas_rect.right(), panel_rect.top()),
-                        egui::vec2(width, total_height),
-                    )
-                });
+                    let (canvas_width, details_width) =
+                        compute_graph_layout(panel_rect.width(), self.show_details_panel);
+                    let canvas_rect =
+                        Rect::from_min_size(panel_rect.min, egui::vec2(canvas_width, total_height));
+                    let details_rect = details_width.map(|width| {
+                        Rect::from_min_size(
+                            Pos2::new(canvas_rect.right(), panel_rect.top()),
+                            egui::vec2(width, total_height),
+                        )
+                    });
 
-                ui.scope_builder(egui::UiBuilder::new().max_rect(canvas_rect), |ui| {
-                    self.main_canvas(ui, ctx, app, canvas_rect.size())
-                });
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(canvas_rect), |ui| {
+                        self.main_canvas(ui, ctx, app, canvas_rect.size())
+                    });
 
-                if let Some((details_rect, details_width)) = details_rect.zip(details_width) {
-                    persist_requested |= ui
-                        .scope_builder(egui::UiBuilder::new().max_rect(details_rect), |ui| {
-                            self.right_panel(ui, app, &notes, details_width)
-                        })
-                        .inner;
-                }
-            });
+                    if let Some((details_rect, details_width)) = details_rect.zip(details_width) {
+                        persist_requested |= ui
+                            .scope_builder(egui::UiBuilder::new().max_rect(details_rect), |ui| {
+                                self.right_panel(ui, app, &notes, details_width)
+                            })
+                            .inner;
+                    }
+                },
+            );
         self.open = window_open;
         self.was_open_last_frame = self.open;
 

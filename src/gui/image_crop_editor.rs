@@ -5,6 +5,7 @@
 //! the adapters that embed it.
 
 use crate::gui::theme::widgets::{ButtonEmphasis, with_button_emphasis};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::image_crop::{ImageCropRect, crop_rgba, validate_crop_rect};
 use eframe::egui;
 use image::RgbaImage;
@@ -612,14 +613,14 @@ impl ImageCropEditorState {
         let max_window_height = available_rect.height().max(1.0);
         let window_output = egui::Window::new(&options.title)
             .id(egui::Id::new(&options.window_id))
-            .open(&mut open)
+
             .collapsible(false)
             .resizable(true)
             .max_width(max_window_width)
             .max_height(max_window_height)
             .default_size([860.0_f32.min(max_window_width), 680.0_f32.min(max_window_height)])
             .min_size([560.0_f32.min(max_window_width), 480.0_f32.min(max_window_height)])
-            .show(ctx, |ui| {
+            .show_utility(ctx, "image-crop-editor", egui::Id::new(&options.window_id), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from([860.0_f32.min(max_window_width), 680.0_f32.min(max_window_height)])), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from([560.0_f32.min(max_window_width), 480.0_f32.min(max_window_height)])).with_max_width(max_window_width).with_max_height(max_window_height), |ui| {
                 #[cfg(test)]
                 let mut filename_label_response = None;
                 #[cfg(test)]

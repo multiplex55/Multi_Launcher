@@ -1,5 +1,6 @@
 use crate::batch_rename::ExplicitDirectoryRoot;
 use crate::file_operations::{NativeFileIdentity, ScanCancellation};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::replace_executor::{
     ConfirmedReplacementRequest, REPLACE_RECOVERY_DIRECTORY, ReplaceExecutor,
     ReplaceExecutorWorker, ReplaceOperationResult, ReplaceProgress, ReplaceRecoveryReceipt,
@@ -1781,11 +1782,11 @@ impl SearchReplaceDialogState {
         let mut window_open = self.open;
         let window = egui::Window::new("Search and Replace")
             .id(egui::Id::new(WINDOW_ID))
-            .open(&mut window_open)
+
             .resizable(true)
             .default_size(egui::vec2(1120.0, 820.0))
             .min_size(egui::vec2(560.0, 360.0))
-            .show(ctx, |ui| {
+            .show_utility(ctx, "search-replace", egui::Id::new("Search and Replace"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from(egui::vec2(1120.0, 820.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from(egui::vec2(560.0, 360.0))), |ui| {
                 let native_visible_pass = native_ui_owner
                     && ui.is_enabled()
                     && ui.is_visible()

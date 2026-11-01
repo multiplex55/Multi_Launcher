@@ -9,6 +9,7 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, secondary_help, semantic_status,
     with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::regex_tester::{EvaluationResult, MatchCompleteness, RegexSession};
 use eframe::egui;
 use std::sync::Arc;
@@ -541,25 +542,39 @@ impl RegexTesterDialogState {
                     let mut open = self.open;
                     egui::Window::new("Regex Tester")
                         .id(egui::Id::new("regex_tester_embedded_window"))
-                        .open(&mut open)
                         .collapsible(false)
                         .resizable(true)
                         .default_size(available.min(egui::vec2(960.0, 680.0)))
                         .min_size(available.min(egui::vec2(360.0, 240.0)))
                         .max_size(available)
-                        .show(child, |ui| {
-                            ui.add_enabled_ui(root_native_owner_current, |ui| {
-                                self.body_in_viewport_scoped(
-                                    ui,
-                                    false,
-                                    process_case_actions
-                                        && application_input_allowed
-                                        && root_native_owner_current,
-                                    root_scope,
-                                    root_native_owner_current,
-                                )
-                            })
-                        });
+                        .show_utility(
+                            child,
+                            "regex-tester",
+                            egui::Id::new("regex_tester_embedded_window"),
+                            Some(&mut open),
+                            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                                    egui::Vec2::from(available.min(egui::vec2(960.0, 680.0))),
+                                ),
+                                egui::Vec2::ZERO,
+                                [None, None],
+                            )
+                            .with_minimum(egui::Vec2::from(available.min(egui::vec2(360.0, 240.0))))
+                            .with_maximum(egui::Vec2::from(available)),
+                            |ui| {
+                                ui.add_enabled_ui(root_native_owner_current, |ui| {
+                                    self.body_in_viewport_scoped(
+                                        ui,
+                                        false,
+                                        process_case_actions
+                                            && application_input_allowed
+                                            && root_native_owner_current,
+                                        root_scope,
+                                        root_native_owner_current,
+                                    )
+                                })
+                            },
+                        );
                     self.open = open;
                 }
             },

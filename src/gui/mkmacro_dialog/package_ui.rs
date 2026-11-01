@@ -1,4 +1,5 @@
 use super::MkMacroDialog;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::{
     common::atomic_file::save_atomic,
     mkmacro::{
@@ -252,13 +253,19 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
     let mut open = true;
     let mut keep = true;
     let labels = footer_labels(&modal);
+    let size_key = match &modal {
+        PackageModal::ExportLibrary { .. } => "mkmacro-package-export",
+        PackageModal::ImportPreview { .. } => "mkmacro-package-import",
+        PackageModal::SaveTemplate { .. } => "mkmacro-template-save",
+        PackageModal::Templates { .. } => "mkmacro-templates",
+        PackageModal::Help => "mkmacro-help",
+    };
     egui::Window::new(modal.title())
         .id(egui::Id::new("mkmacro_package_modal"))
-        .open(&mut open)
         .collapsible(false)
         .resizable(true)
         .default_width(520.0)
-        .show(ctx, |ui| {
+        .show_utility(ctx, size_key, egui::Id::new("mkmacro_package_modal"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::width(520.0), |ui| {
             let footer_height = package_footer_reserved_height(ui, labels);
             let body_max_height = (ui.available_height() - footer_height).max(0.0);
             let body_output = egui::ScrollArea::vertical()

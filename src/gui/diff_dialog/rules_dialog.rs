@@ -3,6 +3,7 @@ use crate::diff::text_compare::{CompiledRules, RegexReplacement, TextComparisonR
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 
 #[derive(Clone)]
@@ -84,76 +85,89 @@ pub fn show(ctx: &egui::Context, view: u64, model: &mut TextViewModel) {
         return;
     }
     let mut open = true;
+    let window_id = id.with("window");
     egui::Window::new("Comparison rules")
-        .id(id.with("window"))
+        .id(window_id)
         .collapsible(false)
         .resizable(true)
-        .open(&mut open)
         .max_width(ctx.content_rect().width().max(1.0))
         .max_height(ctx.content_rect().height().max(1.0))
-        .show(ctx, |ui| {
-            let footer_height = action_footer_reserved_height(ui, &["Apply", "Cancel"]);
-            let body_height = (ui.available_height() - footer_height).max(0.0);
-            egui::ScrollArea::vertical()
-                .id_salt("diff_rules_form_body")
-                .auto_shrink([false, true])
-                .min_scrolled_height(0.0)
-                .max_height(body_height)
-                .show(ui, |ui| {
-                    ui.checkbox(
-                        &mut state.draft.ignore_leading_whitespace,
-                        "Ignore leading whitespace",
-                    );
-                    ui.checkbox(
-                        &mut state.draft.ignore_trailing_whitespace,
-                        "Ignore trailing whitespace",
-                    );
-                    ui.checkbox(
-                        &mut state.draft.ignore_all_whitespace,
-                        "Ignore all whitespace",
-                    );
-                    ui.checkbox(&mut state.draft.ignore_blank_lines, "Ignore blank lines");
-                    ui.checkbox(&mut state.draft.case_sensitive, "Case sensitive");
-                    ui.checkbox(
-                        &mut state.draft.line_ending_equivalence,
-                        "Treat line endings as equivalent",
-                    );
-                    compact_section_heading(
-                        ui,
-                        "Replacement rules",
-                        Some("One PATTERN => REPLACEMENT per line."),
-                    );
-                    ui.add(
-                        egui::TextEdit::multiline(&mut state.replacements)
-                            .desired_width(ui.available_width())
-                            .desired_rows(4),
-                    );
-                    compact_section_heading(
-                        ui,
-                        "Unimportant-section regexes",
-                        Some("One regex per line."),
-                    );
-                    ui.add(
-                        egui::TextEdit::multiline(&mut state.unimportant)
-                            .desired_width(ui.available_width())
-                            .desired_rows(4),
-                    );
-                    if let Some(error) = &state.error {
-                        semantic_status(ui, StatusTone::Error, "Invalid rules", Some(error));
+        .show_utility(
+            ctx,
+            "diff-comparison-rules",
+            window_id,
+            Some(&mut open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                egui::Vec2::ZERO,
+                [None, None],
+            )
+            .with_max_width(ctx.content_rect().width().max(1.0))
+            .with_max_height(ctx.content_rect().height().max(1.0)),
+            |ui| {
+                let footer_height = action_footer_reserved_height(ui, &["Apply", "Cancel"]);
+                let body_height = (ui.available_height() - footer_height).max(0.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("diff_rules_form_body")
+                    .auto_shrink([false, true])
+                    .min_scrolled_height(0.0)
+                    .max_height(body_height)
+                    .show(ui, |ui| {
+                        ui.checkbox(
+                            &mut state.draft.ignore_leading_whitespace,
+                            "Ignore leading whitespace",
+                        );
+                        ui.checkbox(
+                            &mut state.draft.ignore_trailing_whitespace,
+                            "Ignore trailing whitespace",
+                        );
+                        ui.checkbox(
+                            &mut state.draft.ignore_all_whitespace,
+                            "Ignore all whitespace",
+                        );
+                        ui.checkbox(&mut state.draft.ignore_blank_lines, "Ignore blank lines");
+                        ui.checkbox(&mut state.draft.case_sensitive, "Case sensitive");
+                        ui.checkbox(
+                            &mut state.draft.line_ending_equivalence,
+                            "Treat line endings as equivalent",
+                        );
+                        compact_section_heading(
+                            ui,
+                            "Replacement rules",
+                            Some("One PATTERN => REPLACEMENT per line."),
+                        );
+                        ui.add(
+                            egui::TextEdit::multiline(&mut state.replacements)
+                                .desired_width(ui.available_width())
+                                .desired_rows(4),
+                        );
+                        compact_section_heading(
+                            ui,
+                            "Unimportant-section regexes",
+                            Some("One regex per line."),
+                        );
+                        ui.add(
+                            egui::TextEdit::multiline(&mut state.unimportant)
+                                .desired_width(ui.available_width())
+                                .desired_rows(4),
+                        );
+                        if let Some(error) = &state.error {
+                            semantic_status(ui, StatusTone::Error, "Invalid rules", Some(error));
+                        }
+                    });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    let apply_button = ui.button("Apply");
+                    let apply = with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary);
+                    if apply.clicked() {
+                        state.apply(model);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        state.open = false;
                     }
                 });
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                let apply_button = ui.button("Apply");
-                let apply = with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary);
-                if apply.clicked() {
-                    state.apply(model);
-                }
-                if ui.button("Cancel").clicked() {
-                    state.open = false;
-                }
-            });
-        });
+            },
+        );
     state.open &= open;
     ctx.data_mut(|d| d.insert_temp(id, state));
 }
@@ -224,6 +238,10 @@ pub(super) fn action_footer_reserved_height(ui: &egui::Ui, labels: &[&str]) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::utility_dialog_size::UtilityDialogSizeManager;
+    use crate::settings::{Settings, utility_dialog_sizes::UtilityToolKey};
+    use crate::settings_save::SettingsSaveWorkerRegistry;
+
     #[test]
     fn validates_candidate_before_apply() {
         let mut state = RulesDialogState::new(&TextComparisonRules::default());
@@ -262,5 +280,41 @@ mod tests {
         assert!(dialog.apply(&mut model));
         assert_eq!(model.rules.revision, revision + 1);
         assert_eq!(model.recalculate_at, scheduled);
+    }
+
+    #[test]
+    fn utility_size_inventory_diff_rules_dynamic_views_have_independent_tracking_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let settings = Settings::default();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let manager = UtilityDialogSizeManager::new(
+            path.to_string_lossy().into_owned(),
+            workers.clone(),
+            settings.utility_dialog_sizes,
+        );
+        manager.install_in_context(&ctx);
+        let mut model = TextViewModel::from_test_text("left".into(), "right".into());
+        let screen = egui::vec2(1200.0, 800.0);
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                ..Default::default()
+            },
+            |root| {
+                manager.begin_frame(root.ctx()).unwrap();
+                show(root.ctx(), 1, &mut model);
+                show(root.ctx(), 2, &mut model);
+            },
+        )
+        .drop_without_applying_deltas();
+
+        let key = UtilityToolKey::parse("diff-comparison-rules").unwrap();
+        let tracked = manager.tracked_windows();
+        assert!(tracked.contains(&(egui::Id::new(("diff-rules", 1_u64)).with("window"), key)));
+        assert!(tracked.contains(&(egui::Id::new(("diff-rules", 2_u64)).with("window"), key)));
+        assert_eq!(tracked.len(), 2);
+        workers.join_all();
     }
 }

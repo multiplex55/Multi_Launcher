@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::compact_section_heading;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use std::time::Instant;
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, ProcessRefreshKind, ProcessesToUpdate, System};
@@ -44,48 +45,60 @@ impl CpuListDialog {
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
             .max_height(ctx.content_rect().height().max(1.0))
-            .open(&mut self.open)
-            .show(ctx, |ui| {
-                compact_section_heading(ui, "Processes", None);
-                let process_list_height =
-                    (ui.available_height() - cpu_close_footer_reserved_height(ui)).max(0.0);
+            .show_utility(
+                ctx,
+                "cpu-usage",
+                egui::Id::new("CPU Usage"),
+                Some(&mut self.open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_max_width(ctx.content_rect().width().max(1.0))
+                .with_max_height(ctx.content_rect().height().max(1.0)),
+                |ui| {
+                    compact_section_heading(ui, "Processes", None);
+                    let process_list_height =
+                        (ui.available_height() - cpu_close_footer_reserved_height(ui)).max(0.0);
 
-                let mut processes: Vec<_> = self.system.processes().values().collect();
-                processes.sort_by(|a, b| {
-                    b.cpu_usage()
-                        .partial_cmp(&a.cpu_usage())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                let cpu_count = self.system.cpus().len() as f32;
-                egui::ScrollArea::vertical()
-                    .id_salt("cpu_process_list")
-                    .auto_shrink([true, true])
-                    .min_scrolled_height(0.0)
-                    .max_height(process_list_height)
-                    .show(ui, |ui| {
-                        for process in processes.into_iter().take(self.count) {
-                            let usage = if cpu_count > 0.0 {
-                                process.cpu_usage() / cpu_count
-                            } else {
-                                0.0
-                            };
-                            ui.add(
-                                egui::Label::new(format!(
-                                    "{usage:.1}% - {}",
-                                    process.name().to_string_lossy()
-                                ))
-                                .wrap(),
-                            );
+                    let mut processes: Vec<_> = self.system.processes().values().collect();
+                    processes.sort_by(|a, b| {
+                        b.cpu_usage()
+                            .partial_cmp(&a.cpu_usage())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let cpu_count = self.system.cpus().len() as f32;
+                    egui::ScrollArea::vertical()
+                        .id_salt("cpu_process_list")
+                        .auto_shrink([true, true])
+                        .min_scrolled_height(0.0)
+                        .max_height(process_list_height)
+                        .show(ui, |ui| {
+                            for process in processes.into_iter().take(self.count) {
+                                let usage = if cpu_count > 0.0 {
+                                    process.cpu_usage() / cpu_count
+                                } else {
+                                    0.0
+                                };
+                                ui.add(
+                                    egui::Label::new(format!(
+                                        "{usage:.1}% - {}",
+                                        process.name().to_string_lossy()
+                                    ))
+                                    .wrap(),
+                                );
+                            }
+                        });
+
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Close").clicked() {
+                            close = true;
                         }
                     });
-
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
-                });
-            });
+                },
+            );
         if close {
             self.open = false;
         }

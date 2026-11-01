@@ -1,6 +1,7 @@
 use crate::commands::{DataDialogFocus, DataRecoveryCommand, DataRecoveryConfirmation};
 use crate::gui::theme::widgets::{self, StatusTone};
 use crate::gui::theme::{TextRole, text_style_for_role};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::persistence::{
     BackupPolicy, DataRequestId, DataService, DataServiceActivity, DataServiceFailure,
     DataServiceRequest, DataServiceResult, PersistentStoreId, RecoveryGroupId, RecoveryTarget,
@@ -387,37 +388,49 @@ impl DataRecoveryDialog {
         let mut actions = Vec::new();
         let mut open = self.open;
         egui::Window::new("Data & Recovery")
-            .open(&mut open)
             .default_size([760.0, 560.0])
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (section, label) in [
-                        (DataDialogSection::StorageHealth, "Storage Health"),
-                        (DataDialogSection::Backups, "Backups"),
-                        (DataDialogSection::Recovery, "Recovery"),
-                        (DataDialogSection::Diagnostics, "Diagnostics"),
-                    ] {
-                        if ui
-                            .selectable_label(self.section == section, label)
-                            .clicked()
-                        {
-                            self.section = section;
-                            if section == DataDialogSection::Backups
-                                || section == DataDialogSection::Recovery
+            .show_utility(
+                ctx,
+                "data-recovery",
+                egui::Id::new("Data & Recovery"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from([760.0, 560.0]),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                ),
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (section, label) in [
+                            (DataDialogSection::StorageHealth, "Storage Health"),
+                            (DataDialogSection::Backups, "Backups"),
+                            (DataDialogSection::Recovery, "Recovery"),
+                            (DataDialogSection::Diagnostics, "Diagnostics"),
+                        ] {
+                            if ui
+                                .selectable_label(self.section == section, label)
+                                .clicked()
                             {
-                                self.request_snapshot_list_or_defer();
+                                self.section = section;
+                                if section == DataDialogSection::Backups
+                                    || section == DataDialogSection::Recovery
+                                {
+                                    self.request_snapshot_list_or_defer();
+                                }
                             }
                         }
+                    });
+                    ui.separator();
+                    match self.section {
+                        DataDialogSection::StorageHealth => self.health_ui(ui, &mut actions),
+                        DataDialogSection::Backups => self.backups_ui(ui),
+                        DataDialogSection::Recovery => self.recovery_ui(ui, &mut actions),
+                        DataDialogSection::Diagnostics => self.diagnostics_ui(ui, &mut actions),
                     }
-                });
-                ui.separator();
-                match self.section {
-                    DataDialogSection::StorageHealth => self.health_ui(ui, &mut actions),
-                    DataDialogSection::Backups => self.backups_ui(ui),
-                    DataDialogSection::Recovery => self.recovery_ui(ui, &mut actions),
-                    DataDialogSection::Diagnostics => self.diagnostics_ui(ui, &mut actions),
-                }
-            });
+                },
+            );
         self.open = open;
         (actions, notices)
     }

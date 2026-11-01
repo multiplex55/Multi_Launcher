@@ -3,6 +3,7 @@ use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{
     ButtonEmphasis, compact_section_heading, secondary_help, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 
 /// State container for the app editor window.
@@ -175,9 +176,9 @@ impl ActionsEditor {
         #[cfg(test)]
         let mut test_sizing_pass = false;
         egui::Window::new("App Editor")
-            .open(&mut open)
+
             .resizable(true)
-            .show(ctx, |ui| {
+            .show_utility(ctx, "custom-apps", egui::Id::new("App Editor"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
                 #[cfg(test)]
                 {
                     test_visible = ui.is_visible();

@@ -2,6 +2,7 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
     semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::mouse_gestures::{
     MouseGestureSettings, add_ignore_window_title, apply_runtime_settings,
     collect_visible_window_titles, normalize_ignore_window_titles,
@@ -320,7 +321,7 @@ impl MouseGestureSettingsDialog {
         let mut ignore_rows_changed = false;
         let mut visual_order = 0;
         let window = egui::Window::new("Mouse Gesture Settings")
-            .open(&mut open)
+
             .resizable(true)
             .default_size(egui::vec2(520.0, 480.0))
             .min_size(egui::vec2(360.0, 260.0))
@@ -328,7 +329,10 @@ impl MouseGestureSettingsDialog {
                 (ctx.content_rect().width() - 16.0).max(360.0),
                 (ctx.content_rect().height() - 16.0).max(260.0),
             ))
-            .show(ctx, |ui| {
+            .show_utility(ctx, "gesture-settings", egui::Id::new("Mouse Gesture Settings"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from(egui::vec2(520.0, 480.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from(egui::vec2(360.0, 260.0))).with_maximum(egui::Vec2::from(egui::vec2(
+                (ctx.content_rect().width() - 16.0).max(360.0),
+                (ctx.content_rect().height() - 16.0).max(260.0),
+            ))), |ui| {
                 authorized_main_pass = native_ui_owner
                     && first_ui_pass
                     && ui.is_visible()
@@ -758,9 +762,9 @@ impl MouseGestureSettingsDialog {
                 if self.window_picker_open {
                     let mut open_picker = self.window_picker_open;
                     egui::Window::new(WINDOW_PICKER_TITLE)
-                        .open(&mut open_picker)
+
                         .resizable(true)
-                        .show(ctx, |ui| {
+                        .show_utility(ctx, "gesture-settings-window-picker", egui::Id::new(WINDOW_PICKER_TITLE), Some(&mut open_picker), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
                             authorized_picker_pass = native_picker_owner
                                 && first_ui_pass
                                 && ui.is_visible()

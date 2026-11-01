@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{ButtonEmphasis, with_button_emphasis};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::bookmarks::{BOOKMARKS_FILE, append_bookmark_with_alias};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -23,9 +24,17 @@ impl AddBookmarkDialog {
             return;
         }
         let mut close = false;
-        egui::Window::new("Add Bookmark")
-            .open(&mut self.open)
-            .show(ctx, |ui| {
+        egui::Window::new("Add Bookmark").show_utility(
+            ctx,
+            "add-bookmark",
+            egui::Id::new("Add Bookmark"),
+            Some(&mut self.open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                egui::Vec2::ZERO,
+                [None, None],
+            ),
+            |ui| {
                 ui.horizontal_wrapped(|ui| {
                     let label = ui.label("URL");
                     ui.add(
@@ -74,7 +83,8 @@ impl AddBookmarkDialog {
                         close = true;
                     }
                 });
-            });
+            },
+        );
         if close {
             self.open = false;
         }

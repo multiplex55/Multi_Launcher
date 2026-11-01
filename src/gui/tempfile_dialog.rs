@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{ButtonEmphasis, secondary_help, with_button_emphasis};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::tempfile::create_named_file;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -45,138 +46,155 @@ impl TempfileDialog {
         #[cfg(test)]
         let mut test_layout = None;
         let window_output = egui::Window::new("Create Temp File")
-            .open(&mut self.open)
             .resizable(true)
             .default_size((360.0, 240.0))
             .min_width(200.0)
             .min_height(150.0)
-            .show(ctx, |ui| {
-                let _alias = ui.horizontal_wrapped(|ui| {
-                    let label = ui.label("Alias");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.alias)
-                            .desired_width(ui.available_width().min(320.0).max(72.0)),
-                    )
-                    .labelled_by(label.id)
-                });
-                #[cfg(test)]
-                let alias_rect = _alias.inner.rect;
+            .show_utility(
+                ctx,
+                "create-tempfile",
+                egui::Id::new("Create Temp File"),
+                Some(&mut self.open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((360.0, 240.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::vec2(200.0, 150.0)),
+                |ui| {
+                    let _alias = ui.horizontal_wrapped(|ui| {
+                        let label = ui.label("Alias");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.alias)
+                                .desired_width(ui.available_width().min(320.0).max(72.0)),
+                        )
+                        .labelled_by(label.id)
+                    });
+                    #[cfg(test)]
+                    let alias_rect = _alias.inner.rect;
 
-                secondary_help(
-                    ui,
-                    "Save creates a text file and opens it in its associated application.",
-                );
-                ui.label("Text");
+                    secondary_help(
+                        ui,
+                        "Save creates a text file and opens it in its associated application.",
+                    );
+                    ui.label("Text");
 
-                let footer_height = tempfile_footer_reserved_height(ui, &["Save", "Cancel"]);
-                let editor_max_height = (ui.available_height() - footer_height).max(0.0);
-                #[cfg(test)]
-                let mut editor_parent_clip_rect = egui::Rect::NOTHING;
-                let editor_output = egui::ScrollArea::vertical()
-                    .id_salt("tempfile_text_scroll")
-                    .auto_shrink([false, false])
-                    .min_scrolled_height(0.0)
-                    .max_height(editor_max_height)
-                    .show(ui, |ui| {
+                    let footer_height = tempfile_footer_reserved_height(ui, &["Save", "Cancel"]);
+                    let editor_max_height = (ui.available_height() - footer_height).max(0.0);
+                    #[cfg(test)]
+                    let mut editor_parent_clip_rect = egui::Rect::NOTHING;
+                    let editor_output = egui::ScrollArea::vertical()
+                        .id_salt("tempfile_text_scroll")
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(0.0)
+                        .max_height(editor_max_height)
+                        .show(ui, |ui| {
+                            #[cfg(test)]
+                            {
+                                editor_parent_clip_rect = ui.clip_rect();
+                            }
+                            egui::TextEdit::multiline(&mut self.text)
+                                .id_salt("tempfile_text_input")
+                                .desired_width(f32::INFINITY)
+                                .show(ui)
+                        });
+
+                    ui.separator();
+                    #[cfg(test)]
+                    let mut footer_clip_rect = egui::Rect::NOTHING;
+                    #[cfg(test)]
+                    let mut save_rect = egui::Rect::NOTHING;
+                    #[cfg(test)]
+                    let mut cancel_rect = egui::Rect::NOTHING;
+                    ui.horizontal_wrapped(|ui| {
                         #[cfg(test)]
                         {
-                            editor_parent_clip_rect = ui.clip_rect();
+                            footer_clip_rect = ui.clip_rect();
                         }
-                        egui::TextEdit::multiline(&mut self.text)
-                            .id_salt("tempfile_text_input")
-                            .desired_width(f32::INFINITY)
-                            .show(ui)
-                    });
+                        let save = ui.button("Save");
+                        let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+                        #[cfg(test)]
+                        {
+                            save_rect = save.rect;
+                        }
+                        if save.clicked() {
+                            if self.alias.trim().is_empty() {
+                                app.report_error_message("ui operation", "Alias required");
+                            } else {
+                                match create_named_file(&self.alias, &self.text) {
+                                    Ok(path) => {
+                                        if let Err(e) = open::that(&path) {
+                                            app.report_error_message(
+                                                "ui operation",
+                                                format!("Failed to open: {e}"),
+                                            );
+                                        } else {
+                                            if app.enable_toasts {
+                                                app.add_toast(Toast {
+                                                    text: format!(
+                                                        "Created {}",
+                                                        path.file_name()
+                                                            .map(|n| n.to_string_lossy())
+                                                            .unwrap_or_else(
+                                                                || path.to_string_lossy()
+                                                            )
+                                                    )
+                                                    .into(),
+                                                    kind: ToastKind::Success,
+                                                    options: ToastOptions::default()
+                                                        .duration_in_seconds(
+                                                            app.toast_duration as f64,
+                                                        ),
 
-                ui.separator();
-                #[cfg(test)]
-                let mut footer_clip_rect = egui::Rect::NOTHING;
-                #[cfg(test)]
-                let mut save_rect = egui::Rect::NOTHING;
-                #[cfg(test)]
-                let mut cancel_rect = egui::Rect::NOTHING;
-                ui.horizontal_wrapped(|ui| {
-                    #[cfg(test)]
-                    {
-                        footer_clip_rect = ui.clip_rect();
-                    }
-                    let save = ui.button("Save");
-                    let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
-                    #[cfg(test)]
-                    {
-                        save_rect = save.rect;
-                    }
-                    if save.clicked() {
-                        if self.alias.trim().is_empty() {
-                            app.report_error_message("ui operation", "Alias required");
-                        } else {
-                            match create_named_file(&self.alias, &self.text) {
-                                Ok(path) => {
-                                    if let Err(e) = open::that(&path) {
-                                        app.report_error_message(
-                                            "ui operation",
-                                            format!("Failed to open: {e}"),
-                                        );
-                                    } else {
-                                        if app.enable_toasts {
-                                            app.add_toast(Toast {
-                                                text: format!(
-                                                    "Created {}",
-                                                    path.file_name()
-                                                        .map(|n| n.to_string_lossy())
-                                                        .unwrap_or_else(|| path.to_string_lossy())
-                                                )
-                                                .into(),
-                                                kind: ToastKind::Success,
-                                                options: ToastOptions::default()
-                                                    .duration_in_seconds(app.toast_duration as f64),
-
-                                                style: Default::default(),
-                                            });
+                                                    style: Default::default(),
+                                                });
+                                            }
+                                            close = true;
+                                            app.search();
+                                            app.focus_input();
                                         }
-                                        close = true;
-                                        app.search();
-                                        app.focus_input();
                                     }
+                                    Err(e) => app.report_error_message(
+                                        "ui operation",
+                                        format!("Failed to save: {e}"),
+                                    ),
                                 }
-                                Err(e) => app.report_error_message(
-                                    "ui operation",
-                                    format!("Failed to save: {e}"),
-                                ),
                             }
                         }
-                    }
-                    let cancel = ui.button("Cancel");
+                        let cancel = ui.button("Cancel");
+                        #[cfg(test)]
+                        {
+                            cancel_rect = cancel.rect;
+                        }
+                        if cancel.clicked() {
+                            close = true;
+                        }
+                    });
+
                     #[cfg(test)]
                     {
-                        cancel_rect = cancel.rect;
+                        test_layout = Some(TempfileDialogLayout {
+                            window_rect: egui::Rect::NOTHING,
+                            alias_rect,
+                            editor_clip_rect: editor_output
+                                .inner
+                                .text_clip_rect
+                                .intersect(editor_parent_clip_rect),
+                            editor_viewport_clip_rect: editor_parent_clip_rect,
+                            editor_content_size: editor_output.content_size,
+                            editor_scroll_id: editor_output.id,
+                            editor_scroll_offset: editor_output.state.offset,
+                            footer_clip_rect,
+                            save_rect,
+                            cancel_rect,
+                        });
                     }
-                    if cancel.clicked() {
-                        close = true;
-                    }
-                });
-
-                #[cfg(test)]
-                {
-                    test_layout = Some(TempfileDialogLayout {
-                        window_rect: egui::Rect::NOTHING,
-                        alias_rect,
-                        editor_clip_rect: editor_output
-                            .inner
-                            .text_clip_rect
-                            .intersect(editor_parent_clip_rect),
-                        editor_viewport_clip_rect: editor_parent_clip_rect,
-                        editor_content_size: editor_output.content_size,
-                        editor_scroll_id: editor_output.id,
-                        editor_scroll_offset: editor_output.state.offset,
-                        footer_clip_rect,
-                        save_rect,
-                        cancel_rect,
-                    });
-                }
-                #[cfg(not(test))]
-                let _ = (_alias, editor_output);
-            });
+                    #[cfg(not(test))]
+                    let _ = (_alias, editor_output);
+                },
+            );
 
         #[cfg(test)]
         {

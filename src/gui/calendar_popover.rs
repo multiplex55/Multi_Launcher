@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::resolved_for_current_context;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::calendar::{CALENDAR_DATA, CalendarSnapshot, add_months, expand_instances};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use eframe::egui;
@@ -51,67 +52,85 @@ impl CalendarPopover {
 
         let mut open = app.calendar_popover_open;
         egui::Window::new("Calendar")
-            .open(&mut open)
             .resizable(true)
             .default_size((480.0, 320.0))
             .max_size(ctx.content_rect().size())
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("<").clicked() {
-                        shift_month(app, -1, &mut self.view_month);
-                    }
-                    if ui.button(">").clicked() {
-                        shift_month(app, 1, &mut self.view_month);
-                    }
-                    if ui
-                        .button(self.view_month.format("%B %Y").to_string())
-                        .clicked()
-                    {
-                        app.calendar_selected_date = Some(today);
-                        self.view_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-                            .unwrap_or(today);
-                    }
-                    ui.separator();
-                    ui.label("View");
-                    egui::ComboBox::from_id_salt("calendar_view_mode")
-                        .selected_text(match self.view_mode {
-                            CalendarViewMode::Day => "Day",
-                            CalendarViewMode::Week => "Week",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.view_mode, CalendarViewMode::Day, "Day");
-                            ui.selectable_value(
-                                &mut self.view_mode,
-                                CalendarViewMode::Week,
-                                "Week",
-                            );
-                        });
-                });
-                ui.separator();
-                // Leave room for the month grid, agenda controls and their spacing.
-                let narrow = ui.available_width() < 460.0;
-                if narrow {
-                    egui::ScrollArea::vertical()
-                        .id_salt("calendar_stacked_content")
-                        .auto_shrink([false, false])
-                        .max_height(ui.available_height().max(0.0))
-                        .show(ui, |ui| {
-                            month_grid(ui, app, self.view_month, &markers, today);
-                            ui.separator();
-                            agenda_view(ui, app, self.view_mode, selected_date);
-                        });
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            month_grid(ui, app, self.view_month, &markers, today);
-                        });
+            .show_utility(
+                ctx,
+                "calendar",
+                egui::Id::new("Calendar"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((480.0, 320.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_maximum(egui::Vec2::from(ctx.content_rect().size())),
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("<").clicked() {
+                            shift_month(app, -1, &mut self.view_month);
+                        }
+                        if ui.button(">").clicked() {
+                            shift_month(app, 1, &mut self.view_month);
+                        }
+                        if ui
+                            .button(self.view_month.format("%B %Y").to_string())
+                            .clicked()
+                        {
+                            app.calendar_selected_date = Some(today);
+                            self.view_month =
+                                NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+                                    .unwrap_or(today);
+                        }
                         ui.separator();
-                        ui.vertical(|ui| {
-                            agenda_view(ui, app, self.view_mode, selected_date);
-                        });
+                        ui.label("View");
+                        egui::ComboBox::from_id_salt("calendar_view_mode")
+                            .selected_text(match self.view_mode {
+                                CalendarViewMode::Day => "Day",
+                                CalendarViewMode::Week => "Week",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.view_mode,
+                                    CalendarViewMode::Day,
+                                    "Day",
+                                );
+                                ui.selectable_value(
+                                    &mut self.view_mode,
+                                    CalendarViewMode::Week,
+                                    "Week",
+                                );
+                            });
                     });
-                }
-            });
+                    ui.separator();
+                    // Leave room for the month grid, agenda controls and their spacing.
+                    let narrow = ui.available_width() < 460.0;
+                    if narrow {
+                        egui::ScrollArea::vertical()
+                            .id_salt("calendar_stacked_content")
+                            .auto_shrink([false, false])
+                            .max_height(ui.available_height().max(0.0))
+                            .show(ui, |ui| {
+                                month_grid(ui, app, self.view_month, &markers, today);
+                                ui.separator();
+                                agenda_view(ui, app, self.view_mode, selected_date);
+                            });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                month_grid(ui, app, self.view_month, &markers, today);
+                            });
+                            ui.separator();
+                            ui.vertical(|ui| {
+                                agenda_view(ui, app, self.view_mode, selected_date);
+                            });
+                        });
+                    }
+                },
+            );
         app.calendar_popover_open = open;
     }
 }

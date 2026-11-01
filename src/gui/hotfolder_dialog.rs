@@ -6,6 +6,7 @@ use crate::gui::hotfolder_runtime::{
     HotFolderCapabilityInputs, HotFolderDriverSnapshot, HotFolderEnablePreview,
     evaluate_sample_conditions,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::hotfolder::{
     ActionCapability, HotFolderEventKind, HotFolderExecutionAction, HotFolderExecutionPhase,
     HotFolderExecutionReceipt, HotFolderRule, HotFolderTerminalStatus, RuleAction, RuleId,
@@ -331,12 +332,12 @@ impl HotFolderDialog {
         let mut window_open = self.open;
         egui::Window::new("Hot Folder Manager")
             .id(egui::Id::new("hotfolder_manager_window"))
-            .open(&mut window_open)
+
             .resizable(true)
             .default_size([940.0, 660.0])
             .min_width(680.0)
             .min_height(420.0)
-            .show(ctx, |ui| {
+            .show_utility(ctx, "hotfolder-manager", egui::Id::new("Hot Folder Manager"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from([940.0, 660.0])), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(680.0, 420.0)), |ui| {
                 if !snapshot.plugin_enabled {
                     ui.colored_label(
                         egui::Color32::YELLOW,

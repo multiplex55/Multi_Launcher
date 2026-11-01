@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 mod diagnostics;
 mod filters;
 mod keyboard;
@@ -1374,20 +1375,33 @@ impl FileSearchDialogState {
         let mut open = self.open;
         let mut commands = Vec::new();
         if let Some(resp) = egui::Window::new("File Search")
-            .open(&mut open)
             .default_size(DEFAULT_WINDOW_SIZE)
             .min_size(egui::vec2(520.0, 360.0))
             .resizable(true)
-            .show(ctx, |ui| {
-                self.contents(
-                    ui,
-                    coordinator,
-                    &mut jump_mode_scope,
-                    &mut jump_mode_results_scope,
-                    first_ui_pass,
-                    navigation_owner,
+            .show_utility(
+                ctx,
+                "file-search",
+                egui::Id::new("File Search"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from(DEFAULT_WINDOW_SIZE),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
                 )
-            })
+                .with_minimum(egui::Vec2::from(egui::vec2(520.0, 360.0))),
+                |ui| {
+                    self.contents(
+                        ui,
+                        coordinator,
+                        &mut jump_mode_scope,
+                        &mut jump_mode_results_scope,
+                        first_ui_pass,
+                        navigation_owner,
+                    )
+                },
+            )
         {
             if navigation_owner {
                 self.persisted_window_size = resp.response.rect.size();

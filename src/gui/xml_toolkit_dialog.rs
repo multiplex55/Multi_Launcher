@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 mod files;
 
 use crate::activity::{
@@ -601,36 +602,50 @@ impl XmlToolkitDialogState {
                     }
                     egui::Window::new("XML Toolkit")
                         .id(egui::Id::new("xml_toolkit_embedded_window"))
-                        .open(&mut open)
                         .collapsible(false)
                         .resizable(true)
                         .default_size(available.min(egui::vec2(1120.0, 760.0)))
                         .min_size(available.min(egui::vec2(480.0, 340.0)))
                         .max_size(available)
-                        .show(child, |ui| {
-                            ui.add_enabled_ui(root_parent_current, |ui| {
-                                self.show_body(
-                                    ui,
-                                    &child_ctx,
-                                    first_pass && root_parent_current && !intents.close,
-                                    root_parent_current,
-                                    root_scope.filter(|_| {
-                                        matches!(
-                                            root_owner,
-                                            NavigationOwner::Dialog {
-                                                kind: NavigationDialogKind::XmlToolkit,
-                                                ..
-                                            }
-                                        )
-                                    }),
-                                    &mut intents,
-                                    parent_instance,
-                                    root_owner,
-                                    root_confirmation_current,
-                                    root_scope.filter(|_| root_confirmation_current),
-                                )
-                            })
-                        });
+                        .show_utility(
+                            child,
+                            "xml-toolkit",
+                            egui::Id::new("xml_toolkit_embedded_window"),
+                            Some(&mut open),
+                            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                                    egui::Vec2::from(available.min(egui::vec2(1120.0, 760.0))),
+                                ),
+                                egui::Vec2::ZERO,
+                                [None, None],
+                            )
+                            .with_minimum(egui::Vec2::from(available.min(egui::vec2(480.0, 340.0))))
+                            .with_maximum(egui::Vec2::from(available)),
+                            |ui| {
+                                ui.add_enabled_ui(root_parent_current, |ui| {
+                                    self.show_body(
+                                        ui,
+                                        &child_ctx,
+                                        first_pass && root_parent_current && !intents.close,
+                                        root_parent_current,
+                                        root_scope.filter(|_| {
+                                            matches!(
+                                                root_owner,
+                                                NavigationOwner::Dialog {
+                                                    kind: NavigationDialogKind::XmlToolkit,
+                                                    ..
+                                                }
+                                            )
+                                        }),
+                                        &mut intents,
+                                        parent_instance,
+                                        root_owner,
+                                        root_confirmation_current,
+                                        root_scope.filter(|_| root_confirmation_current),
+                                    )
+                                })
+                            },
+                        );
                     if root_parent_current {
                         self.open = open;
                     }

@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::image_compare::{
     DifferenceClass, ImageBudgetLease, ImageCompareSession, ImageCompareSnapshot, ImageInput,
     ImageLoadStatus, ImageSessionError, ImageSide,
@@ -512,25 +513,38 @@ impl ImageCompareDialogState {
             .resizable(true)
             .default_size((1100.0, 760.0))
             .min_size((620.0, 430.0))
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                let visible_owner = owner_current && ui.is_visible() && !ui.is_sizing_pass();
-                let controls_enabled = visible_owner && !snapshot.closed;
-                let actions_enabled = controls_enabled && first_ui_pass;
-                let mut order = 0_u64;
-                self.show_controls(
-                    ui,
-                    &snapshot,
-                    controls_enabled,
-                    actions_enabled,
-                    current_scope.as_ref(),
-                    &mut order,
-                );
-                ui.separator();
-                self.show_status(ui, &snapshot);
-                ui.separator();
-                self.show_canvas(ui, &snapshot, actions_enabled);
-            });
+            .show_utility(
+                ctx,
+                "image-comparison",
+                egui::Id::new(WINDOW_TITLE),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((1100.0, 760.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::Vec2::from((620.0, 430.0))),
+                |ui| {
+                    let visible_owner = owner_current && ui.is_visible() && !ui.is_sizing_pass();
+                    let controls_enabled = visible_owner && !snapshot.closed;
+                    let actions_enabled = controls_enabled && first_ui_pass;
+                    let mut order = 0_u64;
+                    self.show_controls(
+                        ui,
+                        &snapshot,
+                        controls_enabled,
+                        actions_enabled,
+                        current_scope.as_ref(),
+                        &mut order,
+                    );
+                    ui.separator();
+                    self.show_status(ui, &snapshot);
+                    ui.separator();
+                    self.show_canvas(ui, &snapshot, actions_enabled);
+                },
+            );
         if !window_open {
             self.close();
         }

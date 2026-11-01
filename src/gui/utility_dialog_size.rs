@@ -40,6 +40,7 @@ struct WindowInstance {
     last_body_clip: Option<Rect>,
     resize_start: Option<Vec2>,
     resize_release: Option<ResizeRelease>,
+    locally_resized: bool,
     restore_after_size_ack: bool,
 }
 
@@ -58,6 +59,7 @@ impl WindowInstance {
             last_body_clip: None,
             resize_start: None,
             resize_release: None,
+            locally_resized: false,
             restore_after_size_ack: false,
         }
     }
@@ -294,12 +296,14 @@ impl UtilityDialogSizeManager {
         &self,
         ctx: &Context,
         key: UtilityToolKey,
-        id: Id,
+        instance_id: Id,
         open: bool,
-        default_outer_size: Vec2,
-        minimum_outer_size: Vec2,
+        recipe: UtilityWindowSizeRecipe,
     ) -> Option<WindowPlan> {
         let viewport = ctx.content_rect().size();
+        let existing_area_size = ctx
+            .memory(|memory| memory.area_rect(instance_id))
+            .map(|rect| rect.size());
         let available = Vec2::new(
             (viewport.x - 2.0 * VIEWPORT_MARGIN).max(1.0),
             (viewport.y - 2.0 * VIEWPORT_MARGIN).max(1.0),
@@ -308,35 +312,45 @@ impl UtilityDialogSizeManager {
         let frame = state.frame;
         state.known_keys.insert(key);
         let mut completed_release = None;
+        let mut previous_size_after_kind_change = None;
 
         if !open {
             let instance = state
                 .instances
-                .entry(id)
+                .entry(instance_id)
                 .or_insert_with(|| WindowInstance::new(key));
             if instance.key != key {
+                completed_release =
+                    completed_resize_size(instance).map(|size| (instance.key, size));
                 *instance = WindowInstance::new(key);
+            } else {
+                completed_release = completed_resize_size(instance).map(|size| (key, size));
             }
-            completed_release = completed_resize_size(instance);
             instance.is_open = false;
             instance.last_seen_frame = Some(frame);
             instance.restore_pending = true;
             instance.resize_start = None;
             instance.resize_release = None;
             drop(state);
-            if let Some(size) = completed_release {
-                let _ = self.submit_resize(key, size, Some(ctx), None);
+            if let Some((release_key, size)) = completed_release {
+                let _ = self.submit_resize(release_key, size, Some(ctx), None);
             }
             return None;
         }
 
         let preference = state.sizes.preference(key);
         let revision = state.accepted_revisions.get(&key).copied();
+        let pending_local_resize = state.local_resize_revisions.contains_key(&key);
         let instance = state
             .instances
-            .entry(id)
+            .entry(instance_id)
             .or_insert_with(|| WindowInstance::new(key));
         if instance.key != key {
+            completed_release = completed_resize_size(instance).map(|size| (instance.key, size));
+            previous_size_after_kind_change = instance
+                .last_outer_rect
+                .map(|rect| rect.size())
+                .or(existing_area_size);
             *instance = WindowInstance::new(key);
         }
 
@@ -344,7 +358,9 @@ impl UtilityDialogSizeManager {
             .last_seen_frame
             .is_some_and(|last| last.saturating_add(1) < frame);
         if omitted {
-            completed_release = completed_resize_size(instance);
+            if completed_release.is_none() {
+                completed_release = completed_resize_size(instance).map(|size| (key, size));
+            }
             instance.resize_start = None;
             instance.resize_release = None;
         }
@@ -357,33 +373,69 @@ impl UtilityDialogSizeManager {
             instance.restore_pending = true;
         }
         let restore_pending = instance.restore_pending;
-        let previous_size = instance.last_outer_rect.map(|rect| rect.size());
+        let previous_size = instance
+            .last_outer_rect
+            .map(|rect| rect.size())
+            .or(previous_size_after_kind_change)
+            .or(existing_area_size);
         instance.is_open = true;
         instance.last_seen_frame = Some(frame);
 
+        let maximum = Vec2::new(
+            recipe.maximum_outer[0].unwrap_or(available.x),
+            recipe.maximum_outer[1].unwrap_or(available.y),
+        )
+        .min(available)
+        .max(Vec2::ZERO);
+        // `Window::new` starts with egui's own 96x32 minimum. Most callers in
+        // the inventory have no explicit minimum, so their recipe uses ZERO
+        // as the "keep the builder default" marker. A size restore must keep
+        // that original minimum instead of replacing it with ZERO.
+        let configured_minimum = if recipe.minimum_outer.x == 0.0 && recipe.minimum_outer.y == 0.0 {
+            Vec2::new(96.0, 32.0)
+        } else {
+            recipe.minimum_outer
+        };
+        let minimum = configured_minimum.min(maximum).max(Vec2::ZERO);
         let preferred = match preference {
-            UtilitySizePreference::Preferred(size) => size,
+            UtilitySizePreference::Preferred(size) => [Some(size.width), Some(size.height)],
             UtilitySizePreference::Missing
             | UtilitySizePreference::Reset
-            | UtilitySizePreference::Unsupported => preferred_default(default_outer_size),
+            | UtilitySizePreference::Unsupported => recipe.default.dimensions(),
         };
-        let applied = preferred.apply_within(available.x, available.y);
-        let minimum = minimum_outer_size.min(available).max(Vec2::ZERO);
+        let target_outer = [
+            preferred[0].map(|value| value.min(maximum.x).max(minimum.x)),
+            preferred[1].map(|value| value.min(maximum.y).max(minimum.y)),
+        ];
+        let completed_local_release =
+            completed_release.is_some_and(|(released_key, _)| released_key == key);
+        let active_resize = instance.resize_start.is_some()
+            || instance.resize_release.is_some()
+            || instance.locally_resized;
+        // Intrinsic and one-axis factory defaults keep their absent axis
+        // content-sized during idle frames. Only an explicit two-axis size or
+        // actual user resize state opts into filling the offered body.
+        let fill_body = preferred.iter().all(Option::is_some)
+            || pending_local_resize
+            || completed_local_release
+            || active_resize;
         let plan = WindowPlan {
             key,
-            id,
+            instance_id,
             frame,
             preference,
             revision,
             restore_pending,
             previous_size,
-            applied_outer: Vec2::new(applied.width, applied.height).max(minimum),
+            target_outer,
             available,
             minimum,
+            maximum,
+            fill_body,
         };
         drop(state);
-        if let Some(size) = completed_release {
-            let _ = self.submit_resize(key, size, Some(ctx), Some(id));
+        if let Some((release_key, size)) = completed_release {
+            let _ = self.submit_resize(release_key, size, Some(ctx), None);
         }
         Some(plan)
     }
@@ -404,7 +456,7 @@ impl UtilityDialogSizeManager {
         {
             let mut state = self.lock();
             state.known_keys.insert(plan.key);
-            if let Some(instance) = state.instances.get_mut(&plan.id) {
+            if let Some(instance) = state.instances.get_mut(&plan.instance_id) {
                 if !open {
                     if grip.stopped
                         && let Some(starting_size) = instance.resize_start
@@ -455,6 +507,7 @@ impl UtilityDialogSizeManager {
                             if changed {
                                 mutation =
                                     PreferredWindowSize::new(rect.width(), rect.height()).ok();
+                                instance.locally_resized = mutation.is_some();
                             }
                             instance.resize_start = None;
                             instance.resize_release = None;
@@ -492,15 +545,214 @@ impl UtilityDialogSizeManager {
 
 struct WindowPlan {
     key: UtilityToolKey,
-    id: Id,
+    instance_id: Id,
     frame: u64,
     preference: UtilitySizePreference,
     revision: Option<UtilitySizeRevision>,
     restore_pending: bool,
     previous_size: Option<Vec2>,
-    applied_outer: Vec2,
+    target_outer: [Option<f32>; 2],
     available: Vec2,
     minimum: Vec2,
+    maximum: Vec2,
+    fill_body: bool,
+}
+
+/// The caller's normal first-open size. Missing axes preserve egui's
+/// content-sized default.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct UtilityWindowSizeDefault {
+    width: Option<f32>,
+    height: Option<f32>,
+}
+
+impl UtilityWindowSizeDefault {
+    pub(crate) const fn intrinsic() -> Self {
+        Self {
+            width: None,
+            height: None,
+        }
+    }
+
+    pub(crate) const fn outer(size: Vec2) -> Self {
+        Self {
+            width: Some(size.x),
+            height: Some(size.y),
+        }
+    }
+
+    pub(crate) const fn width(width: f32) -> Self {
+        Self {
+            width: Some(width),
+            height: None,
+        }
+    }
+
+    pub(crate) const fn height(height: f32) -> Self {
+        Self {
+            width: None,
+            height: Some(height),
+        }
+    }
+
+    fn dimensions(self) -> [Option<f32>; 2] {
+        [self.width, self.height]
+    }
+}
+
+/// Bounds that belong to the original Window builder.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UtilityWindowSizeRecipe {
+    default: UtilityWindowSizeDefault,
+    minimum_outer: Vec2,
+    maximum_outer: [Option<f32>; 2],
+}
+
+impl UtilityWindowSizeRecipe {
+    pub(crate) const fn new(
+        default: UtilityWindowSizeDefault,
+        minimum_outer: Vec2,
+        maximum_outer: [Option<f32>; 2],
+    ) -> Self {
+        Self {
+            default,
+            minimum_outer,
+            maximum_outer,
+        }
+    }
+
+    pub(crate) const fn intrinsic() -> Self {
+        Self::new(
+            UtilityWindowSizeDefault::intrinsic(),
+            Vec2::ZERO,
+            [None, None],
+        )
+    }
+
+    pub(crate) const fn outer(default: Vec2) -> Self {
+        Self::new(
+            UtilityWindowSizeDefault::outer(default),
+            Vec2::ZERO,
+            [None, None],
+        )
+    }
+
+    pub(crate) const fn width(default: f32) -> Self {
+        Self::new(
+            UtilityWindowSizeDefault::width(default),
+            Vec2::ZERO,
+            [None, None],
+        )
+    }
+
+    pub(crate) const fn with_minimum(mut self, minimum: Vec2) -> Self {
+        self.minimum_outer = minimum;
+        self
+    }
+
+    pub(crate) fn with_min_width(mut self, minimum: f32) -> Self {
+        if self.minimum_outer == Vec2::ZERO {
+            self.minimum_outer = Vec2::new(96.0, 32.0);
+        }
+        self.minimum_outer.x = minimum;
+        self
+    }
+
+    pub(crate) fn with_min_height(mut self, minimum: f32) -> Self {
+        if self.minimum_outer == Vec2::ZERO {
+            self.minimum_outer = Vec2::new(96.0, 32.0);
+        }
+        self.minimum_outer.y = minimum;
+        self
+    }
+
+    pub(crate) const fn with_maximum(mut self, maximum: Vec2) -> Self {
+        self.maximum_outer = [Some(maximum.x), Some(maximum.y)];
+        self
+    }
+
+    pub(crate) const fn with_max_width(mut self, maximum: f32) -> Self {
+        self.maximum_outer[0] = Some(maximum);
+        self
+    }
+
+    pub(crate) const fn with_max_height(mut self, maximum: f32) -> Self {
+        self.maximum_outer[1] = Some(maximum);
+        self
+    }
+}
+
+pub(crate) trait UtilityDialogSizeWindowExt {
+    fn show_utility<R>(
+        self,
+        ctx: &Context,
+        stable_key: &'static str,
+        instance_id: Id,
+        open: Option<&mut bool>,
+        recipe: UtilityWindowSizeRecipe,
+        contents: impl FnOnce(&mut Ui) -> R,
+    ) -> Option<InnerResponse<Option<R>>>;
+}
+
+impl UtilityDialogSizeWindowExt for Window<'_> {
+    fn show_utility<R>(
+        self,
+        ctx: &Context,
+        stable_key: &'static str,
+        instance_id: Id,
+        open: Option<&mut bool>,
+        recipe: UtilityWindowSizeRecipe,
+        contents: impl FnOnce(&mut Ui) -> R,
+    ) -> Option<InnerResponse<Option<R>>> {
+        show_utility_window(ctx, stable_key, instance_id, open, recipe, self, contents)
+    }
+}
+
+/// Render an ordinary embedded utility window through the app's one shared
+/// capability. The helper falls back to the caller's original default recipe
+/// when used by headless or standalone contexts.
+pub(crate) fn show_utility_window<R>(
+    ctx: &Context,
+    stable_key: &'static str,
+    instance_id: Id,
+    open: Option<&mut bool>,
+    recipe: UtilityWindowSizeRecipe,
+    window: Window<'_>,
+    contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<InnerResponse<Option<R>>> {
+    let Ok(key) = UtilityToolKey::parse(stable_key) else {
+        tracing::error!(tool = stable_key, "unknown utility window size key");
+        return show_unmanaged_window(ctx, open, recipe.default, window, contents);
+    };
+    UtilityDialogSizeManager::for_context(ctx).show_window_with_recipe(
+        ctx,
+        key,
+        instance_id,
+        open,
+        recipe,
+        window,
+        contents,
+    )
+}
+
+fn show_unmanaged_window<R>(
+    ctx: &Context,
+    open: Option<&mut bool>,
+    default: UtilityWindowSizeDefault,
+    window: Window<'_>,
+    contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<InnerResponse<Option<R>>> {
+    let window = match (default.width, default.height) {
+        (Some(width), Some(height)) => window.default_size(Vec2::new(width, height)),
+        (Some(width), None) => window.default_width(width),
+        (None, Some(height)) => window.default_height(height),
+        (None, None) => window,
+    };
+    match open {
+        Some(open) if *open => window.open(open).show(ctx, contents),
+        Some(_) => None,
+        None => window.show(ctx, contents),
+    }
 }
 
 /// A frame-local handle fetched from egui Context data by every eligible
@@ -527,30 +779,58 @@ impl UtilityDialogSizeAccess {
         window: Window<'_>,
         contents: impl FnOnce(&mut Ui) -> R,
     ) -> Option<InnerResponse<Option<R>>> {
-        let Some(capability) = self.0.as_ref() else {
-            return (*open).then(|| {
-                window
-                    .default_size(default_outer_size)
-                    .open(open)
-                    .show(ctx, contents)
-            })?;
-        };
-        let plan = capability.prepare_window(
+        self.show_window_with_recipe(
             ctx,
             key,
             id,
-            *open,
-            default_outer_size,
-            minimum_outer_size,
-        )?;
+            Some(open),
+            UtilityWindowSizeRecipe::new(
+                UtilityWindowSizeDefault::outer(default_outer_size),
+                minimum_outer_size,
+                [None, None],
+            ),
+            window,
+            contents,
+        )
+    }
+
+    pub(crate) fn show_window_with_recipe<R>(
+        &self,
+        ctx: &Context,
+        key: UtilityToolKey,
+        instance_id: Id,
+        open: Option<&mut bool>,
+        recipe: UtilityWindowSizeRecipe,
+        window: Window<'_>,
+        contents: impl FnOnce(&mut Ui) -> R,
+    ) -> Option<InnerResponse<Option<R>>> {
+        let is_open = open.as_deref().copied().unwrap_or(true);
+        let Some(capability) = self.0.as_ref() else {
+            return show_unmanaged_window(ctx, open, recipe.default, window, contents);
+        };
+        let mut open = open;
+        let plan = capability.prepare_window(ctx, key, instance_id, is_open, recipe)?;
         let mut window = window;
-        if plan.restore_pending {
-            window = window.default_size(plan.applied_outer);
+        if plan.restore_pending && plan.target_outer.iter().any(Option::is_some) {
+            if matches!(plan.preference, UtilitySizePreference::Preferred(_)) {
+                window = window.default_size(Vec2::new(
+                    plan.target_outer[0].unwrap_or_default(),
+                    plan.target_outer[1].unwrap_or_default(),
+                ));
+            } else {
+                if let Some(width) = plan.target_outer[0] {
+                    window = window.default_width(width);
+                }
+                if let Some(height) = plan.target_outer[1] {
+                    window = window.default_height(height);
+                }
+            }
             let (minimum, maximum) = restoration_bounds(
-                plan.applied_outer,
+                plan.target_outer,
                 plan.available,
                 plan.previous_size,
                 plan.minimum,
+                plan.maximum,
             );
             window = window.min_size(minimum).max_size(maximum);
         }
@@ -558,30 +838,50 @@ impl UtilityDialogSizeAccess {
         let mut body_rect = None;
         let mut body_clip = None;
         let mut accepted_body = false;
-        let response = window.open(open).show(ctx, |ui| {
-            let accepted = ui.is_visible() && ui.is_enabled() && !ui.is_sizing_pass();
-            accepted_body = accepted;
+        let fill_body = plan.fill_body;
+        let response = match open.as_deref_mut() {
+            Some(open) => window.open(open).show(ctx, |ui| {
+                let accepted = ui.is_visible() && ui.is_enabled() && !ui.is_sizing_pass();
+                accepted_body = accepted;
 
-            let result = contents(ui);
-            if accepted && !ctx.will_discard() {
-                ui.take_available_space();
-                body_rect = Some(ui.min_rect());
-                body_clip = Some(ui.clip_rect());
-            }
-            result
-        });
+                let result = contents(ui);
+                if accepted && fill_body && !ctx.will_discard() {
+                    ui.take_available_space();
+                    body_rect = Some(ui.min_rect());
+                    body_clip = Some(ui.clip_rect());
+                }
+                result
+            }),
+            None => window.show(ctx, |ui| {
+                let accepted = ui.is_visible() && ui.is_enabled() && !ui.is_sizing_pass();
+                accepted_body = accepted;
 
+                let result = contents(ui);
+                if accepted && fill_body && !ctx.will_discard() {
+                    ui.take_available_space();
+                    body_rect = Some(ui.min_rect());
+                    body_clip = Some(ui.clip_rect());
+                }
+                result
+            }),
+        };
+
+        let is_still_open = open.as_deref().copied().unwrap_or(true);
         let visible_body = accepted_body
             && response
                 .as_ref()
                 .is_some_and(|response| response.inner.is_some())
-            && *open
+            && is_still_open
             && !ctx.will_discard();
         let rect = response.as_ref().map(|response| response.response.rect);
-        let grip = resize_grip_state(ctx, id);
+        let window_layer = response.as_ref().map_or(
+            egui::LayerId::new(egui::Order::Middle, instance_id),
+            |response| response.response.layer_id,
+        );
+        let grip = resize_grip_state(ctx, window_layer);
         capability.observe_window(
             plan,
-            *open,
+            is_still_open,
             visible_body,
             rect,
             body_rect,
@@ -634,6 +934,7 @@ impl UtilityDialogSizeState {
             .values_mut()
             .filter(|instance| instance.key == key)
         {
+            instance.locally_resized = false;
             if !instance.is_open || !instance.has_applied_restore || instance.restore_pending {
                 continue;
             }
@@ -650,13 +951,6 @@ impl UtilityDialogSizeState {
         Ok(())
     }
 }
-fn preferred_default(default_outer: Vec2) -> PreferredWindowSize {
-    PreferredWindowSize::new(default_outer.x, default_outer.y).unwrap_or(PreferredWindowSize {
-        width: 400.0,
-        height: 300.0,
-    })
-}
-
 fn completed_resize_size(instance: &WindowInstance) -> Option<PreferredWindowSize> {
     let release = instance.resize_release?;
     let rect = instance.last_outer_rect?;
@@ -668,20 +962,25 @@ fn completed_resize_size(instance: &WindowInstance) -> Option<PreferredWindowSiz
 }
 
 fn restoration_bounds(
-    target: Vec2,
+    target: [Option<f32>; 2],
     available: Vec2,
     previous: Option<Vec2>,
     caller_minimum: Vec2,
+    caller_maximum: Vec2,
 ) -> (Vec2, Vec2) {
-    let mut minimum = caller_minimum.min((available - Vec2::splat(0.5)).max(Vec2::ZERO));
-    let mut maximum = available;
+    let mut minimum = caller_minimum
+        .min(caller_maximum)
+        .min((available - Vec2::splat(0.5)).max(Vec2::ZERO));
+    let mut maximum = caller_maximum.min(available);
     if let Some(previous) = previous {
         for axis in 0..2 {
-            if target[axis] + 0.5 < previous[axis] {
-                maximum[axis] = target[axis];
-                minimum[axis] = minimum[axis].min((target[axis] - 0.5).max(0.0));
-            } else if target[axis] > previous[axis] + 0.5 {
-                minimum[axis] = (target[axis] - 0.5).max(0.0);
+            if let Some(target) = target[axis] {
+                if target + 0.5 < previous[axis] {
+                    maximum[axis] = target;
+                    minimum[axis] = minimum[axis].min((target - 0.5).max(0.0));
+                } else if target > previous[axis] + 0.5 {
+                    minimum[axis] = (target - 0.5).max(0.0);
+                }
             }
         }
     }
@@ -694,8 +993,8 @@ struct ResizeGripState {
     stopped: bool,
 }
 
-fn resize_grip_state(ctx: &Context, window_id: Id) -> ResizeGripState {
-    let edge_drag = Id::new(egui::LayerId::new(egui::Order::Middle, window_id)).with("edge_drag");
+fn resize_grip_state(ctx: &Context, window_layer: egui::LayerId) -> ResizeGripState {
+    let edge_drag = Id::new(window_layer).with("edge_drag");
     let edge_ids = [
         "left",
         "right",
@@ -743,11 +1042,26 @@ mod tests {
         SettingsSaveWorkerRegistry,
         UtilityDialogSizeManager,
     ) {
+        setup_with_preferences(&[(key(), size)])
+    }
+
+    fn setup_with_preferences(
+        preferences: &[(UtilityToolKey, Option<PreferredWindowSize>)],
+    ) -> (
+        TempDir,
+        String,
+        Settings,
+        Context,
+        SettingsSaveWorkerRegistry,
+        UtilityDialogSizeManager,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
         let mut settings = Settings::default();
-        if let Some(size) = size {
-            settings.utility_dialog_sizes.set(key(), size).unwrap();
+        for (key, size) in preferences {
+            if let Some(size) = size {
+                settings.utility_dialog_sizes.set(*key, *size).unwrap();
+            }
         }
         settings.save(path.to_str().unwrap()).unwrap();
         let path = path.to_string_lossy().into_owned();
@@ -760,6 +1074,66 @@ mod tests {
         );
         manager.install_in_context(&ctx);
         (directory, path, settings, ctx, workers, manager)
+    }
+
+    fn render_recipe_window(
+        ctx: &Context,
+        manager: &UtilityDialogSizeManager,
+        tool: UtilityToolKey,
+        id: Id,
+        title: &'static str,
+        recipe: UtilityWindowSizeRecipe,
+        open: &mut bool,
+        screen: Vec2,
+        events: Vec<Event>,
+    ) -> Vec<Id> {
+        let mut dragged_ids = Vec::new();
+        let output = ctx.run_ui(raw_input(screen, events, 1.0), |root| {
+            let ctx = root.ctx().clone();
+            manager.begin_frame(&ctx).unwrap();
+            let window = Window::new(title).id(id).resizable(true);
+            let _ = UtilityDialogSizeManager::for_context(&ctx).show_window_with_recipe(
+                &ctx,
+                tool,
+                id,
+                Some(open),
+                recipe,
+                window,
+                |ui| {
+                    ui.label("Stable utility size test content");
+                    ui.label("Second intrinsic content row");
+                },
+            );
+            if let Some(id) = ctx.dragged_id() {
+                dragged_ids.push(id);
+            }
+        });
+        output.drop_without_applying_deltas();
+        dragged_ids
+    }
+
+    fn wait_for_preference(
+        ctx: &Context,
+        manager: &UtilityDialogSizeManager,
+        key: UtilityToolKey,
+        preference: UtilitySizePreference,
+        screen: Vec2,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if manager.snapshot().preference(key) == preference {
+                return;
+            }
+            ctx.run_ui(raw_input(screen, vec![], 1.0), |root| {
+                manager.begin_frame(root.ctx()).unwrap();
+            })
+            .drop_without_applying_deltas();
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for utility preference acknowledgement: {preference:?}"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        }
     }
 
     fn raw_input(screen: Vec2, events: Vec<Event>, pixels_per_point: f32) -> RawInput {
@@ -1616,5 +1990,295 @@ mod tests {
         );
         assert_eq!(workers.utility_size_latest_revision(key()), None);
         assert_eq!(workers.utility_size_latest_revision(key()), None);
+    }
+
+    #[test]
+    fn utility_size_inventory_intrinsic_default_matches_plain_egui_window() {
+        let tool = UtilityToolKey::parse("plugin-settings").unwrap();
+        let (_directory, _path, _settings, ctx, workers, manager) =
+            setup_with_preferences(&[(tool, None)]);
+        let screen = egui::vec2(1000.0, 800.0);
+        let id = Id::new("Intrinsic baseline production title");
+        let mut open = true;
+        for _ in 0..3 {
+            render_recipe_window(
+                &ctx,
+                &manager,
+                tool,
+                id,
+                "Intrinsic baseline production title",
+                UtilityWindowSizeRecipe::intrinsic(),
+                &mut open,
+                screen,
+                vec![],
+            );
+        }
+        let managed = outer_rect(&ctx, id);
+
+        let plain_ctx = Context::default();
+        for _ in 0..3 {
+            plain_ctx
+                .run_ui(raw_input(screen, vec![], 1.0), |root| {
+                    Window::new("Intrinsic baseline production title")
+                        .id(id)
+                        .resizable(true)
+                        .show(root.ctx(), |ui| {
+                            ui.label("Stable utility size test content");
+                            ui.label("Second intrinsic content row");
+                        });
+                })
+                .drop_without_applying_deltas();
+        }
+        let plain = outer_rect(&plain_ctx, id);
+        assert!(
+            (managed.width() - plain.width()).abs() < 1.0
+                && (managed.height() - plain.height()).abs() < 1.0,
+            "intrinsic managed={managed:?}, plain={plain:?}"
+        );
+        workers.join_all();
+    }
+
+    #[test]
+    fn utility_size_inventory_same_id_kind_change_flushes_release_and_restores_new_kind() {
+        let export_key = UtilityToolKey::parse("mkmacro-package-export").unwrap();
+        let import_key = UtilityToolKey::parse("mkmacro-package-import").unwrap();
+        let export_default = PreferredWindowSize::new(480.0, 360.0).unwrap();
+        let import_default = PreferredWindowSize::new(300.0, 250.0).unwrap();
+        let (_directory, path, _settings, ctx, workers, manager) = setup_with_preferences(&[
+            (export_key, Some(export_default)),
+            (import_key, Some(import_default)),
+        ]);
+        let screen = egui::vec2(1000.0, 800.0);
+        let shared_id = Id::new("mkmacro_package_modal");
+        let recipe = UtilityWindowSizeRecipe::width(520.0);
+        let mut open = true;
+        for _ in 0..3 {
+            render_recipe_window(
+                &ctx,
+                &manager,
+                export_key,
+                shared_id,
+                "Shared Package Modal",
+                recipe,
+                &mut open,
+                screen,
+                vec![],
+            );
+        }
+        let before = outer_rect(&ctx, shared_id);
+        assert!((before.width() - 480.0).abs() < 1.0, "{before:?}");
+        assert!((before.height() - 360.0).abs() < 1.0, "{before:?}");
+
+        let mut dragged = Vec::new();
+        for events in pointer_press_and_drag(before, egui::vec2(75.0, 55.0)) {
+            dragged.extend(render_recipe_window(
+                &ctx,
+                &manager,
+                export_key,
+                shared_id,
+                "Shared Package Modal",
+                recipe,
+                &mut open,
+                screen,
+                events,
+            ));
+        }
+        assert_actual_resize_grip_was_dragged(shared_id, &dragged);
+        let completed_export_size = outer_rect(&ctx, shared_id);
+        assert!(completed_export_size.width() > before.width() + 30.0);
+        assert!(completed_export_size.height() > before.height() + 20.0);
+
+        for _ in 0..3 {
+            render_recipe_window(
+                &ctx,
+                &manager,
+                import_key,
+                shared_id,
+                "Shared Package Modal",
+                recipe,
+                &mut open,
+                screen,
+                vec![],
+            );
+        }
+        let import_rect = outer_rect(&ctx, shared_id);
+        assert!(
+            (import_rect.width() - import_default.width).abs() < 1.0
+                && (import_rect.height() - import_default.height).abs() < 1.0,
+            "new modal kind did not restore over the prior kind's larger desired size: {import_rect:?}"
+        );
+        let expected_export = PreferredWindowSize::new(
+            completed_export_size.width(),
+            completed_export_size.height(),
+        )
+        .unwrap();
+        wait_for_preference(
+            &ctx,
+            &manager,
+            export_key,
+            UtilitySizePreference::Preferred(expected_export),
+            screen,
+        );
+        workers.join_all();
+        let persisted = settings_file(&path).utility_dialog_sizes;
+        assert_eq!(persisted.preferred(export_key), Some(expected_export));
+        assert_eq!(persisted.preferred(import_key), Some(import_default));
+    }
+
+    #[test]
+    fn utility_size_inventory_real_resize_reset_and_width_default_reopen() {
+        let tool = UtilityToolKey::parse("action-sheet").unwrap();
+        let prior = PreferredWindowSize::new(560.0, 380.0).unwrap();
+        let (_directory, path, _settings, ctx, workers, manager) =
+            setup_with_preferences(&[(tool, Some(prior))]);
+        let screen = egui::vec2(1000.0, 800.0);
+        let title = "Action Sheet reset default fixture";
+        let id = Id::new(title);
+        let recipe = UtilityWindowSizeRecipe::width(440.0);
+        let mut open = true;
+
+        let plain_ctx = Context::default();
+        for _ in 0..3 {
+            plain_ctx
+                .run_ui(raw_input(screen, vec![], 1.0), |root| {
+                    Window::new(title)
+                        .id(id)
+                        .default_width(440.0)
+                        .show(root.ctx(), |ui| {
+                            ui.label("Stable utility size test content");
+                            ui.label("Second intrinsic content row");
+                        });
+                })
+                .drop_without_applying_deltas();
+        }
+        let normal_default = outer_rect(&plain_ctx, id);
+
+        for _ in 0..3 {
+            render_recipe_window(
+                &ctx,
+                &manager,
+                tool,
+                id,
+                title,
+                recipe,
+                &mut open,
+                screen,
+                vec![],
+            );
+        }
+        let before = outer_rect(&ctx, id);
+        assert!((before.width() - prior.width).abs() < 1.0, "{before:?}");
+        assert!((before.height() - prior.height).abs() < 1.0, "{before:?}");
+
+        let mut dragged = Vec::new();
+        for events in pointer_press_and_drag(before, egui::vec2(80.0, 60.0)) {
+            dragged.extend(render_recipe_window(
+                &ctx, &manager, tool, id, title, recipe, &mut open, screen, events,
+            ));
+        }
+        assert_actual_resize_grip_was_dragged(id, &dragged);
+        for _ in 0..2 {
+            render_recipe_window(
+                &ctx,
+                &manager,
+                tool,
+                id,
+                title,
+                recipe,
+                &mut open,
+                screen,
+                vec![],
+            );
+        }
+        let resized = outer_rect(&ctx, id);
+        assert!(resized.width() > before.width() + 30.0);
+        assert!(resized.height() > before.height() + 20.0);
+        let expected_saved = PreferredWindowSize::new(resized.width(), resized.height()).unwrap();
+        wait_for_preference(
+            &ctx,
+            &manager,
+            tool,
+            UtilitySizePreference::Preferred(expected_saved),
+            screen,
+        );
+
+        manager.reset(tool).unwrap();
+        wait_for_preference(&ctx, &manager, tool, UtilitySizePreference::Reset, screen);
+        for _ in 0..3 {
+            render_recipe_window(
+                &ctx,
+                &manager,
+                tool,
+                id,
+                title,
+                recipe,
+                &mut open,
+                screen,
+                vec![],
+            );
+        }
+        let reset_rect = outer_rect(&ctx, id);
+        assert!(
+            (reset_rect.width() - 440.0).abs() < 1.0,
+            "one-axis default width was not restored: {reset_rect:?}"
+        );
+        assert!(
+            (reset_rect.height() - normal_default.height()).abs() < 1.0,
+            "intrinsic height changed on reset: reset={reset_rect:?}, default={normal_default:?}"
+        );
+        for _ in 0..3 {
+            render_recipe_window(
+                &ctx,
+                &manager,
+                tool,
+                id,
+                title,
+                recipe,
+                &mut open,
+                screen,
+                vec![],
+            );
+        }
+        let idle_rect = outer_rect(&ctx, id);
+        assert!((idle_rect.width() - reset_rect.width()).abs() < 1.0);
+        assert!((idle_rect.height() - reset_rect.height()).abs() < 1.0);
+
+        open = false;
+        render_recipe_window(
+            &ctx,
+            &manager,
+            tool,
+            id,
+            title,
+            recipe,
+            &mut open,
+            screen,
+            vec![],
+        );
+        open = true;
+        for _ in 0..3 {
+            render_recipe_window(
+                &ctx,
+                &manager,
+                tool,
+                id,
+                title,
+                recipe,
+                &mut open,
+                screen,
+                vec![],
+            );
+        }
+        let reopened = outer_rect(&ctx, id);
+        assert!((reopened.width() - 440.0).abs() < 1.0, "{reopened:?}");
+        assert!(
+            (reopened.height() - normal_default.height()).abs() < 1.0,
+            "reopened intrinsic height differs: reopened={reopened:?}, default={normal_default:?}"
+        );
+        workers.join_all();
+        assert_eq!(
+            settings_file(&path).utility_dialog_sizes.preference(tool),
+            UtilitySizePreference::Reset
+        );
     }
 }

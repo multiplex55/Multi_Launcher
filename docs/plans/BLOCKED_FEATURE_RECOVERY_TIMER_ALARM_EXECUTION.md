@@ -30,8 +30,8 @@ Imported Goal/Kickstart Git blobs exactly equal master (`010ce29bc91967d101b295d
 | M0-A | COMPLETE | Exact predecessor baseline c0bc9de1; normal push successful; clean at baseline. |
 | M1-A | TESTED / COMPLETE | Commit81eadd2bbb56a18f59c20be3919ef6c25575a229 pushed; clean at checkpoint. Canonical bounded versioned field outside GENERAL_SETTINGS_FIELDS; mapping preserves current preference. Registry owns coalesced writes, revisions/ack, retry and join/unsaved report. Independent semantic review resolved;19/19 selected tests pass. No dialogs migrated. |
 | M1-B | TESTED / COMPLETE | Commit86d3feb946894a201fe4af4f50fa0cd0b25dd5f9 pushed; clean at checkpoint. Five actual Window tests pass after initial+two focused corrections. Both historic cases prove400×300 outer restore, real two-axis gripID, body/frame/viewport clip, settled persisted size and omitted-instance latest reopen. Stable reset plus full post-reset resize persistence, clamping/discard and title/reflow/collapse controls pass. Independent source review cleared. No production dialog migrated yet. |
-| M1-C | TESTED / COMPLETE | Six production surfaces use one context capability/cache and actual installed registry, once-per-logical-root-frame drainage; no lock over contents. Clipboard/Preview competing geometry writers retired; Diff body legacy conversion only Missing, Reset wins. Close/omission/shutdown release persistence and error dedup verified. All19 scoped cases have passing evidence across documented runs, not one clean19 run. Commit follows. |
-| M1-D | pending | Inventory and independent review after representative migration. |
+| M1-C | TESTED / COMPLETE | Commit144a55e1aa138e05f80f4e193dc2ddff18d2b290 pushed; clean at checkpoint. Six production surfaces use one context capability/cache and installed registry, once-per-logical-root-frame drainage; no lock over contents. Competing Clipboard/Preview writers retired; Diff body fallback only Missing, Reset wins. Close/omission/shutdown and error dedup verified. All19 scoped cases have passing evidence across documented runs, not one clean19 run. |
+| M1-D | in_progress / native capture partial | First coherent checkpoint assigned: remaining eligible embedded inventory through same capability, defaults/minima/IDs/nested keys preserved. Second checkpoint will add Settings Reset/Retry and native-safe restore only. Automatic native capture unfulfilled under supported interface; not complete. |
 
 Historical evidence only: `docs/plans/execution/standalone/productivity-and-iteration/stalls/20261031T180743Z.md`. Exact old failures: `real_window_resize_grip_records_candidate_after_one_shot_restore` and `omitted_window_reopens_with_latest_size_from_another_instance`; actual outer 400×63 versus 400×300. Later content-minimum candidate compiled without test acceptance. Preserved candidate root: `C:\Users\Jay\AppData\Local\Temp\Multi_Launcher\productivity-iteration-20261031\c04-m4c-unverified-source_20261031T180444Z_0c876f539d7a42c184af0e8c0cacd196`. Manifest SHA256 independently matches `53EAE08BF76D7F9B1501353CD5F1CC34F84926D55C39B66BA2AFDA7021DEB7CF`; patch expected SHA256 `7A398AE3A4BF05B28F4FA3C58433A41C1E9C827D36E2CBC0B52AA26D0BD3687C`. Unaccepted design evidence, not applied.
 
@@ -75,77 +75,93 @@ Execution `c01-m1c-execution_20261101T125459197Z_8b01aa775a9642e68c09983ac2202b9
 
 M1-C exact minimum-fixture correction preparation `c01-m1c-minimum-fixture-prepare_20261101T125747139Z_2ce9d9b0d2d24a38a7c72a24fd78221f` passed78.208893s (lib only; main/source unchanged). Exact inventory1nonignored `...minimum-fixture-inventory_20261101T130010835Z_ab451f1d0a604c6c926ef7e3483dd2b2` passed1.663892s; execution `c01-m1c-minimum-fixture-execution_20261101T130141574Z_04b05289d9f34b089e7fd5dc4d7593e8` passed1/1,Nextest0.079s/runner0.874214s,exit0,cleanup/drain true. Current source fingerprint `6bd53fa506bdfe36a50f499f3d617c8b1612c7d52eb04aac68d85476ba05c666` stable. Earlier18passes reused only for unchanged production/test paths; no clean aggregate19 claim. Previous source fingerprint for initial/remainder `c6ca0385cec771339703b740419068e5d849451c8b69dc3d10814705f90b0c40`. Search found no obsolete Clipboard/Preview size fields or close writer, and no production Diff window_size assignment (remaining assignments tests only). Scoped cumulative diff inspected, Rust format/diff checks pass. No owned process remains. Main application test target compilation is current for unchanged production source; no native acceptance claimed.
 
-### M1-D read-only ordinary-dialog inventory
+### M1-D native capability boundary
 
-Planner revalidated production builders; omitted resizable flag means egui default true. This is an eligibility inventory, NOT implementation/native acceptance. All eligible rows remain pending until M1-C/D verification. Paths below are under src/. Same context capability is required for nested children and plugin settings. No missing stable key found. Native adapter work remains M1-D and uses child viewport/monitor bounds, never launcher bounds.
+Pinned ViewportInfo exposes inner_rect/outer_rect/native_pixels_per_point/monitor_size and state flags; ViewportEvent only Close. egui_winit converts Resized/Moved to repaint, and asynchronous InnerSize commands use the same path. raw_input_hook has converted input, no completed-user-resize cause. Rectangles are UI points divided by zoom×nativeDPI; child monitor_size gives dimensions, not identity/origin/work area. Root content_rect is unsuitable for child bounds.
 
-| Owner | Stable kinds | Planned disposition |
+Bounded repository owner check found no exact child-handle/completion bridge: window_manager::get_hwnd(Frame) and visibility::RootWindowBridge capture root handles; immediate callbacks receive Context/ViewportClass only. screenshot_countdown and passive_tooltip subclass directly owned native windows; pinboard lookup is pin-specific with exact lifetime/title/process constraints, not an eframe child creation bridge. No WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE/WM_SIZING/WM_SIZE handlers found. No enumeration, native action, hook, vendor edit, or new framework performed.
+
+Automatic native capture for Regex/XML/QR and macro parameter/runtime prompts is therefore UNFULFILLED/BLOCKED by the supported interface, not an observed native test failure. Integrate embedded variants normally; preserve native defaults/resizing and allow only proven one-shot restore/reset from known preferences with measured inner/outer conversion if implemented. Never persist arbitrary native rectangle/close observations as user intent. C01 cannot be represented fully complete while this mandatory capture boundary remains. Other independent categories may proceed from its actual safe closing tip.
+
+M1-D uses two coherent source checkpoints on the same C01 branch: remaining embedded inventory migration, then Reset/native-safe adapter and final inventory/review closeout. These are bounded increments of approved M1-D, not new categories or repair waves.
+
+M1-D embedded investigation confirmed many builders lack full explicit defaults. Candidate adds typed per-axis intrinsic/outer/width/height recipes and returned response.layer_id grip provenance (pinned namespace Id::new(layer_id).with("edge_drag")). Tracking IDs must preserve per-instance identity. Shared physical-ID kind transitions submit an old completed release before clearing it and retain observed geometry for a smaller new-kind restore. Original close-button presence is preserved. First sweep reported70literal-key sites plus dynamic package variants and screenshot builder across68files; most line churn is callback indentation (non-whitespace diff1737insertions/314deletions at initial snapshot). Candidate not accepted yet.
+
+M1-D embedded preparation `c01-m1d-embedded-prepare_20261101T133343337Z_36c92ad76a8d4fd19084848d2cc45498` failed122.516156s exit101,cleanup/drain true,no timeout,no inventory/tests. Fingerprint `30686097001527fd51b0533622575547067d0ce632d7cb39b5f89f4d5feed72f` stable. Eleven compiler errors reduce to missing egui namespace in MkMacro primary/recording review, missing extension trait import, and nested Some around Window::show Option. Independent review found unspecified intrinsic axes filled on later idle frames; comparison-rules tracking constant despite dynamic actual window ID; Settings full minimum overwrite lowers implicit width instead of setting only height. No further dynamic-ID/X mismatch; domain bodies unchanged except formatting; crop branch close distinctions intact. Correction1 assigned those exact findings and one trailing-whitespace line. New four grouped fixtures cover intrinsic baseline, same-ID kind transition, width-only reset/reopen, and nested plugin picker; actual inventory/results pending.
+
+M1-D embedded correction1 preparation `c01-m1d-embedded-correction1-prepare_20261101T134450256Z_ed59fe26fd59474b85a9727525f98c27` passed208.82689s,lib+bin,cleanup/drain true. Focused reviewer cleared intrinsic-idle behavior, dynamic Diff tracking, and Settings axis minimum; no remaining finding. Inventory `c01-m1d-embedded-inventory_20261101T134846319Z_a9bb901d2db14aab8acf7d9a55a67580` passed2.769807s,23nonignored selected library cases(main compiled/unselected). Expression: inventory/integration prefixes, all common helper cases, exact Jump layer inventory, theme density lifecycle+saved typography, Clipboard cleanup, settings shutdown. Execution `c01-m1d-embedded-execution_20261101T134900716Z_51812ba25de544618d794b45332413b1` passed23/23 in1.632s Nextest/2.481164s runner,exit0,no timeout,cleanup/drain true. Stable source fingerprint `d2d16eb4cc570901ef6ac3ea43b4a25c30fd8690d4272062a7af512134539e66`. Initial+one correction bound used for named findings; no additional cycle. Static literal scan found72call sites including fixtures,70unique keys,all in canonical allowlist; dynamic package variants source-reviewed. No native capture or interaction accepted. Diff/format checks pass; no owned job remains. Embedded checkpoint commit follows before Reset/native-safe increment.
+
+### M1-D ordinary-dialog inventory
+
+Planner revalidated production builders; omitted resizable flag means egui default true. Embedded rows are now source-integrated with scoped verification below; native rows remain explicitly unfulfilled. This inventory does not claim native interaction acceptance. Paths below are under src/. Same context capability is required for nested children and plugin settings. No missing stable key found. Native adapter work remains M1-D and uses child viewport/monitor bounds, never launcher bounds.
+
+| Owner | Stable kinds | Current disposition |
 | --- | --- | --- |
-| actions_editor.rs | custom-apps | eligible/pending |
-| settings_editor/render.rs | settings | eligible/pending |
-| plugin_editor.rs | plugin-settings | eligible/pending |
-| help_window.rs | quick-help, command-help | eligible/pending |
-| multi_manager/ui.rs | multi-manager, multi-manager-settings | eligible/pending |
-| gui/action_sheet.rs | action-sheet | eligible/pending; retain anchor |
-| gui/activity_dialog.rs | activity | eligible/pending |
-| gui/add_action_dialog.rs | add-action | eligible/pending |
-| gui/add_bookmark_dialog.rs | add-bookmark | eligible/pending |
-| gui/alias_dialog.rs | folder-alias | eligible/pending |
-| gui/bookmark_alias_dialog.rs | bookmark-alias | eligible/pending |
-| gui/tempfile_alias_dialog.rs | tempfile-alias | eligible/pending |
-| gui/batch_rename_dialog.rs | batch-rename | eligible/pending primary |
-| gui/brightness_dialog.rs | brightness | eligible/pending |
-| gui/calendar_popover.rs | calendar | eligible/pending |
-| gui/calendar_event_editor.rs | calendar-event-editor | eligible/pending |
-| gui/calendar_event_details.rs | calendar-event-details | eligible/pending |
-| gui/clipboard_dialog.rs | clipboard-history | eligible/pending production history |
-| gui/cpu_list_dialog.rs | cpu-usage | eligible/pending |
-| gui/dashboard_editor_dialog.rs | dashboard-editor | eligible/pending primary |
-| gui/data_recovery_dialog.rs | data-recovery | eligible/pending |
-| gui/diff_dialog/{rules_dialog,folder_rules_dialog}.rs; text input | diff-comparison-rules, diff-folder-rules, diff-text-input | eligible/pending children |
-| gui/duplicate_finder_dialog.rs | duplicate-finder | eligible/pending |
-| gui/fav_dialog.rs | favorites | eligible/pending |
-| gui/file_search_dialog.rs | file-search | eligible/pending |
-| gui/hotfolder_dialog.rs | hotfolder-manager | eligible/pending |
-| gui/hotkey_directory_dialog.rs | hotkey-directory | eligible/pending |
-| gui/image_compare_dialog.rs | image-comparison | eligible/pending |
-| gui/image_panel.rs | image-viewer | eligible/pending; retain instance ID |
-| gui/image_crop_editor.rs | image-crop-editor | eligible/pending shared crop |
-| gui/mkmacro_dialog/image_crop_editor.rs | mkmacro-reference-crop | eligible/pending all load/error branches |
-| gui/json_utility_dialog.rs | json-utility | eligible/pending |
-| gui/macro_dialog.rs | legacy-macros | eligible/pending |
-| gui/mkmacro_dialog/mod.rs | mkmacro | eligible/pending |
-| gui/mkmacro_dialog/action_catalog.rs | mkmacro-action-catalog | eligible/pending |
-| gui/mkmacro_dialog/action_editor.rs | mkmacro-action-editor | eligible/pending primary |
-| gui/mkmacro_dialog/launcher_action_picker.rs | mkmacro-launcher-picker | eligible/pending |
-| gui/mkmacro_dialog/package_ui.rs | mkmacro-package-export, mkmacro-package-import, mkmacro-template-save, mkmacro-templates, mkmacro-help | eligible/pending; shared ID, variant key |
-| gui/mkmacro_dialog/recording_review.rs | mkmacro-recording-review | eligible/pending |
-| gui/mkmacro_dialog/search.rs | mkmacro-step-search | eligible/pending Find/Replace/Jump |
-| gui/mkmacro_dialog/window_picker.rs | mkmacro-window-picker | eligible/pending |
-| gui/mkmacro_dialog/parameter_prompt.rs | mkmacro-parameters | eligible/pending native default-resizable |
-| gui/render.rs::show_macro_prompt | mkmacro-runtime-prompt | eligible/pending native default-resizable |
-| gui/mouse_settings_dialog.rs | mouse-settings | eligible/pending |
-| gui/mouse_gesture_settings_dialog.rs | gesture-settings, gesture-settings-window-picker | eligible/pending |
-| gui/mouse_gestures_dialog.rs | mouse-gestures, gesture-binding-editor | eligible/pending |
-| plugins/mouse_gestures.rs | gesture-ignore-window-picker | eligible/pending; shared context capability |
-| gui/note_graph_dialog.rs | note-graph | eligible/pending |
-| gui/note_panel.rs | note-editor | eligible/pending; retain instance ID |
-| gui/notes_dialog.rs | quick-notes, note-templates | eligible/pending |
-| gui/ocr_view.rs | ocr-result | eligible/pending |
-| gui/paste_sequence_dialog.rs | paste-sequences | eligible/pending |
-| gui/pinboard_windows.rs::show_pin_list | screenshot-pin-list | eligible/pending |
-| gui/{qr_dialog,regex_tester_dialog,xml_toolkit_dialog}.rs | qr-generator, regex-tester, xml-toolkit | eligible/pending native+embedded shared kinds |
-| gui/search_replace_dialog.rs | search-replace | eligible/pending primary |
-| gui/screenshot_editor.rs | screenshot-editor | eligible/pending ordinary editor |
-| gui/shell_cmd_dialog.rs | shell-commands | eligible/pending |
-| gui/snippet_dialog.rs | snippets | eligible/pending |
-| gui/snippet_prompt_dialog.rs | snippet-prompt | eligible/pending; retain anchor |
-| gui/tempfile_dialog.rs | create-tempfile | eligible/pending |
-| gui/toast_log_dialog.rs | toast-log | eligible/pending |
-| gui/todo_dialog.rs | todos | eligible/pending |
-| gui/unused_assets_dialog.rs | unused-note-assets | eligible/pending |
-| gui/volume_dialog.rs | volume | eligible/pending |
-| M1-C six representatives | diff, clipboard-modify, file-preview, hash-generator, table-utility, theme-settings | in_progress, acceptance pending |
+| actions_editor.rs | custom-apps | embedded implemented; scoped tests pass |
+| settings_editor/render.rs | settings | embedded implemented; scoped tests pass |
+| plugin_editor.rs | plugin-settings | embedded implemented; scoped tests pass |
+| help_window.rs | quick-help, command-help | embedded implemented; scoped tests pass |
+| multi_manager/ui.rs | multi-manager, multi-manager-settings | embedded implemented; scoped tests pass |
+| gui/action_sheet.rs | action-sheet | embedded implemented; scoped tests pass; retain anchor |
+| gui/activity_dialog.rs | activity | embedded implemented; scoped tests pass |
+| gui/add_action_dialog.rs | add-action | embedded implemented; scoped tests pass |
+| gui/add_bookmark_dialog.rs | add-bookmark | embedded implemented; scoped tests pass |
+| gui/alias_dialog.rs | folder-alias | embedded implemented; scoped tests pass |
+| gui/bookmark_alias_dialog.rs | bookmark-alias | embedded implemented; scoped tests pass |
+| gui/tempfile_alias_dialog.rs | tempfile-alias | embedded implemented; scoped tests pass |
+| gui/batch_rename_dialog.rs | batch-rename | embedded implemented; scoped tests pass primary |
+| gui/brightness_dialog.rs | brightness | embedded implemented; scoped tests pass |
+| gui/calendar_popover.rs | calendar | embedded implemented; scoped tests pass |
+| gui/calendar_event_editor.rs | calendar-event-editor | embedded implemented; scoped tests pass |
+| gui/calendar_event_details.rs | calendar-event-details | embedded implemented; scoped tests pass |
+| gui/clipboard_dialog.rs | clipboard-history | embedded implemented; scoped tests pass production history |
+| gui/cpu_list_dialog.rs | cpu-usage | embedded implemented; scoped tests pass |
+| gui/dashboard_editor_dialog.rs | dashboard-editor | embedded implemented; scoped tests pass primary |
+| gui/data_recovery_dialog.rs | data-recovery | embedded implemented; scoped tests pass |
+| gui/diff_dialog/{rules_dialog,folder_rules_dialog}.rs; text input | diff-comparison-rules, diff-folder-rules, diff-text-input | embedded implemented; scoped tests pass children |
+| gui/duplicate_finder_dialog.rs | duplicate-finder | embedded implemented; scoped tests pass |
+| gui/fav_dialog.rs | favorites | embedded implemented; scoped tests pass |
+| gui/file_search_dialog.rs | file-search | embedded implemented; scoped tests pass |
+| gui/hotfolder_dialog.rs | hotfolder-manager | embedded implemented; scoped tests pass |
+| gui/hotkey_directory_dialog.rs | hotkey-directory | embedded implemented; scoped tests pass |
+| gui/image_compare_dialog.rs | image-comparison | embedded implemented; scoped tests pass |
+| gui/image_panel.rs | image-viewer | embedded implemented; scoped tests pass; retain instance ID |
+| gui/image_crop_editor.rs | image-crop-editor | embedded implemented; scoped tests pass shared crop |
+| gui/mkmacro_dialog/image_crop_editor.rs | mkmacro-reference-crop | embedded implemented; scoped tests pass all load/error branches |
+| gui/json_utility_dialog.rs | json-utility | embedded implemented; scoped tests pass |
+| gui/macro_dialog.rs | legacy-macros | embedded implemented; scoped tests pass |
+| gui/mkmacro_dialog/mod.rs | mkmacro | embedded implemented; scoped tests pass |
+| gui/mkmacro_dialog/action_catalog.rs | mkmacro-action-catalog | embedded implemented; scoped tests pass |
+| gui/mkmacro_dialog/action_editor.rs | mkmacro-action-editor | embedded implemented; scoped tests pass primary |
+| gui/mkmacro_dialog/launcher_action_picker.rs | mkmacro-launcher-picker | embedded implemented; scoped tests pass |
+| gui/mkmacro_dialog/package_ui.rs | mkmacro-package-export, mkmacro-package-import, mkmacro-template-save, mkmacro-templates, mkmacro-help | embedded implemented; scoped tests pass; shared ID, variant key |
+| gui/mkmacro_dialog/recording_review.rs | mkmacro-recording-review | embedded implemented; scoped tests pass |
+| gui/mkmacro_dialog/search.rs | mkmacro-step-search | embedded implemented; scoped tests pass Find/Replace/Jump |
+| gui/mkmacro_dialog/window_picker.rs | mkmacro-window-picker | embedded implemented; scoped tests pass |
+| gui/mkmacro_dialog/parameter_prompt.rs | mkmacro-parameters | unintegrated native capture; default-resizable |
+| gui/render.rs::show_macro_prompt | mkmacro-runtime-prompt | unintegrated native capture; default-resizable |
+| gui/mouse_settings_dialog.rs | mouse-settings | embedded implemented; scoped tests pass |
+| gui/mouse_gesture_settings_dialog.rs | gesture-settings, gesture-settings-window-picker | embedded implemented; scoped tests pass |
+| gui/mouse_gestures_dialog.rs | mouse-gestures, gesture-binding-editor | embedded implemented; scoped tests pass |
+| plugins/mouse_gestures.rs | gesture-ignore-window-picker | embedded implemented; scoped tests pass; shared context capability |
+| gui/note_graph_dialog.rs | note-graph | embedded implemented; scoped tests pass |
+| gui/note_panel.rs | note-editor | embedded implemented; scoped tests pass; retain instance ID |
+| gui/notes_dialog.rs | quick-notes, note-templates | embedded implemented; scoped tests pass |
+| gui/ocr_view.rs | ocr-result | embedded implemented; scoped tests pass |
+| gui/paste_sequence_dialog.rs | paste-sequences | embedded implemented; scoped tests pass |
+| gui/pinboard_windows.rs::show_pin_list | screenshot-pin-list | embedded implemented; scoped tests pass |
+| gui/{qr_dialog,regex_tester_dialog,xml_toolkit_dialog}.rs | qr-generator, regex-tester, xml-toolkit | embedded implemented/tested; native capture unfulfilled |
+| gui/search_replace_dialog.rs | search-replace | embedded implemented; scoped tests pass primary |
+| gui/screenshot_editor.rs | screenshot-editor | embedded implemented; scoped tests pass ordinary editor |
+| gui/shell_cmd_dialog.rs | shell-commands | embedded implemented; scoped tests pass |
+| gui/snippet_dialog.rs | snippets | embedded implemented; scoped tests pass |
+| gui/snippet_prompt_dialog.rs | snippet-prompt | embedded implemented; scoped tests pass; retain anchor |
+| gui/tempfile_dialog.rs | create-tempfile | embedded implemented; scoped tests pass |
+| gui/toast_log_dialog.rs | toast-log | embedded implemented; scoped tests pass |
+| gui/todo_dialog.rs | todos | embedded implemented; scoped tests pass |
+| gui/unused_assets_dialog.rs | unused-note-assets | embedded implemented; scoped tests pass |
+| gui/volume_dialog.rs | volume | embedded implemented; scoped tests pass |
+| M1-C six representatives | diff, clipboard-modify, file-preview, hash-generator, table-utility, theme-settings | implemented/tested M1-C |
 | Later category features | unicode-inspector, zip-extractor | reserved/absent until accepted UI |
 | gui/convert_panel.rs; gui/todo_view_dialog.rs; Timer/Alarm | corresponding fixed dialogs | excluded: explicit resizable(false) |
 | Timer Finished; confirmation wrappers; Batch Rename Apply/Undo; Search Replace Apply/recovery; Diff folder-operation preview | transient alerts/confirmations | excluded: ephemeral confirmations |

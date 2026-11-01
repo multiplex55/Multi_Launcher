@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::gui::theme::widgets::{self, ButtonEmphasis};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::gui::{ActivationSource, LauncherApp};
 use crate::plugins::note::{
     Note, append_note_content, delete_template, get_template, list_templates, note_backlink_count,
@@ -956,96 +957,109 @@ impl TemplateManagerState {
         let mut refresh = false;
         let mut open = self.open;
         egui::Window::new("Note Templates")
-            .open(&mut open)
             .resizable(true)
             .default_size((520.0, 360.0))
             .min_width(320.0)
             .min_height(220.0)
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("New Template").clicked() {
-                        self.clear_editor();
-                    }
-                    if ui.button("Refresh").clicked() {
-                        refresh = true;
-                    }
-                });
-                ui.separator();
-                ui.columns(2, |columns| {
-                    widgets::compact_section_heading(&mut columns[0], "Saved templates", None);
-                    egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
-                        for name in self.templates.clone() {
-                            ui.horizontal(|ui| {
-                                let selected = self.selected.as_deref() == Some(name.as_str());
-                                if ui.selectable_label(selected, &name).clicked() {
-                                    self.load_for_edit(&name);
-                                }
-                                if ui.small_button("Open").clicked() {
-                                    match template_path(&name)
-                                        .and_then(|path| open::that(path).map_err(Into::into))
-                                    {
-                                        Ok(()) => {}
-                                        Err(e) => app.report_error_message(
-                                            "ui operation",
-                                            format!("Failed to open template: {e}"),
-                                        ),
-                                    }
-                                }
-                                if ui.small_button("Delete").clicked() {
-                                    self.pending_delete = Some(name.clone());
-                                }
-                            });
-                        }
-                    });
-
-                    widgets::compact_section_heading(
-                        &mut columns[1],
-                        if self.selected.is_some() {
-                            "Edit template"
-                        } else {
-                            "Create template"
-                        },
-                        None,
-                    );
-                    widgets::secondary_help(&mut columns[1], "Name");
-                    columns[1].add(
-                        egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY),
-                    );
-                    widgets::secondary_help(&mut columns[1], "Content");
-                    columns[1].add(
-                        egui::TextEdit::multiline(&mut self.content)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(10),
-                    );
-                    columns[1].horizontal(|ui| {
-                        let save_template_button = ui.button("Save Template");
-                        if widgets::with_button_emphasis(
-                            ui,
-                            save_template_button,
-                            ButtonEmphasis::Primary,
-                        )
-                        .clicked()
-                        {
-                            match validate_template_name(&self.name).and_then(|name| {
-                                save_template(name, &self.content).map(|_| name.to_string())
-                            }) {
-                                Ok(saved_name) => {
-                                    self.selected = Some(saved_name);
-                                    refresh = true;
-                                    app.search();
-                                }
-                                Err(e) => app.report_error_message(
-                                    "ui operation",
-                                    format!("Failed to save template: {e}"),
-                                ),
-                            }
-                        }
-                        if ui.button("Clear").clicked() {
+            .show_utility(
+                ctx,
+                "note-templates",
+                egui::Id::new("Note Templates"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((520.0, 360.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::vec2(320.0, 220.0)),
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("New Template").clicked() {
                             self.clear_editor();
                         }
+                        if ui.button("Refresh").clicked() {
+                            refresh = true;
+                        }
                     });
-                });
-            });
+                    ui.separator();
+                    ui.columns(2, |columns| {
+                        widgets::compact_section_heading(&mut columns[0], "Saved templates", None);
+                        egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
+                            for name in self.templates.clone() {
+                                ui.horizontal(|ui| {
+                                    let selected = self.selected.as_deref() == Some(name.as_str());
+                                    if ui.selectable_label(selected, &name).clicked() {
+                                        self.load_for_edit(&name);
+                                    }
+                                    if ui.small_button("Open").clicked() {
+                                        match template_path(&name)
+                                            .and_then(|path| open::that(path).map_err(Into::into))
+                                        {
+                                            Ok(()) => {}
+                                            Err(e) => app.report_error_message(
+                                                "ui operation",
+                                                format!("Failed to open template: {e}"),
+                                            ),
+                                        }
+                                    }
+                                    if ui.small_button("Delete").clicked() {
+                                        self.pending_delete = Some(name.clone());
+                                    }
+                                });
+                            }
+                        });
+
+                        widgets::compact_section_heading(
+                            &mut columns[1],
+                            if self.selected.is_some() {
+                                "Edit template"
+                            } else {
+                                "Create template"
+                            },
+                            None,
+                        );
+                        widgets::secondary_help(&mut columns[1], "Name");
+                        columns[1].add(
+                            egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY),
+                        );
+                        widgets::secondary_help(&mut columns[1], "Content");
+                        columns[1].add(
+                            egui::TextEdit::multiline(&mut self.content)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(10),
+                        );
+                        columns[1].horizontal(|ui| {
+                            let save_template_button = ui.button("Save Template");
+                            if widgets::with_button_emphasis(
+                                ui,
+                                save_template_button,
+                                ButtonEmphasis::Primary,
+                            )
+                            .clicked()
+                            {
+                                match validate_template_name(&self.name).and_then(|name| {
+                                    save_template(name, &self.content).map(|_| name.to_string())
+                                }) {
+                                    Ok(saved_name) => {
+                                        self.selected = Some(saved_name);
+                                        refresh = true;
+                                        app.search();
+                                    }
+                                    Err(e) => app.report_error_message(
+                                        "ui operation",
+                                        format!("Failed to save template: {e}"),
+                                    ),
+                                }
+                            }
+                            if ui.button("Clear").clicked() {
+                                self.clear_editor();
+                            }
+                        });
+                    });
+                },
+            );
         self.open = open;
 
         if let Some(name) = self.pending_delete.clone() {
@@ -1670,12 +1684,12 @@ impl NotesDialog {
         let mut window_open = self.open;
         let mut jump_visual_order = 0;
         egui::Window::new("Quick Notes")
-            .open(&mut window_open)
+
             .resizable(true)
             .default_size((360.0, 240.0))
             .min_width(200.0)
             .min_height(150.0)
-            .show(ctx, |ui| {
+            .show_utility(ctx, "quick-notes", egui::Id::new("Quick Notes"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((360.0, 240.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(200.0, 150.0)), |ui| {
                 if let Some(idx) = self.edit_idx {
                     widgets::compact_section_heading(ui, "Edit note", None);
                     let footer_height = edit_footer_button_height(ui);

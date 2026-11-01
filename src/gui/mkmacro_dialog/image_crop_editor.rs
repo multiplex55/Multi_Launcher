@@ -15,6 +15,7 @@ pub use crate::gui::image_crop_editor::{
     source_to_display,
 };
 use crate::gui::theme::widgets::{StatusTone, semantic_status};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mkmacro::{
     ImageAssetAuthoringService, ImageImportChoice, ImageImportResult, MkImageRef, MkMacroStore,
 };
@@ -210,21 +211,38 @@ impl ImageCropEditorState {
                 egui::Window::new("Crop Reference Image")
                     .id(egui::Id::new("mkmacro_crop_reference_image"))
                     .collapsible(false)
-                    .show(ctx, |ui| {
-                        ui.label("Loading reference image…");
-                    });
+                    .show_utility(
+                        ctx,
+                        "mkmacro-reference-crop",
+                        egui::Id::new("mkmacro_crop_reference_image"),
+                        None,
+                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                            crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                            egui::Vec2::ZERO,
+                            [None, None],
+                        ),
+                        |ui| {
+                            ui.label("Loading reference image…");
+                        },
+                    );
             } else if let Some(error) = &self.validation_message {
                 let mut open = true;
                 egui::Window::new("Crop Reference Image")
                     .id(egui::Id::new("mkmacro_crop_reference_image"))
                     .collapsible(false)
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
-                        if ui.button("Cancel").clicked() {
-                            self.open = false;
-                        }
-                    });
+                    .show_utility(
+                        ctx,
+                        "mkmacro-reference-crop",
+                        egui::Id::new("mkmacro_crop_reference_image"),
+                        Some(&mut open),
+                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::intrinsic(),
+                        |ui| {
+                            ui.colored_label(ui.visuals().error_fg_color, error);
+                            if ui.button("Cancel").clicked() {
+                                self.open = false;
+                            }
+                        },
+                    );
                 if !open {
                     self.open = false;
                 }

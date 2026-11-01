@@ -7,6 +7,7 @@ use crate::annotation::redaction::{
     RedactionOperation,
 };
 use crate::gui::LauncherApp;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui::{
     self, Color32, PointerButton, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
 };
@@ -877,10 +878,22 @@ impl ScreenshotEditor {
         let test_width = self.test_window_width;
         #[cfg(not(test))]
         let test_width = None;
+        let utility_size_recipe = if let Some(width) = test_width {
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::intrinsic()
+                .with_min_width(width)
+                .with_max_width(width)
+        } else {
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::intrinsic()
+        };
         screenshot_editor_window(test_width)
-            .open(&mut open)
             .resizable(true)
-            .show(ctx, |ui| {
+            .show_utility(
+                ctx,
+                "screenshot-editor",
+                egui::Id::new("Screenshot Editor"),
+                Some(&mut open),
+                utility_size_recipe,
+                |ui| {
                 #[cfg(test)]
                 {
                     self.test_content_clip = Some(ui.clip_rect());
@@ -1707,7 +1720,8 @@ impl ScreenshotEditor {
                         );
                     }
                 }
-            });
+                },
+            );
         self.open = open;
         if self.history.revision() != history_revision_before_frame {
             ctx.request_repaint();

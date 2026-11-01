@@ -4,6 +4,7 @@ use crate::diff::folder_runtime::{
 use crate::diff::model::{DiffView, DiffWorkspace, TextCompareOrigin, TextCompareState};
 use crate::diff::query::DiffOpenPayload;
 use crate::gui::theme::widgets::{StatusTone, semantic_status};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -493,11 +494,18 @@ impl DiffDialogState {
         };
         egui::Window::new(title)
             .id(egui::Id::new((self.workspace.workspace_id, "text_input", identity)))
-            .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_size(egui::vec2(760.0, 540.0))
-            .show(ctx, |ui| {
+            .show_utility(
+                ctx,
+                "diff-text-input",
+                egui::Id::new((self.workspace.workspace_id, "text_input", identity)),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(
+                    egui::vec2(760.0, 540.0),
+                ),
+                |ui| {
                 ui.label("Enter text for both sides. Empty text is allowed.");
                 ui.label(
                     "Each side is limited to 8 MiB and 100,000 lines. Oversized input is rejected without truncation.",
@@ -565,7 +573,8 @@ impl DiffDialogState {
                         ui.close();
                     }
                 });
-            });
+                },
+            );
         if submit {
             if let Some(draft) = self.text_input.take() {
                 match self.apply_text_input(draft) {

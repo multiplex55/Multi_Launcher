@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::paste_sequence::{
     HotkeyChord, PASTE_SEQUENCES_FILE, PlaybackMode, PreparedSequencePreview, SequenceDraft,
     SequenceHotkeyBinding, SequenceId, SequenceInvocationContext, SequenceSnapshot, SequenceStore,
@@ -656,154 +657,167 @@ impl PasteSequenceDialog {
             .min_width(520.0)
             .min_height(420.0)
             .resizable(true)
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                // Reserve two action rows and the run status before the body requests space.
-                // A list-only cap cannot bound the sum of controls, preview and saved rows.
-                let row_height = ui
-                    .spacing()
-                    .interact_size
-                    .y
-                    .max(ui.text_style_height(&egui::TextStyle::Body));
-                let footer_height = row_height * 3.0 + ui.spacing().item_spacing.y * 4.0;
-                let body_height = (ui.available_height() - footer_height).max(0.0);
-                let step_height = (body_height * 0.6).min(260.0);
-                #[cfg(test)]
-                let mut body_content_origin_y = None;
-                let body = egui::ScrollArea::vertical()
-                    .id_salt("paste_sequence_body")
-                    .min_scrolled_height(0.0)
-                    .max_height(body_height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        #[cfg(test)]
-                        {
-                            body_content_origin_y = Some(ui.cursor().min.y);
-                        }
-                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Saved sequences");
-                            let playback_settings = ui
-                                .button("Playback Settings")
-                                .on_hover_text(app.paste_sequence_shortcut_summary());
-                            register_paste_sequence_jump_target(
-                                initial_dialog_scope.as_ref(),
-                                ui,
-                                &playback_settings,
-                                "playback-settings",
-                                "Playback Settings",
-                                crate::gui::jump_mode::TargetKind::Button,
-                                &mut jump_visual_order,
-                            );
-                            if playback_settings.clicked() {
-                                app.open_paste_sequence_settings_dialog();
+            .show_utility(
+                ctx,
+                "paste-sequences",
+                egui::Id::new("Paste Sequences"),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((760.0, 640.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::vec2(520.0, 420.0)),
+                |ui| {
+                    // Reserve two action rows and the run status before the body requests space.
+                    // A list-only cap cannot bound the sum of controls, preview and saved rows.
+                    let row_height = ui
+                        .spacing()
+                        .interact_size
+                        .y
+                        .max(ui.text_style_height(&egui::TextStyle::Body));
+                    let footer_height = row_height * 3.0 + ui.spacing().item_spacing.y * 4.0;
+                    let body_height = (ui.available_height() - footer_height).max(0.0);
+                    let step_height = (body_height * 0.6).min(260.0);
+                    #[cfg(test)]
+                    let mut body_content_origin_y = None;
+                    let body = egui::ScrollArea::vertical()
+                        .id_salt("paste_sequence_body")
+                        .min_scrolled_height(0.0)
+                        .max_height(body_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            #[cfg(test)]
+                            {
+                                body_content_origin_y = Some(ui.cursor().min.y);
                             }
-                            let new_sequence = ui.button("New");
-                            register_paste_sequence_jump_target(
-                                initial_dialog_scope.as_ref(),
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Saved sequences");
+                                let playback_settings = ui
+                                    .button("Playback Settings")
+                                    .on_hover_text(app.paste_sequence_shortcut_summary());
+                                register_paste_sequence_jump_target(
+                                    initial_dialog_scope.as_ref(),
+                                    ui,
+                                    &playback_settings,
+                                    "playback-settings",
+                                    "Playback Settings",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    &mut jump_visual_order,
+                                );
+                                if playback_settings.clicked() {
+                                    app.open_paste_sequence_settings_dialog();
+                                }
+                                let new_sequence = ui.button("New");
+                                register_paste_sequence_jump_target(
+                                    initial_dialog_scope.as_ref(),
+                                    ui,
+                                    &new_sequence,
+                                    "new-sequence",
+                                    "New",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    &mut jump_visual_order,
+                                );
+                                if new_sequence.clicked() {
+                                    self.selected_id = None;
+                                    self.selected_step = None;
+                                    self.reveal_step = None;
+                                    self.remove_confirmation = None;
+                                    self.draft = SequenceDraft::new("New sequence", Vec::new());
+                                    self.hotkey_text.clear();
+                                    self.inline_error = None;
+                                }
+                                let remove_saved = ui.add_enabled(
+                                    self.selected_id.is_some() && self.hotkey_update.is_none(),
+                                    egui::Button::new("Remove Saved"),
+                                );
+                                register_paste_sequence_jump_target(
+                                    initial_dialog_scope.as_ref(),
+                                    ui,
+                                    &remove_saved,
+                                    "remove-saved",
+                                    "Remove Saved",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    &mut jump_visual_order,
+                                );
+                                if remove_saved.clicked() {
+                                    self.remove_confirmation = self.selected_id;
+                                }
+                            });
+                            // The header may have opened or closed the inline
+                            // confirmation. Select scopes from the live state so
+                            // the remainder of this same UI pass belongs only to
+                            // its actual foreground surface.
+                            let dialog_scope = self.current_dialog_jump_scope(jump_scope.as_ref());
+                            let picker_blocks_parent_targets =
+                                retired_picker_identity.is_some() || self.source_picker.is_some();
+                            let content_scope = (!picker_blocks_parent_targets)
+                                .then_some(dialog_scope.as_ref())
+                                .flatten();
+                            body_dialog_scope_for_footer = if picker_blocks_parent_targets {
+                                None
+                            } else {
+                                dialog_scope.clone()
+                            };
+                            let confirmation_scope =
+                                self.current_confirmation_jump_scope(jump_scope.as_ref());
+                            self.saved_sequence_list(ui, content_scope, &mut jump_visual_order);
+                            self.saved_sequence_remove_confirmation(
                                 ui,
-                                &new_sequence,
-                                "new-sequence",
-                                "New",
-                                crate::gui::jump_mode::TargetKind::Button,
+                                ctx,
+                                app,
+                                (!picker_blocks_parent_targets)
+                                    .then_some(confirmation_scope.as_ref())
+                                    .flatten(),
                                 &mut jump_visual_order,
                             );
-                            if new_sequence.clicked() {
-                                self.selected_id = None;
-                                self.selected_step = None;
-                                self.reveal_step = None;
-                                self.remove_confirmation = None;
-                                self.draft = SequenceDraft::new("New sequence", Vec::new());
-                                self.hotkey_text.clear();
-                                self.inline_error = None;
-                            }
-                            let remove_saved = ui.add_enabled(
-                                self.selected_id.is_some() && self.hotkey_update.is_none(),
-                                egui::Button::new("Remove Saved"),
-                            );
-                            register_paste_sequence_jump_target(
-                                initial_dialog_scope.as_ref(),
+                            ui.separator();
+                            self.editor(
                                 ui,
-                                &remove_saved,
-                                "remove-saved",
-                                "Remove Saved",
-                                crate::gui::jump_mode::TargetKind::Button,
+                                app,
+                                step_height,
+                                dialog_scope.as_ref(),
                                 &mut jump_visual_order,
                             );
-                            if remove_saved.clicked() {
-                                self.remove_confirmation = self.selected_id;
+                            if picker_blocks_parent_targets || self.source_picker.is_some() {
+                                if let Some(scope) = dialog_scope.as_ref() {
+                                    scope.discard_registered_targets();
+                                }
+                                body_dialog_scope_for_footer = None;
                             }
                         });
-                        // The header may have opened or closed the inline
-                        // confirmation. Select scopes from the live state so
-                        // the remainder of this same UI pass belongs only to
-                        // its actual foreground surface.
-                        let dialog_scope = self.current_dialog_jump_scope(jump_scope.as_ref());
-                        let picker_blocks_parent_targets =
-                            retired_picker_identity.is_some() || self.source_picker.is_some();
-                        let content_scope = (!picker_blocks_parent_targets)
-                            .then_some(dialog_scope.as_ref())
-                            .flatten();
-                        body_dialog_scope_for_footer = if picker_blocks_parent_targets {
-                            None
-                        } else {
-                            dialog_scope.clone()
-                        };
-                        let confirmation_scope =
-                            self.current_confirmation_jump_scope(jump_scope.as_ref());
-                        self.saved_sequence_list(ui, content_scope, &mut jump_visual_order);
-                        self.saved_sequence_remove_confirmation(
+                    #[cfg(test)]
+                    {
+                        self.layout.body = body.inner_rect;
+                        self.layout.body_content = body.content_size;
+                        self.layout.body_id = Some(body.id);
+                        self.layout.body_offset = body.state.offset.y;
+                        self.layout.body_painted_offset = body.inner_rect.top()
+                            - body_content_origin_y.unwrap_or(body.inner_rect.top());
+                    }
+                    #[cfg(not(test))]
+                    let _ = body;
+                    ui.separator();
+                    let footer = ui.scope(|ui| {
+                        self.editor_footer(
                             ui,
                             ctx,
                             app,
-                            (!picker_blocks_parent_targets)
-                                .then_some(confirmation_scope.as_ref())
-                                .flatten(),
+                            body_dialog_scope_for_footer.as_ref(),
                             &mut jump_visual_order,
-                        );
-                        ui.separator();
-                        self.editor(
-                            ui,
-                            app,
-                            step_height,
-                            dialog_scope.as_ref(),
-                            &mut jump_visual_order,
-                        );
-                        if picker_blocks_parent_targets || self.source_picker.is_some() {
-                            if let Some(scope) = dialog_scope.as_ref() {
-                                scope.discard_registered_targets();
-                            }
-                            body_dialog_scope_for_footer = None;
-                        }
+                        )
                     });
-                #[cfg(test)]
-                {
-                    self.layout.body = body.inner_rect;
-                    self.layout.body_content = body.content_size;
-                    self.layout.body_id = Some(body.id);
-                    self.layout.body_offset = body.state.offset.y;
-                    self.layout.body_painted_offset = body.inner_rect.top()
-                        - body_content_origin_y.unwrap_or(body.inner_rect.top());
-                }
-                #[cfg(not(test))]
-                let _ = body;
-                ui.separator();
-                let footer = ui.scope(|ui| {
-                    self.editor_footer(
-                        ui,
-                        ctx,
-                        app,
-                        body_dialog_scope_for_footer.as_ref(),
-                        &mut jump_visual_order,
-                    )
-                });
-                #[cfg(test)]
-                {
-                    self.layout.footer = footer.response.rect;
-                }
-                #[cfg(not(test))]
-                let _ = footer;
-            });
+                    #[cfg(test)]
+                    {
+                        self.layout.footer = footer.response.rect;
+                    }
+                    #[cfg(not(test))]
+                    let _ = footer;
+                },
+            );
         #[cfg(test)]
         if let Some(window) = &window {
             self.layout.window = window.response.rect;

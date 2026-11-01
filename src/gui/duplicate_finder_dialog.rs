@@ -2,6 +2,7 @@ use crate::duplicate_finder::{
     DiscoveryDiagnostic, DiscoverySnapshot, DiscoveryStage, DiscoveryStatus,
     DuplicateFinderSession, DuplicateFinderSessionError, RootScanStatus, VerifiedKnownFile,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -666,87 +667,101 @@ impl DuplicateFinderDialogState {
             .default_size((1040.0, 700.0))
             .min_size((620.0, 420.0))
             .max_size(ctx.content_rect().size())
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                let visible_owner = owner_current && ui.is_visible() && !ui.is_sizing_pass();
-                let commit_enabled = visible_owner && first_ui_pass;
-                #[cfg(any(test, feature = "dev-smoke-binaries"))]
-                {
-                    self.responses_interaction_eligible = commit_enabled;
-                }
-                ui.add_enabled_ui(visible_owner, |ui| {
-                    let footer_reserve = ui.spacing().interact_size.y
-                        + 2.0 * ui.spacing().item_spacing.y
-                        + FOOTER_SEPARATOR_SPACING;
-                    let body_max_height = (ui.available_height() - footer_reserve).max(0.0);
-                    let _content = egui::ScrollArea::vertical()
-                        .id_salt("duplicate-finder-content")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(body_max_height)
-                        .show(ui, |ui| {
-                            self.show_roots(
-                                ui,
-                                visible_owner,
-                                commit_enabled,
-                                jump_scope.as_ref(),
-                                &mut order,
-                            );
-                            ui.separator();
-                            self.show_status(ui, &snapshot);
-                            if let Some(message) = self.status.as_deref() {
-                                ui.separator();
-                                ui.label(message);
-                            }
-                            ui.separator();
-                            // The inner scroll area's remaining height may be
-                            // exhausted by the roots and status sections. Give
-                            // results a finite viewport derived from the
-                            // shared body budget; the outer body scrolls those
-                            // sections together when the window is crowded.
-                            let results_max_height = body_max_height * 0.4;
-                            self.show_results(
-                                ui,
-                                &snapshot,
-                                visible_owner,
-                                commit_enabled,
-                                results_max_height,
-                                jump_scope.as_ref(),
-                                &mut order,
-                            );
-                        });
+            .show_utility(
+                ctx,
+                "duplicate-finder",
+                egui::Id::new(WINDOW_TITLE),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((1040.0, 700.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::Vec2::from((620.0, 420.0)))
+                .with_maximum(egui::Vec2::from(ctx.content_rect().size())),
+                |ui| {
+                    let visible_owner = owner_current && ui.is_visible() && !ui.is_sizing_pass();
+                    let commit_enabled = visible_owner && first_ui_pass;
                     #[cfg(any(test, feature = "dev-smoke-binaries"))]
-                    self.record_scroll_area(
-                        "content-scroll",
-                        _content.id,
-                        _content.inner_rect,
-                        ui.clip_rect(),
-                        ui.is_enabled(),
-                    );
-                    ui.add(egui::Separator::default().spacing(FOOTER_SEPARATOR_SPACING));
-                    ui.horizontal(|ui| {
-                        self.show_scan_controls(
-                            ui,
-                            visible_owner,
-                            commit_enabled,
-                            jump_scope.as_ref(),
-                            &mut order,
+                    {
+                        self.responses_interaction_eligible = commit_enabled;
+                    }
+                    ui.add_enabled_ui(visible_owner, |ui| {
+                        let footer_reserve = ui.spacing().interact_size.y
+                            + 2.0 * ui.spacing().item_spacing.y
+                            + FOOTER_SEPARATOR_SPACING;
+                        let body_max_height = (ui.available_height() - footer_reserve).max(0.0);
+                        let _content = egui::ScrollArea::vertical()
+                            .id_salt("duplicate-finder-content")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(body_max_height)
+                            .show(ui, |ui| {
+                                self.show_roots(
+                                    ui,
+                                    visible_owner,
+                                    commit_enabled,
+                                    jump_scope.as_ref(),
+                                    &mut order,
+                                );
+                                ui.separator();
+                                self.show_status(ui, &snapshot);
+                                if let Some(message) = self.status.as_deref() {
+                                    ui.separator();
+                                    ui.label(message);
+                                }
+                                ui.separator();
+                                // The inner scroll area's remaining height may be
+                                // exhausted by the roots and status sections. Give
+                                // results a finite viewport derived from the
+                                // shared body budget; the outer body scrolls those
+                                // sections together when the window is crowded.
+                                let results_max_height = body_max_height * 0.4;
+                                self.show_results(
+                                    ui,
+                                    &snapshot,
+                                    visible_owner,
+                                    commit_enabled,
+                                    results_max_height,
+                                    jump_scope.as_ref(),
+                                    &mut order,
+                                );
+                            });
+                        #[cfg(any(test, feature = "dev-smoke-binaries"))]
+                        self.record_scroll_area(
+                            "content-scroll",
+                            _content.id,
+                            _content.inner_rect,
+                            ui.clip_rect(),
+                            ui.is_enabled(),
                         );
-                        let close = ui.button("Close");
-                        self.record_response("close", &close);
-                        register_target(
-                            jump_scope.as_ref(),
-                            ui,
-                            &close,
-                            "dialog/close",
-                            "Close Duplicate Finder",
-                            crate::gui::jump_mode::TargetKind::Button,
-                            &mut order,
-                        );
-                        visual_close = close.clicked() && commit_enabled;
+                        ui.add(egui::Separator::default().spacing(FOOTER_SEPARATOR_SPACING));
+                        ui.horizontal(|ui| {
+                            self.show_scan_controls(
+                                ui,
+                                visible_owner,
+                                commit_enabled,
+                                jump_scope.as_ref(),
+                                &mut order,
+                            );
+                            let close = ui.button("Close");
+                            self.record_response("close", &close);
+                            register_target(
+                                jump_scope.as_ref(),
+                                ui,
+                                &close,
+                                "dialog/close",
+                                "Close Duplicate Finder",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut order,
+                            );
+                            visual_close = close.clicked() && commit_enabled;
+                        });
                     });
-                });
-            });
+                },
+            );
         if first_ui_pass
             && native_owner_current
             && application_input_allowed

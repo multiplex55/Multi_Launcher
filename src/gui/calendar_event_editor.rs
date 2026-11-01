@@ -5,6 +5,7 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, secondary_help, semantic_status,
     with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::calendar::{
     CALENDAR_EVENTS_FILE, CalendarEvent, CustomRecurrenceUnit, RecurrenceEnd, RecurrenceFrequency,
     RecurrenceRule, Reminder, new_event_id, update_events,
@@ -244,335 +245,352 @@ impl CalendarEventEditor {
         #[cfg(test)]
         let mut test_layout = CalendarEditorLayout::default();
         let window_output = egui::Window::new("Calendar Event")
-            .open(&mut open)
             .resizable(true)
             .default_size((420.0, 400.0))
             .max_size(ctx.content_rect().size())
-            .show(ctx, |ui| {
-                #[cfg(test)]
-                {
-                    test_layout.visible = ui.is_visible();
-                    test_layout.sizing_pass = ui.is_sizing_pass();
-                    test_layout.parent_clip_rect = ui.clip_rect();
-                }
+            .show_utility(
+                ctx,
+                "calendar-event-editor",
+                egui::Id::new("Calendar Event"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((420.0, 400.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_maximum(egui::Vec2::from(ctx.content_rect().size())),
+                |ui| {
+                    #[cfg(test)]
+                    {
+                        test_layout.visible = ui.is_visible();
+                        test_layout.sizing_pass = ui.is_sizing_pass();
+                        test_layout.parent_clip_rect = ui.clip_rect();
+                    }
 
-                let footer_reserved_height = calendar_editor_footer_reserved_height(ui);
-                let body_max_height = (ui.available_height() - footer_reserved_height).max(0.0);
-                let body_max_width = ui.available_width().max(0.0);
-                #[cfg(test)]
-                let mut body_clip_rect = egui::Rect::NOTHING;
-                let body_output = egui::ScrollArea::vertical()
-                    .id_salt("calendar_event_editor_body")
-                    .auto_shrink([false, false])
-                    .min_scrolled_height(0.0)
-                    .max_height(body_max_height)
-                    .show(ui, |ui| {
-                        ui.set_max_width(body_max_width);
+                    let footer_reserved_height = calendar_editor_footer_reserved_height(ui);
+                    let body_max_height = (ui.available_height() - footer_reserved_height).max(0.0);
+                    let body_max_width = ui.available_width().max(0.0);
+                    #[cfg(test)]
+                    let mut body_clip_rect = egui::Rect::NOTHING;
+                    let body_output = egui::ScrollArea::vertical()
+                        .id_salt("calendar_event_editor_body")
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(0.0)
+                        .max_height(body_max_height)
+                        .show(ui, |ui| {
+                            ui.set_max_width(body_max_width);
 
-                        compact_section_heading(ui, "Event", None);
-                        let title_width = ui.available_width().max(1.0);
-                        let title_error = self.errors.get("title").cloned();
-                        editor_text_field(
-                            ui,
-                            "Title",
-                            &mut self.title,
-                            title_width,
-                            title_error.as_deref(),
-                        );
-
-                        compact_section_heading(
-                            ui,
-                            "Schedule",
-                            Some("Use YYYY-MM-DD dates and 24-hour HH:MM times."),
-                        );
-                        let column_width = editor_datetime_column_width(ui);
-                        let start_date_error = self.errors.get("start_date").cloned();
-                        let start_time_error = self.errors.get("start_time").cloned();
-                        ui.horizontal_wrapped(|ui| {
+                            compact_section_heading(ui, "Event", None);
+                            let title_width = ui.available_width().max(1.0);
+                            let title_error = self.errors.get("title").cloned();
                             editor_text_field(
                                 ui,
-                                "Start Date (YYYY-MM-DD)",
-                                &mut self.start_date,
-                                column_width,
-                                start_date_error.as_deref(),
+                                "Title",
+                                &mut self.title,
+                                title_width,
+                                title_error.as_deref(),
                             );
-                            editor_text_field(
-                                ui,
-                                "Start Time (HH:MM)",
-                                &mut self.start_time,
-                                column_width,
-                                start_time_error.as_deref(),
-                            );
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            ui.checkbox(&mut self.all_day, "All day");
-                        });
 
-                        let end_date_error = self.errors.get("end_date").cloned();
-                        let end_time_error = self.errors.get("end_time").cloned();
-                        ui.horizontal_wrapped(|ui| {
-                            editor_text_field(
+                            compact_section_heading(
                                 ui,
-                                "End Date (optional)",
-                                &mut self.end_date,
-                                column_width,
-                                end_date_error.as_deref(),
+                                "Schedule",
+                                Some("Use YYYY-MM-DD dates and 24-hour HH:MM times."),
                             );
-                            editor_text_field(
-                                ui,
-                                "End Time (optional)",
-                                &mut self.end_time,
-                                column_width,
-                                end_time_error.as_deref(),
-                            );
-                        });
-                        let duration_error = self.errors.get("duration").cloned();
-                        let duration_width = ui.available_width().max(1.0);
-                        editor_text_field(
-                            ui,
-                            "Duration (minutes, optional)",
-                            &mut self.duration_minutes,
-                            duration_width,
-                            duration_error.as_deref(),
-                        );
-
-                        compact_section_heading(
-                            ui,
-                            "Notes and tags",
-                            Some("Notes are optional. Separate multiple tags with commas."),
-                        );
-                        let notes_label = ui.label("Notes");
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.notes)
-                                .desired_width(ui.available_width().max(1.0))
-                                .desired_rows(4),
-                        )
-                        .labelled_by(notes_label.id);
-
-                        compact_section_heading(
-                            ui,
-                            "Recurrence",
-                            Some("Repeat this event on the selected schedule."),
-                        );
-                        ui.horizontal_wrapped(|ui| {
-                            ui.checkbox(&mut self.repeat_enabled, "Enable recurrence");
-                        });
-                        if self.repeat_enabled {
+                            let column_width = editor_datetime_column_width(ui);
+                            let start_date_error = self.errors.get("start_date").cloned();
+                            let start_time_error = self.errors.get("start_time").cloned();
                             ui.horizontal_wrapped(|ui| {
-                                egui::ComboBox::from_id_salt("calendar_repeat_frequency")
-                                    .selected_text(format!("{:?}", self.repeat_frequency))
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.repeat_frequency,
-                                            RecurrenceFrequency::Daily,
-                                            "Daily",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.repeat_frequency,
-                                            RecurrenceFrequency::Weekly,
-                                            "Weekly",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.repeat_frequency,
-                                            RecurrenceFrequency::Monthly,
-                                            "Monthly",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.repeat_frequency,
-                                            RecurrenceFrequency::Yearly,
-                                            "Yearly",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.repeat_frequency,
-                                            RecurrenceFrequency::Custom,
-                                            "Custom",
-                                        );
-                                    });
-                                ui.label("Every");
-                                ui.add(
-                                    egui::DragValue::new(&mut self.repeat_interval).range(1..=365),
+                                editor_text_field(
+                                    ui,
+                                    "Start Date (YYYY-MM-DD)",
+                                    &mut self.start_date,
+                                    column_width,
+                                    start_date_error.as_deref(),
+                                );
+                                editor_text_field(
+                                    ui,
+                                    "Start Time (HH:MM)",
+                                    &mut self.start_time,
+                                    column_width,
+                                    start_time_error.as_deref(),
                                 );
                             });
-                            if self.repeat_frequency == RecurrenceFrequency::Custom {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.checkbox(&mut self.all_day, "All day");
+                            });
+
+                            let end_date_error = self.errors.get("end_date").cloned();
+                            let end_time_error = self.errors.get("end_time").cloned();
+                            ui.horizontal_wrapped(|ui| {
+                                editor_text_field(
+                                    ui,
+                                    "End Date (optional)",
+                                    &mut self.end_date,
+                                    column_width,
+                                    end_date_error.as_deref(),
+                                );
+                                editor_text_field(
+                                    ui,
+                                    "End Time (optional)",
+                                    &mut self.end_time,
+                                    column_width,
+                                    end_time_error.as_deref(),
+                                );
+                            });
+                            let duration_error = self.errors.get("duration").cloned();
+                            let duration_width = ui.available_width().max(1.0);
+                            editor_text_field(
+                                ui,
+                                "Duration (minutes, optional)",
+                                &mut self.duration_minutes,
+                                duration_width,
+                                duration_error.as_deref(),
+                            );
+
+                            compact_section_heading(
+                                ui,
+                                "Notes and tags",
+                                Some("Notes are optional. Separate multiple tags with commas."),
+                            );
+                            let notes_label = ui.label("Notes");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.notes)
+                                    .desired_width(ui.available_width().max(1.0))
+                                    .desired_rows(4),
+                            )
+                            .labelled_by(notes_label.id);
+
+                            compact_section_heading(
+                                ui,
+                                "Recurrence",
+                                Some("Repeat this event on the selected schedule."),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                ui.checkbox(&mut self.repeat_enabled, "Enable recurrence");
+                            });
+                            if self.repeat_enabled {
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("Repeat unit");
-                                    egui::ComboBox::from_id_salt("calendar_repeat_custom")
-                                        .selected_text(format!("{:?}", self.repeat_custom_unit))
+                                    egui::ComboBox::from_id_salt("calendar_repeat_frequency")
+                                        .selected_text(format!("{:?}", self.repeat_frequency))
                                         .show_ui(ui, |ui| {
                                             ui.selectable_value(
-                                                &mut self.repeat_custom_unit,
-                                                CustomRecurrenceUnit::Days,
-                                                "Days",
+                                                &mut self.repeat_frequency,
+                                                RecurrenceFrequency::Daily,
+                                                "Daily",
                                             );
                                             ui.selectable_value(
-                                                &mut self.repeat_custom_unit,
-                                                CustomRecurrenceUnit::Weeks,
-                                                "Weeks",
+                                                &mut self.repeat_frequency,
+                                                RecurrenceFrequency::Weekly,
+                                                "Weekly",
                                             );
                                             ui.selectable_value(
-                                                &mut self.repeat_custom_unit,
-                                                CustomRecurrenceUnit::Months,
-                                                "Months",
+                                                &mut self.repeat_frequency,
+                                                RecurrenceFrequency::Monthly,
+                                                "Monthly",
                                             );
                                             ui.selectable_value(
-                                                &mut self.repeat_custom_unit,
-                                                CustomRecurrenceUnit::Years,
-                                                "Years",
+                                                &mut self.repeat_frequency,
+                                                RecurrenceFrequency::Yearly,
+                                                "Yearly",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.repeat_frequency,
+                                                RecurrenceFrequency::Custom,
+                                                "Custom",
+                                            );
+                                        });
+                                    ui.label("Every");
+                                    ui.add(
+                                        egui::DragValue::new(&mut self.repeat_interval)
+                                            .range(1..=365),
+                                    );
+                                });
+                                if self.repeat_frequency == RecurrenceFrequency::Custom {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label("Repeat unit");
+                                        egui::ComboBox::from_id_salt("calendar_repeat_custom")
+                                            .selected_text(format!("{:?}", self.repeat_custom_unit))
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut self.repeat_custom_unit,
+                                                    CustomRecurrenceUnit::Days,
+                                                    "Days",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut self.repeat_custom_unit,
+                                                    CustomRecurrenceUnit::Weeks,
+                                                    "Weeks",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut self.repeat_custom_unit,
+                                                    CustomRecurrenceUnit::Months,
+                                                    "Months",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut self.repeat_custom_unit,
+                                                    CustomRecurrenceUnit::Years,
+                                                    "Years",
+                                                );
+                                            });
+                                    });
+                                }
+                                if self.repeat_frequency == RecurrenceFrequency::Weekly {
+                                    ui.horizontal_wrapped(|ui| {
+                                        for weekday in [
+                                            Weekday::Mon,
+                                            Weekday::Tue,
+                                            Weekday::Wed,
+                                            Weekday::Thu,
+                                            Weekday::Fri,
+                                            Weekday::Sat,
+                                            Weekday::Sun,
+                                        ] {
+                                            let selected = self.weekly_days.contains(&weekday);
+                                            if ui
+                                                .selectable_label(selected, weekday.to_string())
+                                                .clicked()
+                                            {
+                                                if selected {
+                                                    self.weekly_days.retain(|d| *d != weekday);
+                                                } else {
+                                                    self.weekly_days.push(weekday);
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Ends");
+                                    egui::ComboBox::from_id_salt("calendar_repeat_end")
+                                        .selected_text(match self.repeat_end_mode {
+                                            RecurrenceEndMode::Never => "Never",
+                                            RecurrenceEndMode::OnDate => "On date",
+                                            RecurrenceEndMode::AfterCount => "After count",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.repeat_end_mode,
+                                                RecurrenceEndMode::Never,
+                                                "Never",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.repeat_end_mode,
+                                                RecurrenceEndMode::OnDate,
+                                                "On date",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.repeat_end_mode,
+                                                RecurrenceEndMode::AfterCount,
+                                                "After count",
                                             );
                                         });
                                 });
-                            }
-                            if self.repeat_frequency == RecurrenceFrequency::Weekly {
-                                ui.horizontal_wrapped(|ui| {
-                                    for weekday in [
-                                        Weekday::Mon,
-                                        Weekday::Tue,
-                                        Weekday::Wed,
-                                        Weekday::Thu,
-                                        Weekday::Fri,
-                                        Weekday::Sat,
-                                        Weekday::Sun,
-                                    ] {
-                                        let selected = self.weekly_days.contains(&weekday);
-                                        if ui
-                                            .selectable_label(selected, weekday.to_string())
-                                            .clicked()
+                                match self.repeat_end_mode {
+                                    RecurrenceEndMode::OnDate => {
+                                        let error = self.errors.get("repeat_end_date").cloned();
+                                        let width = ui.available_width().max(1.0);
+                                        let field_rect = editor_text_field(
+                                            ui,
+                                            "Repeat ends on (YYYY-MM-DD)",
+                                            &mut self.repeat_end_date,
+                                            width,
+                                            error.as_deref(),
+                                        );
+                                        #[cfg(test)]
                                         {
-                                            if selected {
-                                                self.weekly_days.retain(|d| *d != weekday);
-                                            } else {
-                                                self.weekly_days.push(weekday);
-                                            }
+                                            test_layout.recurrence_end_rect = field_rect;
                                         }
+                                        #[cfg(not(test))]
+                                        let _ = field_rect;
                                     }
-                                });
-                            }
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Ends");
-                                egui::ComboBox::from_id_salt("calendar_repeat_end")
-                                    .selected_text(match self.repeat_end_mode {
-                                        RecurrenceEndMode::Never => "Never",
-                                        RecurrenceEndMode::OnDate => "On date",
-                                        RecurrenceEndMode::AfterCount => "After count",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.repeat_end_mode,
-                                            RecurrenceEndMode::Never,
-                                            "Never",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.repeat_end_mode,
-                                            RecurrenceEndMode::OnDate,
-                                            "On date",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.repeat_end_mode,
-                                            RecurrenceEndMode::AfterCount,
-                                            "After count",
-                                        );
-                                    });
-                            });
-                            match self.repeat_end_mode {
-                                RecurrenceEndMode::OnDate => {
-                                    let error = self.errors.get("repeat_end_date").cloned();
-                                    let width = ui.available_width().max(1.0);
-                                    let field_rect = editor_text_field(
-                                        ui,
-                                        "Repeat ends on (YYYY-MM-DD)",
-                                        &mut self.repeat_end_date,
-                                        width,
-                                        error.as_deref(),
-                                    );
-                                    #[cfg(test)]
-                                    {
-                                        test_layout.recurrence_end_rect = field_rect;
+                                    RecurrenceEndMode::AfterCount => {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label("After");
+                                            ui.add(
+                                                egui::DragValue::new(&mut self.repeat_end_count)
+                                                    .range(1..=999),
+                                            );
+                                            ui.label("occurrences");
+                                        });
                                     }
-                                    #[cfg(not(test))]
-                                    let _ = field_rect;
+                                    RecurrenceEndMode::Never => {}
                                 }
-                                RecurrenceEndMode::AfterCount => {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("After");
-                                        ui.add(
-                                            egui::DragValue::new(&mut self.repeat_end_count)
-                                                .range(1..=999),
-                                        );
-                                        ui.label("occurrences");
-                                    });
-                                }
-                                RecurrenceEndMode::Never => {}
                             }
-                        }
 
-                        compact_section_heading(ui, "Reminders", None);
-                        secondary_help(ui, "Enter minutes before the event, separated by commas.");
-                        let reminders_error = self.errors.get("reminders").cloned();
-                        let reminders_width = ui.available_width().max(1.0);
-                        editor_text_field(
-                            ui,
-                            "Reminders (minutes before, comma separated)",
-                            &mut self.reminders,
-                            reminders_width,
-                            reminders_error.as_deref(),
-                        );
-                        let tags_width = ui.available_width().max(1.0);
-                        editor_text_field(
-                            ui,
-                            "Tags (comma separated)",
-                            &mut self.tags,
-                            tags_width,
-                            None,
-                        );
+                            compact_section_heading(ui, "Reminders", None);
+                            secondary_help(
+                                ui,
+                                "Enter minutes before the event, separated by commas.",
+                            );
+                            let reminders_error = self.errors.get("reminders").cloned();
+                            let reminders_width = ui.available_width().max(1.0);
+                            editor_text_field(
+                                ui,
+                                "Reminders (minutes before, comma separated)",
+                                &mut self.reminders,
+                                reminders_width,
+                                reminders_error.as_deref(),
+                            );
+                            let tags_width = ui.available_width().max(1.0);
+                            editor_text_field(
+                                ui,
+                                "Tags (comma separated)",
+                                &mut self.tags,
+                                tags_width,
+                                None,
+                            );
 
+                            #[cfg(test)]
+                            {
+                                body_clip_rect = ui.clip_rect();
+                            }
+                        });
+
+                    ui.separator();
+                    #[cfg(test)]
+                    let mut save_rect = egui::Rect::NOTHING;
+                    #[cfg(test)]
+                    let mut cancel_rect = egui::Rect::NOTHING;
+                    ui.horizontal_wrapped(|ui| {
+                        let save = ui.button("Save");
+                        let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
                         #[cfg(test)]
                         {
-                            body_clip_rect = ui.clip_rect();
+                            save_rect = save.rect;
+                        }
+                        if save.clicked() {
+                            if let Err(err) = self.save(app) {
+                                app.report_error("ui operation", err);
+                            } else {
+                                close_requested = true;
+                            }
+                        }
+                        let cancel = ui.button("Cancel");
+                        #[cfg(test)]
+                        {
+                            cancel_rect = cancel.rect;
+                        }
+                        if cancel.clicked() {
+                            close_requested = true;
                         }
                     });
 
-                ui.separator();
-                #[cfg(test)]
-                let mut save_rect = egui::Rect::NOTHING;
-                #[cfg(test)]
-                let mut cancel_rect = egui::Rect::NOTHING;
-                ui.horizontal_wrapped(|ui| {
-                    let save = ui.button("Save");
-                    let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
                     #[cfg(test)]
                     {
-                        save_rect = save.rect;
+                        test_layout.body_inner_rect = body_output.inner_rect;
+                        test_layout.body_id = Some(body_output.id);
+                        test_layout.body_clip_rect = body_clip_rect;
+                        test_layout.body_content_size = body_output.content_size;
+                        test_layout.body_max_height = body_max_height;
+                        test_layout.footer_button_rects = [save_rect, cancel_rect];
+                        test_layout.footer_reserved_height = footer_reserved_height;
                     }
-                    if save.clicked() {
-                        if let Err(err) = self.save(app) {
-                            app.report_error("ui operation", err);
-                        } else {
-                            close_requested = true;
-                        }
-                    }
-                    let cancel = ui.button("Cancel");
-                    #[cfg(test)]
-                    {
-                        cancel_rect = cancel.rect;
-                    }
-                    if cancel.clicked() {
-                        close_requested = true;
-                    }
-                });
-
-                #[cfg(test)]
-                {
-                    test_layout.body_inner_rect = body_output.inner_rect;
-                    test_layout.body_id = Some(body_output.id);
-                    test_layout.body_clip_rect = body_clip_rect;
-                    test_layout.body_content_size = body_output.content_size;
-                    test_layout.body_max_height = body_max_height;
-                    test_layout.footer_button_rects = [save_rect, cancel_rect];
-                    test_layout.footer_reserved_height = footer_reserved_height;
-                }
-                #[cfg(not(test))]
-                let _ = (body_output, footer_reserved_height);
-            });
+                    #[cfg(not(test))]
+                    let _ = (body_output, footer_reserved_height);
+                },
+            );
 
         #[cfg(test)]
         {

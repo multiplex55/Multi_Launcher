@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use std::time::{Duration, Instant};
 
 use crate::activity::{ActivityCenter, ActivityOwner, ActivityRow, ActivitySnapshot};
@@ -127,111 +128,123 @@ impl ActivityDialogState {
         let mut open = self.open;
         egui::Window::new("Activity")
             .id(egui::Id::new("activity_dialog"))
-            .open(&mut open)
             .default_size([620.0, 480.0])
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Filter");
-                    ui.text_edit_singleline(&mut self.filter);
-                    if ui.button("Clear history").clicked() {
-                        center.clear_terminal_history();
-                        self.snapshot = center.snapshot();
-                    }
-                    if ui.button("Copy sanitized diagnostics").clicked() {
-                        ctx.copy_text(sanitized_diagnostics(&self.snapshot));
-                    }
-                });
-                ui.small(format!(
-                    "Current process working set: {}",
-                    format_bytes(self.current_process_working_set_bytes)
-                ));
-                ui.small(format!(
-                    "Current process private bytes (Windows): {}",
-                    format_bytes(self.current_process_private_bytes)
-                ));
-                ui.small(format!(
-                    "Pinboard-accounted image bytes (global): {}",
-                    format_bytes(self.pinboard_accounted_image_bytes)
-                ));
-                ui.separator();
-                for omitted in &self.snapshot.omissions_by_owner {
-                    let mut facts = Vec::new();
-                    if omitted.active > 0 {
-                        facts.push(format!("{} active", omitted.active));
-                    }
-                    if omitted.terminal > 0 {
-                        facts.push(format!("{} terminal", omitted.terminal));
-                    }
-                    ui.label(format!(
-                        "{}: {} activity facts omitted by the observer's retention limits.",
-                        omitted.owner.label(),
-                        facts.join(" and ")
+            .show_utility(
+                ctx,
+                "activity",
+                egui::Id::new("Activity"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from([620.0, 480.0]),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                ),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Filter");
+                        ui.text_edit_singleline(&mut self.filter);
+                        if ui.button("Clear history").clicked() {
+                            center.clear_terminal_history();
+                            self.snapshot = center.snapshot();
+                        }
+                        if ui.button("Copy sanitized diagnostics").clicked() {
+                            ctx.copy_text(sanitized_diagnostics(&self.snapshot));
+                        }
+                    });
+                    ui.small(format!(
+                        "Current process working set: {}",
+                        format_bytes(self.current_process_working_set_bytes)
                     ));
-                }
-                let needle = self.filter.trim().to_ascii_lowercase();
-                let rows = self
-                    .snapshot
-                    .rows
-                    .iter()
-                    .filter(|row| matches_filter(row, &needle))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if rows.is_empty() {
-                    ui.label("No matching activity.");
-                } else {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            for row in rows {
-                                ui.group(|ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.strong(row.key.owner().label());
-                                        ui.label(row.operation.label());
-                                        ui.label(row.lifecycle.label());
-                                        ui.label(row.retirement.label());
-                                        ui.label(format_elapsed(row.elapsed));
+                    ui.small(format!(
+                        "Current process private bytes (Windows): {}",
+                        format_bytes(self.current_process_private_bytes)
+                    ));
+                    ui.small(format!(
+                        "Pinboard-accounted image bytes (global): {}",
+                        format_bytes(self.pinboard_accounted_image_bytes)
+                    ));
+                    ui.separator();
+                    for omitted in &self.snapshot.omissions_by_owner {
+                        let mut facts = Vec::new();
+                        if omitted.active > 0 {
+                            facts.push(format!("{} active", omitted.active));
+                        }
+                        if omitted.terminal > 0 {
+                            facts.push(format!("{} terminal", omitted.terminal));
+                        }
+                        ui.label(format!(
+                            "{}: {} activity facts omitted by the observer's retention limits.",
+                            omitted.owner.label(),
+                            facts.join(" and ")
+                        ));
+                    }
+                    let needle = self.filter.trim().to_ascii_lowercase();
+                    let rows = self
+                        .snapshot
+                        .rows
+                        .iter()
+                        .filter(|row| matches_filter(row, &needle))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if rows.is_empty() {
+                        ui.label("No matching activity.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                for row in rows {
+                                    ui.group(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.strong(row.key.owner().label());
+                                            ui.label(row.operation.label());
+                                            ui.label(row.lifecycle.label());
+                                            ui.label(row.retirement.label());
+                                            ui.label(format_elapsed(row.elapsed));
+                                        });
+                                        if let Some(progress) = row.progress {
+                                            if let Some(total) = progress.total {
+                                                ui.label(format!(
+                                                    "{} / {} {}",
+                                                    progress.completed,
+                                                    total,
+                                                    progress.unit.label()
+                                                ));
+                                            } else {
+                                                ui.label(format!(
+                                                    "{} {}",
+                                                    progress.completed,
+                                                    progress.unit.label()
+                                                ));
+                                            }
+                                        }
+                                        if let Some(diagnostic) = row.diagnostic {
+                                            ui.label(diagnostic.label());
+                                        }
+                                        render_resources(ui, &row);
+                                        ui.horizontal(|ui| {
+                                            if row.key.owner() == ActivityOwner::Screenshot
+                                                && !screenshot_editor_available
+                                            {
+                                                ui.label("No screenshot editor is open");
+                                            } else if ui.button("Open owner tool").clicked() {
+                                                actions.push(ActivityDialogAction::Navigate(
+                                                    row.key.owner(),
+                                                ));
+                                            }
+                                            if row.can_cancel
+                                                && ui.button("Cancel current operation").clicked()
+                                            {
+                                                let _ = center.request_cancel(row.key);
+                                            }
+                                        });
                                     });
-                                    if let Some(progress) = row.progress {
-                                        if let Some(total) = progress.total {
-                                            ui.label(format!(
-                                                "{} / {} {}",
-                                                progress.completed,
-                                                total,
-                                                progress.unit.label()
-                                            ));
-                                        } else {
-                                            ui.label(format!(
-                                                "{} {}",
-                                                progress.completed,
-                                                progress.unit.label()
-                                            ));
-                                        }
-                                    }
-                                    if let Some(diagnostic) = row.diagnostic {
-                                        ui.label(diagnostic.label());
-                                    }
-                                    render_resources(ui, &row);
-                                    ui.horizontal(|ui| {
-                                        if row.key.owner() == ActivityOwner::Screenshot
-                                            && !screenshot_editor_available
-                                        {
-                                            ui.label("No screenshot editor is open");
-                                        } else if ui.button("Open owner tool").clicked() {
-                                            actions.push(ActivityDialogAction::Navigate(
-                                                row.key.owner(),
-                                            ));
-                                        }
-                                        if row.can_cancel
-                                            && ui.button("Cancel current operation").clicked()
-                                        {
-                                            let _ = center.request_cancel(row.key);
-                                        }
-                                    });
-                                });
-                            }
-                        });
-                }
-            });
+                                }
+                            });
+                    }
+                },
+            );
         if self.open != open {
             self.open = open;
         }

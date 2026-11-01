@@ -41,6 +41,7 @@ mod window_matcher_editor;
 pub mod window_picker;
 
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mkmacro::{
     DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroFolder, MkMacroStore,
     MkWindowMatcher, NormalizationConfig, repair_ids, validate_document,
@@ -7243,14 +7244,28 @@ impl MkMacroDialog {
         // and delete them again. Its chosen outer height must remain unchanged.
         let _window_output = eframe::egui::Window::new("Mouse/Keyboard Macros")
             .id(eframe::egui::Id::new("mkmacro_main_window"))
-            .open(open)
             .default_size(default_size)
             .min_size(min_size)
             .max_size(max_size)
             .resizable(true)
-            .show(ctx, |ui| {
-                table_viewport = self.show_contents_with_table_viewport(ui, jump_mode_scope);
-            });
+            .show_utility(
+                ctx,
+                "mkmacro",
+                eframe::egui::Id::new("mkmacro_main_window"),
+                Some(open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        eframe::egui::Vec2::from(default_size),
+                    ),
+                    eframe::egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(eframe::egui::Vec2::from(min_size))
+                .with_maximum(eframe::egui::Vec2::from(max_size)),
+                |ui| {
+                    table_viewport = self.show_contents_with_table_viewport(ui, jump_mode_scope);
+                },
+            );
         #[cfg(test)]
         {
             self.last_main_window_rect = _window_output.as_ref().map(|output| output.response.rect);

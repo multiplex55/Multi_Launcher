@@ -11,6 +11,7 @@ use super::{
     key_capture::{CapturedChord, captured_chord, key_name},
 };
 use crate::gui::theme::widgets::{StatusTone, semantic_status};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::*;
 use eframe::egui;
@@ -5621,11 +5622,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.action_editor.variable_catalog_key = Some(catalog_key);
     }
     egui::Window::new("Action Editor")
-        .open(&mut open)
+
         .collapsible(false)
         .default_size(egui::vec2(640.0, 720.0))
         .resizable(true)
-        .show(ctx, |ui| {
+        .show_utility(ctx, "mkmacro-action-editor", egui::Id::new("Action Editor"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from(egui::vec2(640.0, 720.0))), egui::Vec2::ZERO, [None, None]), |ui| {
           let footer_height = action_editor_footer_reserved_height(ui, &["Apply", cancel_label]);
           let body_max_height = (ui.available_height() - footer_height).max(0.0);
           let mut apply_enabled = false;

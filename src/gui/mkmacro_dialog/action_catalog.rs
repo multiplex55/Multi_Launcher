@@ -1,4 +1,5 @@
 use super::MkMacroDialog;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::*;
 use eframe::egui;
@@ -2704,50 +2705,64 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut open = d.action_catalog_visible;
     let mut close_clicked = false;
     egui::Window::new("Add Action")
-        .open(&mut open)
         .default_width(520.0)
-        .show(ctx, |ui| {
-            ui.add(egui::TextEdit::singleline(&mut d.action_search).hint_text("Search actions"));
-            egui::ScrollArea::vertical()
-                .max_height(430.0)
-                .show(ui, |ui| {
-                    let query = d.action_search.clone();
-                    for (category, descriptors) in group_visible_descriptors(&query) {
-                        ui.heading(category.label());
-                        for x in descriptors {
-                            let blocked = d.action_editor.draft.is_some();
-                            let action = (x.make_default)();
-                            let context_error = if matches!(x.editor, EditorKind::DirectInsert) {
-                                d.selected_macro().and_then(|m| {
-                                    validate_direct_context(m, insertion_position(d), &action).err()
-                                })
-                            } else {
-                                None
-                            };
-                            let response = ui
-                                .add_enabled(
-                                    !blocked && context_error.is_none(),
-                                    egui::Button::new(x.name),
-                                )
-                                .on_hover_text(x.description);
-                            let response = if blocked {
-                                response.on_disabled_hover_text(
-                                    "Apply or cancel the current action first.",
-                                )
-                            } else if let Some(reason) = context_error {
-                                response.on_disabled_hover_text(reason)
-                            } else {
-                                response
-                            };
-                            if response.clicked() {
-                                select_descriptor(d, &x);
+        .show_utility(
+            ctx,
+            "mkmacro-action-catalog",
+            egui::Id::new("Add Action"),
+            Some(&mut open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(520.0),
+                egui::Vec2::ZERO,
+                [None, None],
+            ),
+            |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut d.action_search).hint_text("Search actions"),
+                );
+                egui::ScrollArea::vertical()
+                    .max_height(430.0)
+                    .show(ui, |ui| {
+                        let query = d.action_search.clone();
+                        for (category, descriptors) in group_visible_descriptors(&query) {
+                            ui.heading(category.label());
+                            for x in descriptors {
+                                let blocked = d.action_editor.draft.is_some();
+                                let action = (x.make_default)();
+                                let context_error = if matches!(x.editor, EditorKind::DirectInsert)
+                                {
+                                    d.selected_macro().and_then(|m| {
+                                        validate_direct_context(m, insertion_position(d), &action)
+                                            .err()
+                                    })
+                                } else {
+                                    None
+                                };
+                                let response = ui
+                                    .add_enabled(
+                                        !blocked && context_error.is_none(),
+                                        egui::Button::new(x.name),
+                                    )
+                                    .on_hover_text(x.description);
+                                let response = if blocked {
+                                    response.on_disabled_hover_text(
+                                        "Apply or cancel the current action first.",
+                                    )
+                                } else if let Some(reason) = context_error {
+                                    response.on_disabled_hover_text(reason)
+                                } else {
+                                    response
+                                };
+                                if response.clicked() {
+                                    select_descriptor(d, &x);
+                                }
                             }
                         }
-                    }
-                });
-            ui.separator();
-            close_clicked = ui.button("Close").clicked();
-        });
+                    });
+                ui.separator();
+                close_clicked = ui.button("Close").clicked();
+            },
+        );
     if !open || close_clicked {
         close(d);
     }

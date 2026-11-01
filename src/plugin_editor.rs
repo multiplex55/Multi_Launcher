@@ -1,4 +1,5 @@
 use crate::gui::LauncherApp;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugin::PluginManager;
 use crate::settings::Settings;
 use eframe::egui;
@@ -214,8 +215,8 @@ impl PluginEditor {
             self.test_filter_response = None;
         }
         egui::Window::new("Plugin Settings")
-            .open(&mut open)
-            .show(ctx, |ui| {
+
+            .show_utility(ctx, "plugin-settings", egui::Id::new("Plugin Settings"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
                 ui.add_enabled_ui(!pending, |ui| {
                     ui.separator();
                     ui.label("Plugins:");

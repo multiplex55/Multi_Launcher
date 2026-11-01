@@ -1,4 +1,5 @@
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::qr::{self, GeneratedQr, QrErrorCorrection, QrGenerationError, QrPayloadMetadata};
 use eframe::egui;
 use image::RgbaImage;
@@ -303,18 +304,32 @@ impl QrDialogState {
                 let mut open = self.open;
                 egui::Window::new("QR Generator")
                     .id(egui::Id::new("qr_generator_embedded"))
-                    .open(&mut open)
                     .collapsible(false)
                     .default_size(available.min(egui::vec2(620.0, 700.0)))
                     .min_size(available.min(egui::vec2(320.0, 420.0)))
                     .max_size(available)
-                    .show(child, |ui| {
-                        self.body(ui);
-                        #[cfg(feature = "qa-framebuffer-capture")]
-                        {
-                            body_rendered = true;
-                        }
-                    });
+                    .show_utility(
+                        child,
+                        "qr-generator",
+                        egui::Id::new("qr_generator_embedded"),
+                        Some(&mut open),
+                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                            crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                                egui::Vec2::from(available.min(egui::vec2(620.0, 700.0))),
+                            ),
+                            egui::Vec2::ZERO,
+                            [None, None],
+                        )
+                        .with_minimum(egui::Vec2::from(available.min(egui::vec2(320.0, 420.0))))
+                        .with_maximum(egui::Vec2::from(available)),
+                        |ui| {
+                            self.body(ui);
+                            #[cfg(feature = "qa-framebuffer-capture")]
+                            {
+                                body_rendered = true;
+                            }
+                        },
+                    );
                 if !open {
                     self.close();
                 }

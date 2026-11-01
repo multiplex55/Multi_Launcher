@@ -4,6 +4,7 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
     semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::fav::{
     FAV_FILE, FavEntry, join_command_args, load_favs, replace_favs, resolve_with_plugin,
 };
@@ -198,367 +199,381 @@ impl FavDialog {
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
             .max_height(ctx.content_rect().height().max(1.0))
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                #[cfg(test)]
-                {
-                    test_visible = ui.is_visible();
-                    test_sizing_pass = ui.is_sizing_pass();
-                }
-                if let Some(error) = &self.load_error {
-                    compact_section_heading(ui, "Saved favorites", None);
-                    semantic_status(
-                        ui,
-                        StatusTone::Error,
-                        "Favorites are read-only because loading failed",
-                        Some("The last good entries remain available."),
-                    );
-                    let footer_height = favorites_footer_reserved_height(ui, &["Close"]);
-                    let error_height = (ui.available_height() - footer_height).max(0.0);
-                    #[cfg(test)]
-                    let parent_max_rect = ui.max_rect();
-                    #[cfg(test)]
-                    let parent_clip_rect = ui.clip_rect();
-                    let _error_output = egui::ScrollArea::vertical()
-                        .id_salt("fav_load_error")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(error_height)
-                        .show(ui, |ui| {
-                            ui.add(egui::Label::new(error).wrap());
-                        });
+            .show_utility(
+                ctx,
+                "favorites",
+                egui::Id::new("Favorites"),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_max_width(ctx.content_rect().width().max(1.0))
+                .with_max_height(ctx.content_rect().height().max(1.0)),
+                |ui| {
                     #[cfg(test)]
                     {
-                        test_scroll = Some(FavScrollLayout {
-                            id: _error_output.id,
-                            parent_max_rect,
-                            parent_clip_rect,
-                            inner_rect: _error_output.inner_rect,
-                            content_size: _error_output.content_size,
-                            offset: _error_output.state.offset,
-                        });
+                        test_visible = ui.is_visible();
+                        test_sizing_pass = ui.is_sizing_pass();
                     }
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        let close_response = ui.button("Close");
-                        let close_response =
-                            with_button_emphasis(ui, close_response, ButtonEmphasis::Primary);
+                    if let Some(error) = &self.load_error {
+                        compact_section_heading(ui, "Saved favorites", None);
+                        semantic_status(
+                            ui,
+                            StatusTone::Error,
+                            "Favorites are read-only because loading failed",
+                            Some("The last good entries remain available."),
+                        );
+                        let footer_height = favorites_footer_reserved_height(ui, &["Close"]);
+                        let error_height = (ui.available_height() - footer_height).max(0.0);
+                        #[cfg(test)]
+                        let parent_max_rect = ui.max_rect();
+                        #[cfg(test)]
+                        let parent_clip_rect = ui.clip_rect();
+                        let _error_output = egui::ScrollArea::vertical()
+                            .id_salt("fav_load_error")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(error_height)
+                            .show(ui, |ui| {
+                                ui.add(egui::Label::new(error).wrap());
+                            });
                         #[cfg(test)]
                         {
-                            test_close_clicked |= close_response.clicked();
-                            test_primary = Some(FavWidgetLayout {
-                                id: close_response.id,
-                                rect: close_response.rect,
+                            test_scroll = Some(FavScrollLayout {
+                                id: _error_output.id,
+                                parent_max_rect,
+                                parent_clip_rect,
+                                inner_rect: _error_output.inner_rect,
+                                content_size: _error_output.content_size,
+                                offset: _error_output.state.offset,
                             });
                         }
-                        if close_response.clicked() {
-                            close = true;
-                        }
-                    });
-                    return;
-                }
-                if let Some(idx) = self.edit_idx {
-                    compact_section_heading(
-                        ui,
-                        if idx == self.entries.len() {
-                            "New favorite"
-                        } else {
-                            "Edit favorite"
-                        },
-                        Some("Choose the label, command, optional arguments, and plugin."),
-                    );
-                    let footer_height = favorites_footer_reserved_height(ui, &["Save", "Cancel"]);
-                    let edit_height = (ui.available_height() - footer_height).max(0.0);
-                    #[cfg(test)]
-                    let parent_max_rect = ui.max_rect();
-                    #[cfg(test)]
-                    let parent_clip_rect = ui.clip_rect();
-                    let _edit_output = egui::ScrollArea::vertical()
-                        .id_salt("fav_edit_form")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(edit_height)
-                        .show(ui, |ui| {
-                            labeled_form_row(ui, "Label", |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.label)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                )
-                            });
-                            labeled_form_row(ui, "Command", |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.command)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                )
-                            });
-                            labeled_form_row(ui, "Args", |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.args)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                )
-                            });
-                            compact_section_heading(ui, "Plugin picker", None);
-                            secondary_help(
-                                ui,
-                                "Filter a plugin's actions or choose one to fill the command.",
-                            );
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Category");
-                                let mut plugin_names: Vec<_> =
-                                    app.plugins.iter().map(|p| p.name().to_string()).collect();
-                                plugin_names.sort_unstable();
-                                egui::ComboBox::from_id_salt("fav_cat")
-                                    .selected_text(if self.add_plugin.is_empty() {
-                                        "Select".to_string()
-                                    } else {
-                                        self.add_plugin.clone()
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        for name in plugin_names.iter() {
-                                            ui.selectable_value(
-                                                &mut self.add_plugin,
-                                                name.to_string(),
-                                                name,
-                                            );
-                                        }
-                                    });
-                            });
-                            labeled_form_row(ui, "Filter", |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.add_filter)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                )
-                            });
-                            if let Some(plugin) =
-                                app.plugins.iter().find(|p| p.name() == self.add_plugin)
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            let close_response = ui.button("Close");
+                            let close_response =
+                                with_button_emphasis(ui, close_response, ButtonEmphasis::Primary);
+                            #[cfg(test)]
                             {
-                                let filter = self.add_filter.trim().to_lowercase();
-                                let mut actions = if plugin.name() == "folders" {
-                                    plugin.search(&format!("f {}", self.add_filter))
-                                } else if plugin.name() == "bookmarks" {
-                                    plugin.search(&format!("bm {}", self.add_filter))
-                                } else {
-                                    plugin.commands()
-                                };
-                                let picker_height = ui.available_height().min(160.0).max(0.0);
-                                egui::ScrollArea::vertical()
-                                    .id_salt("fav_plugin_actions")
-                                    .auto_shrink([false, false])
-                                    .min_scrolled_height(0.0)
-                                    .max_height(picker_height)
-                                    .show(ui, |ui| {
-                                        for act in actions.drain(..) {
-                                            if !filter.is_empty()
-                                                && !act.label.to_lowercase().contains(&filter)
-                                                && !act.desc.to_lowercase().contains(&filter)
-                                                && !act.action.to_lowercase().contains(&filter)
-                                            {
-                                                continue;
-                                            }
-                                            let action = ui.add(
-                                                egui::Button::new(format!(
-                                                    "{} - {}",
-                                                    act.label, act.desc
-                                                ))
-                                                .wrap(),
-                                            );
-                                            if action.clicked() {
-                                                let mut cmd = act.action.clone();
-                                                let mut args = if self.args.trim().is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(self.args.clone())
-                                                };
-                                                if let Some(q) = cmd.strip_prefix("query:") {
-                                                    let q = join_command_args(q, args.as_deref());
-                                                    if let Some(res) =
-                                                        plugin.search(&q).into_iter().next()
-                                                    {
-                                                        cmd = res.action;
-                                                        args = res.args;
-                                                    } else {
-                                                        cmd = q;
-                                                        args = None;
-                                                    }
-                                                }
-                                                self.command = cmd;
-                                                self.args = args.unwrap_or_default();
-                                            }
-                                        }
-                                    });
+                                test_close_clicked |= close_response.clicked();
+                                test_primary = Some(FavWidgetLayout {
+                                    id: close_response.id,
+                                    rect: close_response.rect,
+                                });
+                            }
+                            if close_response.clicked() {
+                                close = true;
                             }
                         });
-                    #[cfg(test)]
-                    {
-                        test_scroll = Some(FavScrollLayout {
-                            id: _edit_output.id,
-                            parent_max_rect,
-                            parent_clip_rect,
-                            inner_rect: _edit_output.inner_rect,
-                            content_size: _edit_output.content_size,
-                            offset: _edit_output.state.offset,
-                        });
+                        return;
                     }
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        let save = ui.button("Save");
-                        let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
-                        #[cfg(test)]
-                        {
-                            test_primary = Some(FavWidgetLayout {
-                                id: save.id,
-                                rect: save.rect,
-                            });
-                        }
-                        if save.clicked() {
-                            if self.label.trim().is_empty() || self.command.trim().is_empty() {
-                                app.report_error_message(
-                                    "ui operation",
-                                    "Label and command required",
-                                );
+                    if let Some(idx) = self.edit_idx {
+                        compact_section_heading(
+                            ui,
+                            if idx == self.entries.len() {
+                                "New favorite"
                             } else {
-                                let mut cmd = self.command.clone();
-                                let mut args_opt = if self.args.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(self.args.clone())
-                                };
+                                "Edit favorite"
+                            },
+                            Some("Choose the label, command, optional arguments, and plugin."),
+                        );
+                        let footer_height =
+                            favorites_footer_reserved_height(ui, &["Save", "Cancel"]);
+                        let edit_height = (ui.available_height() - footer_height).max(0.0);
+                        #[cfg(test)]
+                        let parent_max_rect = ui.max_rect();
+                        #[cfg(test)]
+                        let parent_clip_rect = ui.clip_rect();
+                        let _edit_output = egui::ScrollArea::vertical()
+                            .id_salt("fav_edit_form")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(edit_height)
+                            .show(ui, |ui| {
+                                labeled_form_row(ui, "Label", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.label)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    )
+                                });
+                                labeled_form_row(ui, "Command", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.command)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    )
+                                });
+                                labeled_form_row(ui, "Args", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.args)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    )
+                                });
+                                compact_section_heading(ui, "Plugin picker", None);
+                                secondary_help(
+                                    ui,
+                                    "Filter a plugin's actions or choose one to fill the command.",
+                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Category");
+                                    let mut plugin_names: Vec<_> =
+                                        app.plugins.iter().map(|p| p.name().to_string()).collect();
+                                    plugin_names.sort_unstable();
+                                    egui::ComboBox::from_id_salt("fav_cat")
+                                        .selected_text(if self.add_plugin.is_empty() {
+                                            "Select".to_string()
+                                        } else {
+                                            self.add_plugin.clone()
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            for name in plugin_names.iter() {
+                                                ui.selectable_value(
+                                                    &mut self.add_plugin,
+                                                    name.to_string(),
+                                                    name,
+                                                );
+                                            }
+                                        });
+                                });
+                                labeled_form_row(ui, "Filter", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.add_filter)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    )
+                                });
                                 if let Some(plugin) =
                                     app.plugins.iter().find(|p| p.name() == self.add_plugin)
                                 {
-                                    let (c, a) = resolve_with_plugin(
-                                        plugin.as_ref(),
-                                        &cmd,
-                                        args_opt.as_deref(),
-                                    );
-                                    cmd = c;
-                                    args_opt = a;
+                                    let filter = self.add_filter.trim().to_lowercase();
+                                    let mut actions = if plugin.name() == "folders" {
+                                        plugin.search(&format!("f {}", self.add_filter))
+                                    } else if plugin.name() == "bookmarks" {
+                                        plugin.search(&format!("bm {}", self.add_filter))
+                                    } else {
+                                        plugin.commands()
+                                    };
+                                    let picker_height = ui.available_height().min(160.0).max(0.0);
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("fav_plugin_actions")
+                                        .auto_shrink([false, false])
+                                        .min_scrolled_height(0.0)
+                                        .max_height(picker_height)
+                                        .show(ui, |ui| {
+                                            for act in actions.drain(..) {
+                                                if !filter.is_empty()
+                                                    && !act.label.to_lowercase().contains(&filter)
+                                                    && !act.desc.to_lowercase().contains(&filter)
+                                                    && !act.action.to_lowercase().contains(&filter)
+                                                {
+                                                    continue;
+                                                }
+                                                let action = ui.add(
+                                                    egui::Button::new(format!(
+                                                        "{} - {}",
+                                                        act.label, act.desc
+                                                    ))
+                                                    .wrap(),
+                                                );
+                                                if action.clicked() {
+                                                    let mut cmd = act.action.clone();
+                                                    let mut args = if self.args.trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(self.args.clone())
+                                                    };
+                                                    if let Some(q) = cmd.strip_prefix("query:") {
+                                                        let q =
+                                                            join_command_args(q, args.as_deref());
+                                                        if let Some(res) =
+                                                            plugin.search(&q).into_iter().next()
+                                                        {
+                                                            cmd = res.action;
+                                                            args = res.args;
+                                                        } else {
+                                                            cmd = q;
+                                                            args = None;
+                                                        }
+                                                    }
+                                                    self.command = cmd;
+                                                    self.args = args.unwrap_or_default();
+                                                }
+                                            }
+                                        });
                                 }
-                                let mut candidate = self.entries.clone();
-                                if idx == candidate.len() {
-                                    candidate.push(FavEntry {
-                                        label: self.label.clone(),
-                                        action: cmd.clone(),
-                                        args: args_opt.clone(),
-                                    });
-                                } else if let Some(e) = candidate.get_mut(idx) {
-                                    e.label = self.label.clone();
-                                    e.action = cmd.clone();
-                                    e.args = args_opt.clone();
-                                }
-                                save_candidate = Some(candidate);
-                            }
-                        }
-                        let cancel = ui.button("Cancel");
+                            });
                         #[cfg(test)]
                         {
-                            test_secondary = Some(FavWidgetLayout {
-                                id: cancel.id,
-                                rect: cancel.rect,
+                            test_scroll = Some(FavScrollLayout {
+                                id: _edit_output.id,
+                                parent_max_rect,
+                                parent_clip_rect,
+                                inner_rect: _edit_output.inner_rect,
+                                content_size: _edit_output.content_size,
+                                offset: _edit_output.state.offset,
                             });
                         }
-                        if cancel.clicked() {
-                            self.edit_idx = None;
-                            self.add_plugin.clear();
-                            self.add_filter.clear();
-                        }
-                    });
-                } else {
-                    compact_section_heading(
-                        ui,
-                        "Saved favorites",
-                        Some("Manage saved labels and launch commands."),
-                    );
-                    ui.horizontal_wrapped(|ui| {
-                        let add = ui.button("Add Fav");
-                        let add = with_button_emphasis(ui, add, ButtonEmphasis::Primary);
-                        #[cfg(test)]
-                        {
-                            test_primary = Some(FavWidgetLayout {
-                                id: add.id,
-                                rect: add.rect,
-                            });
-                        }
-                        if add.clicked() {
-                            self.edit_idx = Some(self.entries.len());
-                            self.label.clear();
-                            self.command.clear();
-                            self.args.clear();
-                            self.add_plugin.clear();
-                            self.add_filter.clear();
-                        }
-                        let close_response = ui.button("Close");
-                        #[cfg(test)]
-                        {
-                            test_close_clicked |= close_response.clicked();
-                            test_secondary = Some(FavWidgetLayout {
-                                id: close_response.id,
-                                rect: close_response.rect,
-                            });
-                        }
-                        if close_response.clicked() {
-                            close = true;
-                        }
-                    });
-                    let list_height = ui.available_height().max(0.0);
-                    let mut remove: Option<usize> = None;
-                    #[cfg(test)]
-                    let parent_max_rect = ui.max_rect();
-                    #[cfg(test)]
-                    let parent_clip_rect = ui.clip_rect();
-                    let _list_output = egui::ScrollArea::vertical()
-                        .id_salt("fav_browse_list")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(list_height)
-                        .show(ui, |ui| {
-                            for idx in 0..self.entries.len() {
-                                let entry = self.entries[idx].clone();
-                                ui.horizontal_wrapped(|ui| {
-                                    if ui.button("Edit").clicked() {
-                                        self.edit_idx = Some(idx);
-                                        self.label = entry.label.clone();
-                                        self.command = entry.action.clone();
-                                        self.args = entry.args.clone().unwrap_or_default();
-                                    }
-                                    ui.add(
-                                        egui::Label::new(format!(
-                                            "{} - {}",
-                                            entry.label, entry.action
-                                        ))
-                                        .wrap(),
-                                    );
-                                    let remove_response = ui.button("Remove");
-                                    if with_button_emphasis(
-                                        ui,
-                                        remove_response,
-                                        ButtonEmphasis::Destructive,
-                                    )
-                                    .clicked()
-                                    {
-                                        remove = Some(idx);
-                                    }
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            let save = ui.button("Save");
+                            let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+                            #[cfg(test)]
+                            {
+                                test_primary = Some(FavWidgetLayout {
+                                    id: save.id,
+                                    rect: save.rect,
                                 });
                             }
+                            if save.clicked() {
+                                if self.label.trim().is_empty() || self.command.trim().is_empty() {
+                                    app.report_error_message(
+                                        "ui operation",
+                                        "Label and command required",
+                                    );
+                                } else {
+                                    let mut cmd = self.command.clone();
+                                    let mut args_opt = if self.args.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.args.clone())
+                                    };
+                                    if let Some(plugin) =
+                                        app.plugins.iter().find(|p| p.name() == self.add_plugin)
+                                    {
+                                        let (c, a) = resolve_with_plugin(
+                                            plugin.as_ref(),
+                                            &cmd,
+                                            args_opt.as_deref(),
+                                        );
+                                        cmd = c;
+                                        args_opt = a;
+                                    }
+                                    let mut candidate = self.entries.clone();
+                                    if idx == candidate.len() {
+                                        candidate.push(FavEntry {
+                                            label: self.label.clone(),
+                                            action: cmd.clone(),
+                                            args: args_opt.clone(),
+                                        });
+                                    } else if let Some(e) = candidate.get_mut(idx) {
+                                        e.label = self.label.clone();
+                                        e.action = cmd.clone();
+                                        e.args = args_opt.clone();
+                                    }
+                                    save_candidate = Some(candidate);
+                                }
+                            }
+                            let cancel = ui.button("Cancel");
+                            #[cfg(test)]
+                            {
+                                test_secondary = Some(FavWidgetLayout {
+                                    id: cancel.id,
+                                    rect: cancel.rect,
+                                });
+                            }
+                            if cancel.clicked() {
+                                self.edit_idx = None;
+                                self.add_plugin.clear();
+                                self.add_filter.clear();
+                            }
                         });
-                    #[cfg(test)]
-                    {
-                        test_scroll = Some(FavScrollLayout {
-                            id: _list_output.id,
-                            parent_max_rect,
-                            parent_clip_rect,
-                            inner_rect: _list_output.inner_rect,
-                            content_size: _list_output.content_size,
-                            offset: _list_output.state.offset,
+                    } else {
+                        compact_section_heading(
+                            ui,
+                            "Saved favorites",
+                            Some("Manage saved labels and launch commands."),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            let add = ui.button("Add Fav");
+                            let add = with_button_emphasis(ui, add, ButtonEmphasis::Primary);
+                            #[cfg(test)]
+                            {
+                                test_primary = Some(FavWidgetLayout {
+                                    id: add.id,
+                                    rect: add.rect,
+                                });
+                            }
+                            if add.clicked() {
+                                self.edit_idx = Some(self.entries.len());
+                                self.label.clear();
+                                self.command.clear();
+                                self.args.clear();
+                                self.add_plugin.clear();
+                                self.add_filter.clear();
+                            }
+                            let close_response = ui.button("Close");
+                            #[cfg(test)]
+                            {
+                                test_close_clicked |= close_response.clicked();
+                                test_secondary = Some(FavWidgetLayout {
+                                    id: close_response.id,
+                                    rect: close_response.rect,
+                                });
+                            }
+                            if close_response.clicked() {
+                                close = true;
+                            }
                         });
+                        let list_height = ui.available_height().max(0.0);
+                        let mut remove: Option<usize> = None;
+                        #[cfg(test)]
+                        let parent_max_rect = ui.max_rect();
+                        #[cfg(test)]
+                        let parent_clip_rect = ui.clip_rect();
+                        let _list_output = egui::ScrollArea::vertical()
+                            .id_salt("fav_browse_list")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(list_height)
+                            .show(ui, |ui| {
+                                for idx in 0..self.entries.len() {
+                                    let entry = self.entries[idx].clone();
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.button("Edit").clicked() {
+                                            self.edit_idx = Some(idx);
+                                            self.label = entry.label.clone();
+                                            self.command = entry.action.clone();
+                                            self.args = entry.args.clone().unwrap_or_default();
+                                        }
+                                        ui.add(
+                                            egui::Label::new(format!(
+                                                "{} - {}",
+                                                entry.label, entry.action
+                                            ))
+                                            .wrap(),
+                                        );
+                                        let remove_response = ui.button("Remove");
+                                        if with_button_emphasis(
+                                            ui,
+                                            remove_response,
+                                            ButtonEmphasis::Destructive,
+                                        )
+                                        .clicked()
+                                        {
+                                            remove = Some(idx);
+                                        }
+                                    });
+                                }
+                            });
+                        #[cfg(test)]
+                        {
+                            test_scroll = Some(FavScrollLayout {
+                                id: _list_output.id,
+                                parent_max_rect,
+                                parent_clip_rect,
+                                inner_rect: _list_output.inner_rect,
+                                content_size: _list_output.content_size,
+                                offset: _list_output.state.offset,
+                            });
+                        }
+                        if let Some(idx) = remove {
+                            let mut candidate = self.entries.clone();
+                            candidate.remove(idx);
+                            save_candidate = Some(candidate);
+                        }
                     }
-                    if let Some(idx) = remove {
-                        let mut candidate = self.entries.clone();
-                        candidate.remove(idx);
-                        save_candidate = Some(candidate);
-                    }
-                }
-            });
+                },
+            );
         #[cfg(test)]
         {
             self.last_layout = match (window_output, test_scroll, test_primary, test_secondary) {

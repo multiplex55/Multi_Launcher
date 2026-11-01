@@ -1,5 +1,6 @@
 use super::{MkMacroDialog, navigation};
 use crate::gui::theme::widgets::{StatusTone, semantic_status};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mkmacro::authoring_fields::ReplacementPreview;
 use eframe::egui::{self, Key, Modifiers};
 
@@ -257,14 +258,18 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     };
     egui::Window::new(title)
         .id(egui::Id::new("mkmacro_step_search"))
-        .open(&mut window_open)
+
         .collapsible(false)
         .default_width(if mode == SearchMode::Replace {
             820.0
         } else {
             550.0
         })
-        .show(ctx, |ui| {
+        .show_utility(ctx, "mkmacro-step-search", egui::Id::new("mkmacro_step_search"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(if mode == SearchMode::Replace {
+            820.0
+        } else {
+            550.0
+        }), egui::Vec2::ZERO, [None, None]), |ui| {
             let macro_name = d
                 .selected_macro()
                 .map_or("No macro selected", |m| m.name.as_str());
