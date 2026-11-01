@@ -508,7 +508,6 @@ fn restore_map_value(
 pub(crate) struct LauncherClosePreferences {
     pub(crate) window_size: (i32, i32),
     pub(crate) pinned_panels: Vec<crate::gui::Panel>,
-    pub(crate) clipboard_modify_dialog_size: (f32, f32),
     pub(crate) file_search_ui_preferences:
         Option<crate::file_search::settings::FileSearchUiPreferences>,
 }
@@ -721,12 +720,20 @@ impl SettingsSaveWorkerRegistry {
     }
 
     pub(crate) fn utility_size_write_error(&self, key: UtilityToolKey) -> Option<String> {
+        self.utility_size_write_failure(key).map(|(_, error)| error)
+    }
+
+    pub(crate) fn utility_size_write_failure(
+        &self,
+        key: UtilityToolKey,
+    ) -> Option<(UtilitySizeRevision, String)> {
         let state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (revision, error) = state.utility_sizes_errors.get(&key)?;
-        (state.utility_sizes_latest_revision.get(&key) == Some(revision)).then(|| error.clone())
+        (state.utility_sizes_latest_revision.get(&key) == Some(revision))
+            .then(|| (*revision, error.clone()))
     }
 
     pub(crate) fn utility_size_latest_revision(
@@ -1008,7 +1015,9 @@ impl PendingSettingsSave {
 
 impl LauncherApp {
     pub fn install_settings_save_worker_registry(&mut self, workers: SettingsSaveWorkerRegistry) {
-        self.settings_save_workers = workers;
+        self.utility_dialog_size_manager
+            .rebind(self.settings_path.clone(), workers.clone());
+        self.settings_save_workers = workers.clone();
     }
 
     pub(crate) fn settings_save_pending(&self) -> bool {
@@ -1179,6 +1188,12 @@ impl LauncherApp {
 
     pub(crate) fn prepare_settings_save_shutdown(&mut self) {
         let preferences = self.settings_save_close_preferences();
+        for (key, error) in self
+            .utility_dialog_size_manager
+            .flush_released_resizes_for_shutdown()
+        {
+            tracing::error!(tool = key.as_str(), %error, "could not queue final utility window size before shutdown");
+        }
         self.settings_save_workers.begin_shutdown();
         if let Some(pending) = self.pending_settings_save.as_ref() {
             pending.request_cancel();
@@ -1640,7 +1655,6 @@ fn persist_launcher_close_preferences(
         path,
         preferences.window_size,
         preferences.pinned_panels.clone(),
-        preferences.clipboard_modify_dialog_size,
     )?;
     if let Some(ui_preferences) = &preferences.file_search_ui_preferences {
         Settings::update(path, |settings| {

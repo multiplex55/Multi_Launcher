@@ -38,7 +38,6 @@ pub struct FileSearchPreviewDialogState {
     pub load_error_message: Option<String>,
     pub action_error_message: Option<String>,
     pub pending_auto_scroll: bool,
-    pub persisted_window_size: egui::Vec2,
     pub reset_horizontal_scroll: bool,
     load_state: PreviewLoadStateMachine,
     preview_result_rx: Option<Receiver<(u64, PreviewLoadOutcome)>>,
@@ -55,7 +54,6 @@ impl std::fmt::Debug for FileSearchPreviewDialogState {
             .field("load_error_message", &self.load_error_message)
             .field("action_error_message", &self.action_error_message)
             .field("pending_auto_scroll", &self.pending_auto_scroll)
-            .field("persisted_window_size", &self.persisted_window_size)
             .field("reset_horizontal_scroll", &self.reset_horizontal_scroll)
             .finish()
     }
@@ -72,7 +70,6 @@ impl Clone for FileSearchPreviewDialogState {
             load_error_message: self.load_error_message.clone(),
             action_error_message: self.action_error_message.clone(),
             pending_auto_scroll: self.pending_auto_scroll,
-            persisted_window_size: self.persisted_window_size,
             reset_horizontal_scroll: self.reset_horizontal_scroll,
             load_state: self.load_state.clone(),
             preview_result_rx: None,
@@ -90,7 +87,6 @@ impl PartialEq for FileSearchPreviewDialogState {
             && self.load_error_message == other.load_error_message
             && self.action_error_message == other.action_error_message
             && self.pending_auto_scroll == other.pending_auto_scroll
-            && self.persisted_window_size == other.persisted_window_size
             && self.reset_horizontal_scroll == other.reset_horizontal_scroll
     }
 }
@@ -106,7 +102,6 @@ impl Default for FileSearchPreviewDialogState {
             load_error_message: None,
             action_error_message: None,
             pending_auto_scroll: false,
-            persisted_window_size: DEFAULT_PREVIEW_WINDOW_SIZE,
             reset_horizontal_scroll: false,
             load_state: PreviewLoadStateMachine::default(),
             preview_result_rx: None,
@@ -228,22 +223,27 @@ impl FileSearchPreviewDialogState {
             ctx.request_repaint();
         }
         let mut open = self.open;
-        let mut size_to_persist = None;
-        let response = egui::Window::new("File preview")
-            .id(egui::Id::new(preview_window_id_source()))
-            .open(&mut open)
-            .default_size(self.persisted_window_size)
-            .resizable(true)
-            .show(ctx, |ui| {
+        let key = crate::settings::UtilityToolKey::parse("file-preview")
+            .expect("file-preview is a stable utility size key");
+        let window_id = egui::Id::new(preview_window_id_source());
+        let size_access =
+            crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
+        let window = egui::Window::new("File preview")
+            .id(window_id)
+            .resizable(true);
+        let _response = size_access.show_window(
+            ctx,
+            key,
+            window_id,
+            &mut open,
+            DEFAULT_PREVIEW_WINDOW_SIZE,
+            egui::Vec2::splat(64.0),
+            window,
+            |ui| {
                 self.render_contents(ui, settings);
-            });
-        if let Some(response) = response {
-            size_to_persist = Some(response.response.rect.size());
-        }
+            },
+        );
         self.open = open;
-        if let Some(size) = size_to_persist.filter(|size| size.x > 0.0 && size.y > 0.0) {
-            self.persisted_window_size = size;
-        }
     }
 
     fn render_contents(&mut self, ui: &mut egui::Ui, settings: &FileSearchSettings) {

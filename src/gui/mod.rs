@@ -1046,6 +1046,7 @@ pub struct LauncherApp {
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
     pub(crate) settings_save_workers: crate::settings_save::SettingsSaveWorkerRegistry,
+    pub(crate) utility_dialog_size_manager: utility_dialog_size::UtilityDialogSizeManager,
     pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
     pub(crate) settings_save_reconciliation_required: bool,
     /// Persistence failure captured before GUI startup. A later recovery UI can
@@ -1566,10 +1567,6 @@ impl LauncherApp {
         crate::settings_save::LauncherClosePreferences {
             window_size: self.window_size,
             pinned_panels: self.pinned_panels.clone(),
-            clipboard_modify_dialog_size: (
-                self.clipboard_modify_dialog.persisted_window_size.x,
-                self.clipboard_modify_dialog.persisted_window_size.y,
-            ),
             file_search_ui_preferences,
         }
     }
@@ -3550,6 +3547,13 @@ impl LauncherApp {
             hotfolder_action_adapter.clone(),
             activity_center.clone(),
         );
+        let settings_save_workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let utility_dialog_size_manager = utility_dialog_size::UtilityDialogSizeManager::new(
+            settings_path.clone(),
+            settings_save_workers.clone(),
+            settings.utility_dialog_sizes.clone(),
+        );
+        utility_dialog_size_manager.install_in_context(ctx);
         let mut app = Self {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
@@ -3629,7 +3633,8 @@ impl LauncherApp {
             settings_editor,
             plugin_editor,
             settings_path,
-            settings_save_workers: crate::settings_save::SettingsSaveWorkerRegistry::default(),
+            settings_save_workers,
+            utility_dialog_size_manager,
             pending_settings_save: None,
             settings_save_reconciliation_required: false,
             startup_settings_diagnostic: None,
@@ -3800,10 +3805,7 @@ impl LauncherApp {
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
             clipboard_modify_runtime,
-            clipboard_modify_dialog: ClipboardModifyDialogState::with_initial_size(
-                clipboard_modify_settings.dialog_width,
-                clipboard_modify_settings.dialog_height,
-            ),
+            clipboard_modify_dialog: ClipboardModifyDialogState::default(),
             json_utility_dialog: JsonUtilityDialogState::default(),
             regex_tester_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),

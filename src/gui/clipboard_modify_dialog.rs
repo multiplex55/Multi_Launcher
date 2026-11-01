@@ -109,7 +109,6 @@ pub struct ClipboardModifyDialogState {
     pub unsaved_template_draft: bool,
     pub unsaved_pipeline_draft: bool,
     pub wrap_preview: bool,
-    pub persisted_window_size: egui::Vec2,
     pub last_action: Option<String>,
     pub template_filter: String,
     pub help_filter: String,
@@ -149,10 +148,6 @@ impl Default for ClipboardModifyDialogState {
             unsaved_template_draft: false,
             unsaved_pipeline_draft: false,
             wrap_preview: true,
-            persisted_window_size: egui::vec2(
-                CLIPBOARD_MODIFY_DEFAULT_WIDTH,
-                CLIPBOARD_MODIFY_DEFAULT_HEIGHT,
-            ),
             last_action: None,
             template_filter: String::new(),
             help_filter: String::new(),
@@ -174,13 +169,6 @@ impl Default for ClipboardModifyDialogState {
 }
 
 impl ClipboardModifyDialogState {
-    pub fn with_initial_size(width: f32, height: f32) -> Self {
-        let mut state = Self::default();
-        state.persisted_window_size = validate_clipboard_modify_size(width, height)
-            .unwrap_or_else(clipboard_modify_default_size);
-        state
-    }
-
     pub fn open_section<B: ClipboardBackend>(
         &mut self,
         section: ClipboardModifyDialogSection,
@@ -218,7 +206,6 @@ impl ClipboardModifyDialogState {
     }
     pub fn cleanup_after_close(&mut self) {
         let wrap = self.wrap_preview;
-        let persisted_window_size = self.persisted_window_size;
         self.preview.cancel_and_invalidate();
         self.source.clear();
         self.baseline.clear();
@@ -234,7 +221,6 @@ impl ClipboardModifyDialogState {
         self.unsaved_pipeline_draft = false;
         self.large_confirmation_open = false;
         self.wrap_preview = wrap;
-        self.persisted_window_size = persisted_window_size;
     }
     pub fn can_apply(&self) -> bool {
         matches!(self.preview.state(), PreviewState::Completed { .. })
@@ -300,6 +286,7 @@ impl ClipboardModifyDialogState {
     pub fn ui<B: ClipboardBackend>(
         &mut self,
         ctx: &egui::Context,
+        legacy_window_size: egui::Vec2,
         service: &Arc<ClipboardService<B>>,
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
         store: Option<&ClipboardModifierStore>,
@@ -308,32 +295,32 @@ impl ClipboardModifyDialogState {
             return;
         }
         let viewport_max_size = clipboard_modify_usable_viewport_size(ctx.content_rect().size());
-        self.persisted_window_size = clamp_clipboard_modify_size(
-            self.persisted_window_size,
-            clipboard_modify_min_size(),
-            viewport_max_size,
-        );
         let min_size = effective_clipboard_modify_min_size(viewport_max_size);
         let mut open = self.open;
-        let response = egui::Window::new("Clipboard Modify")
+        let key = crate::settings::UtilityToolKey::parse("clipboard-modify")
+            .expect("clipboard-modify is a stable utility size key");
+        let access = crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
+        let default_size =
+            clipboard_modify_default_window_size(legacy_window_size, access.preference(key));
+        let window = egui::Window::new("Clipboard Modify")
             .id(egui::Id::new(CLIPBOARD_MODIFY_WINDOW_ID))
             .resizable(true)
-            .default_size(self.persisted_window_size)
             .min_size(min_size)
-            .max_size(viewport_max_size)
-            .open(&mut open)
-            .show(ctx, |ui| {
+            .max_size(viewport_max_size);
+        let _response = access.show_window(
+            ctx,
+            key,
+            egui::Id::new(CLIPBOARD_MODIFY_WINDOW_ID),
+            &mut open,
+            default_size,
+            min_size,
+            window,
+            |ui| {
                 self.shortcuts(ui, service, catalog.clone());
                 let _footer_response =
                     self.render_section_contents(ui, service, catalog.clone(), store);
-            });
-        if let Some(response) = response {
-            self.persisted_window_size = clamp_clipboard_modify_size(
-                response.response.rect.size(),
-                clipboard_modify_min_size(),
-                viewport_max_size,
-            );
-        }
+            },
+        );
         if self.open && !open {
             self.open = false;
             self.cleanup_after_close();
@@ -1928,6 +1915,38 @@ pub fn clipboard_modify_default_size() -> egui::Vec2 {
     )
 }
 
+fn clipboard_modify_default_window_size(
+    legacy_size: egui::Vec2,
+    preference: crate::settings::UtilitySizePreference,
+) -> egui::Vec2 {
+    match preference {
+        crate::settings::UtilitySizePreference::Missing => legacy_size,
+        crate::settings::UtilitySizePreference::Reset
+        | crate::settings::UtilitySizePreference::Preferred(_)
+        | crate::settings::UtilitySizePreference::Unsupported => clipboard_modify_default_size(),
+    }
+}
+
+pub(crate) fn clipboard_modify_legacy_window_size(
+    settings: &crate::settings::Settings,
+) -> egui::Vec2 {
+    let configured = settings
+        .plugin_settings
+        .get("clipboard_modify")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<
+                    crate::plugins::clipboard_modify::ClipboardModifyPluginSettings,
+                >(value)
+                .ok()
+        });
+    configured
+        .and_then(|preferences| {
+            validate_clipboard_modify_size(preferences.dialog_width, preferences.dialog_height)
+        })
+        .unwrap_or_else(clipboard_modify_default_size)
+}
+
 pub fn clipboard_modify_min_size() -> egui::Vec2 {
     egui::vec2(CLIPBOARD_MODIFY_MIN_WIDTH, CLIPBOARD_MODIFY_MIN_HEIGHT)
 }
@@ -2437,29 +2456,118 @@ mod tests {
     }
 
     #[test]
-    fn startup_size_creation_uses_valid_dimensions() {
-        let state = ClipboardModifyDialogState::with_initial_size(777.0, 555.0);
-        assert_vec2_eq(state.persisted_window_size, egui::vec2(777.0, 555.0));
-
-        let default_state = ClipboardModifyDialogState::default();
+    fn legacy_geometry_is_read_only_fallback_and_invalid_values_use_default() {
+        let mut settings = crate::settings::Settings::default();
+        settings.plugin_settings.insert(
+            "clipboard_modify".into(),
+            serde_json::json!({ "dialog_width": 777.0, "dialog_height": 555.0 }),
+        );
         assert_vec2_eq(
-            default_state.persisted_window_size,
+            clipboard_modify_legacy_window_size(&settings),
+            egui::vec2(777.0, 555.0),
+        );
+
+        settings.plugin_settings.insert(
+            "clipboard_modify".into(),
+            serde_json::json!({ "dialog_width": -1.0, "dialog_height": 555.0 }),
+        );
+        assert_vec2_eq(
+            clipboard_modify_legacy_window_size(&settings),
+            clipboard_modify_default_size(),
+        );
+        settings.plugin_settings.remove("clipboard_modify");
+        assert_vec2_eq(
+            clipboard_modify_legacy_window_size(&settings),
             clipboard_modify_default_size(),
         );
     }
 
     #[test]
-    fn invalid_startup_size_falls_back_to_default() {
-        for (width, height) in [
-            (0.0, 555.0),
-            (777.0, 0.0),
-            (-1.0, 555.0),
-            (777.0, -1.0),
-            (f32::NAN, 555.0),
-            (777.0, f32::INFINITY),
-        ] {
-            let state = ClipboardModifyDialogState::with_initial_size(width, height);
-            assert_vec2_eq(state.persisted_window_size, clipboard_modify_default_size());
+    fn utility_size_integration_clipboard_precedence_renders_production_window() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let key = crate::settings::UtilityToolKey::parse("clipboard-modify").unwrap();
+        let legacy = egui::vec2(777.0, 555.0);
+        let preferred = crate::settings::PreferredWindowSize::new(720.0, 480.0).unwrap();
+        let expected = [
+            ("missing", None, legacy),
+            (
+                "preferred",
+                Some(preferred),
+                egui::vec2(preferred.width, preferred.height),
+            ),
+            ("reset", None, clipboard_modify_default_size()),
+        ];
+
+        for (mode, configured_preference, expected_size) in expected {
+            let ctx = egui::Context::default();
+            let directory = tempfile::tempdir().unwrap();
+            let mut sizes = crate::settings::UtilityDialogSizes::default();
+            match mode {
+                "preferred" => {
+                    sizes.set(key, configured_preference.unwrap()).unwrap();
+                }
+                "reset" => {
+                    sizes.reset(key).unwrap();
+                }
+                _ => {}
+            }
+            let manager = crate::gui::utility_dialog_size::UtilityDialogSizeManager::new(
+                directory
+                    .path()
+                    .join("settings.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                crate::settings_save::SettingsSaveWorkerRegistry::default(),
+                sizes,
+            );
+            manager.install_in_context(&ctx);
+
+            let mut settings = crate::settings::Settings::default();
+            settings.plugin_settings.insert(
+                "clipboard_modify".into(),
+                serde_json::json!({ "dialog_width": legacy.x, "dialog_height": legacy.y }),
+            );
+            let original_plugin_settings = settings.plugin_settings.clone();
+            let legacy_size = clipboard_modify_legacy_window_size(&settings);
+            let service = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+                "unchanged clipboard".to_string(),
+            )));
+            let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+            let mut state = ClipboardModifyDialogState::default();
+            state.open = true;
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+
+            for _ in 0..4 {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |root| {
+                        manager.begin_frame(root.ctx()).unwrap();
+                        state.ui(root.ctx(), legacy_size, &service, catalog.clone(), None);
+                    },
+                );
+                output.drop_without_applying_deltas();
+            }
+
+            let window_rect = ctx
+                .memory(|memory| memory.area_rect(egui::Id::new(CLIPBOARD_MODIFY_WINDOW_ID)))
+                .expect("Clipboard Modify renders through its production Window");
+            assert!(
+                (window_rect.width() - expected_size.x).abs() < 2.0
+                    && (window_rect.height() - expected_size.y).abs() < 2.0,
+                "{mode} preference selected the wrong outer size: {window_rect:?}"
+            );
+            assert_eq!(
+                settings.plugin_settings, original_plugin_settings,
+                "legacy plugin geometry is read-only for {mode} preference"
+            );
+            assert!(
+                service.backend().writes().is_empty(),
+                "measuring the production dialog does not use the clipboard"
+            );
         }
     }
 
@@ -2490,14 +2598,97 @@ mod tests {
 
     #[test]
     fn cleanup_after_close_preserves_window_size_and_wrap_preview() {
-        let mut state = ClipboardModifyDialogState::with_initial_size(777.0, 555.0);
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let key = crate::settings::UtilityToolKey::parse("clipboard-modify").unwrap();
+        let size = crate::settings::PreferredWindowSize::new(777.0, 555.0).unwrap();
+        let mut shared_sizes = crate::settings::UtilityDialogSizes::default();
+        shared_sizes.set(key, size).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let manager = crate::gui::utility_dialog_size::UtilityDialogSizeManager::new(
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            workers.clone(),
+            shared_sizes,
+        );
+        manager.install_in_context(&ctx);
+        let service = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text(
+            "unchanged clipboard".to_string(),
+        )));
+        let catalog = Arc::new(crate::clipboard_modify::defaults::default_catalog());
+        let mut state = ClipboardModifyDialogState::default();
         state.wrap_preview = false;
         state.source = "source".into();
+        state.open = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
 
+        let render = |state: &mut ClipboardModifyDialogState| {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |root| {
+                    manager.begin_frame(root.ctx()).unwrap();
+                    state.ui(
+                        root.ctx(),
+                        clipboard_modify_default_size(),
+                        &service,
+                        catalog.clone(),
+                        None,
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+        };
+        for _ in 0..3 {
+            render(&mut state);
+        }
+        let window_id = egui::Id::new(CLIPBOARD_MODIFY_WINDOW_ID);
+        let original_rect = ctx
+            .memory(|memory| memory.area_rect(window_id))
+            .expect("production Clipboard Modify window is rendered");
+        assert!((original_rect.width() - size.width).abs() < 2.0);
+        assert!((original_rect.height() - size.height).abs() < 2.0);
+
+        state.open = false;
         state.cleanup_after_close();
-
-        assert_vec2_eq(state.persisted_window_size, egui::vec2(777.0, 555.0));
+        assert_eq!(
+            crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(&ctx)
+                .preference(key),
+            crate::settings::UtilitySizePreference::Preferred(size),
+            "cleanup must retain the preference in the installed app capability"
+        );
+        assert!(state.source.is_empty());
         assert!(!state.wrap_preview);
+
+        // The surface is omitted while closed, then reopens from the same
+        // context-owned size preference.
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |root| manager.begin_frame(root.ctx()).unwrap(),
+        );
+        output.drop_without_applying_deltas();
+        state.open = true;
+        for _ in 0..3 {
+            render(&mut state);
+        }
+        let reopened_rect = ctx
+            .memory(|memory| memory.area_rect(window_id))
+            .expect("production Clipboard Modify window reopens");
+        assert!((reopened_rect.width() - size.width).abs() < 2.0);
+        assert!((reopened_rect.height() - size.height).abs() < 2.0);
+        workers.join_all();
+
+        assert!(service.backend().writes().is_empty());
     }
 
     #[test]

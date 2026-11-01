@@ -543,14 +543,25 @@ impl TableUtilityDialogState {
             TableUtilityProfile::Table => "Table Utility",
             TableUtilityProfile::Csv => "CSV Viewer",
         };
-        egui::Window::new(title)
-            .id(egui::Id::new(Some("Table Utility")))
+        let key = crate::settings::UtilityToolKey::parse("table-utility")
+            .expect("table-utility is a stable utility size key");
+        let window_id = egui::Id::new(Some("Table Utility"));
+        let size_access =
+            crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
+        let window = egui::Window::new(title)
+            .id(window_id)
             .collapsible(false)
             .resizable(true)
-            .default_size((1180.0, 760.0))
-            .min_size((600.0, 420.0))
-            .open(&mut window_open)
-            .show(ctx, |ui| {
+            .min_size((600.0, 420.0));
+        let _response = size_access.show_window(
+            ctx,
+            key,
+            window_id,
+            &mut window_open,
+            egui::vec2(1180.0, 760.0),
+            egui::vec2(600.0, 420.0),
+            window,
+            |ui| {
                 let visible_owner =
                     response_owner_current && ui.is_visible() && !ui.is_sizing_pass();
                 let main_response_owner = visible_owner && main_owner_current;
@@ -613,7 +624,8 @@ impl TableUtilityDialogState {
                         ui.label(message);
                     }
                 });
-            });
+            },
+        );
 
         if first_ui_pass
             && native_owner_current

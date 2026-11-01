@@ -378,14 +378,26 @@ impl HashGeneratorDialogState {
         }
 
         let mut open = self.open;
-        egui::Window::new("Hash Generator")
-            .id(egui::Id::new("hash_generator_dialog"))
+        let key = crate::settings::UtilityToolKey::parse("hash-generator")
+            .expect("hash-generator is a stable utility size key");
+        let window_id = egui::Id::new("hash_generator_dialog");
+        let size_access =
+            crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
+        let window = egui::Window::new("Hash Generator")
+            .id(window_id)
             .collapsible(false)
             .resizable(true)
-            .default_size((620.0, 440.0))
-            .min_size((420.0, 320.0))
-            .open(&mut open)
-            .show(ctx, |ui| self.contents(ui, ctx));
+            .min_size((420.0, 320.0));
+        let _response = size_access.show_window(
+            ctx,
+            key,
+            window_id,
+            &mut open,
+            egui::vec2(620.0, 440.0),
+            egui::vec2(420.0, 320.0),
+            window,
+            |ui| self.contents(ui, ctx),
+        );
         if self.open && !open {
             self.end_session();
         } else {
@@ -879,5 +891,47 @@ mod tests {
         assert!(dialog.error.as_deref().unwrap().contains("clipboard busy"));
         assert_eq!(dialog.result().unwrap().digest, digest);
         assert!(clipboard.writes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn utility_size_integration_hash_minimum_does_not_rewrite_smaller_preference() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut sizes = crate::settings::UtilityDialogSizes::default();
+        let key = crate::settings::UtilityToolKey::parse("hash-generator").unwrap();
+        let preferred = crate::settings::PreferredWindowSize::new(300.0, 250.0).unwrap();
+        sizes.set(key, preferred).unwrap();
+        let manager = crate::gui::utility_dialog_size::UtilityDialogSizeManager::new(
+            path.to_string_lossy().into_owned(),
+            crate::settings_save::SettingsSaveWorkerRegistry::default(),
+            sizes,
+        );
+        let ctx = egui::Context::default();
+        manager.install_in_context(&ctx);
+        let mut dialog = HashGeneratorDialogState::default();
+        dialog.open = true;
+        for _ in 0..3 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 800.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    manager.begin_frame(ui.ctx()).unwrap();
+                    dialog.show(ui.ctx());
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+
+        let rect = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new("hash_generator_dialog")))
+            .expect("Hash Generator uses its stable production window id");
+        assert!(rect.width() >= 420.0, "{rect:?}");
+        assert!(rect.height() >= 320.0, "{rect:?}");
+        assert_eq!(manager.snapshot().preferred(key), Some(preferred));
     }
 }
