@@ -161,11 +161,16 @@ pub(crate) struct NativeArchiveError {
     primary: NativeFailure,
     cleanup_attempted: bool,
     cleanup_failure: Option<NativeFailure>,
+    cleanup_failed: bool,
 }
 
 impl NativeArchiveError {
     pub(crate) fn kind(&self) -> io::ErrorKind {
         self.primary.kind
+    }
+
+    pub(crate) fn cleanup_failed(&self) -> bool {
+        self.cleanup_failed
     }
 
     fn validation(
@@ -177,6 +182,7 @@ impl NativeArchiveError {
             primary: NativeFailure::validation(operation, kind, held_identity),
             cleanup_attempted: false,
             cleanup_failure: None,
+            cleanup_failed: false,
         }
     }
 
@@ -189,6 +195,7 @@ impl NativeArchiveError {
             primary: NativeFailure::from_io(operation, &error, held_identity),
             cleanup_attempted: false,
             cleanup_failure: None,
+            cleanup_failed: false,
         }
     }
 
@@ -201,6 +208,7 @@ impl NativeArchiveError {
             primary: NativeFailure::from_win32(operation, error, held_identity),
             cleanup_attempted: false,
             cleanup_failure: None,
+            cleanup_failed: false,
         }
     }
 
@@ -213,13 +221,34 @@ impl NativeArchiveError {
             primary: NativeFailure::from_ntstatus(operation, status, held_identity),
             cleanup_attempted: false,
             cleanup_failure: None,
+            cleanup_failed: false,
         }
     }
 
     fn with_cleanup(mut self, cleanup: Result<(), NativeFailure>) -> Self {
         self.cleanup_attempted = true;
         self.cleanup_failure = cleanup.err();
+        self.cleanup_failed = self.cleanup_failure.is_some();
         self
+    }
+
+    fn after_cleanup(primary: NativeFailure, cleanup: Result<(), NativeFailure>) -> Self {
+        let cleanup_failure = cleanup.err();
+        Self {
+            primary,
+            cleanup_attempted: true,
+            cleanup_failed: cleanup_failure.is_some(),
+            cleanup_failure,
+        }
+    }
+
+    fn from_failed_cleanup(failure: NativeFailure) -> Self {
+        Self {
+            primary: failure,
+            cleanup_attempted: true,
+            cleanup_failure: None,
+            cleanup_failed: true,
+        }
     }
 
     #[cfg(test)]
@@ -236,6 +265,9 @@ impl fmt::Display for NativeArchiveError {
                 Some(failure) => {
                     formatter.write_str("; owned-stage cleanup failed: ")?;
                     write_failure(formatter, failure)?;
+                }
+                None if self.cleanup_failed => {
+                    formatter.write_str("; owned-stage cleanup failed")?
                 }
                 None => formatter.write_str("; owned-stage cleanup completed")?,
             }
@@ -1220,6 +1252,7 @@ fn open_relative(
         primary,
         cleanup_attempted: false,
         cleanup_failure: None,
+        cleanup_failed: false,
     })?;
     if parent_attributes.FileAttributes
         & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
@@ -1577,11 +1610,7 @@ impl OwnedStage {
                     Some(parent.identity),
                 );
                 let cleanup = delete_open_file_without_identity(&file);
-                return Err(NativeArchiveError {
-                    primary,
-                    cleanup_attempted: true,
-                    cleanup_failure: cleanup.err(),
-                });
+                return Err(NativeArchiveError::after_cleanup(primary, cleanup));
             }
 
             let metadata = match file.metadata() {
@@ -1593,11 +1622,7 @@ impl OwnedStage {
                         Some(parent.identity),
                     );
                     let cleanup = delete_open_file_without_identity(&file);
-                    return Err(NativeArchiveError {
-                        primary,
-                        cleanup_attempted: true,
-                        cleanup_failure: cleanup.err(),
-                    });
+                    return Err(NativeArchiveError::after_cleanup(primary, cleanup));
                 }
             };
             if !metadata.is_file()
@@ -1611,11 +1636,7 @@ impl OwnedStage {
                     native_file_identity(&file).ok(),
                 );
                 let cleanup = delete_open_file_without_identity(&file);
-                return Err(NativeArchiveError {
-                    primary,
-                    cleanup_attempted: true,
-                    cleanup_failure: cleanup.err(),
-                });
+                return Err(NativeArchiveError::after_cleanup(primary, cleanup));
             }
             let identity = match native_file_identity(&file) {
                 Ok(identity) => identity,
@@ -1626,11 +1647,7 @@ impl OwnedStage {
                         Some(parent.identity),
                     );
                     let cleanup = delete_open_file_without_identity(&file);
-                    return Err(NativeArchiveError {
-                        primary,
-                        cleanup_attempted: true,
-                        cleanup_failure: cleanup.err(),
-                    });
+                    return Err(NativeArchiveError::after_cleanup(primary, cleanup));
                 }
             };
             if identity.volume_serial_number() != parent.identity.volume_serial_number() {
@@ -1640,11 +1657,7 @@ impl OwnedStage {
                     Some(identity),
                 );
                 let cleanup = delete_open_file_without_identity(&file);
-                return Err(NativeArchiveError {
-                    primary,
-                    cleanup_attempted: true,
-                    cleanup_failure: cleanup.err(),
-                });
+                return Err(NativeArchiveError::after_cleanup(primary, cleanup));
             }
             if let Err(error) = VerifiedOverlappedFile::verify_before_ownership(&file) {
                 let primary = match error {
@@ -1671,11 +1684,7 @@ impl OwnedStage {
                     }
                 };
                 let cleanup = delete_open_file(&file, identity);
-                return Err(NativeArchiveError {
-                    primary,
-                    cleanup_attempted: true,
-                    cleanup_failure: cleanup.err(),
-                });
+                return Err(NativeArchiveError::after_cleanup(primary, cleanup));
             }
             return Ok(Self {
                 file: VerifiedOverlappedFile::from_verified(file),
@@ -1888,21 +1897,13 @@ impl OwnedStage {
     fn fail_and_cleanup(&mut self, primary: NativeFailure) -> NativeArchiveError {
         let cleanup = delete_open_file(self.file.as_file(), self.identity);
         self.finished = true;
-        NativeArchiveError {
-            primary,
-            cleanup_attempted: true,
-            cleanup_failure: cleanup.err(),
-        }
+        NativeArchiveError::after_cleanup(primary, cleanup)
     }
 
     pub(crate) fn abort(mut self) -> Result<(), NativeArchiveError> {
         let cleanup = delete_open_file(self.file.as_file(), self.identity);
         self.finished = true;
-        cleanup.map_err(|failure| NativeArchiveError {
-            primary: failure,
-            cleanup_attempted: true,
-            cleanup_failure: None,
-        })
+        cleanup.map_err(NativeArchiveError::from_failed_cleanup)
     }
 
     #[cfg(test)]

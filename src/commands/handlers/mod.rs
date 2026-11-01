@@ -27,6 +27,7 @@ mod snippet_run;
 mod table_utility;
 mod todo;
 mod xml_toolkit;
+mod zip_extractor;
 
 pub(crate) use batch_rename::handle_batch_rename;
 pub(crate) use calendar::handle_calendar;
@@ -57,3 +58,4 @@ pub(crate) use snippet_run::handle_snippet_run;
 pub(crate) use table_utility::handle_table_utility;
 pub(crate) use todo::handle_todo;
 pub(crate) use xml_toolkit::handle_xml_toolkit;
+pub(crate) use zip_extractor::handle_zip_extractor;

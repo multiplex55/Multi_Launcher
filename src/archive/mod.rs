@@ -35,3 +35,8 @@ pub(crate) use session::{
     ArchivePreviewSummary, ArchiveSession, ArchiveSessionFailure, ArchiveSessionPhase,
     ArchiveSessionRequestError, ArchiveSessionSnapshot, PreviewToken,
 };
+#[cfg(windows)]
+pub(crate) use writer::{
+    ArchiveWriteFailureKind, ArchiveWritePhase, ArchiveWriteProgress, ArchiveWriteReport,
+    ArchiveWriteStatus,
+};

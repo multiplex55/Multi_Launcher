@@ -437,6 +437,11 @@ const UTILITY_SIZE_CHOICES: &[UtilitySizeChoice] = &[
         label: "XML Toolkit",
         native_restore_only: true,
     },
+    UtilitySizeChoice {
+        key: "zip-extractor",
+        label: "ZIP Extractor",
+        native_restore_only: false,
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -7288,6 +7293,11 @@ mod settings_shell_tests {
         use crate::settings::{PreferredWindowSize, UtilitySizePreference, UtilityToolKey};
         use std::time::{Duration, Instant};
 
+        assert!(UTILITY_SIZE_CHOICES.iter().any(|choice| {
+            choice.key == "zip-extractor"
+                && choice.label == "ZIP Extractor"
+                && !choice.native_restore_only
+        }));
         let directory = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         ctx.global_style_mut(|style| style.animation_time = 0.0);

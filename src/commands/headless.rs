@@ -422,6 +422,9 @@ fn execute_with_external(
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
+        Command::ZipExtractor(_) => {
+            anyhow::bail!("ZIP extraction requires the launcher interface")
+        }
         Command::HashGenerator(_) => {
             anyhow::bail!("Hash Generator commands require the launcher interface")
         }
@@ -1376,5 +1379,36 @@ mod qr_headless_tests {
                 .contains("requires the launcher interface")
         );
         assert!(!error.to_string().contains("secret"));
+    }
+}
+
+#[cfg(test)]
+mod zip_extractor_headless_tests {
+    use super::*;
+
+    #[test]
+    fn zip_command_refuses_headless_without_external_launch() {
+        let original = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "zip:open".into(),
+            args: None,
+        };
+        let mut calls = 0;
+        let error = execute_with_external(
+            Command::ZipExtractor(crate::commands::ZipExtractorCommand::Open),
+            &original,
+            &mut |_, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .expect_err("ZIP extraction requires the launcher interface");
+        assert_eq!(calls, 0);
+        assert!(
+            error
+                .to_string()
+                .contains("requires the launcher interface")
+        );
     }
 }

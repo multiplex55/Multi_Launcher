@@ -327,6 +327,22 @@ mod radial_parser_tests {
 
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
+    if s.get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("zip:"))
+    {
+        if s[4..].eq_ignore_ascii_case("open") && action.args.is_none() {
+            return Ok(Command::ZipExtractor(ZipExtractorCommand::Open));
+        }
+        return Err(CommandError::new(
+            "zip_extractor",
+            if action.args.is_some() {
+                "ZIP Extractor commands do not accept a path or content payload"
+            } else {
+                "Unknown ZIP Extractor command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
     if let Some(raw) = s.strip_prefix("pinboard:") {
         if action.args.is_some() {
             return Err(CommandError::new(
@@ -3120,6 +3136,48 @@ mod duplicate_finder_route_parser_tests {
         }
         assert!(matches!(
             parse_action(&action("dffusion:open", None)).unwrap(),
+            Command::External(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod zip_extractor_route_tests {
+    use super::*;
+
+    fn action(raw: &str, args: Option<&str>) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn zip_namespace_is_exact_and_rejects_payloads_without_external_fallback() {
+        assert_eq!(
+            parse_action(&action("zip:open", None)).unwrap(),
+            Command::ZipExtractor(ZipExtractorCommand::Open)
+        );
+        assert_eq!(
+            parse_action(&action("ZIP:OPEN", None)).unwrap(),
+            Command::ZipExtractor(ZipExtractorCommand::Open)
+        );
+
+        for (raw, args) in [
+            ("zip:open", Some("C:\\private\\archive.zip")),
+            ("zip:extract", None),
+            ("zip:open:again", None),
+            ("ZIP:OPEN", Some("private archive text")),
+        ] {
+            let error = parse_action(&action(raw, args)).unwrap_err();
+            assert_eq!(error.domain, "zip_extractor");
+            assert!(error.toast && error.refocus);
+            assert!(!error.message.contains("private"));
+        }
+        assert!(matches!(
+            parse_action(&action("zipper:open", None)).unwrap(),
             Command::External(_)
         ));
     }

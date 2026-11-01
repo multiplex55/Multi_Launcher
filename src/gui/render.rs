@@ -3889,6 +3889,19 @@ impl LauncherApp {
                 ),
             );
         }
+        #[cfg(windows)]
+        {
+            let completed = self.archive_session.poll();
+            let worker_active = self.archive_session.has_active_worker();
+            let now = Instant::now();
+            if completed || self.zip_extractor_dialog.progress_refresh_due(now) {
+                self.zip_extractor_dialog
+                    .update_session_snapshot(self.archive_session.snapshot(), now);
+            }
+            if worker_active || self.zip_extractor_dialog.session_needs_polling() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
         self.brightness_dialog.runtime_tick(ctx);
         if let Some(completion) = self.screenshot_capture.tick(std::time::Instant::now(), ctx) {
             self.pending_screenshot_completion = Some(completion);
@@ -5534,6 +5547,7 @@ impl LauncherApp {
                         | super::Panel::SnippetDialog
                         | super::Panel::ClipboardDialog
                         | super::Panel::JsonUtilityDialog
+                        | super::Panel::ZipExtractorDialog
                         | super::Panel::RegexTesterDialog
                         | super::Panel::XmlToolkitDialog
                         | super::Panel::TableUtilityDialog
@@ -5603,6 +5617,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
                 self.json_utility_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
+                self.zip_extractor_dialog.open,
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::RegexTester,
@@ -9480,6 +9498,43 @@ impl LauncherApp {
             json_utility_native_owner,
             first_ui_pass,
         );
+        let zip_kind = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor;
+        let zip_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let zip_scope = match zip_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
+                instance,
+            } if self.jump_mode_enabled()
+                && self.jump_mode_ui.dialog_instance(zip_kind) == Some(instance) =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("zip-extractor", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "zip-extractor",
+                    ctx.viewport_id(),
+                    zip_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let zip_was_open = self.zip_extractor_dialog.open;
+        #[cfg(windows)]
+        self.zip_extractor_dialog.show(
+            &ctx,
+            &mut self.archive_session,
+            first_ui_pass,
+            zip_scope.as_ref(),
+        );
+        #[cfg(not(windows))]
+        self.zip_extractor_dialog
+            .show_unsupported(&ctx, first_ui_pass, zip_scope.as_ref());
+        if zip_was_open && !self.zip_extractor_dialog.open {
+            self.panel_states.zip_extractor_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::ZipExtractorDialog);
+        }
         self.hash_generator_dialog.show(&ctx);
         self.show_regex_tester(&ctx, frame_logic.should_be_visible);
         self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
@@ -10067,6 +10122,8 @@ impl eframe::App for LauncherApp {
         self.hotfolder_runtime.shutdown_and_reap();
         self.hotfolder_runtime.join_reaper();
         self.xml_toolkit_dialog.shutdown();
+        #[cfg(windows)]
+        self.archive_session.shutdown();
         self.table_utility_dialog.shutdown();
         self.image_compare_dialog.shutdown();
         self.duplicate_finder_dialog.shutdown();
@@ -11278,6 +11335,73 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn zip_extractor_panel_renders_registered_layer_across_close_and_reopen() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let panel = super::Panel::ZipExtractorDialog;
+        let layer = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor
+            .layer_id()
+            .expect("ZIP Extractor is an embedded root window");
+        let screen_size = egui::vec2(1200.0, 800.0);
+
+        let render_open_panel = |app: &mut LauncherApp| {
+            for _ in 0..3 {
+                let (output, _) = app.run_root_frame_for_test(
+                    &ctx,
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
+                        focused: true,
+                        ..Default::default()
+                    },
+                    false,
+                );
+                output.drop_without_applying_deltas();
+            }
+            let actual_window_hit = (1..19).any(|x| {
+                (1..13).any(|y| {
+                    ctx.layer_id_at(egui::pos2(x as f32 * 60.0, y as f32 * 60.0)) == Some(layer)
+                })
+            });
+            assert!(
+                actual_window_hit,
+                "the production ZIP Extractor Window must occupy its registered Jump layer"
+            );
+        };
+
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.follow_mouse = false;
+        app.focus_panel(panel);
+        render_open_panel(&mut app);
+        #[cfg(windows)]
+        assert_eq!(
+            app.archive_session.snapshot().phase,
+            crate::archive::ArchiveSessionPhase::Empty,
+            "opening and painting the panel starts no file-system operation"
+        );
+
+        assert!(app.close_front_dialog());
+        assert!(!app.is_panel_open(panel));
+        assert!(!app.panel_stack.contains(&panel));
+        app.focus_panel(panel);
+        render_open_panel(&mut app);
+        #[cfg(windows)]
+        assert_eq!(
+            app.archive_session.snapshot().phase,
+            crate::archive::ArchiveSessionPhase::Closed,
+            "reopening the presentation does not reopen a previously closed path"
+        );
+        assert!(app.close_front_dialog());
+        #[cfg(windows)]
+        app.archive_session.shutdown();
+        drop(app);
+        drop(workspace);
     }
 
     #[test]

@@ -93,6 +93,7 @@ pub(crate) struct ArchiveWriteReport {
     pub created_directories: usize,
     pub actual_bytes_written: u64,
     pub failure: Option<(ArchiveWriteFailureKind, String)>,
+    pub cleanup_failed: bool,
 }
 
 #[derive(Clone)]
@@ -124,6 +125,7 @@ struct PipelineFailure {
     kind: ArchiveWriteFailureKind,
     entry: Option<ArchiveEntryId>,
     message: String,
+    cleanup_failed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -538,6 +540,7 @@ impl ArchiveWriteJob {
                         ArchiveWriteFailureKind::WorkerPanicked,
                         "archive writer worker panicked".to_owned(),
                     )),
+                    cleanup_failed: false,
                 }
             }
         };
@@ -574,6 +577,7 @@ impl ArchiveWriteReport {
             created_directories: 0,
             actual_bytes_written: 0,
             failure: None,
+            cleanup_failed: false,
         }
     }
 }
@@ -588,11 +592,15 @@ impl PipelineFailure {
             kind,
             entry,
             message: message.into(),
+            cleanup_failed: false,
         }
     }
 
     fn native(error: NativeArchiveError, entry: Option<ArchiveEntryId>) -> Self {
-        Self::new(ArchiveWriteFailureKind::NativeIo, entry, error.to_string())
+        let cleanup_failed = error.cleanup_failed();
+        let mut failure = Self::new(ArchiveWriteFailureKind::NativeIo, entry, error.to_string());
+        failure.cleanup_failed = cleanup_failed;
+        failure
     }
 
     fn io(error: io::Error, entry: Option<ArchiveEntryId>) -> Self {
@@ -616,6 +624,7 @@ fn execute_pipeline(
         Ok(files) => files,
         Err(error) => {
             report.failure = Some((error.kind, error.message));
+            report.cleanup_failed = error.cleanup_failed;
             return;
         }
     };
@@ -1507,6 +1516,7 @@ fn abort_stage(stage: OwnedStage, mut failure: PipelineFailure) -> PipelineFailu
         failure.message.push_str("; stage cleanup failed: ");
         failure.message.push_str(&cleanup.to_string());
         failure.kind = ArchiveWriteFailureKind::NativeIo;
+        failure.cleanup_failed = cleanup.cleanup_failed();
     }
     failure
 }
@@ -1536,6 +1546,7 @@ fn unsupported(entry: ArchiveEntryId, message: &'static str) -> PipelineFailure 
 }
 
 fn set_pipeline_failure(report: &mut ArchiveWriteReport, failure: PipelineFailure) {
+    report.cleanup_failed = failure.cleanup_failed;
     let cancelled = failure.kind == ArchiveWriteFailureKind::Cancelled;
     report.status = if cancelled {
         if report.published_entries.is_empty() {
@@ -2393,6 +2404,10 @@ mod tests {
             b"foreign winner"
         );
         assert_eq!(stage_count(&fixture.destination), 0);
+        assert!(
+            !report.cleanup_failed,
+            "successful cleanup of the incomplete stage is not a cleanup failure"
+        );
     }
 
     #[test]

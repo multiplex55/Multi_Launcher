@@ -764,6 +764,10 @@ impl ArchiveSession {
         self.snapshot_with_phase(phase, write_progress)
     }
 
+    pub(crate) fn has_active_worker(&self) -> bool {
+        self.active.is_some()
+    }
+
     fn snapshot_with_phase(
         &self,
         phase: ArchiveSessionPhase,
