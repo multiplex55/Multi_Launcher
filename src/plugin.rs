@@ -75,6 +75,7 @@ use crate::plugins::text_case::TextCasePlugin;
 use crate::plugins::timer::TimerPlugin;
 use crate::plugins::timestamp::TimestampPlugin;
 use crate::plugins::todo::TodoPlugin;
+use crate::plugins::unicode_inspector::UnicodeInspectorPlugin;
 use crate::plugins::unit_convert::UnitConvertPlugin;
 use crate::plugins::virtual_desktop::VirtualDesktopPlugin;
 use crate::plugins::volume::VolumePlugin;
@@ -955,6 +956,7 @@ impl PluginManager {
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
+        self.register_with_settings(UnicodeInspectorPlugin, plugin_settings);
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
         self.register_with_settings(ImageComparePlugin, plugin_settings);
         self.register_with_settings(DuplicateFinderPlugin, plugin_settings);
@@ -1791,6 +1793,34 @@ mod tests {
         assert_eq!(snapshot.actions, synchronous);
         assert!(!snapshot.pending);
         assert_eq!(snapshot.start_revision, snapshot.provider_revision);
+    }
+
+    #[test]
+    fn unicode_inspector_builtin_registration_emits_no_query_payload() {
+        let mut manager = PluginManager::new();
+        manager.reload_from_dirs(
+            &[],
+            10,
+            NetUnit::Auto,
+            false,
+            &HashMap::new(),
+            Arc::new(Vec::new()),
+        );
+
+        assert!(
+            manager
+                .plugin_names()
+                .iter()
+                .any(|name| name == "unicode_inspector")
+        );
+        let actions = manager.search_filtered("unicode private text", None, None);
+        let action = actions
+            .iter()
+            .find(|action| action.action == "unicode:open")
+            .expect("builtin Unicode Inspector should route its prefix");
+        assert!(action.args.is_none());
+        assert!(!action.label.contains("private text"));
+        assert!(!action.desc.contains("private text"));
     }
 
     #[test]

@@ -103,6 +103,7 @@ mod todo_view_dialog;
 #[cfg(test)]
 mod track_c_action_observer;
 mod track_c_query_observer;
+mod unicode_inspector_dialog;
 pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
@@ -190,6 +191,7 @@ pub use timer_dialog::{TimerCompletionDialog, TimerDialog};
 pub use toast_log_dialog::ToastLogDialog;
 pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::{TodoViewDialog, todo_view_layout_sizes, todo_view_window_constraints};
+pub(crate) use unicode_inspector_dialog::UnicodeInspectorDialogState;
 pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use volume_dialog::VolumeDialog;
 pub use xml_toolkit_dialog::XmlToolkitDialogState;
@@ -735,6 +737,7 @@ pub enum Panel {
     ClipboardDialog,
     ClipboardModifyDialog,
     JsonUtilityDialog,
+    UnicodeInspectorDialog,
     RegexTesterDialog,
     BatchRenameDialog,
     SearchReplaceDialog,
@@ -799,6 +802,7 @@ impl Panel {
             Self::ClipboardDialog => "Clipboard History",
             Self::ClipboardModifyDialog => "Clipboard Modify",
             Self::JsonUtilityDialog => "JSON Utility",
+            Self::UnicodeInspectorDialog => "Unicode Inspector",
             Self::RegexTesterDialog => "Regex Tester",
             Self::BatchRenameDialog => "Batch Renamer",
             Self::SearchReplaceDialog => "Search and Replace",
@@ -864,6 +868,7 @@ struct PanelStates {
     clipboard_dialog: bool,
     clipboard_modify_dialog: bool,
     json_utility_dialog: bool,
+    unicode_inspector_dialog: bool,
     regex_tester_dialog: bool,
     batch_rename_dialog: bool,
     search_replace_dialog: bool,
@@ -1230,6 +1235,7 @@ pub struct LauncherApp {
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub json_utility_dialog: JsonUtilityDialogState,
+    pub(crate) unicode_inspector_dialog: UnicodeInspectorDialogState,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
@@ -3807,6 +3813,7 @@ impl LauncherApp {
             clipboard_modify_runtime,
             clipboard_modify_dialog: ClipboardModifyDialogState::default(),
             json_utility_dialog: JsonUtilityDialogState::default(),
+            unicode_inspector_dialog: UnicodeInspectorDialogState::default(),
             regex_tester_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
@@ -4520,7 +4527,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 59] = [
+    const TRACKED_PANELS: [Panel; 60] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4556,6 +4563,7 @@ impl LauncherApp {
         Panel::ClipboardDialog,
         Panel::ClipboardModifyDialog,
         Panel::JsonUtilityDialog,
+        Panel::UnicodeInspectorDialog,
         Panel::RegexTesterDialog,
         Panel::BatchRenameDialog,
         Panel::SearchReplaceDialog,
@@ -4619,6 +4627,7 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_dialog.open,
             Panel::ClipboardModifyDialog => self.clipboard_modify_dialog.open,
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
+            Panel::UnicodeInspectorDialog => self.unicode_inspector_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
@@ -4903,6 +4912,10 @@ impl LauncherApp {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
             }
+            Panel::UnicodeInspectorDialog => {
+                self.unicode_inspector_dialog.close_session();
+                self.panel_states.unicode_inspector_dialog = false;
+            }
             Panel::ConvertPanel => {
                 self.convert_panel.open = false;
                 self.panel_states.convert_panel = false;
@@ -5174,6 +5187,10 @@ impl LauncherApp {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
             }
+            Panel::UnicodeInspectorDialog => {
+                self.unicode_inspector_dialog.close_session();
+                self.panel_states.unicode_inspector_dialog = false;
+            }
             Panel::ConvertPanel => {
                 self.convert_panel.open = false;
                 self.panel_states.convert_panel = false;
@@ -5291,6 +5308,7 @@ impl LauncherApp {
                 .clipboard_modify_dialog
                 .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
             Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
+            Panel::UnicodeInspectorDialog => self.unicode_inspector_dialog.open_session(),
             Panel::QrDialog => self.qr_dialog.open = true,
             Panel::RegexTesterDialog => {
                 if !self.regex_tester_dialog.open {
@@ -5447,6 +5465,7 @@ impl LauncherApp {
         check!(clipboard_dialog, Panel::ClipboardDialog);
         check!(clipboard_modify_dialog, Panel::ClipboardModifyDialog);
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
+        check!(unicode_inspector_dialog, Panel::UnicodeInspectorDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(search_replace_dialog, Panel::SearchReplaceDialog);

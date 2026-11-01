@@ -422,6 +422,9 @@ fn execute_with_external(
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
+        Command::UnicodeInspector(_) => {
+            anyhow::bail!("Unicode Inspector requires the launcher interface")
+        }
         Command::HashGenerator(_) => {
             anyhow::bail!("Hash Generator commands require the launcher interface")
         }
@@ -625,6 +628,38 @@ mod json_utility_headless_tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("require the launcher interface"));
+        assert!(external_calls.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod unicode_inspector_headless_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_inspector_headless_route_refuses_without_external_fallback() {
+        let original = Action {
+            label: "Open Unicode Inspector".into(),
+            desc: String::new(),
+            action: "unicode:open".into(),
+            args: None,
+        };
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(
+            Command::UnicodeInspector(UnicodeInspectorCommand::Open),
+            &original,
+            &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires the launcher interface")
+        );
         assert!(external_calls.is_empty());
     }
 }

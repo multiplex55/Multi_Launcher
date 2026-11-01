@@ -123,6 +123,12 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         self.read_retry()
     }
 
+    /// Read the current clipboard exactly once, without the modifier retry policy.
+    /// This is used by explicit, read-only tools that must not retry a user action.
+    pub fn read_text_once(&self) -> Result<String, ClipboardError> {
+        self.backend.read_text()
+    }
+
     #[cfg(test)]
     pub fn backend(&self) -> &B {
         &self.backend

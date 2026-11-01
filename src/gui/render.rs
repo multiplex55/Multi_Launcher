@@ -9480,6 +9480,12 @@ impl LauncherApp {
             json_utility_native_owner,
             first_ui_pass,
         );
+        if self.unicode_inspector_dialog.open {
+            let clipboard = crate::clipboard_modify::runtime::clipboard_service();
+            self.unicode_inspector_dialog.show(&ctx, first_ui_pass, || {
+                clipboard.read_text_once().map_err(|_| ())
+            });
+        }
         self.hash_generator_dialog.show(&ctx);
         self.show_regex_tester(&ctx, frame_logic.should_be_visible);
         self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);

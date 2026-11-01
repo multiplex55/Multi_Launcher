@@ -75,6 +75,7 @@ pub mod text_case;
 pub mod timer;
 pub mod timestamp;
 pub mod todo;
+pub mod unicode_inspector;
 pub mod unit_convert;
 pub mod virtual_desktop;
 pub mod volume;

@@ -13,8 +13,8 @@ Initial Git mutation failed with `.git/index.lock: Permission denied` under sand
 
 | Category | Branch | parent_branch | parent_tip_sha | baseline_sha | Final tip / push |
 | --- | --- | --- | --- | --- | --- |
-| C01 | fix/utility-sizing-20261101-r01 | perf/large-data-startup-20261031 | 25a9468450f4f91090658be23d129908c92ca501 | c0bc9de129bce0cf75fbba0374d9edf7588e8b31 | pending; baseline pushed |
-| C02 | pending | C01 | pending | pending | pending |
+| C01 | fix/utility-sizing-20261101-r01 | perf/large-data-startup-20261031 | 25a9468450f4f91090658be23d129908c92ca501 | c0bc9de129bce0cf75fbba0374d9edf7588e8b31 | 25a0b86b9d18a1eb6d878c61620126a5d4b327e8; pushed; clean/PARTIAL |
+| C02 | feat/unicode-inspector-ui-20261101-r01 | fix/utility-sizing-20261101-r01 | 25a0b86b9d18a1eb6d878c61620126a5d4b327e8 | 8b552b24cfa2dda5b1895d4e17651dc525867edd | pending; baseline pushed |
 | C03 | pending | C02 | pending | pending | pending |
 | C04 | pending | C03 | pending | pending | pending |
 | C05 | pending | C04 | pending | pending | pending |
@@ -187,7 +187,22 @@ M1-D packet: after M1-C commit, integrate remaining eligible rows via the same c
 
 ## C02 — Unicode UI
 
-Pending C01 closeout and direct-child baseline.
+C01 closed as PARTIAL with source checkpoint3c3d732c07f9fb7ec6fccd8c511c9bf189313311 and [native capture report](execution/standalone/blocked-utility-recovery-timer-alarm/stalls/20261101T145606Z.md), closing25a0b86b9d18a1eb6d878c61620126a5d4b327e8. Both local/upstream matched, tree clean, no operation marker or owned live process before transition. Fresh C02 branch created directly from that closing tip; baseline8b552b24cfa2dda5b1895d4e17651dc525867edd direct parent verified equal25a0b86b; normal upstream push succeeded; clean at baseline. No merge/rebase/cherry-pick/worktree/auxiliary checkout used.
+
+| Checkpoint | State | Evidence / next action |
+| --- | --- | --- |
+| M0-A | COMPLETE | Exact C01 final parent verified; baseline pushed. |
+| M2-A | TESTED / COMPLETE |24/24 focused cases pass, review clear; route/session checkpoint pending commit. Last-row/full UI acceptance remains M2-B/C. |
+| M2-B | pending | Actual themed full-last-row gate, no assertion relaxation. |
+| M2-C | pending | Help/build/integration/review or truthful withdrawal after bounded gate. |
+
+M2-A ownership packet: current Unicode domain unchanged; plugin registration owner is `src/plugin.rs` (not plugins_builtin). Add exact `unicode:open` typed command with malformed/payload namespace errors, Macro/HotFolder/headless refusal and history skip; exclude query override. One dialog state owns source/model/selection/revision, transactional explicit one-read Paste, exact source/scalar copy, bounded editing and close/Clear erasure. Shared ClipboardBackend errors are mapped to fixed safe labels rather than raw Display strings. New dialog/plugin/handler plus current typed/GUI lifecycle integration; no alternate size store. Parent owns commands/receipts/Git after writer freeze. Requested/configured planner and implementer identities unchanged from bootstrap; backend remains unobservable. Historical20261031T195454Z row stop is reference only; no candidate wholesale import. M2-B remains mandatory before UI acceptance.
+
+M2-B planner packet: pinned `show_rows` takes height excluding inter-row spacing; `show_viewport` adds scroll content margin and its inner_rect is not the effective parent-intersected clip. Production layout must contract actual one-line widget height from themed font/interaction/frame metrics, reserve real available viewport after controls, and keep details bounded separately. Exact historical test name must prove the entire final row at65536rows inside actual clip, row pitch/contiguity, bounded visible work and real wheel/end paths across both densities,100/200% typography, narrow/wide/details/content replacement. Logical Windows Undo uses ctrl+command; same-frame Paste remains editor-owned. Initial+2 corrections only for the original row finding. M2-C completes NavigationDialogKind/Jump, Help, accepted-only Reset selector, focused current app build and independent frozen review. Native proof stays C05.
+
+M2-A frozen candidate adds dialog/plugin/handler and current typed/panel integration plus narrow `ClipboardService::read_text_once` (existing retrying read would violate one-read action). Actual plugin owner is `PluginManager::reload_from_dirs`, correcting planner's stale function name. Initial lib preparation `c02-m2a-prepare_20261101T151946075Z_bd411fe75b184c8f904301c71d7deabb` failed106.026255s exit101 with cleanup/drain verified, no timeout. Root E0277: finite payload-free InspectorStatus lacks Debug for five assert_eq sites (ten diagnostics); no inventory/tests ran. Source fingerprint946c884b4f8093fb36db395f2e62e8360d611546c1715a9d409e8867ac47f2f3 unchanged. Stable read-only review ongoing; correction packet waits for findings. No native acceptance.
+
+M2-A independent review found no substantive scope findings; actual button/multipass/Undo evidence stays M2-B. Correction1 only derives Debug for finite nonpayload status. Preparation `c02-m2a-correction1-prepare_20261101T152315943Z_317eb0036e354c9c909051593560c6c3` passed201.436576s; inventory `c02-m2a-inventory_20261101T152746019Z_c4bcf42433be46cdb6de814a335f439b` passed11.343996s and selected24nonignored cases via `test(unicode_inspector)` across actual library inventory. Execution `c02-m2a-execution_20261101T152835828Z_21972f7d4d5e401387c1e5b773888b34` passed24/24, Nextest0.893s/runner1.746969s. All exit0, no timeout, cleanup/drain verified. Source fingerprintbb69b18933b5ac48ee3db7b3becb37e04e524c2d3c1222546ca4a6d68391ee29 stable before/after; scoped diff check passes. Ten unchanged pure cases plus14new boundary/session/host cases; no broad suite, Clippy or native proof. Initial+one focused correction used for status Debug finding.
 
 ## C03 — ZIP
 
