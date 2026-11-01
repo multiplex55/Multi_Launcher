@@ -42,28 +42,23 @@ fn checked(
     }
 }
 
-pub fn start(dur: &str, name: &str) {
-    if let Some(d) = crate::plugins::timer::parse_duration(dur) {
-        if name.is_empty() {
-            crate::plugins::timer::start_timer(d, "None".to_string());
-        } else {
-            crate::plugins::timer::start_timer_named(d, Some(name.to_string()), "None".to_string());
-        }
-    }
+pub fn start(dur: &str, name: &str) -> anyhow::Result<()> {
+    let duration = crate::plugins::timer::parse_duration(dur)
+        .ok_or_else(|| anyhow::anyhow!("invalid or non-positive timer duration"))?;
+    crate::plugins::timer::try_start_timer_named(
+        duration,
+        (!name.is_empty()).then(|| name.to_string()),
+        "None".to_string(),
+    )?;
+    Ok(())
 }
 
-pub fn set_alarm(time: &str, name: &str) {
-    if let Some((h, m, date)) = crate::plugins::timer::parse_hhmm(time) {
-        if name.is_empty() {
-            crate::plugins::timer::start_alarm(h, m, date, "None".to_string());
-        } else {
-            crate::plugins::timer::start_alarm_named(
-                h,
-                m,
-                date,
-                Some(name.to_string()),
-                "None".to_string(),
-            );
-        }
-    }
+pub fn set_alarm(time: &str, name: &str) -> anyhow::Result<()> {
+    let spec = crate::plugins::timer::parse_alarm_spec(time)?;
+    crate::plugins::timer::try_start_alarm_named(
+        spec,
+        (!name.is_empty()).then(|| name.to_string()),
+        "None".to_string(),
+    )?;
+    Ok(())
 }

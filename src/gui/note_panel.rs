@@ -9,6 +9,7 @@ use crate::gui::note_find_preview::{
     NoteFindPreviewBlock, NoteFindPreviewIndex, inline_note_visible_ranges,
 };
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::notes_markdown::{
     MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
     PlainLinkConversionReport, analyze_markdown, convert_plain_links,
@@ -3247,66 +3248,81 @@ impl NotePanel {
 
         let window_response = egui::Window::new(self.note.title.clone())
             .id(window_id)
-            .open(&mut open)
             .resizable(true)
             .default_size(app.note_panel_default_size)
             .min_size(egui::vec2(200.0, 150.0))
             .max_width(max_width)
             .max_height(max_height)
             .movable(true)
-            .show(ctx, |ui| {
-                #[cfg(test)]
-                {
-                    self.last_ui_sections = NotePanelUiSections::default();
-                    self.last_content_rect = None;
-                    self.last_editor_rect = None;
-                    self.last_editor_font_size = None;
-                    self.last_split_editor_rect = None;
-                    self.last_split_preview_rect = None;
-                    self.last_outline_rect = None;
-                    self.last_preview_heading_rects.clear();
-                    self.last_preview_heading_font_sizes.clear();
-                    self.last_inline_note_font_size = None;
-                }
-                if ui
-                    .ctx()
-                    .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Equals))
-                {
-                    app.note_font_size += 1.0;
-                }
-                if ui
-                    .ctx()
-                    .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Minus))
-                {
-                    app.note_font_size = (app.note_font_size - 1.0).max(8.0);
-                }
-                if self.render_toolbar(ui, app) {
-                    save_now = true;
-                }
-                if self.note_find.is_open() {
-                    self.render_find_strip(ui, ctx, app);
-                }
-                if !app.note_settings.outline_sidebar_enabled {
-                    self.outline_open = false;
-                    self.outline_filter.clear();
-                    self.selected_outline_heading = None;
-                    self.pending_scroll_target = None;
-                }
-                if self.fast_derived_dirty {
-                    self.refresh_fast_derived();
-                }
-                self.maybe_refresh_heavy_derived(ctx, app.note_settings.backlinks_enabled);
-                if self.show_metadata {
-                    self.render_metadata_details_section(ui, app);
-                }
-                self.render_note_body_row(
-                    ui,
-                    app,
-                    ctx,
-                    scroll_id_source.clone(),
-                    text_id_source.clone(),
-                );
-            });
+            .show_utility(
+                ctx,
+                "note-editor",
+                window_id,
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from(app.note_panel_default_size),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::vec2(200.0, 150.0))
+                .with_max_width(max_width)
+                .with_max_height(max_height),
+                |ui| {
+                    #[cfg(test)]
+                    {
+                        self.last_ui_sections = NotePanelUiSections::default();
+                        self.last_content_rect = None;
+                        self.last_editor_rect = None;
+                        self.last_editor_font_size = None;
+                        self.last_split_editor_rect = None;
+                        self.last_split_preview_rect = None;
+                        self.last_outline_rect = None;
+                        self.last_preview_heading_rects.clear();
+                        self.last_preview_heading_font_sizes.clear();
+                        self.last_inline_note_font_size = None;
+                    }
+                    if ui
+                        .ctx()
+                        .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Equals))
+                    {
+                        app.note_font_size += 1.0;
+                    }
+                    if ui
+                        .ctx()
+                        .input(|i| i.modifiers.ctrl && i.key_pressed(Key::Minus))
+                    {
+                        app.note_font_size = (app.note_font_size - 1.0).max(8.0);
+                    }
+                    if self.render_toolbar(ui, app) {
+                        save_now = true;
+                    }
+                    if self.note_find.is_open() {
+                        self.render_find_strip(ui, ctx, app);
+                    }
+                    if !app.note_settings.outline_sidebar_enabled {
+                        self.outline_open = false;
+                        self.outline_filter.clear();
+                        self.selected_outline_heading = None;
+                        self.pending_scroll_target = None;
+                    }
+                    if self.fast_derived_dirty {
+                        self.refresh_fast_derived();
+                    }
+                    self.maybe_refresh_heavy_derived(ctx, app.note_settings.backlinks_enabled);
+                    if self.show_metadata {
+                        self.render_metadata_details_section(ui, app);
+                    }
+                    self.render_note_body_row(
+                        ui,
+                        app,
+                        ctx,
+                        scroll_id_source.clone(),
+                        text_id_source.clone(),
+                    );
+                },
+            );
         #[cfg(feature = "qa-framebuffer-capture")]
         if let Some(window_response) = window_response.as_ref() {
             self.record_note_replace_control(

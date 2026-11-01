@@ -1,4 +1,5 @@
 //! Searchable launcher-action picker and its transactional conversion helpers.
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::{
     actions::Action,
     mkmacro::{MkAction, MkLauncherCommandPayload, MkProcessPayload},
@@ -271,186 +272,201 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
         .request
         .as_ref()
         .map(|r| r.purpose);
-    egui::Window::new(match purpose {
+    let title = match purpose {
         Some(PickerPurpose::LauncherCommand) => "Choose Launcher Command Suggestion",
         _ => "Choose Program or Launcher Query",
-    })
-    .collapsible(false)
-    .open(&mut open)
-    .default_width(680.0)
-    .show(ctx, |ui| {
-        let state = &mut dialog.launcher_action_picker;
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut state.search)
-                .hint_text("Search command/query suggestions"),
-        );
-        response.request_focus();
-        let use_label = match purpose {
-            Some(PickerPurpose::LauncherCommand) => "Use Query Suggestion",
-            _ => "Use Selected Program",
-        };
-        let has_conversion_confirmation = state.conversion_confirmation.is_some();
-        let eligible: Vec<usize> = actions
-            .iter()
-            .enumerate()
-            .filter(|(_, action)| {
-                purpose != Some(PickerPurpose::LauncherCommand)
-                    || launcher_query_suggestion(action).is_some()
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let ranked = matching_action_indices(&actions, &state.search);
-        let visible: Vec<usize> = ranked
-            .into_iter()
-            .filter(|index| eligible.contains(index))
-            .collect();
-        if eligible.is_empty() {
-            ui.label("No safe Launcher command/query suggestions are available.");
-        } else if visible.is_empty() {
-            ui.label("No Launcher command/query suggestions match this search.");
-        }
-        let footer_height = launcher_action_picker_footer_reserved_height(
-            ui,
-            use_label,
-            has_conversion_confirmation,
-        );
-        let body_max_height = (ui.available_height() - footer_height).max(0.0);
-        #[cfg(test)]
-        let mut last_result = None;
-        let body_output = egui::ScrollArea::vertical()
-            .id_salt("mkmacro_launcher_action_picker_results")
-            .auto_shrink([false, false])
-            .min_scrolled_height(0.0)
-            .max_height(body_max_height)
-            .show(ui, |ui| {
-                for &index in &visible {
-                    let a = &actions[index];
-                    let detail = match purpose {
-                        Some(PickerPurpose::LauncherCommand) => launcher_query_suggestion(a)
-                            .map(|suggestion| match suggestion {
-                                LauncherQuerySuggestion::Query(query)
-                                | LauncherQuerySuggestion::Application(query) => {
-                                    format!("Query suggestion: {query}")
-                                }
-                            })
-                            .unwrap_or_default(),
-                        _ => format!(
-                            "Program/action: {}{}",
-                            a.action,
-                            a.args
-                                .as_ref()
-                                .map(|v| format!("  {v}"))
-                                .unwrap_or_default()
-                        ),
-                    };
-                    let text = format!("{}\n{}\n{}", a.label, a.desc, detail);
-                    #[cfg(test)]
-                    let last_text = (visible.last() == Some(&index)).then(|| text.clone());
-                    let row = ui.selectable_label(state.selected == Some(index), text);
-                    if row.clicked() {
-                        state.selected = Some(index);
-                    }
-                    if row.double_clicked() {
-                        state.selected = Some(index);
-                        choose = true;
-                    }
-                    #[cfg(test)]
-                    if let Some(text) = last_text {
-                        last_result = Some((text, row.id, row.rect));
-                    }
+    };
+    egui::Window::new(title)
+        .collapsible(false)
+        .default_width(680.0)
+        .show_utility(
+            ctx,
+            "mkmacro-launcher-picker",
+            egui::Id::new(title),
+            Some(&mut open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::width(680.0),
+            |ui| {
+                let state = &mut dialog.launcher_action_picker;
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.search)
+                        .hint_text("Search command/query suggestions"),
+                );
+                response.request_focus();
+                let use_label = match purpose {
+                    Some(PickerPurpose::LauncherCommand) => "Use Query Suggestion",
+                    _ => "Use Selected Program",
+                };
+                let has_conversion_confirmation = state.conversion_confirmation.is_some();
+                let eligible: Vec<usize> = actions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, action)| {
+                        purpose != Some(PickerPurpose::LauncherCommand)
+                            || launcher_query_suggestion(action).is_some()
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
+                let ranked = matching_action_indices(&actions, &state.search);
+                let visible: Vec<usize> = ranked
+                    .into_iter()
+                    .filter(|index| eligible.contains(index))
+                    .collect();
+                if eligible.is_empty() {
+                    ui.label("No safe Launcher command/query suggestions are available.");
+                } else if visible.is_empty() {
+                    ui.label("No Launcher command/query suggestions match this search.");
                 }
-            });
-        let down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
-        let up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
-        if (down || up) && !visible.is_empty() {
-            let pos = state
-                .selected
-                .and_then(|s| visible.iter().position(|i| *i == s));
-            let next = if down {
-                pos.map_or(0, |p| (p + 1).min(visible.len() - 1))
-            } else {
-                pos.map_or(visible.len() - 1, |p| p.saturating_sub(1))
-            };
-            state.selected = Some(visible[next]);
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Enter)) && state.selected.is_some() {
-            choose = true;
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            cancel = true;
-        }
-        #[cfg(test)]
-        let footer_clip = ui.clip_rect();
-        #[cfg(test)]
-        let mut footer_buttons = Vec::new();
-        #[cfg(test)]
-        let mut confirmation_label = None;
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            let response = ui.add_enabled(state.selected.is_some(), egui::Button::new(use_label));
-            #[cfg(test)]
-            footer_buttons.push((use_label.to_owned(), response.id, response.rect));
-            if response.clicked() {
-                choose = true;
-            }
-            let response = ui.button("Cancel");
-            #[cfg(test)]
-            footer_buttons.push(("Cancel".to_owned(), response.id, response.rect));
-            if response.clicked() {
-                cancel = true;
-            }
-        });
-        if let Some(action) = state.conversion_confirmation.clone() {
-            ui.separator();
-            let _response = ui
-                .label("This choice can be stored as a safe Launcher query instead of a program.");
-            #[cfg(test)]
-            {
-                confirmation_label = Some((_response.id, _response.rect));
-            }
-            ui.horizontal_wrapped(|ui| {
-                let response = ui.button("Use Launcher Query instead");
+                let footer_height = launcher_action_picker_footer_reserved_height(
+                    ui,
+                    use_label,
+                    has_conversion_confirmation,
+                );
+                let body_max_height = (ui.available_height() - footer_height).max(0.0);
                 #[cfg(test)]
-                footer_buttons.push((
-                    "Use Launcher Query instead".to_owned(),
-                    response.id,
-                    response.rect,
-                ));
-                if response.clicked() {
-                    if let Some(request) = state.request.clone() {
-                        dialog.action_editor.apply_launcher_picker_action(
-                            &request,
-                            &action,
-                            dialog.selected_macro_id,
-                            true,
-                        );
-                    }
+                let mut last_result = None;
+                let body_output = egui::ScrollArea::vertical()
+                    .id_salt("mkmacro_launcher_action_picker_results")
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(0.0)
+                    .max_height(body_max_height)
+                    .show(ui, |ui| {
+                        for &index in &visible {
+                            let a = &actions[index];
+                            let detail = match purpose {
+                                Some(PickerPurpose::LauncherCommand) => {
+                                    launcher_query_suggestion(a)
+                                        .map(|suggestion| match suggestion {
+                                            LauncherQuerySuggestion::Query(query)
+                                            | LauncherQuerySuggestion::Application(query) => {
+                                                format!("Query suggestion: {query}")
+                                            }
+                                        })
+                                        .unwrap_or_default()
+                                }
+                                _ => format!(
+                                    "Program/action: {}{}",
+                                    a.action,
+                                    a.args
+                                        .as_ref()
+                                        .map(|v| format!("  {v}"))
+                                        .unwrap_or_default()
+                                ),
+                            };
+                            let text = format!("{}\n{}\n{}", a.label, a.desc, detail);
+                            #[cfg(test)]
+                            let last_text = (visible.last() == Some(&index)).then(|| text.clone());
+                            let row = ui.selectable_label(state.selected == Some(index), text);
+                            if row.clicked() {
+                                state.selected = Some(index);
+                            }
+                            if row.double_clicked() {
+                                state.selected = Some(index);
+                                choose = true;
+                            }
+                            #[cfg(test)]
+                            if let Some(text) = last_text {
+                                last_result = Some((text, row.id, row.rect));
+                            }
+                        }
+                    });
+                let down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
+                let up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
+                if (down || up) && !visible.is_empty() {
+                    let pos = state
+                        .selected
+                        .and_then(|s| visible.iter().position(|i| *i == s));
+                    let next = if down {
+                        pos.map_or(0, |p| (p + 1).min(visible.len() - 1))
+                    } else {
+                        pos.map_or(visible.len() - 1, |p| p.saturating_sub(1))
+                    };
+                    state.selected = Some(visible[next]);
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) && state.selected.is_some() {
+                    choose = true;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     cancel = true;
                 }
-                let response = ui.button("Keep Run Program");
                 #[cfg(test)]
-                footer_buttons.push(("Keep Run Program".to_owned(), response.id, response.rect));
-                if response.clicked() {
-                    state.conversion_confirmation = None;
+                let footer_clip = ui.clip_rect();
+                #[cfg(test)]
+                let mut footer_buttons = Vec::new();
+                #[cfg(test)]
+                let mut confirmation_label = None;
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    let response =
+                        ui.add_enabled(state.selected.is_some(), egui::Button::new(use_label));
+                    #[cfg(test)]
+                    footer_buttons.push((use_label.to_owned(), response.id, response.rect));
+                    if response.clicked() {
+                        choose = true;
+                    }
+                    let response = ui.button("Cancel");
+                    #[cfg(test)]
+                    footer_buttons.push(("Cancel".to_owned(), response.id, response.rect));
+                    if response.clicked() {
+                        cancel = true;
+                    }
+                });
+                if let Some(action) = state.conversion_confirmation.clone() {
+                    ui.separator();
+                    let _response = ui.label(
+                        "This choice can be stored as a safe Launcher query instead of a program.",
+                    );
+                    #[cfg(test)]
+                    {
+                        confirmation_label = Some((_response.id, _response.rect));
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        let response = ui.button("Use Launcher Query instead");
+                        #[cfg(test)]
+                        footer_buttons.push((
+                            "Use Launcher Query instead".to_owned(),
+                            response.id,
+                            response.rect,
+                        ));
+                        if response.clicked() {
+                            if let Some(request) = state.request.clone() {
+                                dialog.action_editor.apply_launcher_picker_action(
+                                    &request,
+                                    &action,
+                                    dialog.selected_macro_id,
+                                    true,
+                                );
+                            }
+                            cancel = true;
+                        }
+                        let response = ui.button("Keep Run Program");
+                        #[cfg(test)]
+                        footer_buttons.push((
+                            "Keep Run Program".to_owned(),
+                            response.id,
+                            response.rect,
+                        ));
+                        if response.clicked() {
+                            state.conversion_confirmation = None;
+                        }
+                    });
                 }
-            });
-        }
-        #[cfg(test)]
-        {
-            state.test_chrome = Some(LauncherPickerChromeObservation {
-                body_id: body_output.id,
-                body_rect: body_output.inner_rect,
-                content_size: body_output.content_size,
-                scroll_offset: body_output.state.offset,
-                last_result,
-                footer_clip,
-                footer_buttons,
-                confirmation_label,
-            });
-        }
-        #[cfg(not(test))]
-        let _ = (body_output, footer_height);
-    });
+                #[cfg(test)]
+                {
+                    state.test_chrome = Some(LauncherPickerChromeObservation {
+                        body_id: body_output.id,
+                        body_rect: body_output.inner_rect,
+                        content_size: body_output.content_size,
+                        scroll_offset: body_output.state.offset,
+                        last_result,
+                        footer_clip,
+                        footer_buttons,
+                        confirmation_label,
+                    });
+                }
+                #[cfg(not(test))]
+                let _ = (body_output, footer_height);
+            },
+        );
     if !open || cancel {
         dialog.launcher_action_picker.cancel();
         return;

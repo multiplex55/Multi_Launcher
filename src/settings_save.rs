@@ -5,6 +5,10 @@ use crate::hotkey::reconfiguration::{
     AppliedHotkeyReconfiguration, HotkeyApplySubmissionError, HotkeyReconfigurationError,
 };
 use crate::settings::Settings;
+use crate::settings::utility_dialog_sizes::{
+    UtilitySizeAcknowledgement, UtilitySizeMutation, UtilitySizePreference, UtilitySizeRevision,
+    UtilityToolKey, persist_mutation,
+};
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
@@ -504,7 +508,6 @@ fn restore_map_value(
 pub(crate) struct LauncherClosePreferences {
     pub(crate) window_size: (i32, i32),
     pub(crate) pinned_panels: Vec<crate::gui::Panel>,
-    pub(crate) clipboard_modify_dialog_size: (f32, f32),
     pub(crate) file_search_ui_preferences:
         Option<crate::file_search::settings::FileSearchUiPreferences>,
 }
@@ -519,6 +522,60 @@ struct ShutdownPreferencesSlot {
 struct WorkerRegistryState {
     accepting: bool,
     workers: Vec<JoinHandle<()>>,
+    utility_sizes_path: Option<String>,
+    utility_sizes_next_revision: HashMap<UtilityToolKey, u64>,
+    utility_sizes_latest_revision: HashMap<UtilityToolKey, UtilitySizeRevision>,
+    utility_sizes_pending: HashMap<UtilityToolKey, PendingUtilitySizeMutation>,
+    utility_sizes_failed: HashMap<UtilityToolKey, PendingUtilitySizeMutation>,
+    utility_sizes_errors: HashMap<UtilityToolKey, (UtilitySizeRevision, String)>,
+    utility_sizes_acknowledgements: HashMap<UtilityToolKey, UtilitySizeAcknowledgement>,
+    utility_sizes_shutdown_failures: Vec<UtilitySizeShutdownFailure>,
+    utility_sizes_worker_active: bool,
+    #[cfg(test)]
+    utility_size_before_write_hook:
+        Option<Arc<dyn Fn(UtilityToolKey, UtilitySizeRevision) + Send + Sync>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingUtilitySizeMutation {
+    revision: UtilitySizeRevision,
+    mutation: UtilitySizeMutation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UtilitySizeShutdownFailure {
+    pub key: UtilityToolKey,
+    pub revision: UtilitySizeRevision,
+    pub error: String,
+}
+
+fn bind_utility_settings_path(
+    state: &mut WorkerRegistryState,
+    settings_path: &str,
+) -> Result<(), String> {
+    if let Some(bound_path) = &state.utility_sizes_path {
+        if bound_path != settings_path {
+            return Err("utility size writer is already bound to a different settings file".into());
+        }
+    } else {
+        state.utility_sizes_path = Some(settings_path.to_owned());
+    }
+    Ok(())
+}
+
+fn next_utility_size_revision(
+    state: &mut WorkerRegistryState,
+    key: UtilityToolKey,
+) -> Result<UtilitySizeRevision, String> {
+    let next = state
+        .utility_sizes_next_revision
+        .get(&key)
+        .copied()
+        .unwrap_or_default()
+        .checked_add(1)
+        .ok_or_else(|| "utility size revision counter is exhausted".to_owned())?;
+    state.utility_sizes_next_revision.insert(key, next);
+    Ok(UtilitySizeRevision(next))
 }
 
 #[derive(Clone)]
@@ -529,6 +586,17 @@ impl Default for SettingsSaveWorkerRegistry {
         Self(Arc::new(Mutex::new(WorkerRegistryState {
             accepting: true,
             workers: Vec::new(),
+            utility_sizes_path: None,
+            utility_sizes_next_revision: HashMap::new(),
+            utility_sizes_latest_revision: HashMap::new(),
+            utility_sizes_pending: HashMap::new(),
+            utility_sizes_failed: HashMap::new(),
+            utility_sizes_errors: HashMap::new(),
+            utility_sizes_acknowledgements: HashMap::new(),
+            utility_sizes_shutdown_failures: Vec::new(),
+            utility_sizes_worker_active: false,
+            #[cfg(test)]
+            utility_size_before_write_hook: None,
         })))
     }
 }
@@ -549,6 +617,261 @@ impl SettingsSaveWorkerRegistry {
         drop(state);
         self.reap_finished();
         Ok(())
+    }
+
+    /// Coalesce one newest accepted size mutation per stable tool key. The
+    /// single tracked worker drains these alongside ordinary settings writes.
+    pub(crate) fn queue_utility_size_mutation(
+        &self,
+        settings_path: String,
+        key: UtilityToolKey,
+        mutation: UtilitySizeMutation,
+    ) -> Result<(), String> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return Err(
+                "utility size updates are closed because the launcher is shutting down".into(),
+            );
+        }
+        bind_utility_settings_path(&mut state, &settings_path)?;
+        let revision = next_utility_size_revision(&mut state, key)?;
+        state.utility_sizes_latest_revision.insert(key, revision);
+        state
+            .utility_sizes_pending
+            .insert(key, PendingUtilitySizeMutation { revision, mutation });
+        state.utility_sizes_failed.remove(&key);
+        state.utility_sizes_errors.remove(&key);
+        if !state.utility_sizes_worker_active {
+            state.utility_sizes_worker_active = true;
+            let registry = self.clone();
+            let worker = thread::Builder::new()
+                .name("utility-size-settings-save".into())
+                .spawn(move || registry.drain_utility_size_mutations(settings_path))
+                .map_err(|error| {
+                    state.utility_sizes_worker_active = false;
+                    let message = format!("failed to start utility size settings writer: {error}");
+                    state
+                        .utility_sizes_errors
+                        .insert(key, (revision, message.clone()));
+                    message
+                })?;
+            state.workers.push(worker);
+        }
+        drop(state);
+        self.reap_finished();
+        Ok(())
+    }
+
+    /// Retry retained failures after an explicit user action or later
+    /// controlled size event. This never starts a per-frame retry loop.
+    pub(crate) fn retry_utility_size_mutations(&self, settings_path: String) -> Result<(), String> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return Err(
+                "utility size updates are closed because the launcher is shutting down".into(),
+            );
+        }
+        if state.utility_sizes_pending.is_empty() && state.utility_sizes_failed.is_empty() {
+            return Ok(());
+        }
+        bind_utility_settings_path(&mut state, &settings_path)?;
+        if state.utility_sizes_worker_active {
+            for (key, mutation) in std::mem::take(&mut state.utility_sizes_failed) {
+                state.utility_sizes_pending.entry(key).or_insert(mutation);
+                if state.utility_sizes_latest_revision.get(&key) == Some(&mutation.revision) {
+                    state.utility_sizes_errors.remove(&key);
+                }
+            }
+            return Ok(());
+        }
+        for (key, mutation) in std::mem::take(&mut state.utility_sizes_failed) {
+            state.utility_sizes_pending.entry(key).or_insert(mutation);
+            if state.utility_sizes_latest_revision.get(&key) == Some(&mutation.revision) {
+                state.utility_sizes_errors.remove(&key);
+            }
+        }
+        if state.utility_sizes_pending.is_empty() {
+            return Ok(());
+        }
+        state.utility_sizes_worker_active = true;
+        let registry = self.clone();
+        let worker = thread::Builder::new()
+            .name("utility-size-settings-save".into())
+            .spawn(move || registry.drain_utility_size_mutations(settings_path))
+            .map_err(|error| {
+                state.utility_sizes_worker_active = false;
+                let message = format!("failed to start utility size settings retry: {error}");
+                let pending_revisions: Vec<_> = state
+                    .utility_sizes_pending
+                    .iter()
+                    .map(|(key, pending)| (*key, pending.revision))
+                    .collect();
+                for (key, revision) in pending_revisions {
+                    state
+                        .utility_sizes_errors
+                        .insert(key, (revision, message.clone()));
+                }
+                message
+            })?;
+        state.workers.push(worker);
+        drop(state);
+        self.reap_finished();
+        Ok(())
+    }
+
+    pub(crate) fn utility_size_write_error(&self, key: UtilityToolKey) -> Option<String> {
+        self.utility_size_write_failure(key).map(|(_, error)| error)
+    }
+
+    pub(crate) fn utility_size_write_failure(
+        &self,
+        key: UtilityToolKey,
+    ) -> Option<(UtilitySizeRevision, String)> {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (revision, error) = state.utility_sizes_errors.get(&key)?;
+        (state.utility_sizes_latest_revision.get(&key) == Some(revision))
+            .then(|| (*revision, error.clone()))
+    }
+
+    pub(crate) fn utility_size_latest_revision(
+        &self,
+        key: UtilityToolKey,
+    ) -> Option<UtilitySizeRevision> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .utility_sizes_latest_revision
+            .get(&key)
+            .copied()
+    }
+
+    /// Take only successful acknowledgements that still match each key's
+    /// latest requested revision. An older in-flight write cannot publish over
+    /// a newer queued size.
+    pub(crate) fn drain_utility_size_acknowledgements(&self) -> Vec<UtilitySizeAcknowledgement> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut acknowledgements = std::mem::take(&mut state.utility_sizes_acknowledgements)
+            .into_values()
+            .filter(|acknowledgement| {
+                state
+                    .utility_sizes_latest_revision
+                    .get(&acknowledgement.key)
+                    == Some(&acknowledgement.revision)
+            })
+            .collect::<Vec<_>>();
+        acknowledgements.sort_by_key(|acknowledgement| acknowledgement.key);
+        acknowledgements
+    }
+
+    pub(crate) fn utility_size_shutdown_failures(&self) -> Vec<UtilitySizeShutdownFailure> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .utility_sizes_shutdown_failures
+            .clone()
+    }
+
+    #[cfg(test)]
+    fn utility_size_writer_active(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .utility_sizes_worker_active
+    }
+
+    #[cfg(test)]
+    fn set_utility_size_before_write_hook(
+        &self,
+        hook: Arc<dyn Fn(UtilityToolKey, UtilitySizeRevision) + Send + Sync>,
+    ) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .utility_size_before_write_hook = Some(hook);
+    }
+
+    fn drain_utility_size_mutations(&self, settings_path: String) {
+        loop {
+            let batch = {
+                let mut state = self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.utility_sizes_pending.is_empty() {
+                    state.utility_sizes_worker_active = false;
+                    return;
+                }
+                std::mem::take(&mut state.utility_sizes_pending)
+            };
+
+            for (key, pending) in batch {
+                #[cfg(test)]
+                {
+                    let hook = self
+                        .0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .utility_size_before_write_hook
+                        .clone();
+                    if let Some(hook) = hook {
+                        hook(key, pending.revision);
+                    }
+                }
+                let result = persist_mutation(&settings_path, key, pending.mutation);
+                let mut state = self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match result {
+                    Ok(preference) => {
+                        if state.utility_sizes_latest_revision.get(&key) == Some(&pending.revision)
+                        {
+                            state.utility_sizes_acknowledgements.insert(
+                                key,
+                                UtilitySizeAcknowledgement {
+                                    key,
+                                    revision: pending.revision,
+                                    preference,
+                                },
+                            );
+                            if state
+                                .utility_sizes_errors
+                                .get(&key)
+                                .is_some_and(|(revision, _)| *revision <= pending.revision)
+                            {
+                                state.utility_sizes_errors.remove(&key);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // Keep the failed intent separately so the worker
+                        // cannot spin on it. A new event replaces it; retry
+                        // explicitly moves it back to the pending queue.
+                        if !state.utility_sizes_pending.contains_key(&key)
+                            && state.utility_sizes_latest_revision.get(&key)
+                                == Some(&pending.revision)
+                        {
+                            state.utility_sizes_failed.insert(key, pending);
+                            state
+                                .utility_sizes_errors
+                                .insert(key, (pending.revision, format!("{error:#}")));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn reap_finished(&self) {
@@ -595,6 +918,57 @@ impl SettingsSaveWorkerRegistry {
             if let Err(payload) = worker.join() {
                 tracing::error!(?payload, "settings save worker panicked during shutdown");
             }
+        }
+
+        let failures = {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut unresolved = HashMap::<UtilityToolKey, PendingUtilitySizeMutation>::new();
+            for (key, pending) in state
+                .utility_sizes_pending
+                .iter()
+                .chain(state.utility_sizes_failed.iter())
+            {
+                unresolved
+                    .entry(*key)
+                    .and_modify(|current| {
+                        if current.revision < pending.revision {
+                            *current = *pending;
+                        }
+                    })
+                    .or_insert(*pending);
+            }
+            let mut failures = unresolved
+                .into_iter()
+                .map(|(key, pending)| {
+                    let error = state
+                        .utility_sizes_errors
+                        .get(&key)
+                        .filter(|(revision, _)| *revision == pending.revision)
+                        .map(|(_, error)| error.clone())
+                        .unwrap_or_else(|| {
+                            "accepted utility size was not persisted before shutdown".into()
+                        });
+                    UtilitySizeShutdownFailure {
+                        key,
+                        revision: pending.revision,
+                        error,
+                    }
+                })
+                .collect::<Vec<_>>();
+            failures.sort_by_key(|failure| failure.key);
+            state.utility_sizes_shutdown_failures = failures.clone();
+            failures
+        };
+        for failure in &failures {
+            tracing::error!(
+                key = failure.key.as_str(),
+                revision = failure.revision.0,
+                error = %failure.error,
+                "utility size preference remains unsaved at shutdown"
+            );
         }
     }
 }
@@ -647,7 +1021,9 @@ impl PendingSettingsSave {
 
 impl LauncherApp {
     pub fn install_settings_save_worker_registry(&mut self, workers: SettingsSaveWorkerRegistry) {
-        self.settings_save_workers = workers;
+        self.utility_dialog_size_manager
+            .rebind(self.settings_path.clone(), workers.clone());
+        self.settings_save_workers = workers.clone();
     }
 
     pub(crate) fn settings_save_pending(&self) -> bool {
@@ -818,6 +1194,12 @@ impl LauncherApp {
 
     pub(crate) fn prepare_settings_save_shutdown(&mut self) {
         let preferences = self.settings_save_close_preferences();
+        for (key, error) in self
+            .utility_dialog_size_manager
+            .flush_released_resizes_for_shutdown()
+        {
+            tracing::error!(tool = key.as_str(), %error, "could not queue final utility window size before shutdown");
+        }
         self.settings_save_workers.begin_shutdown();
         if let Some(pending) = self.pending_settings_save.as_ref() {
             pending.request_cancel();
@@ -1279,7 +1661,6 @@ fn persist_launcher_close_preferences(
         path,
         preferences.window_size,
         preferences.pinned_panels.clone(),
-        preferences.clipboard_modify_dialog_size,
     )?;
     if let Some(ui_preferences) = &preferences.file_search_ui_preferences {
         Settings::update(path, |settings| {
@@ -2667,6 +3048,263 @@ mod tests {
         assert!(
             app.settings_save_workers.spawn(|| {}).is_err(),
             "shutdown must reject new save workers"
+        );
+    }
+
+    #[test]
+    fn utility_dialog_sizes_writer_coalesces_and_retries_failed_intent() {
+        use crate::settings::utility_dialog_sizes::{
+            PreferredWindowSize, UtilitySizeMutation, UtilityToolKey,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::create_dir(&path).unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let key = UtilityToolKey::parse("diff").unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::Set(PreferredWindowSize::new(640.0, 480.0).unwrap()),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while workers.utility_size_writer_active() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            !workers.utility_size_writer_active(),
+            "failed writer must retire promptly"
+        );
+        assert!(workers.utility_size_write_error(key).is_some());
+
+        std::fs::remove_dir(&path).unwrap();
+        Settings::default().save(&path_text).unwrap();
+        workers
+            .retry_utility_size_mutations(path_text.clone())
+            .unwrap();
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::Set(PreferredWindowSize::new(900.0, 700.0).unwrap()),
+            )
+            .unwrap();
+        workers.join_all();
+
+        let saved = Settings::load(&path_text).unwrap();
+        assert_eq!(
+            saved.utility_dialog_sizes.preferred(key),
+            Some(PreferredWindowSize::new(900.0, 700.0).unwrap())
+        );
+        assert_eq!(workers.utility_size_write_error(key), None);
+        let acknowledgements = workers.drain_utility_size_acknowledgements();
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(acknowledgements[0].key, key);
+        assert_eq!(acknowledgements[0].revision, UtilitySizeRevision(2));
+        assert_eq!(
+            acknowledgements[0].preference,
+            UtilitySizePreference::Preferred(PreferredWindowSize::new(900.0, 700.0).unwrap())
+        );
+        assert!(workers.utility_size_shutdown_failures().is_empty());
+        assert!(
+            workers
+                .queue_utility_size_mutation(path_text, key, UtilitySizeMutation::Reset,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn utility_dialog_sizes_writer_rejects_path_mismatch_before_queueing() {
+        use crate::settings::utility_dialog_sizes::{
+            PreferredWindowSize, UtilitySizeMutation, UtilityToolKey,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path_a = directory.path().join("a/settings.json");
+        let path_b = directory.path().join("b/settings.json");
+        std::fs::create_dir_all(path_a.parent().unwrap()).unwrap();
+        Settings::default().save(path_a.to_str().unwrap()).unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let diff = UtilityToolKey::parse("diff").unwrap();
+        let preview = UtilityToolKey::parse("file-preview").unwrap();
+        workers
+            .queue_utility_size_mutation(
+                path_a.to_string_lossy().into_owned(),
+                diff,
+                UtilitySizeMutation::Set(PreferredWindowSize::new(700.0, 500.0).unwrap()),
+            )
+            .unwrap();
+        let mismatched = workers.queue_utility_size_mutation(
+            path_b.to_string_lossy().into_owned(),
+            preview,
+            UtilitySizeMutation::Set(PreferredWindowSize::new(800.0, 600.0).unwrap()),
+        );
+        workers.join_all();
+
+        assert!(mismatched.unwrap_err().contains("already bound"));
+        assert!(!path_b.exists());
+        let saved = Settings::load(path_a.to_str().unwrap()).unwrap();
+        assert_eq!(
+            saved.utility_dialog_sizes.preferred(diff),
+            Some(PreferredWindowSize::new(700.0, 500.0).unwrap())
+        );
+        assert_eq!(
+            saved.utility_dialog_sizes.preference(preview),
+            crate::settings::UtilitySizePreference::Missing
+        );
+    }
+
+    #[test]
+    fn utility_dialog_sizes_newer_pending_write_survives_old_ack_and_shutdown() {
+        use crate::settings::utility_dialog_sizes::{
+            PreferredWindowSize, UtilitySizeMutation, UtilityToolKey,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let path_text = path.to_string_lossy().into_owned();
+        Settings::default().save(&path_text).unwrap();
+        let key = UtilityToolKey::parse("diff").unwrap();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let release_receiver = Arc::new(Mutex::new(release_receiver));
+        let first_write = Arc::new(AtomicBool::new(true));
+        let before_write = {
+            let release_receiver = Arc::clone(&release_receiver);
+            let first_write = Arc::clone(&first_write);
+            Arc::new(move |_key: UtilityToolKey, revision: UtilitySizeRevision| {
+                if revision.0 == 1 && first_write.swap(false, Ordering::AcqRel) {
+                    let _ = started_sender.send(revision);
+                    let _ = release_receiver
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5));
+                }
+            })
+        };
+        let workers = SettingsSaveWorkerRegistry::default();
+        workers.set_utility_size_before_write_hook(before_write);
+        let first_queued = workers.queue_utility_size_mutation(
+            path_text.clone(),
+            key,
+            UtilitySizeMutation::Set(PreferredWindowSize::new(640.0, 480.0).unwrap()),
+        );
+        let entered = started_receiver.recv_timeout(Duration::from_secs(5));
+        let newer_queued = workers.queue_utility_size_mutation(
+            path_text.clone(),
+            key,
+            UtilitySizeMutation::Set(PreferredWindowSize::new(920.0, 720.0).unwrap()),
+        );
+        let path_mismatch = workers.queue_utility_size_mutation(
+            directory
+                .path()
+                .join("other.json")
+                .to_string_lossy()
+                .into_owned(),
+            UtilityToolKey::parse("file-preview").unwrap(),
+            UtilitySizeMutation::Reset,
+        );
+        workers.begin_shutdown();
+        let after_shutdown =
+            workers.queue_utility_size_mutation(path_text.clone(), key, UtilitySizeMutation::Reset);
+        let _ = release_sender.send(());
+        workers.join_all();
+
+        assert!(first_queued.is_ok());
+        assert_eq!(entered.unwrap().0, 1);
+        assert!(newer_queued.is_ok());
+        assert!(path_mismatch.unwrap_err().contains("already bound"));
+        assert!(after_shutdown.unwrap_err().contains("shutting down"));
+        assert!(workers.utility_size_shutdown_failures().is_empty());
+        let saved = Settings::load(&path_text).unwrap();
+        assert_eq!(
+            saved.utility_dialog_sizes.preferred(key),
+            Some(PreferredWindowSize::new(920.0, 720.0).unwrap())
+        );
+        let acknowledgements = workers.drain_utility_size_acknowledgements();
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(acknowledgements[0].revision, UtilitySizeRevision(2));
+        assert_eq!(
+            acknowledgements[0].preference,
+            UtilitySizePreference::Preferred(PreferredWindowSize::new(920.0, 720.0).unwrap())
+        );
+        assert_eq!(
+            workers.utility_size_latest_revision(key),
+            Some(UtilitySizeRevision(2))
+        );
+    }
+
+    #[test]
+    fn utility_dialog_sizes_shutdown_reports_retained_unsaved_intent() {
+        use crate::settings::utility_dialog_sizes::{
+            PreferredWindowSize, UtilitySizeMutation, UtilityToolKey,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let key = UtilityToolKey::parse("diff").unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        workers
+            .queue_utility_size_mutation(
+                path.to_string_lossy().into_owned(),
+                key,
+                UtilitySizeMutation::Set(PreferredWindowSize::new(720.0, 480.0).unwrap()),
+            )
+            .unwrap();
+
+        workers.join_all();
+        let failures = workers.utility_size_shutdown_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].key, key);
+        assert_eq!(failures[0].revision, UtilitySizeRevision(1));
+        assert!(failures[0].error.contains("failed to persist"));
+        assert_eq!(workers.utility_size_shutdown_failures(), failures);
+        assert!(workers.drain_utility_size_acknowledgements().is_empty());
+    }
+
+    #[test]
+    fn utility_dialog_sizes_survive_stale_general_apply_ack_and_rollback() {
+        use crate::settings::utility_dialog_sizes::{PreferredWindowSize, UtilityToolKey};
+
+        let key = UtilityToolKey::parse("diff").unwrap();
+        let size = |width| PreferredWindowSize::new(width, 500.0).unwrap();
+        let mut baseline = Settings::default();
+        baseline.utility_dialog_sizes.set(key, size(600.0)).unwrap();
+        let mut desired = baseline.clone();
+        desired.hotkey = Some("F8".into());
+        desired.utility_dialog_sizes.set(key, size(700.0)).unwrap();
+        let intent = SettingsSaveIntent::general(desired, &baseline);
+
+        let mut latest = baseline.clone();
+        latest.utility_dialog_sizes.set(key, size(800.0)).unwrap();
+        intent.apply(&mut latest);
+        assert_eq!(latest.hotkey.as_deref(), Some("F8"));
+        assert_eq!(
+            latest.utility_dialog_sizes.preferred(key),
+            Some(size(800.0))
+        );
+
+        let committed = latest.clone();
+        latest.utility_dialog_sizes.set(key, size(900.0)).unwrap();
+        intent.overlay_applied(&mut latest, &committed);
+        assert_eq!(
+            latest.utility_dialog_sizes.preferred(key),
+            Some(size(900.0))
+        );
+
+        let before = baseline;
+        let written = committed;
+        latest.utility_dialog_sizes.set(key, size(1000.0)).unwrap();
+        let conflicts = intent.rollback_owned(&mut latest, &before, &written);
+        assert!(conflicts.is_empty());
+        assert_eq!(
+            latest.utility_dialog_sizes.preferred(key),
+            Some(size(1000.0))
         );
     }
 }

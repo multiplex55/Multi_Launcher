@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -49,10 +50,17 @@ impl ImagePanel {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("Image");
-        egui::Window::new(title)
-            .open(&mut open)
-            .resizable(true)
-            .show(ctx, |ui| {
+        egui::Window::new(title).resizable(true).show_utility(
+            ctx,
+            "image-viewer",
+            egui::Id::new(("image-viewer", self.path.clone())),
+            Some(&mut open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                egui::Vec2::ZERO,
+                [None, None],
+            ),
+            |ui| {
                 ui.horizontal(|ui| {
                     ui.add(egui::Slider::new(&mut self.zoom, 0.1..=5.0).text("Zoom"));
                     if ui.button("Open in Default Viewer").clicked() {
@@ -67,7 +75,8 @@ impl ImagePanel {
                 } else {
                     ui.label("Failed to load image");
                 }
-            });
+            },
+        );
         self.open = open;
     }
 }

@@ -54,6 +54,9 @@ pub trait RadialCommandHost {
 }
 
 pub trait DialogCommandHost {
+    fn open_zip_extractor_dialog(&mut self) -> Result<(), String> {
+        Err("ZIP extraction requires the launcher interface".into())
+    }
     fn open_qr_dialog(&mut self, initial_text: Option<&str>);
     fn open_regex_tester_dialog(&mut self);
     fn open_help_dialog(&mut self);

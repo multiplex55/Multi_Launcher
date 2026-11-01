@@ -3,6 +3,7 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, semantic_status,
     with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::macros::{MACROS_FILE, MacroEntry, MacroStep, load_macros, replace_macros};
 use eframe::egui;
 use fuzzy_matcher::FuzzyMatcher;
@@ -190,585 +191,601 @@ impl MacroDialog {
         #[cfg(test)]
         let mut test_sizing_pass = false;
         let _window_output = egui::Window::new("Macros")
-            .open(&mut open)
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
             .max_height(ctx.content_rect().height().max(1.0))
-            .show(ctx, |ui| {
-                #[cfg(test)]
-                {
-                    test_visible = ui.is_visible();
-                    test_sizing_pass = ui.is_sizing_pass();
-                }
-                if let Some(error) = &self.load_error {
-                    compact_section_heading(
-                        ui,
-                        "Saved macros",
-                        Some("The current macro file could not be loaded."),
-                    );
-                    semantic_status(
-                        ui,
-                        StatusTone::Error,
-                        "Macros are read-only",
-                        Some("Loading failed; the last good entries are retained."),
-                    );
-                    let footer_height = macro_footer_reserved_height(ui, &["Close"]);
-                    let parent_max_rect = ui.max_rect();
-                    let parent_clip_rect = ui.clip_rect();
-                    let body_height = (ui.available_height() - footer_height).max(0.0);
-                    let error_output = egui::ScrollArea::vertical()
-                        .id_salt("macro_load_error")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(body_height)
-                        .show(ui, |ui| {
-                            ui.add(egui::Label::new(error).wrap());
-                        });
-                    ui.separator();
-                    let mut close_rect = egui::Rect::NOTHING;
-                    ui.horizontal_wrapped(|ui| {
-                        let close_button = ui.button("Close");
-                        let close_button =
-                            with_button_emphasis(ui, close_button, ButtonEmphasis::Primary);
-                        close_rect = close_button.rect;
-                        if close_button.clicked() {
-                            close = true;
-                        }
-                    });
+            .show_utility(
+                ctx,
+                "legacy-macros",
+                egui::Id::new("Macros"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_max_width(ctx.content_rect().width().max(1.0))
+                .with_max_height(ctx.content_rect().height().max(1.0)),
+                |ui| {
                     #[cfg(test)]
                     {
-                        test_layout = Some(MacroLayoutObservation {
-                            scroll: macro_scroll_layout(
-                                error_output.id,
-                                parent_max_rect,
-                                parent_clip_rect,
-                                error_output.inner_rect,
-                                error_output.content_size,
-                                error_output.state.offset,
-                            ),
-                            picker_scroll: None,
-                            primary_rect: close_rect,
-                            secondary_rect: egui::Rect::NOTHING,
-                            window_rect: egui::Rect::NOTHING,
-                            visible: test_visible,
-                            sizing_pass: test_sizing_pass,
-                            close_requested: close,
-                        });
+                        test_visible = ui.is_visible();
+                        test_sizing_pass = ui.is_sizing_pass();
                     }
-                    #[cfg(not(test))]
-                    let _ = (error_output, parent_max_rect, parent_clip_rect, close_rect);
-                } else if let Some(idx) = self.edit_idx {
-                    compact_section_heading(
-                        ui,
-                        if idx == self.entries.len() {
-                            "New macro"
-                        } else {
-                            "Edit macro"
-                        },
-                        Some("Describe the macro and arrange its steps."),
-                    );
-                    let footer_height = macro_footer_reserved_height(ui, &["Save", "Cancel"]);
-                    let parent_max_rect = ui.max_rect();
-                    let parent_clip_rect = ui.clip_rect();
-                    let body_height = (ui.available_height() - footer_height).max(0.0);
-                    #[cfg(test)]
-                    let mut picker_scroll = None;
-                    let edit_output = egui::ScrollArea::vertical()
-                        .id_salt("macro_edit_scroll")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(body_height)
-                        .show(ui, |ui| {
-                            compact_section_heading(ui, "Identity", None);
-                            labeled_form_row(ui, "Label", |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.label)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                )
+                    if let Some(error) = &self.load_error {
+                        compact_section_heading(
+                            ui,
+                            "Saved macros",
+                            Some("The current macro file could not be loaded."),
+                        );
+                        semantic_status(
+                            ui,
+                            StatusTone::Error,
+                            "Macros are read-only",
+                            Some("Loading failed; the last good entries are retained."),
+                        );
+                        let footer_height = macro_footer_reserved_height(ui, &["Close"]);
+                        let parent_max_rect = ui.max_rect();
+                        let parent_clip_rect = ui.clip_rect();
+                        let body_height = (ui.available_height() - footer_height).max(0.0);
+                        let error_output = egui::ScrollArea::vertical()
+                            .id_salt("macro_load_error")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(body_height)
+                            .show(ui, |ui| {
+                                ui.add(egui::Label::new(error).wrap());
                             });
-                            labeled_form_row(ui, "Description", |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.desc)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                )
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.checkbox(&mut self.auto_delay, "Automatic delay");
-                                if self.auto_delay {
-                                    let mut auto_delay_secs = self.auto_delay_secs;
-                                    let delay = ui.add(
-                                        egui::DragValue::new(&mut auto_delay_secs)
-                                            .speed(0.1)
-                                            .range(0.0..=60.0)
-                                            .suffix("s"),
-                                    );
-                                    if delay.changed() {
-                                        self.auto_delay_secs = auto_delay_secs;
-                                    }
-                                }
-                            });
-
-                            compact_section_heading(ui, "Steps", None);
-                            let mut remove_step: Option<usize> = None;
-                            let mut move_up: Option<usize> = None;
-                            let mut move_down: Option<usize> = None;
-                            for i in 0..self.steps.len() {
-                                ui.push_id(("macro_step", i), |ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(format!("{}.", i + 1));
-                                        ui.add(
-                                            egui::Label::new(&self.steps[i].label)
-                                                .wrap()
-                                                .selectable(false),
-                                        );
-                                        let mut args =
-                                            self.steps[i].args.clone().unwrap_or_default();
-                                        let args_response = ui.add(
-                                            egui::TextEdit::singleline(&mut args)
-                                                .hint_text("Arguments")
-                                                .desired_width(
-                                                    ui.available_width().min(180.0).max(72.0),
-                                                ),
-                                        );
-                                        if args_response.changed() {
-                                            self.steps[i].args = Some(args);
-                                        }
-                                        if !self.auto_delay {
-                                            let mut seconds =
-                                                self.steps[i].delay_ms as f32 / 1000.0;
-                                            let delay_response = ui.add(
-                                                egui::DragValue::new(&mut seconds)
-                                                    .speed(0.1)
-                                                    .range(0.0..=60.0)
-                                                    .suffix("s"),
-                                            );
-                                            if delay_response.changed() {
-                                                self.steps[i].delay_ms = (seconds * 1000.0) as u64;
-                                            }
-                                        }
-                                        if ui.button("Up").clicked() {
-                                            move_up = Some(i);
-                                        }
-                                        if ui.button("Down").clicked() {
-                                            move_down = Some(i);
-                                        }
-                                        let remove_button = ui.button("Remove");
-                                        if with_button_emphasis(
-                                            ui,
-                                            remove_button,
-                                            ButtonEmphasis::Destructive,
-                                        )
-                                        .clicked()
-                                        {
-                                            remove_step = Some(i);
-                                        }
-                                    });
-                                });
-                            }
-                            if let Some(i) = move_up
-                                && i > 0
-                            {
-                                self.steps.swap(i, i - 1);
-                            }
-                            if let Some(i) = move_down
-                                && i + 1 < self.steps.len()
-                            {
-                                self.steps.swap(i, i + 1);
-                            }
-                            if let Some(i) = remove_step {
-                                self.steps.remove(i);
-                            }
-
-                            compact_section_heading(ui, "Add a step", None);
-                            labeled_form_row(ui, "Category", |ui| {
-                                // Free-form text input used to fuzzily match plugin names.
-                                let response = ui.add(
-                                    egui::TextEdit::singleline(&mut self.category_filter)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                );
-                                if response.changed() {
-                                    debug!("category_filter set to '{}'", self.category_filter);
-                                }
-                                response
-                            });
-                            // Collect plugin names matching the fuzzy category filter,
-                            // including the special `app` category.
-                            let available_plugin_names = app.plugins.plugin_names();
-                            let plugin_names = MacroDialog::matching_plugins(
-                                &self.category_filter,
-                                available_plugin_names
-                                    .iter()
-                                    .map(String::as_str)
-                                    .chain(std::iter::once("app")),
-                            );
-                            let _plugin_output = egui::ScrollArea::vertical()
-                                .id_salt("macro_plugin_list")
-                                .auto_shrink([false, false])
-                                .max_height(100.0)
-                                .show(ui, |ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        for name in plugin_names {
-                                            // Choosing a plugin stores it and clears the filter.
-                                            let response = ui.button(name);
-                                            if response.clicked() {
-                                                debug!("selected plugin {name}");
-                                                MacroDialog::select_plugin(
-                                                    &mut self.add_plugin,
-                                                    &mut self.category_filter,
-                                                    name,
-                                                );
-                                            }
-                                        }
-                                    });
-                                });
-                            labeled_form_row(ui, "Filter", |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.add_filter)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                )
-                            });
-                            labeled_form_row(ui, "Arguments", |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.add_args)
-                                        .desired_width(ui.available_width().max(72.0)),
-                                )
-                            });
-                            if self.add_plugin == "app" {
-                                let filter = self.add_filter.trim().to_lowercase();
-                                let _picker_max_rect = ui.max_rect();
-                                let _picker_clip_rect = ui.clip_rect();
-                                let app_output = egui::ScrollArea::vertical()
-                                    .id_salt("macro_app_list")
-                                    .auto_shrink([false, false])
-                                    .max_height(100.0)
-                                    .show(ui, |ui| {
-                                        for act in app.actions.iter() {
-                                            if !filter.is_empty()
-                                                && !act.label.to_lowercase().contains(&filter)
-                                                && !act.desc.to_lowercase().contains(&filter)
-                                                && !act.action.to_lowercase().contains(&filter)
-                                            {
-                                                continue;
-                                            }
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.vertical(|ui| {
-                                                    ui.label(&act.label);
-                                                    ui.add(
-                                                        egui::Label::new(&act.desc)
-                                                            .wrap()
-                                                            .selectable(false),
-                                                    );
-                                                });
-                                                if ui.button("Add").clicked() {
-                                                    let args = if self.add_args.trim().is_empty() {
-                                                        act.args.clone()
-                                                    } else {
-                                                        Some(self.add_args.clone())
-                                                    };
-                                                    self.steps.push(MacroStep {
-                                                        label: act.label.clone(),
-                                                        command: act.action.clone(),
-                                                        args,
-                                                        delay_ms: 0,
-                                                    });
-                                                    self.add_args.clear();
-                                                }
-                                            });
-                                            ui.add_space(ui.spacing().item_spacing.y);
-                                        }
-                                    });
-                                #[cfg(test)]
-                                {
-                                    picker_scroll = Some(macro_scroll_layout(
-                                        app_output.id,
-                                        _picker_max_rect,
-                                        _picker_clip_rect,
-                                        app_output.inner_rect,
-                                        app_output.content_size,
-                                        app_output.state.offset,
-                                    ));
-                                }
-                                #[cfg(not(test))]
-                                let _ = app_output;
-                            } else if let Some(plugin) =
-                                app.plugins.iter().find(|p| p.name() == self.add_plugin)
-                            {
-                                let filter = self.add_filter.trim().to_lowercase();
-                                let mut actions = if plugin.name() == "folders" {
-                                    plugin.search(&format!("f list {}", self.add_filter))
-                                } else if plugin.name() == "bookmarks" {
-                                    plugin.search(&format!("bm list {}", self.add_filter))
-                                } else {
-                                    plugin.commands()
-                                };
-                                let _action_output = egui::ScrollArea::vertical()
-                                    .id_salt("macro_action_list")
-                                    .auto_shrink([false, false])
-                                    .max_height(100.0)
-                                    .show(ui, |ui| {
-                                        for act in actions.drain(..) {
-                                            if !filter.is_empty()
-                                                && !act.label.to_lowercase().contains(&filter)
-                                                && !act.desc.to_lowercase().contains(&filter)
-                                                && !act.action.to_lowercase().contains(&filter)
-                                            {
-                                                continue;
-                                            }
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.vertical(|ui| {
-                                                    ui.label(&act.label);
-                                                    ui.add(
-                                                        egui::Label::new(&act.desc)
-                                                            .wrap()
-                                                            .selectable(false),
-                                                    );
-                                                });
-                                                if ui.button("Add").clicked() {
-                                                    let mut command = act.action.clone();
-                                                    let mut args =
-                                                        if self.add_args.trim().is_empty() {
-                                                            None
-                                                        } else {
-                                                            Some(self.add_args.clone())
-                                                        };
-
-                                                    if let Some(q) = command.strip_prefix("query:")
-                                                    {
-                                                        let mut q = q.to_string();
-                                                        if let Some(ref a) = args {
-                                                            q.push_str(a);
-                                                        }
-                                                        if let Some(res) =
-                                                            plugin.search(&q).into_iter().next()
-                                                        {
-                                                            command = res.action;
-                                                            args = res.args;
-                                                        } else {
-                                                            command = q;
-                                                            args = None;
-                                                        }
-                                                    }
-
-                                                    self.steps.push(MacroStep {
-                                                        label: act.label.clone(),
-                                                        command,
-                                                        args,
-                                                        delay_ms: 0,
-                                                    });
-                                                    // Reset pending args after adding a step.
-                                                    self.add_args.clear();
-                                                }
-                                            });
-                                            ui.add_space(ui.spacing().item_spacing.y);
-                                        }
-                                    });
+                        ui.separator();
+                        let mut close_rect = egui::Rect::NOTHING;
+                        ui.horizontal_wrapped(|ui| {
+                            let close_button = ui.button("Close");
+                            let close_button =
+                                with_button_emphasis(ui, close_button, ButtonEmphasis::Primary);
+                            close_rect = close_button.rect;
+                            if close_button.clicked() {
+                                close = true;
                             }
                         });
-                    ui.separator();
-                    let mut save_rect = egui::Rect::NOTHING;
-                    let mut cancel_rect = egui::Rect::NOTHING;
-                    ui.horizontal_wrapped(|ui| {
-                        let save_button = ui.button("Save");
-                        let save_button =
-                            with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
-                        save_rect = save_button.rect;
-                        if save_button.clicked() {
-                            if self.label.trim().is_empty() {
-                                app.report_error_message("ui operation", "Label required");
+                        #[cfg(test)]
+                        {
+                            test_layout = Some(MacroLayoutObservation {
+                                scroll: macro_scroll_layout(
+                                    error_output.id,
+                                    parent_max_rect,
+                                    parent_clip_rect,
+                                    error_output.inner_rect,
+                                    error_output.content_size,
+                                    error_output.state.offset,
+                                ),
+                                picker_scroll: None,
+                                primary_rect: close_rect,
+                                secondary_rect: egui::Rect::NOTHING,
+                                window_rect: egui::Rect::NOTHING,
+                                visible: test_visible,
+                                sizing_pass: test_sizing_pass,
+                                close_requested: close,
+                            });
+                        }
+                        #[cfg(not(test))]
+                        let _ = (error_output, parent_max_rect, parent_clip_rect, close_rect);
+                    } else if let Some(idx) = self.edit_idx {
+                        compact_section_heading(
+                            ui,
+                            if idx == self.entries.len() {
+                                "New macro"
                             } else {
-                                let mut steps = self.steps.clone();
-                                for step in &mut steps {
-                                    if let Some(args) = &step.args
-                                        && args.trim().is_empty()
-                                    {
-                                        step.args = None;
+                                "Edit macro"
+                            },
+                            Some("Describe the macro and arrange its steps."),
+                        );
+                        let footer_height = macro_footer_reserved_height(ui, &["Save", "Cancel"]);
+                        let parent_max_rect = ui.max_rect();
+                        let parent_clip_rect = ui.clip_rect();
+                        let body_height = (ui.available_height() - footer_height).max(0.0);
+                        #[cfg(test)]
+                        let mut picker_scroll = None;
+                        let edit_output = egui::ScrollArea::vertical()
+                            .id_salt("macro_edit_scroll")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(body_height)
+                            .show(ui, |ui| {
+                                compact_section_heading(ui, "Identity", None);
+                                labeled_form_row(ui, "Label", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.label)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    )
+                                });
+                                labeled_form_row(ui, "Description", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.desc)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    )
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.checkbox(&mut self.auto_delay, "Automatic delay");
+                                    if self.auto_delay {
+                                        let mut auto_delay_secs = self.auto_delay_secs;
+                                        let delay = ui.add(
+                                            egui::DragValue::new(&mut auto_delay_secs)
+                                                .speed(0.1)
+                                                .range(0.0..=60.0)
+                                                .suffix("s"),
+                                        );
+                                        if delay.changed() {
+                                            self.auto_delay_secs = auto_delay_secs;
+                                        }
                                     }
-                                }
-                                let mut candidate = self.entries.clone();
-                                if idx == candidate.len() {
-                                    candidate.push(MacroEntry {
-                                        label: self.label.clone(),
-                                        desc: self.desc.clone(),
-                                        auto_delay_ms: if self.auto_delay {
-                                            Some((self.auto_delay_secs * 1000.0) as u64)
-                                        } else {
-                                            None
-                                        },
-                                        steps,
-                                    });
-                                } else if let Some(entry) = candidate.get_mut(idx) {
-                                    entry.label = self.label.clone();
-                                    entry.desc = self.desc.clone();
-                                    entry.auto_delay_ms = if self.auto_delay {
-                                        Some((self.auto_delay_secs * 1000.0) as u64)
-                                    } else {
-                                        None
-                                    };
-                                    entry.steps = steps;
-                                }
-                                save_candidate = Some(candidate);
-                            }
-                        }
-                        let cancel_button = ui.button("Cancel");
-                        cancel_rect = cancel_button.rect;
-                        if cancel_button.clicked() {
-                            self.edit_idx = None;
-                            self.auto_delay = false;
-                            self.auto_delay_secs = 1.0;
-                            // Cancel editing and reset plugin selection state.
-                            self.add_plugin.clear();
-                            self.add_filter.clear();
-                            self.add_args.clear();
-                        }
-                    });
-                    #[cfg(test)]
-                    {
-                        test_layout = Some(MacroLayoutObservation {
-                            scroll: macro_scroll_layout(
-                                edit_output.id,
-                                parent_max_rect,
-                                parent_clip_rect,
-                                edit_output.inner_rect,
-                                edit_output.content_size,
-                                edit_output.state.offset,
-                            ),
-                            picker_scroll,
-                            primary_rect: save_rect,
-                            secondary_rect: cancel_rect,
-                            window_rect: egui::Rect::NOTHING,
-                            visible: test_visible,
-                            sizing_pass: test_sizing_pass,
-                            close_requested: close,
-                        });
-                    }
-                    #[cfg(not(test))]
-                    let _ = (
-                        edit_output,
-                        parent_max_rect,
-                        parent_clip_rect,
-                        save_rect,
-                        cancel_rect,
-                    );
-                } else {
-                    compact_section_heading(
-                        ui,
-                        "Saved macros",
-                        Some("Build reusable command sequences from apps and plugins."),
-                    );
-                    let footer_height = macro_footer_reserved_height(ui, &["Add Macro", "Close"]);
-                    let parent_max_rect = ui.max_rect();
-                    let parent_clip_rect = ui.clip_rect();
-                    let body_height = (ui.available_height() - footer_height).max(0.0);
-                    let mut remove: Option<usize> = None;
-                    let list_output = egui::ScrollArea::vertical()
-                        .id_salt("macro_entry_list")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(body_height)
-                        .show(ui, |ui| {
-                            for idx in 0..self.entries.len() {
-                                let entry = &self.entries[idx];
-                                ui.group(|ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.vertical(|ui| {
-                                            compact_section_heading(ui, &entry.label, None);
+                                });
+
+                                compact_section_heading(ui, "Steps", None);
+                                let mut remove_step: Option<usize> = None;
+                                let mut move_up: Option<usize> = None;
+                                let mut move_down: Option<usize> = None;
+                                for i in 0..self.steps.len() {
+                                    ui.push_id(("macro_step", i), |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(format!("{}.", i + 1));
                                             ui.add(
-                                                egui::Label::new(&entry.desc)
+                                                egui::Label::new(&self.steps[i].label)
                                                     .wrap()
                                                     .selectable(false),
                                             );
-                                        });
-                                        let edit_button = ui.button("Edit");
-                                        if edit_button.clicked() {
-                                            self.edit_idx = Some(idx);
-                                            self.label = entry.label.clone();
-                                            self.desc = entry.desc.clone();
-                                            self.steps = entry.steps.clone();
-                                            if let Some(ms) = entry.auto_delay_ms {
-                                                self.auto_delay = true;
-                                                self.auto_delay_secs = ms as f32 / 1000.0;
-                                            } else {
-                                                self.auto_delay = false;
-                                                self.auto_delay_secs = 1.0;
+                                            let mut args =
+                                                self.steps[i].args.clone().unwrap_or_default();
+                                            let args_response = ui.add(
+                                                egui::TextEdit::singleline(&mut args)
+                                                    .hint_text("Arguments")
+                                                    .desired_width(
+                                                        ui.available_width().min(180.0).max(72.0),
+                                                    ),
+                                            );
+                                            if args_response.changed() {
+                                                self.steps[i].args = Some(args);
                                             }
-                                            self.add_plugin.clear();
-                                            self.add_filter.clear();
-                                        }
-                                        let remove_button = ui.button("Remove");
-                                        if with_button_emphasis(
-                                            ui,
-                                            remove_button,
-                                            ButtonEmphasis::Destructive,
-                                        )
-                                        .clicked()
-                                        {
-                                            remove = Some(idx);
-                                        }
+                                            if !self.auto_delay {
+                                                let mut seconds =
+                                                    self.steps[i].delay_ms as f32 / 1000.0;
+                                                let delay_response = ui.add(
+                                                    egui::DragValue::new(&mut seconds)
+                                                        .speed(0.1)
+                                                        .range(0.0..=60.0)
+                                                        .suffix("s"),
+                                                );
+                                                if delay_response.changed() {
+                                                    self.steps[i].delay_ms =
+                                                        (seconds * 1000.0) as u64;
+                                                }
+                                            }
+                                            if ui.button("Up").clicked() {
+                                                move_up = Some(i);
+                                            }
+                                            if ui.button("Down").clicked() {
+                                                move_down = Some(i);
+                                            }
+                                            let remove_button = ui.button("Remove");
+                                            if with_button_emphasis(
+                                                ui,
+                                                remove_button,
+                                                ButtonEmphasis::Destructive,
+                                            )
+                                            .clicked()
+                                            {
+                                                remove_step = Some(i);
+                                            }
+                                        });
                                     });
+                                }
+                                if let Some(i) = move_up
+                                    && i > 0
+                                {
+                                    self.steps.swap(i, i - 1);
+                                }
+                                if let Some(i) = move_down
+                                    && i + 1 < self.steps.len()
+                                {
+                                    self.steps.swap(i, i + 1);
+                                }
+                                if let Some(i) = remove_step {
+                                    self.steps.remove(i);
+                                }
+
+                                compact_section_heading(ui, "Add a step", None);
+                                labeled_form_row(ui, "Category", |ui| {
+                                    // Free-form text input used to fuzzily match plugin names.
+                                    let response = ui.add(
+                                        egui::TextEdit::singleline(&mut self.category_filter)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    );
+                                    if response.changed() {
+                                        debug!("category_filter set to '{}'", self.category_filter);
+                                    }
+                                    response
                                 });
-                                ui.add_space(ui.spacing().item_spacing.y);
+                                // Collect plugin names matching the fuzzy category filter,
+                                // including the special `app` category.
+                                let available_plugin_names = app.plugins.plugin_names();
+                                let plugin_names = MacroDialog::matching_plugins(
+                                    &self.category_filter,
+                                    available_plugin_names
+                                        .iter()
+                                        .map(String::as_str)
+                                        .chain(std::iter::once("app")),
+                                );
+                                let _plugin_output = egui::ScrollArea::vertical()
+                                    .id_salt("macro_plugin_list")
+                                    .auto_shrink([false, false])
+                                    .max_height(100.0)
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            for name in plugin_names {
+                                                // Choosing a plugin stores it and clears the filter.
+                                                let response = ui.button(name);
+                                                if response.clicked() {
+                                                    debug!("selected plugin {name}");
+                                                    MacroDialog::select_plugin(
+                                                        &mut self.add_plugin,
+                                                        &mut self.category_filter,
+                                                        name,
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    });
+                                labeled_form_row(ui, "Filter", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.add_filter)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    )
+                                });
+                                labeled_form_row(ui, "Arguments", |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.add_args)
+                                            .desired_width(ui.available_width().max(72.0)),
+                                    )
+                                });
+                                if self.add_plugin == "app" {
+                                    let filter = self.add_filter.trim().to_lowercase();
+                                    let _picker_max_rect = ui.max_rect();
+                                    let _picker_clip_rect = ui.clip_rect();
+                                    let app_output = egui::ScrollArea::vertical()
+                                        .id_salt("macro_app_list")
+                                        .auto_shrink([false, false])
+                                        .max_height(100.0)
+                                        .show(ui, |ui| {
+                                            for act in app.actions.iter() {
+                                                if !filter.is_empty()
+                                                    && !act.label.to_lowercase().contains(&filter)
+                                                    && !act.desc.to_lowercase().contains(&filter)
+                                                    && !act.action.to_lowercase().contains(&filter)
+                                                {
+                                                    continue;
+                                                }
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(&act.label);
+                                                        ui.add(
+                                                            egui::Label::new(&act.desc)
+                                                                .wrap()
+                                                                .selectable(false),
+                                                        );
+                                                    });
+                                                    if ui.button("Add").clicked() {
+                                                        let args =
+                                                            if self.add_args.trim().is_empty() {
+                                                                act.args.clone()
+                                                            } else {
+                                                                Some(self.add_args.clone())
+                                                            };
+                                                        self.steps.push(MacroStep {
+                                                            label: act.label.clone(),
+                                                            command: act.action.clone(),
+                                                            args,
+                                                            delay_ms: 0,
+                                                        });
+                                                        self.add_args.clear();
+                                                    }
+                                                });
+                                                ui.add_space(ui.spacing().item_spacing.y);
+                                            }
+                                        });
+                                    #[cfg(test)]
+                                    {
+                                        picker_scroll = Some(macro_scroll_layout(
+                                            app_output.id,
+                                            _picker_max_rect,
+                                            _picker_clip_rect,
+                                            app_output.inner_rect,
+                                            app_output.content_size,
+                                            app_output.state.offset,
+                                        ));
+                                    }
+                                    #[cfg(not(test))]
+                                    let _ = app_output;
+                                } else if let Some(plugin) =
+                                    app.plugins.iter().find(|p| p.name() == self.add_plugin)
+                                {
+                                    let filter = self.add_filter.trim().to_lowercase();
+                                    let mut actions = if plugin.name() == "folders" {
+                                        plugin.search(&format!("f list {}", self.add_filter))
+                                    } else if plugin.name() == "bookmarks" {
+                                        plugin.search(&format!("bm list {}", self.add_filter))
+                                    } else {
+                                        plugin.commands()
+                                    };
+                                    let _action_output = egui::ScrollArea::vertical()
+                                        .id_salt("macro_action_list")
+                                        .auto_shrink([false, false])
+                                        .max_height(100.0)
+                                        .show(ui, |ui| {
+                                            for act in actions.drain(..) {
+                                                if !filter.is_empty()
+                                                    && !act.label.to_lowercase().contains(&filter)
+                                                    && !act.desc.to_lowercase().contains(&filter)
+                                                    && !act.action.to_lowercase().contains(&filter)
+                                                {
+                                                    continue;
+                                                }
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(&act.label);
+                                                        ui.add(
+                                                            egui::Label::new(&act.desc)
+                                                                .wrap()
+                                                                .selectable(false),
+                                                        );
+                                                    });
+                                                    if ui.button("Add").clicked() {
+                                                        let mut command = act.action.clone();
+                                                        let mut args =
+                                                            if self.add_args.trim().is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(self.add_args.clone())
+                                                            };
+
+                                                        if let Some(q) =
+                                                            command.strip_prefix("query:")
+                                                        {
+                                                            let mut q = q.to_string();
+                                                            if let Some(ref a) = args {
+                                                                q.push_str(a);
+                                                            }
+                                                            if let Some(res) =
+                                                                plugin.search(&q).into_iter().next()
+                                                            {
+                                                                command = res.action;
+                                                                args = res.args;
+                                                            } else {
+                                                                command = q;
+                                                                args = None;
+                                                            }
+                                                        }
+
+                                                        self.steps.push(MacroStep {
+                                                            label: act.label.clone(),
+                                                            command,
+                                                            args,
+                                                            delay_ms: 0,
+                                                        });
+                                                        // Reset pending args after adding a step.
+                                                        self.add_args.clear();
+                                                    }
+                                                });
+                                                ui.add_space(ui.spacing().item_spacing.y);
+                                            }
+                                        });
+                                }
+                            });
+                        ui.separator();
+                        let mut save_rect = egui::Rect::NOTHING;
+                        let mut cancel_rect = egui::Rect::NOTHING;
+                        ui.horizontal_wrapped(|ui| {
+                            let save_button = ui.button("Save");
+                            let save_button =
+                                with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
+                            save_rect = save_button.rect;
+                            if save_button.clicked() {
+                                if self.label.trim().is_empty() {
+                                    app.report_error_message("ui operation", "Label required");
+                                } else {
+                                    let mut steps = self.steps.clone();
+                                    for step in &mut steps {
+                                        if let Some(args) = &step.args
+                                            && args.trim().is_empty()
+                                        {
+                                            step.args = None;
+                                        }
+                                    }
+                                    let mut candidate = self.entries.clone();
+                                    if idx == candidate.len() {
+                                        candidate.push(MacroEntry {
+                                            label: self.label.clone(),
+                                            desc: self.desc.clone(),
+                                            auto_delay_ms: if self.auto_delay {
+                                                Some((self.auto_delay_secs * 1000.0) as u64)
+                                            } else {
+                                                None
+                                            },
+                                            steps,
+                                        });
+                                    } else if let Some(entry) = candidate.get_mut(idx) {
+                                        entry.label = self.label.clone();
+                                        entry.desc = self.desc.clone();
+                                        entry.auto_delay_ms = if self.auto_delay {
+                                            Some((self.auto_delay_secs * 1000.0) as u64)
+                                        } else {
+                                            None
+                                        };
+                                        entry.steps = steps;
+                                    }
+                                    save_candidate = Some(candidate);
+                                }
+                            }
+                            let cancel_button = ui.button("Cancel");
+                            cancel_rect = cancel_button.rect;
+                            if cancel_button.clicked() {
+                                self.edit_idx = None;
+                                self.auto_delay = false;
+                                self.auto_delay_secs = 1.0;
+                                // Cancel editing and reset plugin selection state.
+                                self.add_plugin.clear();
+                                self.add_filter.clear();
+                                self.add_args.clear();
                             }
                         });
-                    ui.separator();
-                    let mut add_rect = egui::Rect::NOTHING;
-                    let mut close_rect = egui::Rect::NOTHING;
-                    ui.horizontal_wrapped(|ui| {
-                        let add_button = ui.button("Add Macro");
-                        let add_button =
-                            with_button_emphasis(ui, add_button, ButtonEmphasis::Primary);
-                        add_rect = add_button.rect;
-                        if add_button.clicked() {
-                            self.edit_idx = Some(self.entries.len());
-                            self.label.clear();
-                            self.desc.clear();
-                            self.steps.clear();
-                            self.auto_delay = false;
-                            self.auto_delay_secs = 1.0;
-                            self.add_plugin.clear();
-                            self.add_filter.clear();
-                            self.add_args.clear();
+                        #[cfg(test)]
+                        {
+                            test_layout = Some(MacroLayoutObservation {
+                                scroll: macro_scroll_layout(
+                                    edit_output.id,
+                                    parent_max_rect,
+                                    parent_clip_rect,
+                                    edit_output.inner_rect,
+                                    edit_output.content_size,
+                                    edit_output.state.offset,
+                                ),
+                                picker_scroll,
+                                primary_rect: save_rect,
+                                secondary_rect: cancel_rect,
+                                window_rect: egui::Rect::NOTHING,
+                                visible: test_visible,
+                                sizing_pass: test_sizing_pass,
+                                close_requested: close,
+                            });
                         }
-                        let close_button = ui.button("Close");
-                        close_rect = close_button.rect;
-                        if close_button.clicked() {
-                            close = true;
-                        }
-                    });
-                    #[cfg(test)]
-                    {
-                        test_layout = Some(MacroLayoutObservation {
-                            scroll: macro_scroll_layout(
-                                list_output.id,
-                                parent_max_rect,
-                                parent_clip_rect,
-                                list_output.inner_rect,
-                                list_output.content_size,
-                                list_output.state.offset,
-                            ),
-                            picker_scroll: None,
-                            primary_rect: add_rect,
-                            secondary_rect: close_rect,
-                            window_rect: egui::Rect::NOTHING,
-                            visible: test_visible,
-                            sizing_pass: test_sizing_pass,
-                            close_requested: close,
+                        #[cfg(not(test))]
+                        let _ = (
+                            edit_output,
+                            parent_max_rect,
+                            parent_clip_rect,
+                            save_rect,
+                            cancel_rect,
+                        );
+                    } else {
+                        compact_section_heading(
+                            ui,
+                            "Saved macros",
+                            Some("Build reusable command sequences from apps and plugins."),
+                        );
+                        let footer_height =
+                            macro_footer_reserved_height(ui, &["Add Macro", "Close"]);
+                        let parent_max_rect = ui.max_rect();
+                        let parent_clip_rect = ui.clip_rect();
+                        let body_height = (ui.available_height() - footer_height).max(0.0);
+                        let mut remove: Option<usize> = None;
+                        let list_output = egui::ScrollArea::vertical()
+                            .id_salt("macro_entry_list")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(body_height)
+                            .show(ui, |ui| {
+                                for idx in 0..self.entries.len() {
+                                    let entry = &self.entries[idx];
+                                    ui.group(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.vertical(|ui| {
+                                                compact_section_heading(ui, &entry.label, None);
+                                                ui.add(
+                                                    egui::Label::new(&entry.desc)
+                                                        .wrap()
+                                                        .selectable(false),
+                                                );
+                                            });
+                                            let edit_button = ui.button("Edit");
+                                            if edit_button.clicked() {
+                                                self.edit_idx = Some(idx);
+                                                self.label = entry.label.clone();
+                                                self.desc = entry.desc.clone();
+                                                self.steps = entry.steps.clone();
+                                                if let Some(ms) = entry.auto_delay_ms {
+                                                    self.auto_delay = true;
+                                                    self.auto_delay_secs = ms as f32 / 1000.0;
+                                                } else {
+                                                    self.auto_delay = false;
+                                                    self.auto_delay_secs = 1.0;
+                                                }
+                                                self.add_plugin.clear();
+                                                self.add_filter.clear();
+                                            }
+                                            let remove_button = ui.button("Remove");
+                                            if with_button_emphasis(
+                                                ui,
+                                                remove_button,
+                                                ButtonEmphasis::Destructive,
+                                            )
+                                            .clicked()
+                                            {
+                                                remove = Some(idx);
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(ui.spacing().item_spacing.y);
+                                }
+                            });
+                        ui.separator();
+                        let mut add_rect = egui::Rect::NOTHING;
+                        let mut close_rect = egui::Rect::NOTHING;
+                        ui.horizontal_wrapped(|ui| {
+                            let add_button = ui.button("Add Macro");
+                            let add_button =
+                                with_button_emphasis(ui, add_button, ButtonEmphasis::Primary);
+                            add_rect = add_button.rect;
+                            if add_button.clicked() {
+                                self.edit_idx = Some(self.entries.len());
+                                self.label.clear();
+                                self.desc.clear();
+                                self.steps.clear();
+                                self.auto_delay = false;
+                                self.auto_delay_secs = 1.0;
+                                self.add_plugin.clear();
+                                self.add_filter.clear();
+                                self.add_args.clear();
+                            }
+                            let close_button = ui.button("Close");
+                            close_rect = close_button.rect;
+                            if close_button.clicked() {
+                                close = true;
+                            }
                         });
+                        #[cfg(test)]
+                        {
+                            test_layout = Some(MacroLayoutObservation {
+                                scroll: macro_scroll_layout(
+                                    list_output.id,
+                                    parent_max_rect,
+                                    parent_clip_rect,
+                                    list_output.inner_rect,
+                                    list_output.content_size,
+                                    list_output.state.offset,
+                                ),
+                                picker_scroll: None,
+                                primary_rect: add_rect,
+                                secondary_rect: close_rect,
+                                window_rect: egui::Rect::NOTHING,
+                                visible: test_visible,
+                                sizing_pass: test_sizing_pass,
+                                close_requested: close,
+                            });
+                        }
+                        #[cfg(not(test))]
+                        let _ = (
+                            list_output,
+                            parent_max_rect,
+                            parent_clip_rect,
+                            add_rect,
+                            close_rect,
+                        );
+                        if let Some(idx) = remove {
+                            let mut candidate = self.entries.clone();
+                            candidate.remove(idx);
+                            save_candidate = Some(candidate);
+                        }
                     }
-                    #[cfg(not(test))]
-                    let _ = (
-                        list_output,
-                        parent_max_rect,
-                        parent_clip_rect,
-                        add_rect,
-                        close_rect,
-                    );
-                    if let Some(idx) = remove {
-                        let mut candidate = self.entries.clone();
-                        candidate.remove(idx);
-                        save_candidate = Some(candidate);
-                    }
-                }
-            });
+                },
+            );
         self.open = open || pinned;
         #[cfg(test)]
         if let Some(mut layout) = test_layout {

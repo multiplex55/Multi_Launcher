@@ -1,4 +1,5 @@
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::qr::{self, GeneratedQr, QrErrorCorrection, QrGenerationError, QrPayloadMetadata};
 use eframe::egui;
 use image::RgbaImage;
@@ -271,6 +272,10 @@ impl QrDialogState {
         >,
     ) {
         if !self.open {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("qr-generator").unwrap(),
+            );
             return;
         }
         self.refresh_generation();
@@ -289,6 +294,14 @@ impl QrDialogState {
             if close {
                 self.close();
             } else if independent {
+                crate::gui::utility_dialog_size::apply_native_utility_size_restore(
+                    child,
+                    class,
+                    crate::settings::UtilityToolKey::parse("qr-generator").unwrap(),
+                    egui::vec2(620.0, 700.0),
+                    Some(egui::vec2(320.0, 420.0)),
+                    None,
+                );
                 egui::CentralPanel::default().show(child, |ui| {
                     self.body(ui);
                     #[cfg(feature = "qa-framebuffer-capture")]
@@ -303,24 +316,44 @@ impl QrDialogState {
                 let mut open = self.open;
                 egui::Window::new("QR Generator")
                     .id(egui::Id::new("qr_generator_embedded"))
-                    .open(&mut open)
                     .collapsible(false)
                     .default_size(available.min(egui::vec2(620.0, 700.0)))
                     .min_size(available.min(egui::vec2(320.0, 420.0)))
                     .max_size(available)
-                    .show(child, |ui| {
-                        self.body(ui);
-                        #[cfg(feature = "qa-framebuffer-capture")]
-                        {
-                            body_rendered = true;
-                        }
-                    });
+                    .show_utility(
+                        child,
+                        "qr-generator",
+                        egui::Id::new("qr_generator_embedded"),
+                        Some(&mut open),
+                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                            crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                                available.min(egui::vec2(620.0, 700.0)),
+                            ),
+                            egui::Vec2::ZERO,
+                            [None, None],
+                        )
+                        .with_minimum(available.min(egui::vec2(320.0, 420.0)))
+                        .with_maximum(available),
+                        |ui| {
+                            self.body(ui);
+                            #[cfg(feature = "qa-framebuffer-capture")]
+                            {
+                                body_rendered = true;
+                            }
+                        },
+                    );
                 if !open {
                     self.close();
                 }
             }
             if independent && !self.open {
                 child.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            if !self.open {
+                crate::gui::utility_dialog_size::close_native_utility_size_window(
+                    child.ctx(),
+                    crate::settings::UtilityToolKey::parse("qr-generator").unwrap(),
+                );
             }
             #[cfg(feature = "qa-framebuffer-capture")]
             if let Some(observation) = qa_observation.as_deref_mut() {

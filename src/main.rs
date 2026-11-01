@@ -4663,7 +4663,6 @@ fn main() -> anyhow::Result<()> {
             }
         };
         if shutdown {
-            settings_save_workers.begin_shutdown();
             drop(hotkey_runtime_receiver.take());
             if let Some(service) = invocation_service.as_ref() {
                 let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
@@ -4676,6 +4675,8 @@ fn main() -> anyhow::Result<()> {
             }
             listener.stop();
             let _ = gui_worker.join();
+            // Let LauncherApp::on_exit queue its final utility-size write
+            // before join_all closes worker admission.
             settings_save_workers.join_all();
             break Ok(());
         }
@@ -6253,7 +6254,6 @@ fn main() -> anyhow::Result<()> {
                 service.stop();
             }
             listener.stop();
-            settings_save_workers.begin_shutdown();
             drop(hotkey_runtime_receiver.take());
             if let Ok(guard) = ctx.lock()
                 && let Some(c) = &*guard
@@ -6262,6 +6262,8 @@ fn main() -> anyhow::Result<()> {
                 c.request_repaint();
             }
             let _ = gui_worker.join();
+            // Let LauncherApp::on_exit queue its final utility-size write
+            // before join_all closes worker admission.
             settings_save_workers.join_all();
             break Ok(());
         }

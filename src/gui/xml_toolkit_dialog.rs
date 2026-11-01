@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 mod files;
 
 use crate::activity::{
@@ -528,6 +529,10 @@ impl XmlToolkitDialogState {
         self.poll_file_worker();
         self.poll_session(ctx);
         if !self.open {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("xml-toolkit").unwrap(),
+            );
             if self.observed_presentation.take().is_some() {
                 self.native_jump_mode.cancel_all();
             }
@@ -563,6 +568,7 @@ impl XmlToolkitDialogState {
                 if independent {
                     let close = self.show_immediate_viewport(
                         child,
+                        class,
                         parent_instance,
                         application_input_allowed,
                         jump_mode_enabled,
@@ -601,36 +607,50 @@ impl XmlToolkitDialogState {
                     }
                     egui::Window::new("XML Toolkit")
                         .id(egui::Id::new("xml_toolkit_embedded_window"))
-                        .open(&mut open)
                         .collapsible(false)
                         .resizable(true)
                         .default_size(available.min(egui::vec2(1120.0, 760.0)))
                         .min_size(available.min(egui::vec2(480.0, 340.0)))
                         .max_size(available)
-                        .show(child, |ui| {
-                            ui.add_enabled_ui(root_parent_current, |ui| {
-                                self.show_body(
-                                    ui,
-                                    &child_ctx,
-                                    first_pass && root_parent_current && !intents.close,
-                                    root_parent_current,
-                                    root_scope.filter(|_| {
-                                        matches!(
-                                            root_owner,
-                                            NavigationOwner::Dialog {
-                                                kind: NavigationDialogKind::XmlToolkit,
-                                                ..
-                                            }
-                                        )
-                                    }),
-                                    &mut intents,
-                                    parent_instance,
-                                    root_owner,
-                                    root_confirmation_current,
-                                    root_scope.filter(|_| root_confirmation_current),
-                                )
-                            })
-                        });
+                        .show_utility(
+                            child,
+                            "xml-toolkit",
+                            egui::Id::new("xml_toolkit_embedded_window"),
+                            Some(&mut open),
+                            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                                    available.min(egui::vec2(1120.0, 760.0)),
+                                ),
+                                egui::Vec2::ZERO,
+                                [None, None],
+                            )
+                            .with_minimum(available.min(egui::vec2(480.0, 340.0)))
+                            .with_maximum(available),
+                            |ui| {
+                                ui.add_enabled_ui(root_parent_current, |ui| {
+                                    self.show_body(
+                                        ui,
+                                        &child_ctx,
+                                        first_pass && root_parent_current && !intents.close,
+                                        root_parent_current,
+                                        root_scope.filter(|_| {
+                                            matches!(
+                                                root_owner,
+                                                NavigationOwner::Dialog {
+                                                    kind: NavigationDialogKind::XmlToolkit,
+                                                    ..
+                                                }
+                                            )
+                                        }),
+                                        &mut intents,
+                                        parent_instance,
+                                        root_owner,
+                                        root_confirmation_current,
+                                        root_scope.filter(|_| root_confirmation_current),
+                                    )
+                                })
+                            },
+                        );
                     if root_parent_current {
                         self.open = open;
                     }
@@ -644,6 +664,12 @@ impl XmlToolkitDialogState {
         if viewport_seen {
             self.process_intents(ctx, intents);
         }
+        if !self.open {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("xml-toolkit").unwrap(),
+            );
+        }
         self.poll_file_worker();
         self.poll_session(ctx);
         self.request_repaint_if_pending(ctx);
@@ -652,6 +678,7 @@ impl XmlToolkitDialogState {
     fn show_immediate_viewport(
         &mut self,
         child: &mut egui::Ui,
+        class: egui::ViewportClass,
         parent_instance: Option<u64>,
         application_input_allowed: bool,
         jump_mode_enabled: bool,
@@ -753,6 +780,15 @@ impl XmlToolkitDialogState {
         if close {
             self.native_jump_mode.cancel_all();
             self.native_jump_frame = None;
+        } else {
+            crate::gui::utility_dialog_size::apply_native_utility_size_restore(
+                child,
+                class,
+                crate::settings::UtilityToolKey::parse("xml-toolkit").unwrap(),
+                egui::vec2(1120.0, 760.0),
+                Some(egui::vec2(480.0, 340.0)),
+                None,
+            );
         }
 
         self.native_jump_mode.begin_ui_pass();

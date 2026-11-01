@@ -4,6 +4,7 @@ use crate::diff::folder_runtime::{
 use crate::diff::model::{DiffView, DiffWorkspace, TextCompareOrigin, TextCompareState};
 use crate::diff::query::DiffOpenPayload;
 use crate::gui::theme::widgets::{StatusTone, semantic_status};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -493,11 +494,18 @@ impl DiffDialogState {
         };
         egui::Window::new(title)
             .id(egui::Id::new((self.workspace.workspace_id, "text_input", identity)))
-            .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_size(egui::vec2(760.0, 540.0))
-            .show(ctx, |ui| {
+            .show_utility(
+                ctx,
+                "diff-text-input",
+                egui::Id::new((self.workspace.workspace_id, "text_input", identity)),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(
+                    egui::vec2(760.0, 540.0),
+                ),
+                |ui| {
                 ui.label("Enter text for both sides. Empty text is allowed.");
                 ui.label(
                     "Each side is limited to 8 MiB and 100,000 lines. Oversized input is rejected without truncation.",
@@ -565,7 +573,8 @@ impl DiffDialogState {
                         ui.close();
                     }
                 });
-            });
+                },
+            );
         if submit {
             if let Some(draft) = self.text_input.take() {
                 match self.apply_text_input(draft) {
@@ -929,184 +938,227 @@ impl DiffDialogState {
         let (initial_size, initial_position) =
             crate::diff::model::validated_window_geometry(&self.persistence, body_screen);
         let minimum_size = crate::diff::model::diff_window_min_size(body_screen);
+        let window_id = egui::Id::new(("diff_window", self.workspace.workspace_id));
+        let key = crate::settings::UtilityToolKey::parse("diff")
+            .expect("diff is a stable utility size key");
+        let size_access =
+            crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
+        let default_body_size = match size_access.preference(key) {
+            crate::settings::UtilitySizePreference::Missing => initial_size,
+            crate::settings::UtilitySizePreference::Reset
+            | crate::settings::UtilitySizePreference::Preferred(_)
+            | crate::settings::UtilitySizePreference::Unsupported => {
+                crate::diff::model::validated_window_geometry(
+                    &crate::diff::persistence::DiffPersistenceV1::default(),
+                    body_screen,
+                )
+                .0
+            }
+        };
+        let minimum_outer_size = egui::Vec2::from(minimum_size) + chrome;
         let mut window = egui::Window::new("Diff")
-            .id(egui::Id::new(("diff_window", self.workspace.workspace_id)))
-            .open(&mut open)
+            .id(window_id)
             .collapsible(false)
             .resizable(true)
-            .default_size(egui::Vec2::from(initial_size) + chrome)
-            .min_size(egui::Vec2::from(minimum_size) + chrome);
+            .min_size(minimum_outer_size);
         if let Some(position) = initial_position {
             window = window.default_pos(position);
         }
         let mut text_input_request = None;
-        let response = window.show(ctx, |ui| {
-            let body_viewport = DiffViewport::remaining(ui);
-            allocate_viewport(ui, body_viewport, |ui| {
-                if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
-                    self.navigate_back();
-                }
-                let header_height = ui.spacing().interact_size.y;
-                let header_width = ui.available_width().max(0.0);
-                egui::ScrollArea::horizontal()
-                    .max_height(header_height)
-                    .show(ui, |ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(header_width, header_height),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                let path_width =
-                                    header_path_width(header_width, ui.spacing().item_spacing.x)
-                                        .min(header_width);
-                                let left = ui.add_sized(
-                                    [path_width, header_height],
-                                    egui::TextEdit::singleline(&mut self.workspace.left_visible)
+        let response = size_access.show_window(
+            ctx,
+            key,
+            window_id,
+            &mut open,
+            egui::Vec2::from(default_body_size) + chrome,
+            minimum_outer_size,
+            window,
+            |ui| {
+                let body_viewport = DiffViewport::remaining(ui);
+                allocate_viewport(ui, body_viewport, |ui| {
+                    if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
+                        self.navigate_back();
+                    }
+                    let header_height = ui.spacing().interact_size.y;
+                    let header_width = ui.available_width().max(0.0);
+                    egui::ScrollArea::horizontal()
+                        .max_height(header_height)
+                        .show(ui, |ui| {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(header_width, header_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let path_width = header_path_width(
+                                        header_width,
+                                        ui.spacing().item_spacing.x,
+                                    )
+                                    .min(header_width);
+                                    let left = ui.add_sized(
+                                        [path_width, header_height],
+                                        egui::TextEdit::singleline(
+                                            &mut self.workspace.left_visible,
+                                        )
                                         .id(egui::Id::new((self.workspace.workspace_id, "left")))
                                         .hint_text("Left file or folder"),
-                                );
-                                if self.workspace.focus_left_requested {
-                                    left.request_focus();
-                                    self.workspace.focus_left_requested = false;
-                                }
-                                picker_menu(
-                                    ui,
-                                    &mut self.workspace,
-                                    crate::diff::model::DiffSide::Left,
-                                );
-                                ui.label("↔");
-                                ui.add_sized(
-                                    [path_width, header_height],
-                                    egui::TextEdit::singleline(&mut self.workspace.right_visible)
+                                    );
+                                    if self.workspace.focus_left_requested {
+                                        left.request_focus();
+                                        self.workspace.focus_left_requested = false;
+                                    }
+                                    picker_menu(
+                                        ui,
+                                        &mut self.workspace,
+                                        crate::diff::model::DiffSide::Left,
+                                    );
+                                    ui.label("↔");
+                                    ui.add_sized(
+                                        [path_width, header_height],
+                                        egui::TextEdit::singleline(
+                                            &mut self.workspace.right_visible,
+                                        )
                                         .id(egui::Id::new((self.workspace.workspace_id, "right")))
                                         .hint_text("Right file or folder"),
-                                );
-                                picker_menu(
-                                    ui,
-                                    &mut self.workspace,
-                                    crate::diff::model::DiffSide::Right,
-                                );
-                                if ui.button("Compare Text…").clicked() {
-                                    text_input_request = Some(TextInputPurpose::NewComparison);
-                                }
-                                if matches!(
-                                    &self.workspace.current_view.view,
-                                    DiffView::TextCompare(state)
-                                        if state.origin == TextCompareOrigin::Memory
-                                ) && ui.button("Edit Inputs…").clicked()
-                                {
-                                    text_input_request = Some(TextInputPurpose::EditInputs {
-                                        view_id: self.workspace.current_view.id,
-                                    });
-                                }
-                                if ui
-                                    .button("Compare")
-                                    .on_hover_text("Compare/change paths (Ctrl+O)")
-                                    .clicked()
-                                    || ui.input_mut(|i| {
-                                        i.consume_key(egui::Modifiers::CTRL, egui::Key::O)
-                                    })
-                                {
-                                    let _ = self.open_and_record(
-                                        self.workspace.left_visible.clone(),
-                                        self.workspace.right_visible.clone(),
                                     );
-                                }
-                                ui.menu_button("More", |ui| {
-                                    let active = !matches!(
-                                        self.workspace.current_view.view,
-                                        DiffView::Start
+                                    picker_menu(
+                                        ui,
+                                        &mut self.workspace,
+                                        crate::diff::model::DiffSide::Right,
                                     );
-                                    if ui
-                                        .add_enabled(active, egui::Button::new("Swap Sides"))
-                                        .clicked()
-                                    {
-                                        self.swap_sides();
-                                        ui.close();
+                                    if ui.button("Compare Text…").clicked() {
+                                        text_input_request = Some(TextInputPurpose::NewComparison);
                                     }
-                                    let active_comparison = matches!(
-                                        self.workspace.current_view.view,
-                                        DiffView::TextCompare(_) | DiffView::BinaryCompare(_)
-                                    );
-                                    let reloadable = matches!(
+                                    if matches!(
                                         &self.workspace.current_view.view,
                                         DiffView::TextCompare(state)
-                                            if state.origin == TextCompareOrigin::FileBacked
-                                    ) || matches!(
-                                        self.workspace.current_view.view,
-                                        DiffView::BinaryCompare(_)
-                                    );
-                                    if ui
-                                        .add_enabled(reloadable, egui::Button::new("Reload Files"))
-                                        .on_disabled_hover_text(
-                                            "In-memory text has no files to reload",
-                                        )
-                                        .clicked()
+                                            if state.origin == TextCompareOrigin::Memory
+                                    ) && ui.button("Edit Inputs…").clicked()
                                     {
-                                        self.reload_files();
-                                        ui.close();
+                                        text_input_request = Some(TextInputPurpose::EditInputs {
+                                            view_id: self.workspace.current_view.id,
+                                        });
                                     }
                                     if ui
-                                        .add_enabled(
-                                            active_comparison,
-                                            egui::Button::new("Recompare"),
-                                        )
+                                        .button("Compare")
+                                        .on_hover_text("Compare/change paths (Ctrl+O)")
                                         .clicked()
+                                        || ui.input_mut(|i| {
+                                            i.consume_key(egui::Modifiers::CTRL, egui::Key::O)
+                                        })
                                     {
-                                        self.recompare();
-                                        ui.close();
+                                        let _ = self.open_and_record(
+                                            self.workspace.left_visible.clone(),
+                                            self.workspace.right_visible.clone(),
+                                        );
                                     }
-                                    let folder = matches!(
-                                        self.workspace.current_view.view,
-                                        DiffView::FolderCompare(_)
-                                    );
-                                    if ui
-                                        .add_enabled(folder, egui::Button::new("Refresh Folder"))
-                                        .on_disabled_hover_text("Open a Folder comparison first")
-                                        .clicked()
-                                    {
-                                        self.refresh_folder();
-                                        ui.close();
-                                    }
-                                });
-                            },
-                        );
-                    });
-                if let Some(error) = &self.workspace.error {
-                    bounded_message(ui, error, 48.0);
-                }
-                if !self.workspace.navigation_stack.is_empty() && ui.button("← Back").clicked() {
-                    self.navigate_back();
-                }
-                ui.separator();
-                let outcome = allocate_remaining_workspace(ui, |ui| {
-                    self.render_workspace(ctx, ui, activity_center)
-                })
-                .inner;
-                if let Some(error) = outcome.error {
-                    self.workspace.error = Some(error);
-                }
-                if let Some(text_view::TextViewAction::CompareSelectionWithClipboard { view_id }) =
-                    outcome.text_action
-                    && let Err(error) = self.compare_selection_with_clipboard_using(view_id, || {
-                        crate::actions::clipboard::get_text()
-                            .map_err(|error| format!("Clipboard text is unavailable: {error}"))
-                    })
-                {
-                    self.workspace.error = Some(error);
-                }
-                if let Some(recent) = outcome.recent_to_open {
-                    match crate::diff::persistence::reopen_recent(&recent) {
-                        Ok((left, right)) => {
-                            let _ = self.open_and_record(left, right);
-                        }
-                        Err(error) => self.workspace.error = Some(error.to_string()),
+                                    ui.menu_button("More", |ui| {
+                                        let active = !matches!(
+                                            self.workspace.current_view.view,
+                                            DiffView::Start
+                                        );
+                                        if ui
+                                            .add_enabled(active, egui::Button::new("Swap Sides"))
+                                            .clicked()
+                                        {
+                                            self.swap_sides();
+                                            ui.close();
+                                        }
+                                        let active_comparison = matches!(
+                                            self.workspace.current_view.view,
+                                            DiffView::TextCompare(_) | DiffView::BinaryCompare(_)
+                                        );
+                                        let reloadable = matches!(
+                                            &self.workspace.current_view.view,
+                                            DiffView::TextCompare(state)
+                                                if state.origin == TextCompareOrigin::FileBacked
+                                        ) || matches!(
+                                            self.workspace.current_view.view,
+                                            DiffView::BinaryCompare(_)
+                                        );
+                                        if ui
+                                            .add_enabled(
+                                                reloadable,
+                                                egui::Button::new("Reload Files"),
+                                            )
+                                            .on_disabled_hover_text(
+                                                "In-memory text has no files to reload",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.reload_files();
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                active_comparison,
+                                                egui::Button::new("Recompare"),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.recompare();
+                                            ui.close();
+                                        }
+                                        let folder = matches!(
+                                            self.workspace.current_view.view,
+                                            DiffView::FolderCompare(_)
+                                        );
+                                        if ui
+                                            .add_enabled(
+                                                folder,
+                                                egui::Button::new("Refresh Folder"),
+                                            )
+                                            .on_disabled_hover_text(
+                                                "Open a Folder comparison first",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.refresh_folder();
+                                            ui.close();
+                                        }
+                                    });
+                                },
+                            );
+                        });
+                    if let Some(error) = &self.workspace.error {
+                        bounded_message(ui, error, 48.0);
                     }
-                }
-                self.apply_folder_action(outcome.folder_action);
-                body_viewport.size
-            })
-            .inner
-        });
+                    if !self.workspace.navigation_stack.is_empty() && ui.button("← Back").clicked()
+                    {
+                        self.navigate_back();
+                    }
+                    ui.separator();
+                    let outcome = allocate_remaining_workspace(ui, |ui| {
+                        self.render_workspace(ctx, ui, activity_center)
+                    })
+                    .inner;
+                    if let Some(error) = outcome.error {
+                        self.workspace.error = Some(error);
+                    }
+                    if let Some(text_view::TextViewAction::CompareSelectionWithClipboard {
+                        view_id,
+                    }) = outcome.text_action
+                        && let Err(error) =
+                            self.compare_selection_with_clipboard_using(view_id, || {
+                                crate::actions::clipboard::get_text().map_err(|error| {
+                                    format!("Clipboard text is unavailable: {error}")
+                                })
+                            })
+                    {
+                        self.workspace.error = Some(error);
+                    }
+                    if let Some(recent) = outcome.recent_to_open {
+                        match crate::diff::persistence::reopen_recent(&recent) {
+                            Ok((left, right)) => {
+                                let _ = self.open_and_record(left, right);
+                            }
+                            Err(error) => self.workspace.error = Some(error.to_string()),
+                        }
+                    }
+                    self.apply_folder_action(outcome.folder_action);
+                    body_viewport.size
+                })
+                .inner
+            },
+        );
         if let Some(purpose) = text_input_request {
             self.begin_text_input(purpose);
         }
@@ -1114,10 +1166,9 @@ impl DiffDialogState {
         self.show_operation_preview(ctx);
         if let Some(response) = response
             && let Some(inner_size) = response.inner
-            && let Some((size, position)) =
+            && let Some((_size, position)) =
                 runtime_window_geometry(inner_size, response.response.rect.left_top(), body_screen)
         {
-            self.persistence.window_size = Some(size);
             self.persistence.window_position = Some(position);
         }
         if !open && self.text_views.values().any(|m| m.has_dirty()) {
@@ -2216,6 +2267,53 @@ mod tests {
             assert_eq!(persistence.window_size, Some([1000.0, 700.0]));
             assert_eq!(persistence.window_position, Some([20.0, 30.0]));
         }
+    }
+
+    #[test]
+    fn utility_size_integration_diff_legacy_body_fallback_adds_chrome_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let manager = crate::gui::utility_dialog_size::UtilityDialogSizeManager::new(
+            settings_path.to_string_lossy().into_owned(),
+            crate::settings_save::SettingsSaveWorkerRegistry::default(),
+            crate::settings::UtilityDialogSizes::default(),
+        );
+        let ctx = egui::Context::default();
+        manager.install_in_context(&ctx);
+        let mut dialog = DiffDialogState::default();
+        dialog.open = true;
+        dialog.persistence.window_size = Some([720.0, 480.0]);
+        let activity_center = crate::activity::ActivityCenter::new();
+        let screen = egui::vec2(1600.0, 1000.0);
+
+        for _ in 0..3 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                    ..Default::default()
+                },
+                |root| {
+                    manager.begin_frame(root.ctx()).unwrap();
+                    dialog.ui(root.ctx(), &activity_center);
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+
+        let window_id = egui::Id::new(("diff_window", dialog.workspace.workspace_id));
+        let outer = ctx
+            .memory(|memory| memory.area_rect(window_id))
+            .expect("Diff uses its workspace-owned production window id");
+        let chrome = window_chrome(&ctx);
+        assert!((outer.width() - 720.0 - chrome.x).abs() < 2.0, "{outer:?}");
+        assert!((outer.height() - 480.0 - chrome.y).abs() < 2.0, "{outer:?}");
+        assert_eq!(dialog.persistence.window_size, Some([720.0, 480.0]));
+        assert_eq!(
+            manager
+                .snapshot()
+                .preference(crate::settings::UtilityToolKey::parse("diff").unwrap()),
+            crate::settings::UtilitySizePreference::Missing
+        );
     }
 
     #[test]

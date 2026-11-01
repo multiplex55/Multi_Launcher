@@ -3,6 +3,7 @@ use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::note::load_notes;
 use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, replace_todos};
 use eframe::egui;
@@ -265,12 +266,12 @@ impl TodoDialog {
             .filter(|_| self.pending_clear_confirm)
             .map(|scope| scope.child_popup_scope("todo-clear-confirm"));
         egui::Window::new("Todos")
-            .open(&mut window_open)
+
             .resizable(true)
             .default_size((320.0, 200.0))
             .min_width(200.0)
             .min_height(150.0)
-            .show(ctx, |ui| {
+            .show_utility(ctx, "todos", egui::Id::new("Todos"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((320.0, 200.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(200.0, 150.0)), |ui| {
                 if let Some(error) = &self.load_error {
                     semantic_status(
                         ui,

@@ -6,6 +6,7 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
     semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::target_repair::{FilesystemTargetKind, RepairCompletion, SelectedTarget};
 use eframe::egui;
 use rfd::FileDialog;
@@ -385,11 +386,11 @@ impl AddActionDialog {
         let mut repair_kind_changed = false;
         let mut window_open = self.open;
         let window_output = egui::Window::new(title)
-            .open(&mut window_open)
+
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
             .max_height(ctx.content_rect().height().max(1.0))
-            .show(ctx, |ui| {
+            .show_utility(ctx, "add-action", egui::Id::new(title), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]).with_max_width(ctx.content_rect().width().max(1.0)).with_max_height(ctx.content_rect().height().max(1.0)), |ui| {
                 #[cfg(test)]
                 {
                     test_visible = ui.is_visible();

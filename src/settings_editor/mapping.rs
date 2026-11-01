@@ -63,6 +63,8 @@ impl SettingsEditor {
             next_settings_navigation_token: 1,
             search_enter_consumption_pending: false,
             baseline_settings: settings.clone(),
+            utility_dialog_size_selected_tool:
+                crate::settings::utility_dialog_sizes::UtilityToolKey::parse("action-sheet").ok(),
             paste_sequence: settings.paste_sequence.clone(),
             paste_next_enabled: settings.paste_sequence.next_hotkey.is_some(),
             paste_cancel_enabled: settings.paste_sequence.cancel_hotkey.is_some(),
@@ -416,6 +418,9 @@ impl SettingsEditor {
             // MkMacro view preferences are independent of this editor's
             // draft and may have changed while the dialog was open.
             mkmacro_properties: current.mkmacro_properties.clone(),
+            // Utility sizes are independent of this editor draft and can be
+            // updated while the Settings window is open.
+            utility_dialog_sizes: current.utility_dialog_sizes.clone(),
             table_utility_resources: current.table_utility_resources,
             radial_submenu_migration: current.radial_submenu_migration.clone(),
         })
@@ -429,6 +434,32 @@ mod tests {
     use crate::plugins::note::NotePluginSettings;
     use crate::plugins::screenshot::ScreenshotPluginSettings;
     use crate::settings::Settings;
+
+    #[test]
+    fn utility_dialog_size_selection_is_session_only_and_save_preserves_latest_sizes() {
+        use crate::settings::utility_dialog_sizes::{PreferredWindowSize, UtilityToolKey};
+
+        let key = UtilityToolKey::parse("diff").unwrap();
+        let size = PreferredWindowSize::new(700.0, 510.0).unwrap();
+        let mut stale_draft = Settings::default();
+        stale_draft.utility_dialog_sizes.set(key, size).unwrap();
+        let mut editor = SettingsEditor::from_settings(&stale_draft);
+        assert_eq!(
+            editor.utility_dialog_size_selected_tool,
+            UtilityToolKey::parse("action-sheet").ok()
+        );
+        editor.utility_dialog_size_selected_tool = Some(key);
+
+        let mut latest = stale_draft.clone();
+        latest.utility_dialog_sizes.reset(key).unwrap();
+        let saved = editor.to_settings(&latest).unwrap();
+        assert_eq!(saved.utility_dialog_sizes, latest.utility_dialog_sizes);
+        assert_eq!(
+            saved.utility_dialog_sizes.preference(key),
+            crate::settings::UtilitySizePreference::Reset,
+            "a stale editor draft cannot restore its older preferred size"
+        );
+    }
 
     #[test]
     fn discard_confirmation_round_trips_both_values() {

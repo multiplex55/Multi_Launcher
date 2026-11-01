@@ -405,15 +405,29 @@ pub fn ui(
     let mut reload_requested = false;
     let mut draft_changed = false;
     let settings_path = app.settings_path.clone();
-    egui::Window::new("Theme settings")
-        .open(&mut keep_open)
+    let key = crate::settings::UtilityToolKey::parse("theme-settings")
+        .expect("theme-settings is a stable utility size key");
+    let window_id = egui::Id::new("Theme settings");
+    let size_access = crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
+    let default_outer_size = egui::vec2(
+        980.0,
+        theme_window_initial_height(ctx.content_rect().height()),
+    );
+    let window = egui::Window::new("Theme settings")
+        .id(window_id)
         .resizable(true)
         .max_width(ctx.content_rect().width())
         .max_height(ctx.content_rect().height())
-        .vscroll(false)
-        .default_width(980.0)
-        .default_height(theme_window_initial_height(ctx.content_rect().height()))
-        .show(ctx, |ui| {
+        .vscroll(false);
+    let _response = size_access.show_window(
+        ctx,
+        key,
+        window_id,
+        &mut keep_open,
+        default_outer_size,
+        egui::Vec2::splat(64.0),
+        window,
+        |ui| {
             #[cfg(test)]
             {
                 let pass_state = (ui.is_sizing_pass(), ui.is_visible(), ui.is_enabled());
@@ -549,7 +563,8 @@ pub fn ui(
                     }
                 }
             }
-        });
+        },
+    );
 
     *open = keep_open && *open;
     if reload_requested {

@@ -83,6 +83,7 @@ use crate::plugins::wikipedia::WikipediaPlugin;
 use crate::plugins::windows::WindowsPlugin;
 use crate::plugins::xml_toolkit::XmlToolkitPlugin;
 use crate::plugins::youtube::YoutubePlugin;
+use crate::plugins::zip_extractor::ZipExtractorPlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
 use crate::window_catalog::WindowCatalog;
@@ -956,6 +957,7 @@ impl PluginManager {
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
+        self.register_with_settings(ZipExtractorPlugin, plugin_settings);
         self.register_with_settings(ImageComparePlugin, plugin_settings);
         self.register_with_settings(DuplicateFinderPlugin, plugin_settings);
         self.register_with_settings(ActivityPlugin, plugin_settings);
@@ -1731,6 +1733,49 @@ mod tests {
                 .search_filtered("regex", Some(&enabled), Some(&no_search_caps))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn zip_extractor_builtin_registration_and_filtered_routing() {
+        let mut workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let profile = workspace.root().join("zip-extractor-plugin");
+        std::fs::create_dir_all(&profile).expect("create task-owned ZIP plugin profile");
+        workspace
+            .scope_to_profile(&profile)
+            .expect("scope real built-in reload to isolated ZIP profile");
+        let mut manager = PluginManager::new_inert_for_test_at(&profile);
+        manager.reload_from_dirs(
+            &[],
+            10,
+            NetUnit::Auto,
+            false,
+            &HashMap::new(),
+            Arc::new(Vec::new()),
+        );
+        assert!(
+            manager
+                .plugin_names()
+                .iter()
+                .any(|name| name == "zip_extractor")
+        );
+        let enabled = HashSet::from(["zip_extractor".to_owned()]);
+        let search_caps = HashMap::from([("zip_extractor".to_owned(), vec!["search".to_owned()])]);
+        let actions = manager.search_filtered(" ZIP ", Some(&enabled), Some(&search_caps));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "zip:open");
+        assert!(actions[0].args.is_none());
+        for query in ["zip archive.zip", "zip:open", "zipper"] {
+            assert!(
+                manager
+                    .search_filtered(query, Some(&enabled), Some(&search_caps))
+                    .is_empty(),
+                "{query:?} must not become an action payload"
+            );
+        }
+        drop(manager);
+        workspace
+            .finish()
+            .expect("restore current directory and remove ZIP plugin profile");
     }
 
     #[test]

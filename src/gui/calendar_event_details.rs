@@ -3,6 +3,7 @@ use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{
     ButtonEmphasis, compact_section_heading, secondary_help, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::calendar::{
     CALENDAR_DATA, CALENDAR_EVENTS_FILE, CalendarEvent, EventInstance, RecurrenceEnd,
     RecurrenceRule, new_event_id, snooze_event, update_events,
@@ -107,152 +108,168 @@ impl CalendarEventDetails {
         let mut open = app.calendar_details_open;
         let mut close_requested = false;
         egui::Window::new("Event Details")
-            .open(&mut open)
             .resizable(true)
             .default_size((360.0, 220.0))
             .max_size(ctx.content_rect().size())
-            .show(ctx, |ui| {
-                let body_height = ui.available_height().max(0.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("calendar_event_details_body")
-                    .auto_shrink([false, false])
-                    .min_scrolled_height(0.0)
-                    .max_height(body_height)
-                    .show(ui, |ui| {
-                        ui.set_max_width(ui.available_width().max(0.0));
-                        compact_section_heading(ui, "Event", None);
-                        ui.add(egui::Label::new(egui::RichText::new(&title).heading()).wrap());
-                        secondary_help(ui, &time_label);
-                        ui.add(egui::Label::new(format!("Tags: {tags}")).wrap());
+            .show_utility(
+                ctx,
+                "calendar-event-details",
+                egui::Id::new("Event Details"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((360.0, 220.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_maximum(ctx.content_rect().size()),
+                |ui| {
+                    let body_height = ui.available_height().max(0.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("calendar_event_details_body")
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(0.0)
+                        .max_height(body_height)
+                        .show(ui, |ui| {
+                            ui.set_max_width(ui.available_width().max(0.0));
+                            compact_section_heading(ui, "Event", None);
+                            ui.add(egui::Label::new(egui::RichText::new(&title).heading()).wrap());
+                            secondary_help(ui, &time_label);
+                            ui.add(egui::Label::new(format!("Tags: {tags}")).wrap());
 
-                        if let Some(notes) = &event.notes {
-                            compact_section_heading(ui, "Notes", None);
-                            egui::ScrollArea::vertical()
-                                .max_height(120.0)
-                                .show(ui, |ui| {
-                                    ui.add(egui::Label::new(notes).wrap());
-                                });
-                        }
-
-                        ui.separator();
-                        compact_section_heading(ui, "Actions", None);
-                        ui.horizontal_wrapped(|ui| {
-                            let edit = ui.button("Edit");
-                            let edit = with_button_emphasis(ui, edit, ButtonEmphasis::Primary);
-                            if edit.clicked() {
-                                let split_scope =
-                                    match (event.recurrence.is_some(), self.edit_scope) {
-                                        (true, RecurrenceScope::This) => {
-                                            Some((RecurrenceScope::This, start))
-                                        }
-                                        (true, RecurrenceScope::ThisAndFollowing) => {
-                                            Some((RecurrenceScope::ThisAndFollowing, start))
-                                        }
-                                        _ => None,
-                                    };
-                                app.open_calendar_editor(Some(event.clone()), split_scope);
-                                close_requested = true;
+                            if let Some(notes) = &event.notes {
+                                compact_section_heading(ui, "Notes", None);
+                                egui::ScrollArea::vertical()
+                                    .max_height(120.0)
+                                    .show(ui, |ui| {
+                                        ui.add(egui::Label::new(notes).wrap());
+                                    });
                             }
-                            if ui.button("Duplicate").clicked() {
-                                if let Err(err) = duplicate_event(&event.id, start) {
-                                    app.report_error(
-                                        "ui operation",
-                                        format!("Failed to duplicate event: {err}"),
-                                    );
-                                } else {
-                                    app.dashboard_data_cache
-                                        .request_refresh(DashboardRefreshRequest::Calendar);
-                                }
-                            }
-                        });
 
-                        if event.recurrence.is_some() {
+                            ui.separator();
+                            compact_section_heading(ui, "Actions", None);
                             ui.horizontal_wrapped(|ui| {
-                                ui.label("Edit scope");
-                                egui::ComboBox::from_id_salt("calendar_edit_scope")
-                                    .selected_text(self.edit_scope.label())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.edit_scope,
-                                            RecurrenceScope::This,
-                                            RecurrenceScope::This.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.edit_scope,
-                                            RecurrenceScope::ThisAndFollowing,
-                                            RecurrenceScope::ThisAndFollowing.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.edit_scope,
-                                            RecurrenceScope::All,
-                                            RecurrenceScope::All.label(),
-                                        );
-                                    });
-                            });
-                        }
-
-                        ui.horizontal_wrapped(|ui| {
-                            let delete = ui.button("Delete");
-                            let delete =
-                                with_button_emphasis(ui, delete, ButtonEmphasis::Destructive);
-                            if delete.clicked() {
-                                if let Err(err) =
-                                    delete_event_with_scope(&event, start, self.delete_scope)
-                                {
-                                    app.report_error(
-                                        "ui operation",
-                                        format!("Failed to delete event: {err}"),
-                                    );
-                                } else {
-                                    app.dashboard_data_cache
-                                        .request_refresh(DashboardRefreshRequest::Calendar);
+                                let edit = ui.button("Edit");
+                                let edit = with_button_emphasis(ui, edit, ButtonEmphasis::Primary);
+                                if edit.clicked() {
+                                    let split_scope =
+                                        match (event.recurrence.is_some(), self.edit_scope) {
+                                            (true, RecurrenceScope::This) => {
+                                                Some((RecurrenceScope::This, start))
+                                            }
+                                            (true, RecurrenceScope::ThisAndFollowing) => {
+                                                Some((RecurrenceScope::ThisAndFollowing, start))
+                                            }
+                                            _ => None,
+                                        };
+                                    app.open_calendar_editor(Some(event.clone()), split_scope);
                                     close_requested = true;
-                                    app.calendar_selected_event = None;
                                 }
-                            }
-                            if event.recurrence.is_some() {
-                                ui.label("Delete scope");
-                                egui::ComboBox::from_id_salt("calendar_delete_scope")
-                                    .selected_text(self.delete_scope.label())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.delete_scope,
-                                            RecurrenceScope::This,
-                                            RecurrenceScope::This.label(),
+                                if ui.button("Duplicate").clicked() {
+                                    if let Err(err) = duplicate_event(&event.id, start) {
+                                        app.report_error(
+                                            "ui operation",
+                                            format!("Failed to duplicate event: {err}"),
                                         );
-                                        ui.selectable_value(
-                                            &mut self.delete_scope,
-                                            RecurrenceScope::ThisAndFollowing,
-                                            RecurrenceScope::ThisAndFollowing.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.delete_scope,
-                                            RecurrenceScope::All,
-                                            RecurrenceScope::All.label(),
-                                        );
-                                    });
-                            }
-                        });
+                                    } else {
+                                        app.dashboard_data_cache
+                                            .request_refresh(DashboardRefreshRequest::Calendar);
+                                    }
+                                }
+                            });
 
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Snooze (minutes)");
-                            ui.add(egui::DragValue::new(&mut self.snooze_minutes).range(1..=1440));
-                            if ui.button("Snooze").clicked() {
-                                if let Err(err) =
-                                    snooze_event(&event.id, Duration::minutes(self.snooze_minutes))
-                                {
-                                    app.report_error(
-                                        "ui operation",
-                                        format!("Failed to snooze event: {err}"),
-                                    );
-                                } else {
-                                    app.dashboard_data_cache
-                                        .request_refresh(DashboardRefreshRequest::Calendar);
-                                }
+                            if event.recurrence.is_some() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Edit scope");
+                                    egui::ComboBox::from_id_salt("calendar_edit_scope")
+                                        .selected_text(self.edit_scope.label())
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.edit_scope,
+                                                RecurrenceScope::This,
+                                                RecurrenceScope::This.label(),
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.edit_scope,
+                                                RecurrenceScope::ThisAndFollowing,
+                                                RecurrenceScope::ThisAndFollowing.label(),
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.edit_scope,
+                                                RecurrenceScope::All,
+                                                RecurrenceScope::All.label(),
+                                            );
+                                        });
+                                });
                             }
+
+                            ui.horizontal_wrapped(|ui| {
+                                let delete = ui.button("Delete");
+                                let delete =
+                                    with_button_emphasis(ui, delete, ButtonEmphasis::Destructive);
+                                if delete.clicked() {
+                                    if let Err(err) =
+                                        delete_event_with_scope(&event, start, self.delete_scope)
+                                    {
+                                        app.report_error(
+                                            "ui operation",
+                                            format!("Failed to delete event: {err}"),
+                                        );
+                                    } else {
+                                        app.dashboard_data_cache
+                                            .request_refresh(DashboardRefreshRequest::Calendar);
+                                        close_requested = true;
+                                        app.calendar_selected_event = None;
+                                    }
+                                }
+                                if event.recurrence.is_some() {
+                                    ui.label("Delete scope");
+                                    egui::ComboBox::from_id_salt("calendar_delete_scope")
+                                        .selected_text(self.delete_scope.label())
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.delete_scope,
+                                                RecurrenceScope::This,
+                                                RecurrenceScope::This.label(),
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.delete_scope,
+                                                RecurrenceScope::ThisAndFollowing,
+                                                RecurrenceScope::ThisAndFollowing.label(),
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.delete_scope,
+                                                RecurrenceScope::All,
+                                                RecurrenceScope::All.label(),
+                                            );
+                                        });
+                                }
+                            });
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Snooze (minutes)");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.snooze_minutes).range(1..=1440),
+                                );
+                                if ui.button("Snooze").clicked() {
+                                    if let Err(err) = snooze_event(
+                                        &event.id,
+                                        Duration::minutes(self.snooze_minutes),
+                                    ) {
+                                        app.report_error(
+                                            "ui operation",
+                                            format!("Failed to snooze event: {err}"),
+                                        );
+                                    } else {
+                                        app.dashboard_data_cache
+                                            .request_refresh(DashboardRefreshRequest::Calendar);
+                                    }
+                                }
+                            });
                         });
-                    });
-            });
+                },
+            );
         app.calendar_details_open = open && !close_requested;
     }
 }

@@ -5,6 +5,7 @@ use crate::gui::LauncherApp;
 use crate::gui::jump_mode::TargetGeneration;
 use crate::gui::theme::widgets::{ButtonEmphasis, compact_section_heading, with_button_emphasis};
 use crate::gui::theme::{TextRole, text_style_for_role};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 #[cfg(test)]
 use crate::plugins::clipboard::save_history;
 use crate::plugins::clipboard::{
@@ -478,20 +479,33 @@ impl ClipboardDialog {
         let scope = native_ui_owner.then_some(scope).flatten();
         let generation_before_ui = self.target_generation;
         egui::Window::new("Clipboard History")
-            .open(&mut window_open)
             .resizable(true)
             .default_size((360.0, 240.0))
             .min_width(100.0)
             .min_height(100.0)
-            .show(ctx, |ui| {
-                let authorized_owner_pass =
-                    authorized_owner_pass && ui.is_visible() && !ui.is_sizing_pass();
-                effects = ui
-                    .add_enabled_ui(native_ui_owner, |ui| {
-                        self.contents_ui(ui, scope, authorized_owner_pass)
-                    })
-                    .inner;
-            });
+            .show_utility(
+                ctx,
+                "clipboard-history",
+                egui::Id::new("Clipboard History"),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((360.0, 240.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::vec2(100.0, 100.0)),
+                |ui| {
+                    let authorized_owner_pass =
+                        authorized_owner_pass && ui.is_visible() && !ui.is_sizing_pass();
+                    effects = ui
+                        .add_enabled_ui(native_ui_owner, |ui| {
+                            self.contents_ui(ui, scope, authorized_owner_pass)
+                        })
+                        .inner;
+                },
+            );
         if authorized_owner_pass {
             self.open = window_open || pinned;
         }

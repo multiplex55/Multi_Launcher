@@ -9,7 +9,12 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, secondary_help, semantic_status,
     with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::{
+    UtilityDialogSizeWindowExt as _, apply_native_utility_size_restore,
+    close_native_utility_size_window,
+};
 use crate::regex_tester::{EvaluationResult, MatchCompleteness, RegexSession};
+use crate::settings::UtilityToolKey;
 use eframe::egui;
 use std::sync::Arc;
 use std::time::Instant;
@@ -478,6 +483,7 @@ impl RegexTesterDialogState {
         jump_mode_enabled: bool,
     ) {
         if !self.open {
+            close_native_utility_size_window(ctx, UtilityToolKey::parse("regex-tester").unwrap());
             if self.observed_viewport.take().is_some() {
                 self.native_jump_mode.cancel_all();
             }
@@ -512,6 +518,7 @@ impl RegexTesterDialogState {
                 if independent {
                     let close = self.show_native_viewport(
                         child,
+                        class,
                         instance,
                         application_input_allowed,
                         jump_mode_enabled,
@@ -541,26 +548,46 @@ impl RegexTesterDialogState {
                     let mut open = self.open;
                     egui::Window::new("Regex Tester")
                         .id(egui::Id::new("regex_tester_embedded_window"))
-                        .open(&mut open)
                         .collapsible(false)
                         .resizable(true)
                         .default_size(available.min(egui::vec2(960.0, 680.0)))
                         .min_size(available.min(egui::vec2(360.0, 240.0)))
                         .max_size(available)
-                        .show(child, |ui| {
-                            ui.add_enabled_ui(root_native_owner_current, |ui| {
-                                self.body_in_viewport_scoped(
-                                    ui,
-                                    false,
-                                    process_case_actions
-                                        && application_input_allowed
-                                        && root_native_owner_current,
-                                    root_scope,
-                                    root_native_owner_current,
-                                )
-                            })
-                        });
+                        .show_utility(
+                            child,
+                            "regex-tester",
+                            egui::Id::new("regex_tester_embedded_window"),
+                            Some(&mut open),
+                            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                                    available.min(egui::vec2(960.0, 680.0)),
+                                ),
+                                egui::Vec2::ZERO,
+                                [None, None],
+                            )
+                            .with_minimum(available.min(egui::vec2(360.0, 240.0)))
+                            .with_maximum(available),
+                            |ui| {
+                                ui.add_enabled_ui(root_native_owner_current, |ui| {
+                                    self.body_in_viewport_scoped(
+                                        ui,
+                                        false,
+                                        process_case_actions
+                                            && application_input_allowed
+                                            && root_native_owner_current,
+                                        root_scope,
+                                        root_native_owner_current,
+                                    )
+                                })
+                            },
+                        );
                     self.open = open;
+                }
+                if !self.open {
+                    close_native_utility_size_window(
+                        child.ctx(),
+                        UtilityToolKey::parse("regex-tester").unwrap(),
+                    );
                 }
             },
         );
@@ -569,6 +596,7 @@ impl RegexTesterDialogState {
     fn show_native_viewport(
         &mut self,
         child: &mut egui::Ui,
+        class: egui::ViewportClass,
         instance: Option<u64>,
         application_input_allowed: bool,
         jump_mode_enabled: bool,
@@ -629,6 +657,14 @@ impl RegexTesterDialogState {
             self.native_jump_frame = None;
             return true;
         }
+        apply_native_utility_size_restore(
+            child,
+            class,
+            UtilityToolKey::parse("regex-tester").unwrap(),
+            egui::vec2(960.0, 680.0),
+            Some(egui::vec2(360.0, 240.0)),
+            None,
+        );
         self.native_jump_mode.begin_ui_pass();
         let scope = binding.filter(|_| jump_owner_current).and_then(|binding| {
             let NavigationOwner::Dialog { instance, .. } = binding.owner else {

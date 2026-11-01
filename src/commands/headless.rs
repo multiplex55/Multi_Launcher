@@ -422,6 +422,9 @@ fn execute_with_external(
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
+        Command::ZipExtractor(_) => {
+            anyhow::bail!("ZIP extraction requires the launcher interface")
+        }
         Command::HashGenerator(_) => {
             anyhow::bail!("Hash Generator commands require the launcher interface")
         }
@@ -821,8 +824,8 @@ fn execute_timer(command: TimerCommand, original: &Action) -> anyhow::Result<()>
         TimerCommand::Cancel(id) => timer::cancel_checked(id),
         TimerCommand::Pause(id) => timer::pause_checked(id),
         TimerCommand::Resume(id) => timer::resume_checked(id),
-        TimerCommand::Start { duration, name } => effect(|| timer::start(&duration, &name)),
-        TimerCommand::AlarmSet { time, name } => effect(|| timer::set_alarm(&time, &name)),
+        TimerCommand::Start { duration, name } => timer::start(&duration, &name),
+        TimerCommand::AlarmSet { time, name } => timer::set_alarm(&time, &name),
         TimerCommand::StopwatchPause(id) => stopwatch::pause_checked(id),
         TimerCommand::StopwatchResume(id) => stopwatch::resume_checked(id),
         TimerCommand::StopwatchStop(id) => stopwatch::stop_checked(id),
@@ -1136,6 +1139,22 @@ mod tests {
     }
 
     #[test]
+    fn invalid_timer_start_and_alarm_commands_preserve_checked_errors() {
+        for command in [
+            TimerCommand::Start {
+                duration: "0s".into(),
+                name: "zero".into(),
+            },
+            TimerCommand::AlarmSet {
+                time: "2025-02-30 12:00".into(),
+                name: "invalid date".into(),
+            },
+        ] {
+            assert!(execute_timer(command, &action("unused")).is_err());
+        }
+    }
+
+    #[test]
     fn external_and_gui_fallbacks_forward_the_expected_arguments() {
         let mut original = action("query:notes");
         original.args = Some("original args".into());
@@ -1376,5 +1395,36 @@ mod qr_headless_tests {
                 .contains("requires the launcher interface")
         );
         assert!(!error.to_string().contains("secret"));
+    }
+}
+
+#[cfg(test)]
+mod zip_extractor_headless_tests {
+    use super::*;
+
+    #[test]
+    fn zip_command_refuses_headless_without_external_launch() {
+        let original = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "zip:open".into(),
+            args: None,
+        };
+        let mut calls = 0;
+        let error = execute_with_external(
+            Command::ZipExtractor(crate::commands::ZipExtractorCommand::Open),
+            &original,
+            &mut |_, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .expect_err("ZIP extraction requires the launcher interface");
+        assert_eq!(calls, 0);
+        assert!(
+            error
+                .to_string()
+                .contains("requires the launcher interface")
+        );
     }
 }

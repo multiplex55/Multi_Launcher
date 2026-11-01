@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{ButtonEmphasis, secondary_help, with_button_emphasis};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::tempfile::set_alias;
 use eframe::egui;
 use std::path::Path;
@@ -46,8 +47,8 @@ impl TempfileAliasDialog {
         #[cfg(test)]
         let mut test_layout = None;
         let window_output = egui::Window::new("Set Tempfile Alias")
-            .open(&mut self.open)
-            .show(ctx, |ui| {
+
+            .show_utility(ctx, "tempfile-alias", egui::Id::new("Set Tempfile Alias"), Some(&mut self.open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(), egui::Vec2::ZERO, [None, None]), |ui| {
                 ui.label("File path");
                 #[cfg(test)]
                 let target_parent_clip_rect = ui.clip_rect();

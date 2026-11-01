@@ -8,6 +8,7 @@ use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
     semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mouse_gestures::db::{
     BindingEntry, BindingKind, GESTURES_FILE, GestureDb, GestureEntry, format_gesture_label,
     load_gestures,
@@ -1325,139 +1326,151 @@ impl MgGesturesDialog {
         egui::Window::new(format!("Bind Action: {gesture_label}"))
             .id(window_id.id)
             .collapsible(false)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                let mut save_entry: Option<BindingEntry> = None;
-                ui.add_enabled_ui(native_ui_owner, |ui| {
-                    let editor = &mut self.binding_dialog.editor;
-                    let prior_kind = editor.kind;
-                    compact_section_heading(ui, "Binding details", None);
-                    let response = labeled_form_row(ui, "Label", |ui| {
-                        ui.text_edit_singleline(&mut editor.label)
-                    });
-                    let _ = register_mouse_gesture_target(
-                        scope,
-                        ui,
-                        &response,
-                        "binding/label",
-                        "Binding label",
-                        TargetKind::TextEntry,
-                        visual_order,
-                    );
-                    if editor.focus_label && native_ui_owner {
-                        response.request_focus();
-                        if authorized_owner_pass {
-                            editor.focus_label = false;
+            .show_utility(
+                ctx,
+                "gesture-binding-editor",
+                window_id.id,
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                ),
+                |ui| {
+                    let mut save_entry: Option<BindingEntry> = None;
+                    ui.add_enabled_ui(native_ui_owner, |ui| {
+                        let editor = &mut self.binding_dialog.editor;
+                        let prior_kind = editor.kind;
+                        compact_section_heading(ui, "Binding details", None);
+                        let response = labeled_form_row(ui, "Label", |ui| {
+                            ui.text_edit_singleline(&mut editor.label)
+                        });
+                        let _ = register_mouse_gesture_target(
+                            scope,
+                            ui,
+                            &response,
+                            "binding/label",
+                            "Binding label",
+                            TargetKind::TextEntry,
+                            visual_order,
+                        );
+                        if editor.focus_label && native_ui_owner {
+                            response.request_focus();
+                            if authorized_owner_pass {
+                                editor.focus_label = false;
+                            }
                         }
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Type");
-                        for (kind, local_id, label) in [
-                            (BindingKind::Execute, "execute", "Execute"),
-                            (BindingKind::SetQuery, "query", "Set query"),
-                            (
-                                BindingKind::SetQueryAndShow,
-                                "query-show",
-                                "Set query + show",
-                            ),
-                            (
-                                BindingKind::SetQueryAndExecute,
-                                "query-execute",
-                                "Set query + execute",
-                            ),
-                            (BindingKind::ToggleLauncher, "toggle", "Toggle launcher"),
-                        ] {
-                            let response = ui.radio_value(&mut editor.kind, kind, label);
-                            let _ = register_mouse_gesture_target(
-                                scope,
-                                ui,
-                                &response,
-                                format!("binding/type/{local_id}"),
-                                "Binding type",
-                                TargetKind::Selectable,
-                                visual_order,
-                            );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Type");
+                            for (kind, local_id, label) in [
+                                (BindingKind::Execute, "execute", "Execute"),
+                                (BindingKind::SetQuery, "query", "Set query"),
+                                (
+                                    BindingKind::SetQueryAndShow,
+                                    "query-show",
+                                    "Set query + show",
+                                ),
+                                (
+                                    BindingKind::SetQueryAndExecute,
+                                    "query-execute",
+                                    "Set query + execute",
+                                ),
+                                (BindingKind::ToggleLauncher, "toggle", "Toggle launcher"),
+                            ] {
+                                let response = ui.radio_value(&mut editor.kind, kind, label);
+                                let _ = register_mouse_gesture_target(
+                                    scope,
+                                    ui,
+                                    &response,
+                                    format!("binding/type/{local_id}"),
+                                    "Binding type",
+                                    TargetKind::Selectable,
+                                    visual_order,
+                                );
+                            }
+                        });
+                        if editor.kind != prior_kind && authorized_owner_pass {
+                            self.binding_dialog.picker_revision =
+                                self.binding_dialog.picker_revision.wrapping_add(1).max(1);
                         }
-                    });
-                    if editor.kind != prior_kind && authorized_owner_pass {
-                        self.binding_dialog.picker_revision =
-                            self.binding_dialog.picker_revision.wrapping_add(1).max(1);
-                    }
-                    match editor.kind {
-                        BindingKind::Execute => {
-                            let response = labeled_form_row(ui, "Action", |ui| {
-                                ui.text_edit_singleline(&mut editor.action)
-                            });
-                            let _ = register_mouse_gesture_target(
-                                scope,
-                                ui,
-                                &response,
-                                "binding/action",
-                                "Action identifier",
-                                TargetKind::TextEntry,
-                                visual_order,
-                            );
-                            let response = labeled_form_row(ui, "Args", |ui| {
-                                ui.text_edit_singleline(&mut editor.args)
-                            });
-                            let _ = register_mouse_gesture_target(
-                                scope,
-                                ui,
-                                &response,
-                                "binding/args",
-                                "Action arguments",
-                                TargetKind::TextEntry,
-                                visual_order,
-                            );
+                        match editor.kind {
+                            BindingKind::Execute => {
+                                let response = labeled_form_row(ui, "Action", |ui| {
+                                    ui.text_edit_singleline(&mut editor.action)
+                                });
+                                let _ = register_mouse_gesture_target(
+                                    scope,
+                                    ui,
+                                    &response,
+                                    "binding/action",
+                                    "Action identifier",
+                                    TargetKind::TextEntry,
+                                    visual_order,
+                                );
+                                let response = labeled_form_row(ui, "Args", |ui| {
+                                    ui.text_edit_singleline(&mut editor.args)
+                                });
+                                let _ = register_mouse_gesture_target(
+                                    scope,
+                                    ui,
+                                    &response,
+                                    "binding/args",
+                                    "Action arguments",
+                                    TargetKind::TextEntry,
+                                    visual_order,
+                                );
+                            }
+                            BindingKind::SetQuery
+                            | BindingKind::SetQueryAndShow
+                            | BindingKind::SetQueryAndExecute => {
+                                let response = labeled_form_row(ui, "Query", |ui| {
+                                    ui.text_edit_singleline(&mut editor.action)
+                                });
+                                let _ = register_mouse_gesture_target(
+                                    scope,
+                                    ui,
+                                    &response,
+                                    "binding/query",
+                                    "Search query",
+                                    TargetKind::TextEntry,
+                                    visual_order,
+                                );
+                            }
+                            BindingKind::ToggleLauncher => {
+                                ui.label("No action details required for toggling the launcher.");
+                            }
                         }
-                        BindingKind::SetQuery
-                        | BindingKind::SetQueryAndShow
-                        | BindingKind::SetQueryAndExecute => {
-                            let response = labeled_form_row(ui, "Query", |ui| {
-                                ui.text_edit_singleline(&mut editor.action)
-                            });
-                            let _ = register_mouse_gesture_target(
-                                scope,
-                                ui,
-                                &response,
-                                "binding/query",
-                                "Search query",
-                                TargetKind::TextEntry,
-                                visual_order,
-                            );
-                        }
-                        BindingKind::ToggleLauncher => {
-                            ui.label("No action details required for toggling the launcher.");
-                        }
-                    }
-                    let enabled = ui.checkbox(&mut editor.enabled, "Enabled");
-                    let _ = register_mouse_gesture_target(
-                        scope,
-                        ui,
-                        &enabled,
-                        "binding/enabled",
-                        "Binding enabled",
-                        TargetKind::Checkbox,
-                        visual_order,
-                    );
-                    ui.separator();
-                    if editor.kind != BindingKind::ToggleLauncher {
-                        let picker_label = if editor.kind == BindingKind::Execute {
-                            "Pick an action"
-                        } else {
-                            "Pick a query"
-                        };
-                        compact_section_heading(ui, picker_label, None);
-                        let prior_plugin = editor.add_plugin.clone();
-                        let category_identity = "binding/category";
-                        let category_popup_scope =
-                            scope.map(|scope| scope.combo_popup_scope(category_identity));
-                        let category = labeled_form_row(ui, "Category", |ui| {
-                            let mut plugin_names: Vec<_> =
-                                app.plugins.iter().map(|p| p.name().to_string()).collect();
-                            plugin_names.push("app".to_string());
-                            plugin_names.sort_unstable();
-                            egui::ComboBox::from_id_salt(("mg_binding_category", binding_instance))
+                        let enabled = ui.checkbox(&mut editor.enabled, "Enabled");
+                        let _ = register_mouse_gesture_target(
+                            scope,
+                            ui,
+                            &enabled,
+                            "binding/enabled",
+                            "Binding enabled",
+                            TargetKind::Checkbox,
+                            visual_order,
+                        );
+                        ui.separator();
+                        if editor.kind != BindingKind::ToggleLauncher {
+                            let picker_label = if editor.kind == BindingKind::Execute {
+                                "Pick an action"
+                            } else {
+                                "Pick a query"
+                            };
+                            compact_section_heading(ui, picker_label, None);
+                            let prior_plugin = editor.add_plugin.clone();
+                            let category_identity = "binding/category";
+                            let category_popup_scope =
+                                scope.map(|scope| scope.combo_popup_scope(category_identity));
+                            let category = labeled_form_row(ui, "Category", |ui| {
+                                let mut plugin_names: Vec<_> =
+                                    app.plugins.iter().map(|p| p.name().to_string()).collect();
+                                plugin_names.push("app".to_string());
+                                plugin_names.sort_unstable();
+                                egui::ComboBox::from_id_salt((
+                                    "mg_binding_category",
+                                    binding_instance,
+                                ))
                                 .selected_text(if editor.add_plugin.is_empty() {
                                     "Select".to_string()
                                 } else {
@@ -1493,195 +1506,197 @@ impl MgGesturesDialog {
                                     }
                                 })
                                 .response
-                        });
-                        combo_popup_ids.push(egui::Popup::default_response_id(&category));
-                        let _ = register_mouse_gesture_target(
-                            scope,
-                            ui,
-                            &category,
-                            category_identity,
-                            "Action category",
-                            TargetKind::ComboBox,
-                            visual_order,
-                        );
-                        if editor.add_plugin != prior_plugin && authorized_owner_pass {
-                            self.binding_dialog.picker_revision =
-                                self.binding_dialog.picker_revision.wrapping_add(1).max(1);
-                        }
-                        let filter = labeled_form_row(ui, "Filter", |ui| {
-                            ui.text_edit_singleline(&mut editor.add_filter)
-                        });
-                        let _ = register_mouse_gesture_target(
-                            scope,
-                            ui,
-                            &filter,
-                            "binding/filter",
-                            "Action filter",
-                            TargetKind::TextEntry,
-                            visual_order,
-                        );
-                        if filter.changed() && authorized_owner_pass {
-                            self.binding_dialog.picker_revision =
-                                self.binding_dialog.picker_revision.wrapping_add(1).max(1);
-                        }
-                        let add_args = labeled_form_row(ui, "Args", |ui| {
-                            ui.text_edit_singleline(&mut editor.add_args)
-                        });
-                        let _ = register_mouse_gesture_target(
-                            scope,
-                            ui,
-                            &add_args,
-                            "binding/add-args",
-                            "Additional arguments",
-                            TargetKind::TextEntry,
-                            visual_order,
-                        );
-                        let picker_scope = scope.map(|scope| {
-                            scope.child_namespace(format!(
-                                "binding/picker/{}",
-                                self.binding_dialog.picker_revision
-                            ))
-                        });
-                        let filter_text = editor.add_filter.trim().to_lowercase();
-                        let mut actions = if editor.add_plugin == "app" {
-                            app.actions.as_ref().clone()
-                        } else {
-                            app.plugins
-                                .iter()
-                                .find(|p| p.name() == editor.add_plugin)
-                                .map(|plugin| {
-                                    resolve_action_source(plugin.as_ref(), &editor.add_filter)
-                                })
-                                .unwrap_or_default()
-                        };
-                        egui::ScrollArea::vertical()
-                            .id_salt(("mg_binding_action_list", binding_instance))
-                            .max_height(160.0)
-                            .show(ui, |ui| {
-                                for (index, action) in actions.drain(..).enumerate() {
-                                    if !filter_text.is_empty()
-                                        && !action.label.to_lowercase().contains(&filter_text)
-                                        && !action.desc.to_lowercase().contains(&filter_text)
-                                        && !action.action.to_lowercase().contains(&filter_text)
-                                    {
-                                        continue;
-                                    }
-                                    let choice_identity = action_choice_identity(&action, index);
-                                    let mut clicked = false;
-                                    let button = ui.push_id(
-                                        (
-                                            "mg_binding_choice",
-                                            binding_instance,
-                                            self.binding_dialog.picker_revision,
-                                            choice_identity,
-                                        ),
-                                        |ui| {
-                                            let button = ui.add_sized(
-                                                [ui.available_width(), 0.0],
-                                                egui::Button::new(format!(
-                                                    "{} - {}",
-                                                    action.label, action.desc
-                                                ))
-                                                .wrap(),
-                                            );
-                                            clicked = button.clicked();
-                                            button
-                                        },
-                                    );
-                                    let _ = register_mouse_gesture_target(
-                                        picker_scope.as_ref(),
-                                        ui,
-                                        &button.inner,
-                                        format!("option/{choice_identity}"),
-                                        "Action option",
-                                        TargetKind::Button,
-                                        visual_order,
-                                    );
-                                    if clicked && authorized_owner_pass {
-                                        let additional_args = editor.add_args.clone();
-                                        apply_action_pick(editor, &action, &additional_args);
-                                    }
-                                }
                             });
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        let save_button = ui.button("Save");
-                        let save_button =
-                            with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
-                        let _ = register_mouse_gesture_target(
-                            scope,
-                            ui,
-                            &save_button,
-                            "binding/save",
-                            "Save binding",
-                            TargetKind::Button,
-                            visual_order,
-                        );
-                        if save_button.clicked() && authorized_owner_pass {
-                            let action_required = matches!(
-                                editor.kind,
-                                BindingKind::Execute
-                                    | BindingKind::SetQuery
-                                    | BindingKind::SetQueryAndShow
-                                    | BindingKind::SetQueryAndExecute
+                            combo_popup_ids.push(egui::Popup::default_response_id(&category));
+                            let _ = register_mouse_gesture_target(
+                                scope,
+                                ui,
+                                &category,
+                                category_identity,
+                                "Action category",
+                                TargetKind::ComboBox,
+                                visual_order,
                             );
-                            if editor.label.trim().is_empty()
-                                || (action_required && editor.action.trim().is_empty())
-                            {
-                                app.report_error_message(
-                                    "ui operation",
-                                    "Label and action required",
-                                );
+                            if editor.add_plugin != prior_plugin && authorized_owner_pass {
+                                self.binding_dialog.picker_revision =
+                                    self.binding_dialog.picker_revision.wrapping_add(1).max(1);
+                            }
+                            let filter = labeled_form_row(ui, "Filter", |ui| {
+                                ui.text_edit_singleline(&mut editor.add_filter)
+                            });
+                            let _ = register_mouse_gesture_target(
+                                scope,
+                                ui,
+                                &filter,
+                                "binding/filter",
+                                "Action filter",
+                                TargetKind::TextEntry,
+                                visual_order,
+                            );
+                            if filter.changed() && authorized_owner_pass {
+                                self.binding_dialog.picker_revision =
+                                    self.binding_dialog.picker_revision.wrapping_add(1).max(1);
+                            }
+                            let add_args = labeled_form_row(ui, "Args", |ui| {
+                                ui.text_edit_singleline(&mut editor.add_args)
+                            });
+                            let _ = register_mouse_gesture_target(
+                                scope,
+                                ui,
+                                &add_args,
+                                "binding/add-args",
+                                "Additional arguments",
+                                TargetKind::TextEntry,
+                                visual_order,
+                            );
+                            let picker_scope = scope.map(|scope| {
+                                scope.child_namespace(format!(
+                                    "binding/picker/{}",
+                                    self.binding_dialog.picker_revision
+                                ))
+                            });
+                            let filter_text = editor.add_filter.trim().to_lowercase();
+                            let mut actions = if editor.add_plugin == "app" {
+                                app.actions.as_ref().clone()
                             } else {
-                                let action = if editor.kind == BindingKind::ToggleLauncher {
-                                    String::new()
-                                } else {
-                                    editor.action.trim().to_string()
-                                };
-                                let args = if editor.kind == BindingKind::Execute
-                                    && !editor.args.trim().is_empty()
-                                {
-                                    Some(editor.args.trim().to_string())
-                                } else {
-                                    None
-                                };
-                                save_entry = Some(BindingEntry {
-                                    label: editor.label.trim().to_string(),
-                                    kind: editor.kind,
-                                    action,
-                                    args,
-                                    enabled: editor.enabled,
+                                app.plugins
+                                    .iter()
+                                    .find(|p| p.name() == editor.add_plugin)
+                                    .map(|plugin| {
+                                        resolve_action_source(plugin.as_ref(), &editor.add_filter)
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            egui::ScrollArea::vertical()
+                                .id_salt(("mg_binding_action_list", binding_instance))
+                                .max_height(160.0)
+                                .show(ui, |ui| {
+                                    for (index, action) in actions.drain(..).enumerate() {
+                                        if !filter_text.is_empty()
+                                            && !action.label.to_lowercase().contains(&filter_text)
+                                            && !action.desc.to_lowercase().contains(&filter_text)
+                                            && !action.action.to_lowercase().contains(&filter_text)
+                                        {
+                                            continue;
+                                        }
+                                        let choice_identity =
+                                            action_choice_identity(&action, index);
+                                        let mut clicked = false;
+                                        let button = ui.push_id(
+                                            (
+                                                "mg_binding_choice",
+                                                binding_instance,
+                                                self.binding_dialog.picker_revision,
+                                                choice_identity,
+                                            ),
+                                            |ui| {
+                                                let button = ui.add_sized(
+                                                    [ui.available_width(), 0.0],
+                                                    egui::Button::new(format!(
+                                                        "{} - {}",
+                                                        action.label, action.desc
+                                                    ))
+                                                    .wrap(),
+                                                );
+                                                clicked = button.clicked();
+                                                button
+                                            },
+                                        );
+                                        let _ = register_mouse_gesture_target(
+                                            picker_scope.as_ref(),
+                                            ui,
+                                            &button.inner,
+                                            format!("option/{choice_identity}"),
+                                            "Action option",
+                                            TargetKind::Button,
+                                            visual_order,
+                                        );
+                                        if clicked && authorized_owner_pass {
+                                            let additional_args = editor.add_args.clone();
+                                            apply_action_pick(editor, &action, &additional_args);
+                                        }
+                                    }
                                 });
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            let save_button = ui.button("Save");
+                            let save_button =
+                                with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
+                            let _ = register_mouse_gesture_target(
+                                scope,
+                                ui,
+                                &save_button,
+                                "binding/save",
+                                "Save binding",
+                                TargetKind::Button,
+                                visual_order,
+                            );
+                            if save_button.clicked() && authorized_owner_pass {
+                                let action_required = matches!(
+                                    editor.kind,
+                                    BindingKind::Execute
+                                        | BindingKind::SetQuery
+                                        | BindingKind::SetQueryAndShow
+                                        | BindingKind::SetQueryAndExecute
+                                );
+                                if editor.label.trim().is_empty()
+                                    || (action_required && editor.action.trim().is_empty())
+                                {
+                                    app.report_error_message(
+                                        "ui operation",
+                                        "Label and action required",
+                                    );
+                                } else {
+                                    let action = if editor.kind == BindingKind::ToggleLauncher {
+                                        String::new()
+                                    } else {
+                                        editor.action.trim().to_string()
+                                    };
+                                    let args = if editor.kind == BindingKind::Execute
+                                        && !editor.args.trim().is_empty()
+                                    {
+                                        Some(editor.args.trim().to_string())
+                                    } else {
+                                        None
+                                    };
+                                    save_entry = Some(BindingEntry {
+                                        label: editor.label.trim().to_string(),
+                                        kind: editor.kind,
+                                        action,
+                                        args,
+                                        enabled: editor.enabled,
+                                    });
+                                }
+                            }
+                            let cancel = ui.button("Cancel");
+                            let _ = register_mouse_gesture_target(
+                                scope,
+                                ui,
+                                &cancel,
+                                "binding/cancel",
+                                "Cancel binding",
+                                TargetKind::Button,
+                                visual_order,
+                            );
+                            if cancel.clicked() && authorized_owner_pass {
+                                close_requested = true;
+                            }
+                        });
+                    });
+                    if let Some(binding_entry) = save_entry {
+                        let bindings = &mut self.db.gestures[gesture_idx].bindings;
+                        if let Some(edit_idx) = self.binding_dialog.editor.edit_idx {
+                            if edit_idx >= bindings.len() {
+                                bindings.push(binding_entry);
+                            } else if let Some(binding) = bindings.get_mut(edit_idx) {
+                                *binding = binding_entry;
                             }
                         }
-                        let cancel = ui.button("Cancel");
-                        let _ = register_mouse_gesture_target(
-                            scope,
-                            ui,
-                            &cancel,
-                            "binding/cancel",
-                            "Cancel binding",
-                            TargetKind::Button,
-                            visual_order,
-                        );
-                        if cancel.clicked() && authorized_owner_pass {
-                            close_requested = true;
-                        }
-                    });
-                });
-                if let Some(binding_entry) = save_entry {
-                    let bindings = &mut self.db.gestures[gesture_idx].bindings;
-                    if let Some(edit_idx) = self.binding_dialog.editor.edit_idx {
-                        if edit_idx >= bindings.len() {
-                            bindings.push(binding_entry);
-                        } else if let Some(binding) = bindings.get_mut(edit_idx) {
-                            *binding = binding_entry;
-                        }
+                        *save_now = true;
+                        close_requested = true;
                     }
-                    *save_now = true;
-                    close_requested = true;
-                }
-            });
+                },
+            );
 
         self.binding_dialog.combo_popup_ids = combo_popup_ids;
         if authorized_owner_pass && (!open || close_requested) {
@@ -1746,9 +1761,22 @@ impl MgGesturesDialog {
             .min_size(egui::vec2(520.0, 320.0))
             .max_size(egui::vec2(980.0, 760.0))
             .resizable(true)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.add_enabled_ui(parent_native, |ui| {
+            .show_utility(
+                ctx,
+                "mouse-gestures",
+                egui::Id::new("Mouse Gestures"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
+                        720.0, 420.0,
+                    )),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::vec2(520.0, 320.0))
+                .with_maximum(egui::vec2(980.0, 760.0)),
+                |ui| {
+                    ui.add_enabled_ui(parent_native, |ui| {
                     if let Some(error) = self.load_error.clone() {
                         semantic_status(ui, StatusTone::Error, "Gesture file", Some(&error));
                         secondary_help(
@@ -2345,7 +2373,8 @@ impl MgGesturesDialog {
                         }
                     });
                 });
-            });
+                },
+            );
 
         self.main_combo_popup_ids = main_combo_popup_ids;
         if self.load_error.is_none() {

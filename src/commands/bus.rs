@@ -7,7 +7,7 @@ use crate::commands::handlers::{
     handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence, handle_pinboard,
     handle_query, handle_radial, handle_screen_draw, handle_screenshot, handle_search_replace,
     handle_simple_dialog, handle_snippet_run, handle_table_utility, handle_todo,
-    handle_xml_toolkit,
+    handle_xml_toolkit, handle_zip_extractor,
 };
 
 #[derive(Debug, Default)]
@@ -43,6 +43,9 @@ impl CommandBus {
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::JsonUtility(command) => Ok(handle_json_utility(host, command)),
+            Command::ZipExtractor(command) => {
+                handle_zip_extractor(host, *command, invocation.source)
+            }
             Command::XmlToolkit(command) => Ok(handle_xml_toolkit(host, *command)),
             Command::TableUtility(command) => Ok(handle_table_utility(host, *command)),
             Command::BatchRename(command) => Ok(handle_batch_rename(host, *command)),
@@ -160,6 +163,7 @@ mod tests {
         search_replace_opens: usize,
         hotfolder_commands: Vec<crate::commands::HotFolderCommand>,
         hash_generator_opens: usize,
+        zip_extractor_opens: usize,
         radial_calls: usize,
     }
 
@@ -197,6 +201,11 @@ mod tests {
     }
 
     impl DialogCommandHost for FakeHost {
+        fn open_zip_extractor_dialog(&mut self) -> Result<(), String> {
+            self.zip_extractor_opens += 1;
+            Ok(())
+        }
+
         fn open_qr_dialog(&mut self, initial_text: Option<&str>) {
             self.qr_calls.push(initial_text.map(str::to_owned));
         }
@@ -858,6 +867,34 @@ mod tests {
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn zip_extractor_dispatch_is_once_session_only_and_rejects_automation() {
+        let mut host = FakeHost::default();
+        let outcome = CommandBus
+            .dispatch(
+                &invocation(Command::ZipExtractor(
+                    crate::commands::ZipExtractorCommand::Open,
+                )),
+                &mut host,
+            )
+            .expect("interactive open dispatch");
+        assert_eq!(host.zip_extractor_opens, 1);
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+        assert_eq!(outcome.query, QueryPolicy::Keep);
+
+        for source in [ActivationSource::Macro, ActivationSource::HotFolder] {
+            let mut automated = invocation(Command::ZipExtractor(
+                crate::commands::ZipExtractorCommand::Open,
+            ));
+            automated.source = source;
+            let error = CommandBus
+                .dispatch(&automated, &mut host)
+                .expect_err("automated routes must fail closed");
+            assert_eq!(error.domain, "zip_extractor");
+        }
+        assert_eq!(host.zip_extractor_opens, 1);
     }
 
     #[test]

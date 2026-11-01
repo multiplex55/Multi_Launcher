@@ -3,6 +3,7 @@ use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::gui::volume_data::{ProcessVolume, get_process_volumes, get_system_volume};
 use crate::launcher::launch_action;
 use eframe::egui;
@@ -109,164 +110,183 @@ impl VolumeDialog {
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
             .max_height(ctx.content_rect().height().max(1.0))
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                #[cfg(test)]
-                {
-                    test_layout = VolumeDialogLayout {
-                        visible: ui.is_visible(),
-                        sizing_pass: ui.is_sizing_pass(),
-                        ..VolumeDialogLayout::default()
-                    };
-                }
-                compact_section_heading(ui, "System output", None);
-                ui.horizontal_wrapped(|ui| {
-                    let _system_slider =
-                        ui.add(egui::Slider::new(&mut self.value, 0..=100).text("Level"));
+            .show_utility(
+                ctx,
+                "volume",
+                egui::Id::new("Volume"),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_max_width(ctx.content_rect().width().max(1.0))
+                .with_max_height(ctx.content_rect().height().max(1.0)),
+                |ui| {
                     #[cfg(test)]
                     {
-                        test_layout.system_slider =
-                            Some(VolumeWidgetLayout::from_response(&_system_slider));
+                        test_layout = VolumeDialogLayout {
+                            visible: ui.is_visible(),
+                            sizing_pass: ui.is_sizing_pass(),
+                            ..VolumeDialogLayout::default()
+                        };
                     }
-                    let set_button = ui.button("Set");
-                    #[cfg(test)]
-                    {
-                        test_layout.system_set =
-                            Some(VolumeWidgetLayout::from_response(&set_button));
-                    }
-                    let set_button = with_button_emphasis(ui, set_button, ButtonEmphasis::Primary);
-                    if set_button.clicked() {
-                        let _ = launch_action(&Action {
-                            label: String::new(),
-                            desc: "Volume".into(),
-                            action: format!("volume:set:{}", self.value),
-                            args: None,
-                        });
-                        close = true;
-                        app.focus_input();
-                    }
-                    let cancel_button = ui.button("Cancel");
-                    #[cfg(test)]
-                    {
-                        test_layout.cancel =
-                            Some(VolumeWidgetLayout::from_response(&cancel_button));
-                    }
-                    if cancel_button.clicked() {
-                        close = true;
-                    }
-                });
-
-                ui.separator();
-                compact_section_heading(ui, "Applications", None);
-                let process_list_height = ui.available_height().max(0.0);
-                #[cfg(test)]
-                let process_parent_clip_rect = ui.clip_rect();
-                #[cfg(test)]
-                let mut effective_process_clip_rect = egui::Rect::NOTHING;
-                let _process_scroll = egui::ScrollArea::vertical()
-                    .id_salt("volume_process_list")
-                    .auto_shrink([true, true])
-                    .min_scrolled_height(0.0)
-                    .max_height(process_list_height)
-                    .show(ui, |ui| {
+                    compact_section_heading(ui, "System output", None);
+                    ui.horizontal_wrapped(|ui| {
+                        let _system_slider =
+                            ui.add(egui::Slider::new(&mut self.value, 0..=100).text("Level"));
                         #[cfg(test)]
                         {
-                            effective_process_clip_rect = ui.clip_rect();
+                            test_layout.system_slider =
+                                Some(VolumeWidgetLayout::from_response(&_system_slider));
                         }
-                        for (row_index, process) in self.processes.iter_mut().enumerate() {
-                            ui.push_id(("volume_process", row_index, process.pid), |ui| {
-                                ui.vertical(|ui| {
-                                    let identity =
-                                        format!("{} (PID {})", process.name, process.pid);
-                                    let _identity_response =
-                                        ui.add(egui::Label::new(identity).wrap());
-                                    #[cfg(test)]
-                                    test_layout
-                                        .process_identity_rects
-                                        .push(_identity_response.rect);
-                                    ui.horizontal_wrapped(|ui| {
-                                        let slider_response = ui.add(
-                                            egui::Slider::new(&mut process.value, 0..=100)
-                                                .text("Level"),
-                                        );
+                        let set_button = ui.button("Set");
+                        #[cfg(test)]
+                        {
+                            test_layout.system_set =
+                                Some(VolumeWidgetLayout::from_response(&set_button));
+                        }
+                        let set_button =
+                            with_button_emphasis(ui, set_button, ButtonEmphasis::Primary);
+                        if set_button.clicked() {
+                            let _ = launch_action(&Action {
+                                label: String::new(),
+                                desc: "Volume".into(),
+                                action: format!("volume:set:{}", self.value),
+                                args: None,
+                            });
+                            close = true;
+                            app.focus_input();
+                        }
+                        let cancel_button = ui.button("Cancel");
+                        #[cfg(test)]
+                        {
+                            test_layout.cancel =
+                                Some(VolumeWidgetLayout::from_response(&cancel_button));
+                        }
+                        if cancel_button.clicked() {
+                            close = true;
+                        }
+                    });
+
+                    ui.separator();
+                    compact_section_heading(ui, "Applications", None);
+                    let process_list_height = ui.available_height().max(0.0);
+                    #[cfg(test)]
+                    let process_parent_clip_rect = ui.clip_rect();
+                    #[cfg(test)]
+                    let mut effective_process_clip_rect = egui::Rect::NOTHING;
+                    let _process_scroll = egui::ScrollArea::vertical()
+                        .id_salt("volume_process_list")
+                        .auto_shrink([true, true])
+                        .min_scrolled_height(0.0)
+                        .max_height(process_list_height)
+                        .show(ui, |ui| {
+                            #[cfg(test)]
+                            {
+                                effective_process_clip_rect = ui.clip_rect();
+                            }
+                            for (row_index, process) in self.processes.iter_mut().enumerate() {
+                                ui.push_id(("volume_process", row_index, process.pid), |ui| {
+                                    ui.vertical(|ui| {
+                                        let identity =
+                                            format!("{} (PID {})", process.name, process.pid);
+                                        let _identity_response =
+                                            ui.add(egui::Label::new(identity).wrap());
                                         #[cfg(test)]
-                                        let mut process_controls = [None; 3];
-                                        #[cfg(test)]
-                                        {
-                                            process_controls[0] = Some(
-                                                VolumeWidgetLayout::from_response(&slider_response),
+                                        test_layout
+                                            .process_identity_rects
+                                            .push(_identity_response.rect);
+                                        ui.horizontal_wrapped(|ui| {
+                                            let slider_response = ui.add(
+                                                egui::Slider::new(&mut process.value, 0..=100)
+                                                    .text("Level"),
                                             );
-                                        }
-                                        if slider_response.changed()
-                                            && let Some(action) = process.slider_changed()
-                                        {
-                                            let _ = launch_action(&Action {
-                                                label: String::new(),
-                                                desc: "Volume".into(),
-                                                action,
-                                                args: None,
-                                            });
-                                        }
-                                        let set_button = ui.button("Set");
-                                        #[cfg(test)]
-                                        {
-                                            process_controls[1] = Some(
-                                                VolumeWidgetLayout::from_response(&set_button),
-                                            );
-                                        }
-                                        if set_button.clicked() {
-                                            let _ = launch_action(&Action {
-                                                label: String::new(),
-                                                desc: "Volume".into(),
-                                                action: format!(
-                                                    "volume:pid:{}:{}",
-                                                    process.pid, process.value
-                                                ),
-                                                args: None,
-                                            });
-                                        }
-                                        let mute_button = ui.button("Mute");
-                                        #[cfg(test)]
-                                        {
-                                            process_controls[2] = Some(
-                                                VolumeWidgetLayout::from_response(&mute_button),
-                                            );
-                                        }
-                                        if mute_button.clicked() {
-                                            let _ = launch_action(&Action {
-                                                label: String::new(),
-                                                desc: "Volume".into(),
-                                                action: format!(
-                                                    "volume:pid_toggle_mute:{}",
-                                                    process.pid
-                                                ),
-                                                args: None,
-                                            });
-                                            process.muted = !process.muted;
-                                        }
-                                        if process.muted {
-                                            semantic_status(ui, StatusTone::Info, "Muted", None);
-                                        }
-                                        #[cfg(test)]
-                                        test_layout.process_controls.push(process_controls);
+                                            #[cfg(test)]
+                                            let mut process_controls = [None; 3];
+                                            #[cfg(test)]
+                                            {
+                                                process_controls[0] =
+                                                    Some(VolumeWidgetLayout::from_response(
+                                                        &slider_response,
+                                                    ));
+                                            }
+                                            if slider_response.changed()
+                                                && let Some(action) = process.slider_changed()
+                                            {
+                                                let _ = launch_action(&Action {
+                                                    label: String::new(),
+                                                    desc: "Volume".into(),
+                                                    action,
+                                                    args: None,
+                                                });
+                                            }
+                                            let set_button = ui.button("Set");
+                                            #[cfg(test)]
+                                            {
+                                                process_controls[1] = Some(
+                                                    VolumeWidgetLayout::from_response(&set_button),
+                                                );
+                                            }
+                                            if set_button.clicked() {
+                                                let _ = launch_action(&Action {
+                                                    label: String::new(),
+                                                    desc: "Volume".into(),
+                                                    action: format!(
+                                                        "volume:pid:{}:{}",
+                                                        process.pid, process.value
+                                                    ),
+                                                    args: None,
+                                                });
+                                            }
+                                            let mute_button = ui.button("Mute");
+                                            #[cfg(test)]
+                                            {
+                                                process_controls[2] = Some(
+                                                    VolumeWidgetLayout::from_response(&mute_button),
+                                                );
+                                            }
+                                            if mute_button.clicked() {
+                                                let _ = launch_action(&Action {
+                                                    label: String::new(),
+                                                    desc: "Volume".into(),
+                                                    action: format!(
+                                                        "volume:pid_toggle_mute:{}",
+                                                        process.pid
+                                                    ),
+                                                    args: None,
+                                                });
+                                                process.muted = !process.muted;
+                                            }
+                                            if process.muted {
+                                                semantic_status(
+                                                    ui,
+                                                    StatusTone::Info,
+                                                    "Muted",
+                                                    None,
+                                                );
+                                            }
+                                            #[cfg(test)]
+                                            test_layout.process_controls.push(process_controls);
+                                        });
                                     });
                                 });
-                            });
-                            ui.add_space(ui.spacing().item_spacing.y);
-                        }
-                    });
-                #[cfg(test)]
-                {
-                    test_layout.process_scroll = Some(VolumeScrollLayout {
-                        id: _process_scroll.id,
-                        pre_autoshrink_inner_rect: _process_scroll.inner_rect,
-                        effective_clip_rect: effective_process_clip_rect,
-                        parent_clip_rect: process_parent_clip_rect,
-                        content_size: _process_scroll.content_size,
-                        offset: _process_scroll.state.offset,
-                    });
-                }
-            });
+                                ui.add_space(ui.spacing().item_spacing.y);
+                            }
+                        });
+                    #[cfg(test)]
+                    {
+                        test_layout.process_scroll = Some(VolumeScrollLayout {
+                            id: _process_scroll.id,
+                            pre_autoshrink_inner_rect: _process_scroll.inner_rect,
+                            effective_clip_rect: effective_process_clip_rect,
+                            parent_clip_rect: process_parent_clip_rect,
+                            content_size: _process_scroll.content_size,
+                            offset: _process_scroll.state.offset,
+                        });
+                    }
+                },
+            );
         #[cfg(test)]
         {
             if let Some(window_output) = _window_output.as_ref() {

@@ -43,10 +43,10 @@ pub mod image_compare_smoke;
 pub mod image_crop_editor;
 mod image_panel;
 mod indexing;
-#[cfg(test)]
-mod m7_startup_measurement;
 mod json_utility_dialog;
 pub(crate) mod jump_mode;
+#[cfg(test)]
+mod m7_startup_measurement;
 pub use jump_mode::ui::JumpModeScope;
 mod macro_dialog;
 pub mod mkmacro_dialog;
@@ -106,6 +106,7 @@ mod track_c_query_observer;
 pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
+pub(crate) mod utility_dialog_size;
 pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
@@ -113,6 +114,7 @@ mod xml_toolkit_dialog;
 pub(crate) mod xml_toolkit_schema;
 pub(crate) mod xml_toolkit_tree;
 pub(crate) mod xml_toolkit_xpath;
+mod zip_extractor_dialog;
 
 pub use crate::settings_save::SettingsSaveWorkerRegistry;
 
@@ -122,6 +124,7 @@ pub(crate) use radial_editor::{
 pub(crate) use render::persist_launcher_close_preferences;
 pub use state::AuthoringProviderSearchRequest;
 pub(crate) use state::{AuthoringProviderSearchPurpose, AuthoringProviderTestPayload};
+pub(crate) use zip_extractor_dialog::ZipExtractorDialog;
 
 pub(crate) const RADIAL_DESIGNER_WINDOW_TITLE: &str = "Radial Designer";
 
@@ -734,6 +737,7 @@ pub enum Panel {
     ClipboardDialog,
     ClipboardModifyDialog,
     JsonUtilityDialog,
+    ZipExtractorDialog,
     RegexTesterDialog,
     BatchRenameDialog,
     SearchReplaceDialog,
@@ -798,6 +802,7 @@ impl Panel {
             Self::ClipboardDialog => "Clipboard History",
             Self::ClipboardModifyDialog => "Clipboard Modify",
             Self::JsonUtilityDialog => "JSON Utility",
+            Self::ZipExtractorDialog => "ZIP Extractor",
             Self::RegexTesterDialog => "Regex Tester",
             Self::BatchRenameDialog => "Batch Renamer",
             Self::SearchReplaceDialog => "Search and Replace",
@@ -863,6 +868,7 @@ struct PanelStates {
     clipboard_dialog: bool,
     clipboard_modify_dialog: bool,
     json_utility_dialog: bool,
+    zip_extractor_dialog: bool,
     regex_tester_dialog: bool,
     batch_rename_dialog: bool,
     search_replace_dialog: bool,
@@ -1045,6 +1051,7 @@ pub struct LauncherApp {
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
     pub(crate) settings_save_workers: crate::settings_save::SettingsSaveWorkerRegistry,
+    pub(crate) utility_dialog_size_manager: utility_dialog_size::UtilityDialogSizeManager,
     pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
     pub(crate) settings_save_reconciliation_required: bool,
     /// Persistence failure captured before GUI startup. A later recovery UI can
@@ -1228,6 +1235,9 @@ pub struct LauncherApp {
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub json_utility_dialog: JsonUtilityDialogState,
+    pub(crate) zip_extractor_dialog: ZipExtractorDialog,
+    #[cfg(windows)]
+    pub(crate) archive_session: crate::archive::ArchiveSession,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
@@ -1565,10 +1575,6 @@ impl LauncherApp {
         crate::settings_save::LauncherClosePreferences {
             window_size: self.window_size,
             pinned_panels: self.pinned_panels.clone(),
-            clipboard_modify_dialog_size: (
-                self.clipboard_modify_dialog.persisted_window_size.x,
-                self.clipboard_modify_dialog.persisted_window_size.y,
-            ),
             file_search_ui_preferences,
         }
     }
@@ -3549,6 +3555,16 @@ impl LauncherApp {
             hotfolder_action_adapter.clone(),
             activity_center.clone(),
         );
+        let settings_save_workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        let utility_dialog_size_manager = utility_dialog_size::UtilityDialogSizeManager::new(
+            settings_path.clone(),
+            settings_save_workers.clone(),
+            settings.utility_dialog_sizes.clone(),
+        );
+        utility_dialog_size_manager.install_in_context(ctx);
+        #[cfg(windows)]
+        let archive_session =
+            crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
         let mut app = Self {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
@@ -3628,7 +3644,8 @@ impl LauncherApp {
             settings_editor,
             plugin_editor,
             settings_path,
-            settings_save_workers: crate::settings_save::SettingsSaveWorkerRegistry::default(),
+            settings_save_workers,
+            utility_dialog_size_manager,
             pending_settings_save: None,
             settings_save_reconciliation_required: false,
             startup_settings_diagnostic: None,
@@ -3799,11 +3816,11 @@ impl LauncherApp {
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
             clipboard_modify_runtime,
-            clipboard_modify_dialog: ClipboardModifyDialogState::with_initial_size(
-                clipboard_modify_settings.dialog_width,
-                clipboard_modify_settings.dialog_height,
-            ),
+            clipboard_modify_dialog: ClipboardModifyDialogState::default(),
             json_utility_dialog: JsonUtilityDialogState::default(),
+            zip_extractor_dialog: ZipExtractorDialog::default(),
+            #[cfg(windows)]
+            archive_session,
             regex_tester_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
@@ -4517,7 +4534,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 59] = [
+    const TRACKED_PANELS: [Panel; 60] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4553,6 +4570,7 @@ impl LauncherApp {
         Panel::ClipboardDialog,
         Panel::ClipboardModifyDialog,
         Panel::JsonUtilityDialog,
+        Panel::ZipExtractorDialog,
         Panel::RegexTesterDialog,
         Panel::BatchRenameDialog,
         Panel::SearchReplaceDialog,
@@ -4616,6 +4634,7 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_dialog.open,
             Panel::ClipboardModifyDialog => self.clipboard_modify_dialog.open,
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
+            Panel::ZipExtractorDialog => self.zip_extractor_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
@@ -4900,6 +4919,9 @@ impl LauncherApp {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
             }
+            Panel::ZipExtractorDialog => {
+                self.close_zip_extractor_dialog();
+            }
             Panel::ConvertPanel => {
                 self.convert_panel.open = false;
                 self.panel_states.convert_panel = false;
@@ -4980,6 +5002,15 @@ impl LauncherApp {
         self.panel_states.paste_sequence_dialog = false;
         self.panel_stack
             .retain(|panel| *panel != Panel::PasteSequenceDialog);
+    }
+
+    fn close_zip_extractor_dialog(&mut self) {
+        self.zip_extractor_dialog.clear_presentation();
+        #[cfg(windows)]
+        self.archive_session.close();
+        self.panel_states.zip_extractor_dialog = false;
+        self.panel_stack
+            .retain(|panel| *panel != Panel::ZipExtractorDialog);
     }
 
     fn force_close_panel(&mut self, panel: Panel) {
@@ -5171,6 +5202,9 @@ impl LauncherApp {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
             }
+            Panel::ZipExtractorDialog => {
+                self.close_zip_extractor_dialog();
+            }
             Panel::ConvertPanel => {
                 self.convert_panel.open = false;
                 self.panel_states.convert_panel = false;
@@ -5288,6 +5322,13 @@ impl LauncherApp {
                 .clipboard_modify_dialog
                 .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
             Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
+            Panel::ZipExtractorDialog => {
+                #[cfg(windows)]
+                self.zip_extractor_dialog
+                    .open_with_snapshot(self.archive_session.snapshot());
+                #[cfg(not(windows))]
+                self.zip_extractor_dialog.open();
+            }
             Panel::QrDialog => self.qr_dialog.open = true,
             Panel::RegexTesterDialog => {
                 if !self.regex_tester_dialog.open {
@@ -5444,6 +5485,7 @@ impl LauncherApp {
         check!(clipboard_dialog, Panel::ClipboardDialog);
         check!(clipboard_modify_dialog, Panel::ClipboardModifyDialog);
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
+        check!(zip_extractor_dialog, Panel::ZipExtractorDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(search_replace_dialog, Panel::SearchReplaceDialog);

@@ -3216,6 +3216,10 @@ impl LauncherApp {
 
     fn show_macro_prompt(&mut self, ctx: &egui::Context, handle_ui_actions: bool) {
         let Some(pending) = self.macro_prompt.pending.as_ref() else {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("mkmacro-runtime-prompt").unwrap(),
+            );
             return;
         };
         let title = pending.request.title.clone();
@@ -3227,7 +3231,21 @@ impl LauncherApp {
                 .with_title(title)
                 .with_inner_size([420.0, 150.0])
                 .with_always_on_top(),
-            |child, _| {
+            |child, class| {
+                let closing = handle_ui_actions
+                    && child.input(|input| {
+                        input.viewport().close_requested() || input.key_pressed(egui::Key::Escape)
+                    });
+                if !closing {
+                    crate::gui::utility_dialog_size::apply_native_utility_size_restore(
+                        child,
+                        class,
+                        crate::settings::UtilityToolKey::parse("mkmacro-runtime-prompt").unwrap(),
+                        egui::vec2(420.0, 150.0),
+                        None,
+                        None,
+                    );
+                }
                 egui::CentralPanel::default().show(child, |ui| {
                     ui.label(prompt.as_str());
                     let response = ui.add(
@@ -3279,6 +3297,10 @@ impl LauncherApp {
             self.macro_prompt.text.clear();
             self.macro_prompt.first_frame = false;
             self.macro_prompt.bootstrap_pending = false;
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("mkmacro-runtime-prompt").unwrap(),
+            );
         }
     }
 }
@@ -3854,6 +3876,32 @@ impl LauncherApp {
         frame: &mut eframe::Frame,
     ) -> super::track_c_query_observer::GeometryCause {
         self.drain_settings_save(ctx);
+        if let Err(error) = self.utility_dialog_size_manager.begin_frame(ctx) {
+            tracing::warn!(%error, "could not publish utility window size acknowledgement");
+        }
+        for failure in self.utility_dialog_size_manager.take_new_write_failures() {
+            self.report_error_message(
+                "utility_dialog_size.save",
+                format!(
+                    "Could not save the {} window size. Resize it again to retry. {}",
+                    failure.key.as_str(),
+                    failure.message
+                ),
+            );
+        }
+        #[cfg(windows)]
+        {
+            let completed = self.archive_session.poll();
+            let worker_active = self.archive_session.has_active_worker();
+            let now = Instant::now();
+            if completed || self.zip_extractor_dialog.progress_refresh_due(now) {
+                self.zip_extractor_dialog
+                    .update_session_snapshot(self.archive_session.snapshot(), now);
+            }
+            if worker_active || self.zip_extractor_dialog.session_needs_polling() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
         self.brightness_dialog.runtime_tick(ctx);
         if let Some(completion) = self.screenshot_capture.tick(std::time::Instant::now(), ctx) {
             self.pending_screenshot_completion = Some(completion);
@@ -5499,6 +5547,7 @@ impl LauncherApp {
                         | super::Panel::SnippetDialog
                         | super::Panel::ClipboardDialog
                         | super::Panel::JsonUtilityDialog
+                        | super::Panel::ZipExtractorDialog
                         | super::Panel::RegexTesterDialog
                         | super::Panel::XmlToolkitDialog
                         | super::Panel::TableUtilityDialog
@@ -5568,6 +5617,10 @@ impl LauncherApp {
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
                 self.json_utility_dialog.open,
+            ),
+            (
+                crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
+                self.zip_extractor_dialog.open,
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::RegexTester,
@@ -8463,7 +8516,12 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
-        timer_dlg.ui_with_jump_mode(&ctx, self, timer_scope);
+        timer_dlg.ui_with_jump_mode(
+            &ctx,
+            self,
+            timer_scope,
+            first_ui_pass && frame_logic.should_be_visible,
+        );
         self.timer_dialog = timer_dlg;
         let mut comp = std::mem::take(&mut self.completion_dialog);
         comp.ui(&ctx);
@@ -9390,8 +9448,13 @@ impl LauncherApp {
         self.clipboard_dialog = cb_dlg;
         if self.clipboard_modify_dialog.open {
             let mut cm_dlg = std::mem::take(&mut self.clipboard_modify_dialog);
+            let legacy_window_size =
+                crate::gui::clipboard_modify_dialog::clipboard_modify_legacy_window_size(
+                    &self.settings_editor.baseline_settings,
+                );
             cm_dlg.ui(
                 &ctx,
+                legacy_window_size,
                 &crate::clipboard_modify::runtime::clipboard_service(),
                 self.clipboard_modify_runtime.catalog_snapshot(),
                 Some(&self.clipboard_modify_runtime.store),
@@ -9440,6 +9503,43 @@ impl LauncherApp {
             json_utility_native_owner,
             first_ui_pass,
         );
+        let zip_kind = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor;
+        let zip_owner =
+            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
+        let zip_scope = match zip_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
+                instance,
+            } if self.jump_mode_enabled()
+                && self.jump_mode_ui.dialog_instance(zip_kind) == Some(instance) =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("zip-extractor", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "zip-extractor",
+                    ctx.viewport_id(),
+                    zip_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let zip_was_open = self.zip_extractor_dialog.open;
+        #[cfg(windows)]
+        self.zip_extractor_dialog.show(
+            &ctx,
+            &mut self.archive_session,
+            first_ui_pass,
+            zip_scope.as_ref(),
+        );
+        #[cfg(not(windows))]
+        self.zip_extractor_dialog
+            .show_unsupported(&ctx, first_ui_pass, zip_scope.as_ref());
+        if zip_was_open && !self.zip_extractor_dialog.open {
+            self.panel_states.zip_extractor_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::ZipExtractorDialog);
+        }
         self.hash_generator_dialog.show(&ctx);
         self.show_regex_tester(&ctx, frame_logic.should_be_visible);
         self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
@@ -9957,31 +10057,10 @@ pub(crate) fn persist_launcher_close_preferences(
     settings_path: &str,
     window_size: (i32, i32),
     pinned_panels: Vec<Panel>,
-    dialog_size: (f32, f32),
 ) -> anyhow::Result<Settings> {
     Settings::update(settings_path, |settings| {
         settings.window_size = Some(window_size);
         settings.pinned_panels = pinned_panels;
-        // Persist only the explicitly approved, non-sensitive Clipboard
-        // Modify UI geometry. Runtime source/preview/undo data is held only
-        // by the dialog/service and is never serialized into Settings.
-        let mut clipboard_modify_preferences: ClipboardModifyPluginSettings = settings
-            .plugin_settings
-            .get("clipboard_modify")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
-        let hide_launcher_after_apply = clipboard_modify_preferences.hide_launcher_after_apply;
-        clipboard_modify_preferences.dialog_width = dialog_size.0;
-        clipboard_modify_preferences.dialog_height = dialog_size.1;
-        debug_assert_eq!(
-            clipboard_modify_preferences.hide_launcher_after_apply, hide_launcher_after_apply,
-            "persisting dialog geometry must not reset the live visibility preference"
-        );
-        let value = serde_json::to_value(clipboard_modify_preferences)?;
-        settings
-            .plugin_settings
-            .insert("clipboard_modify".into(), value);
         Ok(())
     })
 }
@@ -10048,6 +10127,8 @@ impl eframe::App for LauncherApp {
         self.hotfolder_runtime.shutdown_and_reap();
         self.hotfolder_runtime.join_reaper();
         self.xml_toolkit_dialog.shutdown();
+        #[cfg(windows)]
+        self.archive_session.shutdown();
         self.table_utility_dialog.shutdown();
         self.image_compare_dialog.shutdown();
         self.duplicate_finder_dialog.shutdown();
@@ -11105,13 +11186,9 @@ mod tests {
         let unchanged = ["actions.json", "query-marker-ledger.txt", "note.md"]
             .map(|name| std::fs::read(directory.path().join(name)).unwrap());
         for _ in 0..2 {
-            let actual = persist_launcher_close_preferences(
-                path.to_str().unwrap(),
-                (900, 650),
-                Vec::new(),
-                (900.0, 640.0),
-            )
-            .unwrap();
+            let actual =
+                persist_launcher_close_preferences(path.to_str().unwrap(), (900, 650), Vec::new())
+                    .unwrap();
             let after = std::fs::read(&path).unwrap();
             // The real reload/save may reorder maps; compare every raw JSON key
             // and value while normalizing only the actual plugin set.
@@ -11263,6 +11340,473 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn zip_extractor_panel_renders_registered_layer_across_close_and_reopen() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let panel = super::Panel::ZipExtractorDialog;
+        let layer = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor
+            .layer_id()
+            .expect("ZIP Extractor is an embedded root window");
+        let screen_size = egui::vec2(1200.0, 800.0);
+
+        let render_open_panel = |app: &mut LauncherApp| {
+            for _ in 0..3 {
+                let (output, _) = app.run_root_frame_for_test(
+                    &ctx,
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
+                        focused: true,
+                        ..Default::default()
+                    },
+                    false,
+                );
+                output.drop_without_applying_deltas();
+            }
+            let actual_window_hit = (1..19).any(|x| {
+                (1..13).any(|y| {
+                    ctx.layer_id_at(egui::pos2(x as f32 * 60.0, y as f32 * 60.0)) == Some(layer)
+                })
+            });
+            assert!(
+                actual_window_hit,
+                "the production ZIP Extractor Window must occupy its registered Jump layer"
+            );
+        };
+
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.follow_mouse = false;
+        app.focus_panel(panel);
+        render_open_panel(&mut app);
+        #[cfg(windows)]
+        assert_eq!(
+            app.archive_session.snapshot().phase,
+            crate::archive::ArchiveSessionPhase::Empty,
+            "opening and painting the panel starts no file-system operation"
+        );
+
+        assert!(app.close_front_dialog());
+        assert!(!app.is_panel_open(panel));
+        assert!(!app.panel_stack.contains(&panel));
+        app.focus_panel(panel);
+        render_open_panel(&mut app);
+        #[cfg(windows)]
+        assert_eq!(
+            app.archive_session.snapshot().phase,
+            crate::archive::ArchiveSessionPhase::Closed,
+            "reopening the presentation does not reopen a previously closed path"
+        );
+        assert!(app.close_front_dialog());
+        #[cfg(windows)]
+        app.archive_session.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn utility_size_integration_six_surfaces_share_context_capability_and_startup_cache() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        for (tool, width, height) in [
+            ("diff", 840.0, 620.0),
+            ("clipboard-modify", 860.0, 640.0),
+            ("file-preview", 880.0, 660.0),
+            ("hash-generator", 620.0, 440.0),
+            ("table-utility", 1180.0, 760.0),
+            ("theme-settings", 980.0, 720.0),
+        ] {
+            settings
+                .utility_dialog_sizes
+                .set(
+                    crate::settings::UtilityToolKey::parse(tool).unwrap(),
+                    crate::settings::PreferredWindowSize::new(width, height).unwrap(),
+                )
+                .unwrap();
+        }
+        let expected_sizes = settings.utility_dialog_sizes.clone();
+        let app = fixture
+            .create_app(&ctx, "utility-size-six-surfaces", settings)
+            .expect("isolated app fixture constructs");
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.diff_dialog.open = true;
+        app.clipboard_modify_dialog.open = true;
+        app.file_search_dialog.preview_dialog.open = true;
+        app.hash_generator_dialog.open = true;
+        app.table_utility_dialog.open = true;
+        app.theme_settings_dialog_open = true;
+
+        let expected_windows = [
+            (
+                egui::Id::new(("diff_window", app.diff_dialog.workspace.workspace_id)),
+                "diff",
+            ),
+            (
+                egui::Id::new("clipboard_modify_dialog_window"),
+                "clipboard-modify",
+            ),
+            (
+                egui::Id::new(crate::gui::file_search_preview_dialog::preview_window_id_source()),
+                "file-preview",
+            ),
+            (egui::Id::new("hash_generator_dialog"), "hash-generator"),
+            (egui::Id::new(Some("Table Utility")), "table-utility"),
+            (egui::Id::new("Theme settings"), "theme-settings"),
+        ]
+        .map(|(id, tool)| (id, crate::settings::UtilityToolKey::parse(tool).unwrap()));
+
+        let (output, _) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 1000.0),
+                )),
+                ..Default::default()
+            },
+            false,
+        );
+        output.drop_without_applying_deltas();
+
+        let tracked = app.utility_dialog_size_manager.tracked_windows();
+        for (id, tool) in expected_windows {
+            assert!(
+                tracked.contains(&(id, tool)),
+                "production surface {tool:?} did not use its shared window owner: {tracked:?}"
+            );
+        }
+        assert_eq!(
+            app.utility_dialog_size_manager.snapshot(),
+            expected_sizes,
+            "starting each surface must not rewrite or independently cache its preference"
+        );
+
+        drop(app);
+        let teardown = fixture.finish().expect("fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
+    }
+
+    #[test]
+    fn utility_size_integration_hash_resize_ack_stale_apply_and_fresh_context_restore() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
+        let profile = "utility-size-hash-restart";
+        let profile_root = fixture.profile_root(profile);
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let settings_path = profile_root.join("settings.json");
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        let key = crate::settings::UtilityToolKey::parse("hash-generator").unwrap();
+        let initial_preference = crate::settings::PreferredWindowSize::new(620.0, 440.0).unwrap();
+        settings
+            .utility_dialog_sizes
+            .set(key, initial_preference)
+            .unwrap();
+        settings.save(settings_path.to_str().unwrap()).unwrap();
+
+        let ctx = egui::Context::default();
+        let app = fixture
+            .create_app(&ctx, profile, settings)
+            .expect("isolated app fixture constructs");
+        let stale_general_settings = app.settings_editor.baseline_settings.clone();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        app.install_settings_save_worker_registry(workers.clone());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.hash_generator_dialog.open = true;
+
+        let render_frame = |app: &mut LauncherApp, ctx: &egui::Context, events| {
+            let (output, _) = app.run_root_frame_for_test(
+                ctx,
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1600.0, 1000.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                false,
+            );
+            output.drop_without_applying_deltas();
+        };
+        let hash_id = egui::Id::new("hash_generator_dialog");
+        for _ in 0..3 {
+            render_frame(app, &ctx, Vec::new());
+        }
+        let before = ctx
+            .memory(|memory| memory.area_rect(hash_id))
+            .expect("Hash Generator opens through the real root renderer");
+        let press = before.right_bottom() - egui::vec2(3.0, 3.0);
+        let release = press + egui::vec2(85.0, 65.0);
+        let mut dragged_ids = Vec::new();
+        for events in [
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerMoved(release)],
+            vec![egui::Event::PointerButton {
+                pos: release,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            render_frame(app, &ctx, events);
+            if let Some(id) = ctx.dragged_id().or_else(|| ctx.drag_stopped_id()) {
+                dragged_ids.push(id);
+            }
+        }
+        let edge_drag =
+            egui::Id::new(egui::LayerId::new(egui::Order::Middle, hash_id)).with("edge_drag");
+        let edge_ids = [
+            "left",
+            "right",
+            "top",
+            "bottom",
+            "left_top",
+            "left_bottom",
+            "right_top",
+            "right_bottom",
+        ]
+        .map(|edge| edge_drag.with(edge));
+        assert!(
+            dragged_ids.iter().any(|id| edge_ids.contains(id)),
+            "the app-level pointer sequence must drag an actual Hash window grip: {dragged_ids:?}"
+        );
+        render_frame(app, &ctx, Vec::new());
+        let resized = ctx
+            .memory(|memory| memory.area_rect(hash_id))
+            .expect("Hash window remains open after resizing");
+        assert!(resized.width() > before.width() + 30.0, "{resized:?}");
+        assert!(resized.height() > before.height() + 20.0, "{resized:?}");
+        assert!(
+            workers.utility_size_latest_revision(key).is_some(),
+            "the installed registry receives the production resize mutation"
+        );
+        workers.join_all();
+        render_frame(app, &ctx, Vec::new());
+
+        let persisted = crate::settings::Settings::load(settings_path.to_str().unwrap())
+            .unwrap()
+            .utility_dialog_sizes
+            .preferred(key)
+            .expect("the actual user resize is durably stored");
+        assert!((persisted.width - resized.width()).abs() < 1.0);
+        assert!((persisted.height - resized.height()).abs() < 1.0);
+        assert_eq!(
+            app.utility_dialog_size_manager.snapshot().preferred(key),
+            Some(persisted)
+        );
+
+        crate::settings_editor::SettingsEditor::apply_saved_settings(
+            &ctx,
+            app,
+            stale_general_settings,
+            false,
+        );
+        assert_eq!(
+            app.utility_dialog_size_manager.snapshot().preferred(key),
+            Some(persisted),
+            "a stale general-settings acknowledgement cannot replace the acknowledged utility cache"
+        );
+        app.prepare_settings_save_shutdown();
+        workers.join_all();
+        fixture.drop_app();
+
+        let reopened_ctx = egui::Context::default();
+        let reopened = fixture
+            .create_app_from_saved_profile(&reopened_ctx, profile)
+            .expect("fresh app context reloads the profile");
+        reopened.visible_flag.store(true, Ordering::SeqCst);
+        reopened.restore_flag.store(false, Ordering::SeqCst);
+        reopened.last_visible = true;
+        reopened.focus_query = false;
+        reopened.hash_generator_dialog.open = true;
+        for _ in 0..3 {
+            render_frame(reopened, &reopened_ctx, Vec::new());
+        }
+        let restored = reopened_ctx
+            .memory(|memory| memory.area_rect(hash_id))
+            .expect("fresh app context restores the Hash window");
+        assert!(
+            (restored.width() - persisted.width).abs() < 1.0,
+            "{restored:?}"
+        );
+        assert!(
+            (restored.height() - persisted.height).abs() < 1.0,
+            "{restored:?}"
+        );
+        assert_eq!(
+            reopened
+                .utility_dialog_size_manager
+                .snapshot()
+                .preferred(key),
+            Some(persisted)
+        );
+        drop(reopened);
+        let teardown = fixture.finish().expect("fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
+    }
+
+    #[test]
+    fn utility_size_integration_failed_write_notifies_once_and_a_resize_can_retry() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let mut fixture = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
+        let profile = "utility-size-failure-notice";
+        let ctx = egui::Context::default();
+        let blocked_path = fixture.profile_root(profile).join("blocked-settings");
+        let app = fixture
+            .create_app(&ctx, profile, Settings::default())
+            .expect("isolated app fixture constructs");
+        std::fs::create_dir_all(&blocked_path).unwrap();
+        app.settings_path = blocked_path.to_string_lossy().into_owned();
+        let workers = crate::settings_save::SettingsSaveWorkerRegistry::default();
+        app.install_settings_save_worker_registry(workers.clone());
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+
+        let key = crate::settings::UtilityToolKey::parse("hash-generator").unwrap();
+        app.utility_dialog_size_manager
+            .reset(key)
+            .expect("the controlled test event is admitted");
+        let render_frame = |app: &mut LauncherApp, events: Vec<egui::Event>| {
+            let (output, _) = app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 800.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                false,
+            );
+            output.drop_without_applying_deltas();
+        };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.test_toast_messages.is_empty() {
+            render_frame(app, Vec::new());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the current utility size save failure should reach the app error owner"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(app.test_toast_messages.len(), 1);
+        assert!(app.test_toast_messages[0].contains("hash-generator"));
+        assert!(app.test_toast_messages[0].contains("Resize it again to retry"));
+
+        for _ in 0..4 {
+            render_frame(app, Vec::new());
+        }
+        assert_eq!(
+            app.test_toast_messages.len(),
+            1,
+            "the same failed revision is reported only once"
+        );
+
+        std::fs::remove_dir(&blocked_path).unwrap();
+        crate::settings::Settings::default()
+            .save(blocked_path.to_str().unwrap())
+            .unwrap();
+        app.hash_generator_dialog.open = true;
+        for _ in 0..3 {
+            render_frame(app, Vec::new());
+        }
+        let hash_id = egui::Id::new("hash_generator_dialog");
+        let before = ctx
+            .memory(|memory| memory.area_rect(hash_id))
+            .expect("Hash Generator opens after the settings path is repaired");
+        let press = before.right_bottom() - egui::vec2(3.0, 3.0);
+        let release = press + egui::vec2(70.0, 50.0);
+        let mut dragged_ids = Vec::new();
+        for events in [
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerMoved(release)],
+            vec![egui::Event::PointerButton {
+                pos: release,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            Vec::new(),
+        ] {
+            render_frame(app, events);
+            if let Some(id) = ctx.dragged_id().or_else(|| ctx.drag_stopped_id()) {
+                dragged_ids.push(id);
+            }
+        }
+        let edge_drag =
+            egui::Id::new(egui::LayerId::new(egui::Order::Middle, hash_id)).with("edge_drag");
+        let edge_ids = [
+            "left",
+            "right",
+            "top",
+            "bottom",
+            "left_top",
+            "left_bottom",
+            "right_top",
+            "right_bottom",
+        ]
+        .map(|edge| edge_drag.with(edge));
+        assert!(
+            dragged_ids.iter().any(|id| edge_ids.contains(id)),
+            "a genuine Hash grip event is the controlled retry: {dragged_ids:?}"
+        );
+        let resized = ctx
+            .memory(|memory| memory.area_rect(hash_id))
+            .expect("Hash Generator remains open after the retry resize");
+        workers.join_all();
+        render_frame(app, Vec::new());
+        let saved = crate::settings::Settings::load(blocked_path.to_str().unwrap())
+            .unwrap()
+            .utility_dialog_sizes
+            .preferred(key)
+            .expect("the genuine new resize replaces and retries the failed intent");
+        assert!((saved.width - resized.width()).abs() < 1.0);
+        assert!((saved.height - resized.height()).abs() < 1.0);
+        assert_eq!(app.test_toast_messages.len(), 1);
+        workers.join_all();
+        fixture.drop_app();
+        let teardown = fixture.finish().expect("fixture cleanup succeeds");
+        assert!(teardown.cwd_restored);
+        assert!(teardown.root_removed);
     }
 
     #[test]

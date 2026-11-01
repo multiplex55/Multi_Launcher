@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{ButtonEmphasis, secondary_help, with_button_emphasis};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::bookmarks::{BOOKMARKS_FILE, load_bookmarks, set_alias};
 use eframe::egui;
 
@@ -48,9 +49,17 @@ impl BookmarkAliasDialog {
         let window_id = egui::Id::new("Set Bookmark Alias");
         #[cfg(test)]
         let mut test_layout = None;
-        let window_output = egui::Window::new("Set Bookmark Alias")
-            .open(&mut self.open)
-            .show(ctx, |ui| {
+        let window_output = egui::Window::new("Set Bookmark Alias").show_utility(
+            ctx,
+            "bookmark-alias",
+            egui::Id::new("Set Bookmark Alias"),
+            Some(&mut self.open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                egui::Vec2::ZERO,
+                [None, None],
+            ),
+            |ui| {
                 ui.label("Bookmark URL");
                 #[cfg(test)]
                 let target_parent_clip_rect = ui.clip_rect();
@@ -150,7 +159,8 @@ impl BookmarkAliasDialog {
                         cancel_rect,
                     });
                 }
-            });
+            },
+        );
         #[cfg(test)]
         {
             self.test_layout = match (window_output.as_ref(), test_layout) {

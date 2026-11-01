@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::hotkey::directory::{EditDestination, Entry, EntryId, Snapshot, Source, Status};
 use eframe::egui;
 
@@ -125,11 +126,11 @@ impl HotkeyDirectoryDialog {
         let mut visual_order = 0;
         egui::Window::new("Hotkey Directory")
             .id(egui::Id::new(Some("Hotkey Directory")))
-            .open(&mut open)
+
             .default_size((1060.0, 640.0))
             .min_size((700.0, 380.0))
             .resizable(true)
-            .show(ctx, |ui| {
+            .show_utility(ctx, "hotkey-directory", egui::Id::new("Hotkey Directory"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((1060.0, 640.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from((700.0, 380.0))), |ui| {
                 ui.label("Browse configured shortcuts and their reported runtime status. Editing opens the owning settings editor; it does not run a shortcut.");
                 let filter = ui.add_enabled(
                     interaction_allowed,

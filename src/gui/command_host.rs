@@ -216,6 +216,11 @@ impl LauncherApp {
 }
 
 impl DialogCommandHost for LauncherApp {
+    fn open_zip_extractor_dialog(&mut self) -> Result<(), String> {
+        self.focus_panel(super::Panel::ZipExtractorDialog);
+        Ok(())
+    }
+
     fn open_qr_dialog(&mut self, initial_text: Option<&str>) {
         self.qr_dialog.open(initial_text);
         self.focus_panel(super::Panel::QrDialog);
@@ -1616,6 +1621,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::Radial(_)
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
+            | Command::ZipExtractor(_)
             | Command::XmlToolkit(_)
             | Command::BatchRename(_)
             | Command::HotFolder(_)
@@ -5438,6 +5444,58 @@ pub(in crate::gui) mod tests {
                 intent: crate::commands::JsonUtilityIntent::Format,
             },
         )));
+    }
+
+    #[test]
+    fn zip_extractor_command_opens_panel_without_starting_archive_io() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let mut workspace = crate::gui::test_fixtures::IsolatedAppWorkspace::new();
+        let ctx = eframe::egui::Context::default();
+        let mut settings = crate::settings::Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        {
+            let app = workspace
+                .create_app(&ctx, "zip-command-routing", settings)
+                .expect("construct isolated app before command routing");
+            let action = crate::actions::Action {
+                label: "Open ZIP Extractor".into(),
+                desc: String::new(),
+                action: "zip:open".into(),
+                args: None,
+            };
+            let invocation = crate::commands::parse_command(
+                action,
+                Some("must stay ignored".into()),
+                crate::commands::ActivationSource::Enter,
+            )
+            .unwrap();
+            assert!(!command_accepts_query_override(&invocation.command));
+            app.dispatch_command_invocation(invocation.clone());
+            app.dispatch_command_invocation(invocation);
+
+            assert!(app.zip_extractor_dialog.open);
+            assert_eq!(
+                app.panel_stack
+                    .iter()
+                    .filter(|panel| **panel == super::super::Panel::ZipExtractorDialog)
+                    .count(),
+                1
+            );
+            #[cfg(windows)]
+            {
+                let snapshot = app.archive_session.snapshot();
+                assert_eq!(
+                    snapshot.phase,
+                    crate::archive::ArchiveSessionPhase::Empty,
+                    "opening the command panel must not open a path or start archive I/O"
+                );
+                assert!(snapshot.catalog.is_none());
+            }
+        }
+        workspace
+            .finish()
+            .expect("drop isolated app, restore current directory, and clean profile");
     }
 
     #[test]

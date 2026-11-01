@@ -8,6 +8,7 @@ use crate::gui::coordinate_tool::CoordinateToolGui;
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 
 #[derive(Default)]
@@ -230,11 +231,11 @@ impl MouseSettingsDialog {
         #[cfg(test)]
         let mut cancel_response = None;
         let output = egui::Window::new("Mouse Settings")
-            .open(&mut open)
+
             .resizable(true)
             .default_width(420.0)
             .max_width((ctx.content_rect().width() - 16.0).max(240.0))
-            .show(ctx, |ui| {
+            .show_utility(ctx, "mouse-settings", egui::Id::new("Mouse Settings"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(420.0), egui::Vec2::ZERO, [None, None]).with_max_width((ctx.content_rect().width() - 16.0).max(240.0)), |ui| {
                 authorized_owner_pass &= ui.is_visible() && !ui.is_sizing_pass();
                 ui.add_enabled_ui(native_ui_owner, |ui| {
                     egui::ScrollArea::vertical()

@@ -1,4 +1,5 @@
 //! Presentation metadata only. The workflow remains the sole result-text owner.
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mkmacro::{DiagnosticKind, ExecutionDiagnostic};
 use crate::ocr::selection::{OcrGeneration, OcrPresentation};
 use eframe::egui;
@@ -79,81 +80,96 @@ impl OcrView {
         let mut intent = None;
         egui::Window::new("Screen Region OCR")
             .id(egui::Id::new("screen_region_ocr"))
-            .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_size((560., 360.))
             .min_size((320., 220.))
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if let OcrPresentation::Result(text) = state
-                        && ui
-                            .add_enabled(!text.trim().is_empty(), egui::Button::new("Copy All"))
-                            .clicked()
-                    {
-                        intent = Some(OcrViewIntent::Copy);
-                    }
-                    if ui.button("Re-capture").clicked() {
-                        intent = Some(OcrViewIntent::Recapture);
-                    }
-                    if ui.button("Close").clicked() {
-                        intent = Some(OcrViewIntent::Close);
-                    }
-                });
-                if let Some(feedback) = &self.feedback {
-                    match feedback {
-                        Ok(message) => {
-                            ui.label(*message);
+            .show_utility(
+                ctx,
+                "ocr-result",
+                egui::Id::new("Screen Region OCR"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((560., 360.)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::Vec2::from((320., 220.))),
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if let OcrPresentation::Result(text) = state
+                            && ui
+                                .add_enabled(!text.trim().is_empty(), egui::Button::new("Copy All"))
+                                .clicked()
+                        {
+                            intent = Some(OcrViewIntent::Copy);
                         }
-                        Err(message) => {
-                            ui.colored_label(ui.visuals().error_fg_color, message);
+                        if ui.button("Re-capture").clicked() {
+                            intent = Some(OcrViewIntent::Recapture);
+                        }
+                        if ui.button("Close").clicked() {
+                            intent = Some(OcrViewIntent::Close);
+                        }
+                    });
+                    if let Some(feedback) = &self.feedback {
+                        match feedback {
+                            Ok(message) => {
+                                ui.label(*message);
+                            }
+                            Err(message) => {
+                                ui.colored_label(ui.visuals().error_fg_color, message);
+                            }
                         }
                     }
-                }
-                match state {
-                    OcrPresentation::Recognizing => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Recognizing text...");
-                        });
-                    }
-                    OcrPresentation::Result(text) => {
-                        // egui hides a new Window during its initial sizing frame.
-                        // Keep focus pending until the editor is actually visible,
-                        // then grant it before TextEdit consumes this frame's keys.
-                        let grant_focus =
-                            ui.is_visible() && ui.is_enabled() && !self.editor_focused;
-                        if grant_focus {
-                            ctx.memory_mut(|memory| memory.request_focus(editor_id(generation)));
-                        }
-                        let editor_size = ui.available_size();
-                        egui::ScrollArea::both()
-                            .id_salt(("screen_ocr_scroll", generation))
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                let response = ui.add_sized(
-                                    editor_size,
-                                    egui::TextEdit::multiline(text)
-                                        .id(editor_id(generation))
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(10),
-                                );
-                                if grant_focus && response.has_focus() {
-                                    self.editor_focused = true;
-                                }
-                                if response.changed() {
-                                    self.feedback = None;
-                                }
+                    match state {
+                        OcrPresentation::Recognizing => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Recognizing text...");
                             });
+                        }
+                        OcrPresentation::Result(text) => {
+                            // egui hides a new Window during its initial sizing frame.
+                            // Keep focus pending until the editor is actually visible,
+                            // then grant it before TextEdit consumes this frame's keys.
+                            let grant_focus =
+                                ui.is_visible() && ui.is_enabled() && !self.editor_focused;
+                            if grant_focus {
+                                ctx.memory_mut(|memory| {
+                                    memory.request_focus(editor_id(generation))
+                                });
+                            }
+                            let editor_size = ui.available_size();
+                            egui::ScrollArea::both()
+                                .id_salt(("screen_ocr_scroll", generation))
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    let response = ui.add_sized(
+                                        editor_size,
+                                        egui::TextEdit::multiline(text)
+                                            .id(editor_id(generation))
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(10),
+                                    );
+                                    if grant_focus && response.has_focus() {
+                                        self.editor_focused = true;
+                                    }
+                                    if response.changed() {
+                                        self.feedback = None;
+                                    }
+                                });
+                        }
+                        OcrPresentation::NoText => {
+                            ui.label("No text was recognized in the selected region.");
+                        }
+                        OcrPresentation::Error(error) => {
+                            ui.colored_label(ui.visuals().error_fg_color, error_guidance(error));
+                        }
                     }
-                    OcrPresentation::NoText => {
-                        ui.label("No text was recognized in the selected region.");
-                    }
-                    OcrPresentation::Error(error) => {
-                        ui.colored_label(ui.visuals().error_fg_color, error_guidance(error));
-                    }
-                }
-            });
+                },
+            );
         if !open {
             intent = Some(OcrViewIntent::Close);
         }

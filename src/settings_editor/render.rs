@@ -11,8 +11,9 @@ use crate::gui::jump_mode::{
     TargetKind,
     ui::{FocusDirective, JumpModeScope, RegistrationResult},
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
-use crate::settings::NoteViewMode;
+use crate::settings::{NoteViewMode, UtilitySizePreference, UtilityToolKey};
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +23,426 @@ const RADIAL_LEGACY_TIMING_EXPLANATION: &str = "Legacy timing: the launcher hotk
 const SETTINGS_NAVIGATION_OBSERVER_ID: &str = "settings_navigation_frame_observer";
 const SETTINGS_NAVIGATION_HIGHLIGHT_DURATION: std::time::Duration =
     std::time::Duration::from_millis(1800);
+
+#[derive(Clone, Copy)]
+struct UtilitySizeChoice {
+    key: &'static str,
+    label: &'static str,
+    native_restore_only: bool,
+}
+
+const UTILITY_SIZE_CHOICES: &[UtilitySizeChoice] = &[
+    UtilitySizeChoice {
+        key: "action-sheet",
+        label: "Action Sheet",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "activity",
+        label: "Activity",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "add-action",
+        label: "Add Action",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "add-bookmark",
+        label: "Add Bookmark",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "batch-rename",
+        label: "Batch Rename",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "bookmark-alias",
+        label: "Bookmark Alias",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "brightness",
+        label: "Brightness",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "calendar",
+        label: "Calendar",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "calendar-event-details",
+        label: "Calendar Event Details",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "calendar-event-editor",
+        label: "Calendar Event Editor",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "clipboard-history",
+        label: "Clipboard History",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "clipboard-modify",
+        label: "Clipboard Modify",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "command-help",
+        label: "Command Help",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "cpu-usage",
+        label: "CPU Usage",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "create-tempfile",
+        label: "Create Temporary File",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "custom-apps",
+        label: "Custom Apps",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "dashboard-editor",
+        label: "Dashboard Editor",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "data-recovery",
+        label: "Data Recovery",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "diff",
+        label: "Diff",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "diff-comparison-rules",
+        label: "Diff Comparison Rules",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "diff-folder-rules",
+        label: "Diff Folder Rules",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "diff-text-input",
+        label: "Diff Text Input",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "duplicate-finder",
+        label: "Duplicate Finder",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "favorites",
+        label: "Favorites",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "file-preview",
+        label: "File Search Preview",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "file-search",
+        label: "File Search",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "folder-alias",
+        label: "Folder Alias",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "gesture-binding-editor",
+        label: "Gesture Binding Editor",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "gesture-ignore-window-picker",
+        label: "Gesture Ignore Window Picker",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "gesture-settings",
+        label: "Gesture Settings",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "gesture-settings-window-picker",
+        label: "Gesture Settings Window Picker",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "hash-generator",
+        label: "Hash Generator",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "hotfolder-manager",
+        label: "Hotfolder Manager",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "hotkey-directory",
+        label: "Hotkey Directory",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "image-comparison",
+        label: "Image Comparison",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "image-crop-editor",
+        label: "Image Crop Editor",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "image-viewer",
+        label: "Image Viewer",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "json-utility",
+        label: "JSON Utility",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "legacy-macros",
+        label: "Legacy Macros",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro",
+        label: "Macro Editor",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-action-catalog",
+        label: "Macro Action Catalog",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-action-editor",
+        label: "Macro Action Editor",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-help",
+        label: "Macro Help",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-launcher-picker",
+        label: "Macro Launcher Picker",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-package-export",
+        label: "Macro Package Export",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-package-import",
+        label: "Macro Package Import",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-recording-review",
+        label: "Macro Recording Review",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-reference-crop",
+        label: "Macro Reference Crop",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-step-search",
+        label: "Macro Step Search",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-template-save",
+        label: "Save Macro Template",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-templates",
+        label: "Macro Templates",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mkmacro-window-picker",
+        label: "Macro Window Picker",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mouse-gestures",
+        label: "Mouse Gestures",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "mouse-settings",
+        label: "Mouse Settings",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "multi-manager",
+        label: "Multi Manager",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "multi-manager-settings",
+        label: "Multi Manager Settings",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "note-editor",
+        label: "Note Editor",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "note-graph",
+        label: "Note Graph",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "note-templates",
+        label: "Note Templates",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "ocr-result",
+        label: "OCR Result",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "paste-sequences",
+        label: "Paste Sequences",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "plugin-settings",
+        label: "Plugin Settings",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "qr-generator",
+        label: "QR Generator",
+        native_restore_only: true,
+    },
+    UtilitySizeChoice {
+        key: "quick-help",
+        label: "Quick Help",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "quick-notes",
+        label: "Quick Notes",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "regex-tester",
+        label: "Regex Tester",
+        native_restore_only: true,
+    },
+    UtilitySizeChoice {
+        key: "screenshot-editor",
+        label: "Screenshot Editor",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "screenshot-pin-list",
+        label: "Screenshot Pins",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "search-replace",
+        label: "Search and Replace",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "settings",
+        label: "Settings",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "shell-commands",
+        label: "Shell Commands",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "snippet-prompt",
+        label: "Snippet Prompt",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "snippets",
+        label: "Snippets",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "table-utility",
+        label: "Table and CSV Utility",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "tempfile-alias",
+        label: "Temporary File Alias",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "theme-settings",
+        label: "Theme Settings",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "toast-log",
+        label: "Toast Log",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "todos",
+        label: "Todos",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "unused-note-assets",
+        label: "Unused Note Assets",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "volume",
+        label: "Volume",
+        native_restore_only: false,
+    },
+    UtilitySizeChoice {
+        key: "xml-toolkit",
+        label: "XML Toolkit",
+        native_restore_only: true,
+    },
+    UtilitySizeChoice {
+        key: "zip-extractor",
+        label: "ZIP Extractor",
+        native_restore_only: false,
+    },
+];
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SettingsNavigationFrameOutcome {
@@ -1370,211 +1791,226 @@ impl SettingsEditor {
             .resizable(true)
             .default_size(Self::settings_window_default_size(ctx))
             .min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                #[cfg(test)]
-                {
-                    test_window_state =
-                        Some((ui.is_sizing_pass(), ui.is_visible(), ui.is_enabled()));
-                }
-                let settings_content_height = Self::settings_content_height(
-                    ui.available_height(),
-                    settings_footer_reserved_height(ui),
-                );
-                egui::ScrollArea::vertical()
-                    .min_scrolled_height(0.0)
-                    .max_height(settings_content_height)
-                    .show(ui, |ui| {
-                        let activated_result = self.render_settings_search(
-                            ctx,
-                            ui,
-                            app,
-                            settings_owner_instance,
-                            jump_mode_active,
-                            first_ui_pass,
-                            &mut jump_targets,
-                        );
-                        if let Some(control_id) = activated_result
-                            && let Some(entry) = self.search_catalog.entry(&control_id).cloned()
-                        {
-                            reveal_section = Some(entry.section.clone());
-                            self.activate_settings_search_result(
+            .show_utility(
+                ctx,
+                "settings",
+                egui::Id::new("Settings"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from(Self::settings_window_default_size(ctx)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT),
+                |ui| {
+                    #[cfg(test)]
+                    {
+                        test_window_state =
+                            Some((ui.is_sizing_pass(), ui.is_visible(), ui.is_enabled()));
+                    }
+                    let settings_content_height = Self::settings_content_height(
+                        ui.available_height(),
+                        settings_footer_reserved_height(ui),
+                    );
+                    egui::ScrollArea::vertical()
+                        .min_scrolled_height(0.0)
+                        .max_height(settings_content_height)
+                        .show(ui, |ui| {
+                            let activated_result = self.render_settings_search(
+                                ctx,
+                                ui,
                                 app,
                                 settings_owner_instance,
-                                entry,
+                                jump_mode_active,
+                                first_ui_pass,
+                                &mut jump_targets,
                             );
-                        }
-                        if let Some(observer) = jump_targets.navigation_observer.as_ref()
-                            && !self.settings_navigation_observer_is_authoritative(observer)
-                        {
-                            observer.invalidate();
-                        }
-
-                        let top_level_expand_request = ui
-                            .horizontal(|ui| {
-                                let mut request = None;
-                                let expand = jump_targets.button(
-                                    ui,
-                                    setting_ids::SECTIONS_EXPAND_ALL,
-                                    "Expand all",
-                                );
-                                if jump_targets.clicked(&expand) {
-                                    request = Some(true);
-                                }
-                                let collapse = jump_targets.button(
-                                    ui,
-                                    setting_ids::SECTIONS_COLLAPSE_ALL,
-                                    "Collapse all",
-                                );
-                                if jump_targets.clicked(&collapse) {
-                                    request = Some(false);
-                                }
-                                request
-                            })
-                            .inner;
-                        if let Some(open) = top_level_expand_request {
-                            set_all_settings_sections_open(ui, open);
-                        }
-
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::Hotkeys,
-                            reveal_request(
-                                TopLevelSettingsSection::Hotkeys,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_hotkey_section(ui, app, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::PasteSequences,
-                            reveal_request(
-                                TopLevelSettingsSection::PasteSequences,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| {
-                                ui.label(app.paste_sequence_shortcut_summary());
-                                ui.separator();
-                                self.render_paste_sequence_section(ui, targets);
-                            },
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::LauncherWindow,
-                            reveal_request(
-                                TopLevelSettingsSection::LauncherWindow,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_launcher_window_section(ui, app, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::SearchResults,
-                            reveal_request(
-                                TopLevelSettingsSection::SearchResults,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_search_results_section(ui, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::ActionsFeedback,
-                            reveal_request(
-                                TopLevelSettingsSection::ActionsFeedback,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_actions_safety_feedback_section(ui, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::Dashboard,
-                            reveal_request(
-                                TopLevelSettingsSection::Dashboard,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_dashboard_section(ui, app, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::Radial,
-                            reveal_request(
-                                TopLevelSettingsSection::Radial,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| self.render_radial_section(ui, app, targets),
-                        );
-                        show_settings_section(
-                            ui,
-                            TopLevelSettingsSection::Plugins,
-                            reveal_request(
-                                TopLevelSettingsSection::Plugins,
-                                top_level_expand_request,
-                                reveal_section.as_ref(),
-                            ),
-                            &mut jump_targets,
-                            |ui, targets| {
-                                self.render_plugin_sections(
-                                    ui,
+                            if let Some(control_id) = activated_result
+                                && let Some(entry) = self.search_catalog.entry(&control_id).cloned()
+                            {
+                                reveal_section = Some(entry.section.clone());
+                                self.activate_settings_search_result(
                                     app,
-                                    targets,
-                                    reveal_section.as_ref(),
-                                )
-                            },
-                        );
-                        self.expand_request = None;
-                    });
+                                    settings_owner_instance,
+                                    entry,
+                                );
+                            }
+                            if let Some(observer) = jump_targets.navigation_observer.as_ref()
+                                && !self.settings_navigation_observer_is_authoritative(observer)
+                            {
+                                observer.invalidate();
+                            }
 
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    let pending = app.settings_save_pending();
-                    let save = ui.add_enabled(!pending, egui::Button::new("Save"));
-                    let save = crate::gui::theme::widgets::with_button_emphasis(
-                        ui,
-                        save,
-                        crate::gui::theme::widgets::ButtonEmphasis::Primary,
-                    );
-                    jump_targets.response(
-                        ui,
-                        &save,
-                        setting_ids::FOOTER_SAVE,
-                        "Save",
-                        TargetKind::Button,
-                    );
-                    if jump_targets.clicked(&save) {
-                        self.save_settings(ctx, app);
-                    }
-                    let cancel_button = ui.add_enabled(!pending, egui::Button::new("Cancel"));
-                    jump_targets.register(
-                        ui,
-                        &cancel_button,
-                        setting_ids::FOOTER_CANCEL,
-                        "Cancel",
-                        TargetKind::Button,
-                    );
-                    if jump_targets.clicked(&cancel_button) {
-                        cancel = true;
-                    }
-                    if app.settings_save_reconciliation_required() {
-                        ui.label("Hotkey state needs reconciliation; saving is disabled.");
-                    } else if pending {
-                        ui.label("Saving settings…");
-                    }
-                });
-            });
+                            let top_level_expand_request = ui
+                                .horizontal(|ui| {
+                                    let mut request = None;
+                                    let expand = jump_targets.button(
+                                        ui,
+                                        setting_ids::SECTIONS_EXPAND_ALL,
+                                        "Expand all",
+                                    );
+                                    if jump_targets.clicked(&expand) {
+                                        request = Some(true);
+                                    }
+                                    let collapse = jump_targets.button(
+                                        ui,
+                                        setting_ids::SECTIONS_COLLAPSE_ALL,
+                                        "Collapse all",
+                                    );
+                                    if jump_targets.clicked(&collapse) {
+                                        request = Some(false);
+                                    }
+                                    request
+                                })
+                                .inner;
+                            if let Some(open) = top_level_expand_request {
+                                set_all_settings_sections_open(ui, open);
+                            }
+
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::Hotkeys,
+                                reveal_request(
+                                    TopLevelSettingsSection::Hotkeys,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_hotkey_section(ui, app, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::PasteSequences,
+                                reveal_request(
+                                    TopLevelSettingsSection::PasteSequences,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| {
+                                    ui.label(app.paste_sequence_shortcut_summary());
+                                    ui.separator();
+                                    self.render_paste_sequence_section(ui, targets);
+                                },
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::LauncherWindow,
+                                reveal_request(
+                                    TopLevelSettingsSection::LauncherWindow,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_launcher_window_section(ui, app, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::SearchResults,
+                                reveal_request(
+                                    TopLevelSettingsSection::SearchResults,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_search_results_section(ui, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::ActionsFeedback,
+                                reveal_request(
+                                    TopLevelSettingsSection::ActionsFeedback,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| {
+                                    self.render_actions_safety_feedback_section(ui, targets)
+                                },
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::Dashboard,
+                                reveal_request(
+                                    TopLevelSettingsSection::Dashboard,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_dashboard_section(ui, app, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::Radial,
+                                reveal_request(
+                                    TopLevelSettingsSection::Radial,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| self.render_radial_section(ui, app, targets),
+                            );
+                            show_settings_section(
+                                ui,
+                                TopLevelSettingsSection::Plugins,
+                                reveal_request(
+                                    TopLevelSettingsSection::Plugins,
+                                    top_level_expand_request,
+                                    reveal_section.as_ref(),
+                                ),
+                                &mut jump_targets,
+                                |ui, targets| {
+                                    self.render_plugin_sections(
+                                        ui,
+                                        app,
+                                        targets,
+                                        reveal_section.as_ref(),
+                                    )
+                                },
+                            );
+                            self.expand_request = None;
+                        });
+
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        let pending = app.settings_save_pending();
+                        let save = ui.add_enabled(!pending, egui::Button::new("Save"));
+                        let save = crate::gui::theme::widgets::with_button_emphasis(
+                            ui,
+                            save,
+                            crate::gui::theme::widgets::ButtonEmphasis::Primary,
+                        );
+                        jump_targets.response(
+                            ui,
+                            &save,
+                            setting_ids::FOOTER_SAVE,
+                            "Save",
+                            TargetKind::Button,
+                        );
+                        if jump_targets.clicked(&save) {
+                            self.save_settings(ctx, app);
+                        }
+                        let cancel_button = ui.add_enabled(!pending, egui::Button::new("Cancel"));
+                        jump_targets.register(
+                            ui,
+                            &cancel_button,
+                            setting_ids::FOOTER_CANCEL,
+                            "Cancel",
+                            TargetKind::Button,
+                        );
+                        if jump_targets.clicked(&cancel_button) {
+                            cancel = true;
+                        }
+                        if app.settings_save_reconciliation_required() {
+                            ui.label("Hotkey state needs reconciliation; saving is disabled.");
+                        } else if pending {
+                            ui.label("Saving settings…");
+                        }
+                    });
+                },
+            );
         #[cfg(test)]
         let navigation_outcome = jump_targets
             .navigation_observer
@@ -3416,6 +3852,160 @@ impl SettingsEditor {
         );
         if targets.clicked(&theme_settings) {
             app.open_theme_settings_dialog();
+        }
+
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Utility window sizes").strong());
+        let size_access =
+            crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ui.ctx());
+        let selected_key = self
+            .utility_dialog_size_selected_tool
+            .or_else(|| UtilityToolKey::parse("action-sheet").ok());
+        let selected_choice = selected_key.and_then(|key| {
+            UTILITY_SIZE_CHOICES
+                .iter()
+                .find(|choice| choice.key == key.as_str())
+                .copied()
+        });
+        ui.horizontal(|ui| {
+            let combo_identity = "utility_sizes.selected_tool";
+            let combo_order = targets.reserve_order();
+            let popup_scope = targets.combo_popup_scope(combo_identity);
+            let combo = egui::ComboBox::from_id_salt(combo_identity)
+                .selected_text(
+                    selected_choice
+                        .map(|choice| choice.label)
+                        .unwrap_or("Select a utility"),
+                )
+                .show_ui(ui, |ui| {
+                    for choice in UTILITY_SIZE_CHOICES {
+                        if let Ok(key) = UtilityToolKey::parse(choice.key) {
+                            let response = ui.selectable_value(
+                                &mut self.utility_dialog_size_selected_tool,
+                                Some(key),
+                                choice.label,
+                            );
+                            targets.popup_option(
+                                popup_scope.as_ref(),
+                                ui,
+                                &response,
+                                choice.key,
+                                choice.label,
+                            );
+                        }
+                    }
+                });
+            targets.register_at(
+                ui,
+                &combo.response,
+                combo_identity,
+                "Utility window kind",
+                TargetKind::ComboBox,
+                combo_order,
+            );
+        });
+
+        let active_key = self
+            .utility_dialog_size_selected_tool
+            .or_else(|| UtilityToolKey::parse("action-sheet").ok());
+        let active_choice = active_key.and_then(|key| {
+            UTILITY_SIZE_CHOICES
+                .iter()
+                .find(|choice| choice.key == key.as_str())
+                .copied()
+        });
+        if let Some(choice) = active_choice
+            && let Some(key) = active_key
+        {
+            let status = size_access.status(key);
+            if status.available {
+                match status.preference {
+                    UtilitySizePreference::Missing => {
+                        ui.label("Default size: using this window's default.");
+                    }
+                    UtilitySizePreference::Reset => {
+                        ui.label("Default size: reset to this window's default.");
+                    }
+                    UtilitySizePreference::Preferred(size) => {
+                        ui.label(format!(
+                            "Saved size: {:.0} × {:.0} points.",
+                            size.width, size.height
+                        ));
+                    }
+                    UtilitySizePreference::Unsupported => {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            "Saved size data is unsupported; this preference is inactive and cannot be changed safely.",
+                        );
+                    }
+                }
+            } else {
+                ui.small("Window size controls are unavailable.");
+            }
+            if status.pending_revision.is_some() {
+                ui.label("Saving utility window size…");
+            }
+            if let Some((_, message)) = &status.failure {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Could not save this size: {message}"),
+                );
+            }
+            if status.available && choice.native_restore_only {
+                ui.small("In-app dialogs remember resizing. Separate windows support restore and reset only.");
+            }
+
+            let can_reset = status.available
+                && status.pending_revision.is_none()
+                && !matches!(status.preference, UtilitySizePreference::Unsupported);
+            let reset = ui.add_enabled(can_reset, egui::Button::new("Reset size to default"));
+            targets.response(
+                ui,
+                &reset,
+                "utility_sizes.reset",
+                "Reset utility window size to default",
+                TargetKind::Button,
+            );
+            let authorized_action = targets.first_ui_pass
+                && ui.is_visible()
+                && ui.is_enabled()
+                && !ui.is_sizing_pass()
+                && !ui.ctx().will_discard();
+            if reset.clicked() && authorized_action {
+                match size_access.reset(key) {
+                    Ok(_) => {
+                        ui.ctx().request_repaint();
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(16));
+                    }
+                    Err(error) => {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            format!("Could not reset this window size: {error}"),
+                        );
+                    }
+                }
+            }
+
+            if status.failure.is_some() {
+                let retry = ui.button("Retry saving");
+                targets.response(
+                    ui,
+                    &retry,
+                    "utility_sizes.retry",
+                    "Retry saving utility window size",
+                    TargetKind::Button,
+                );
+                if retry.clicked()
+                    && authorized_action
+                    && let Err(error) = size_access.retry_failed(ui.ctx())
+                {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("Could not retry utility size save: {error}"),
+                    );
+                }
+            }
         }
     }
 
@@ -6696,5 +7286,189 @@ mod settings_shell_tests {
                 .contains_rect(save_rect),
             "the Save control remains inside a short viewport"
         );
+    }
+
+    #[test]
+    fn utility_size_settings_jump_controls_reset_once_and_cancel_keeps_the_committed_tombstone() {
+        use crate::gui::jump_mode::ui::{JumpModeUi, NavigationOwner};
+        use crate::settings::{PreferredWindowSize, UtilitySizePreference, UtilityToolKey};
+        use std::time::{Duration, Instant};
+
+        assert!(UTILITY_SIZE_CHOICES.iter().any(|choice| {
+            choice.key == "zip-extractor"
+                && choice.label == "ZIP Extractor"
+                && !choice.native_restore_only
+        }));
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let key = UtilityToolKey::parse("diff").unwrap();
+        let preferred = PreferredWindowSize::new(760.0, 520.0).unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings.experimental_jump_mode_enabled = true;
+        settings.utility_dialog_sizes.set(key, preferred).unwrap();
+        let mut app = settings_test_app(&ctx, &directory, settings);
+        app.show_settings = true;
+        app.settings_editor.utility_dialog_size_selected_tool = Some(key);
+        for _ in 0..3 {
+            paste_settings_frame(&ctx, &mut app, Vec::new());
+        }
+        paste_settings_click(&ctx, &mut app, "Expand all");
+
+        let mut jump = JumpModeUi::new(true);
+        let setup_output = ctx.run_ui(
+            egui::RawInput {
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                jump.begin_frame();
+                assert!(jump.observe_settings_visibility(true));
+                let settings_owner = NavigationOwner::Settings {
+                    instance: jump.settings_instance(),
+                };
+                assert_eq!(
+                    jump.update_navigation_owner(&ctx, settings_owner, true),
+                    NavigationOwner::Blocked,
+                    "the newly opened Settings owner waits for retained window ordering"
+                );
+                ui.label("Utility size Settings owner setup");
+            },
+        );
+        setup_output.drop_without_applying_deltas();
+
+        let mut targets = settings_jump_frame(&ctx, &mut app, &mut jump, Vec::new(), None, true);
+        targets = settings_scroll_until_target(
+            &ctx,
+            &mut app,
+            &mut jump,
+            targets,
+            "Utility window kind",
+            SettingsScrollDirection::Later,
+        );
+        assert_eq!(
+            target_by_label(&targets, "Utility window kind")
+                .metadata()
+                .kind(),
+            crate::gui::jump_mode::TargetKind::ComboBox
+        );
+        assert_eq!(
+            crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(&ctx)
+                .status(key)
+                .pending_revision,
+            None,
+            "viewing the session-only selected utility does not submit a size mutation"
+        );
+        targets = settings_scroll_until_target(
+            &ctx,
+            &mut app,
+            &mut jump,
+            targets,
+            "Reset utility window size to default",
+            SettingsScrollDirection::Later,
+        );
+        let reset = target_by_label(&targets, "Reset utility window size to default").clone();
+        assert!(reset.eligible());
+        assert_eq!(
+            reset.metadata().kind(),
+            crate::gui::jump_mode::TargetKind::Button
+        );
+        let reset_position = reset.rect().center();
+        for pressed in [true, false] {
+            targets = settings_jump_frame(
+                &ctx,
+                &mut app,
+                &mut jump,
+                vec![
+                    egui::Event::PointerMoved(reset_position),
+                    egui::Event::PointerButton {
+                        pos: reset_position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                None,
+                true,
+            );
+        }
+
+        let pending = crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(&ctx)
+            .status(key);
+        assert!(
+            pending.pending_revision.is_some(),
+            "the actual Settings Reset control queues one pending independent mutation"
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let acknowledged = loop {
+            app.utility_dialog_size_manager.begin_frame(&ctx).unwrap();
+            let status =
+                crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(&ctx)
+                    .status(key);
+            if status.preference == UtilitySizePreference::Reset
+                && status.pending_revision.is_none()
+            {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the Settings Reset acknowledgement: {status:?}"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        };
+        assert!(acknowledged.acknowledged_revision.is_some());
+        assert_eq!(
+            crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .utility_dialog_sizes
+                .preference(key),
+            UtilitySizePreference::Reset,
+            "the canonical async transaction persists a reset tombstone"
+        );
+
+        app.settings_editor.always_on_top = !app.settings_editor.always_on_top;
+        targets = settings_jump_frame(&ctx, &mut app, &mut jump, Vec::new(), None, true);
+        targets = settings_scroll_until_target(
+            &ctx,
+            &mut app,
+            &mut jump,
+            targets,
+            "Cancel",
+            SettingsScrollDirection::Later,
+        );
+        let cancel = target_by_label(&targets, "Cancel").clone();
+        assert!(cancel.eligible());
+        let cancel_position = cancel.rect().center();
+        for pressed in [true, false] {
+            settings_jump_frame(
+                &ctx,
+                &mut app,
+                &mut jump,
+                vec![
+                    egui::Event::PointerMoved(cancel_position),
+                    egui::Event::PointerButton {
+                        pos: cancel_position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                None,
+                true,
+            );
+        }
+        assert!(
+            !app.show_settings,
+            "the actual Settings Cancel control closes the draft"
+        );
+        assert_eq!(
+            crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .utility_dialog_sizes
+                .preference(key),
+            UtilitySizePreference::Reset,
+            "general editor cancellation cannot undo the independent size reset"
+        );
+        app.settings_save_workers.join_all();
     }
 }

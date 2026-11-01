@@ -83,3 +83,4 @@ pub mod wikipedia;
 pub mod windows;
 pub mod xml_toolkit;
 pub mod youtube;
+pub mod zip_extractor;

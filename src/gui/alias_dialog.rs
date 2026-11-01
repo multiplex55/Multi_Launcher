@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{ButtonEmphasis, secondary_help, with_button_emphasis};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::folders::{FOLDERS_FILE, load_folders, set_alias};
 use eframe::egui;
 
@@ -49,9 +50,17 @@ impl AliasDialog {
         let window_id = egui::Id::new("Set Folder Alias");
         #[cfg(test)]
         let mut test_layout = None;
-        let window_output = egui::Window::new("Set Folder Alias")
-            .open(&mut self.open)
-            .show(ctx, |ui| {
+        let window_output = egui::Window::new("Set Folder Alias").show_utility(
+            ctx,
+            "folder-alias",
+            egui::Id::new("Set Folder Alias"),
+            Some(&mut self.open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                egui::Vec2::ZERO,
+                [None, None],
+            ),
+            |ui| {
                 ui.label("Folder path");
                 #[cfg(test)]
                 let target_parent_clip_rect = ui.clip_rect();
@@ -135,7 +144,8 @@ impl AliasDialog {
                         cancel_rect,
                     });
                 }
-            });
+            },
+        );
         #[cfg(test)]
         {
             self.test_layout = match (window_output.as_ref(), test_layout) {

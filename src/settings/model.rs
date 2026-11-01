@@ -825,6 +825,11 @@ pub struct Settings {
     /// history.
     #[serde(default)]
     pub mkmacro_properties: MkMacroPropertiesPreferences,
+    /// Local-only preferred outer sizes for stable utility window kinds.
+    /// This field is independently updated and excluded from the general
+    /// Settings editor's ownership/rollback set.
+    #[serde(default)]
+    pub utility_dialog_sizes: crate::settings::utility_dialog_sizes::UtilityDialogSizes,
     /// Internal durable marker for the one-time radial submenu conversion.
     /// It deliberately lives outside the authorable RadialDocument so imports
     /// and authoring undo cannot erase migration recovery state.
@@ -1214,6 +1219,8 @@ impl Default for Settings {
             radial: crate::radial::model::RadialFeatureSettings::default(),
             radial_designer: RadialDesignerPreferences::default(),
             mkmacro_properties: MkMacroPropertiesPreferences::default(),
+            utility_dialog_sizes:
+                crate::settings::utility_dialog_sizes::UtilityDialogSizes::default(),
             radial_submenu_migration: None,
         }
     }

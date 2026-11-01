@@ -54,10 +54,11 @@ pub(crate) enum NavigationDialogKind {
     ImageCompare,
     DuplicateFinder,
     Activity,
+    ZipExtractor,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 19] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -76,6 +77,7 @@ impl NavigationDialogKind {
         Self::ImageCompare,
         Self::DuplicateFinder,
         Self::Activity,
+        Self::ZipExtractor,
     ];
 
     const fn index(self) -> usize {
@@ -98,6 +100,7 @@ impl NavigationDialogKind {
             Self::ImageCompare => 15,
             Self::DuplicateFinder => 16,
             Self::Activity => 17,
+            Self::ZipExtractor => 18,
         }
     }
 
@@ -121,6 +124,7 @@ impl NavigationDialogKind {
             Self::ImageCompare => "image-compare",
             Self::DuplicateFinder => "duplicate-finder",
             Self::Activity => "activity",
+            Self::ZipExtractor => "zip-extractor",
         }
     }
 
@@ -147,6 +151,7 @@ impl NavigationDialogKind {
             Self::ImageCompare => egui::Id::new(Some("Image Comparison")),
             Self::DuplicateFinder => egui::Id::new(Some("Duplicate Finder")),
             Self::Activity => egui::Id::new("activity_dialog"),
+            Self::ZipExtractor => egui::Id::new("zip_extractor_dialog"),
         };
         Some(egui::LayerId::new(egui::Order::Middle, id))
     }
@@ -3981,6 +3986,11 @@ mod tests {
                     NavigationDialogKind::JsonUtility => {
                         egui::Window::new("JSON Utility")
                             .id(egui::Id::new("json_utility_dialog"))
+                            .show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::ZipExtractor => {
+                        egui::Window::new("ZIP Extractor")
+                            .id(egui::Id::new("zip_extractor_dialog"))
                             .show(ctx, |_| {});
                     }
                     NavigationDialogKind::RegexTester => {

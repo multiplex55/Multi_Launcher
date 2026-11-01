@@ -1,5 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
     MmBindingStatus, MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace,
@@ -67,117 +68,135 @@ impl MultiManagerDialog {
         refresh_live_titles_if_due(app, ctx, false);
         let mut open = self.open;
         egui::Window::new("MultiManager")
-            .open(&mut open)
             .vscroll(true)
-            .show(ctx, |ui| {
-                self.capture_banner(ui, app);
-                ui.add_enabled_ui(app.multi_manager.pending_capture.is_none(), |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Add Workspace").clicked() {
-                            add_workspace(app);
-                        }
-                        let save = ui.button("Save");
-                        if widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary)
-                            .clicked()
-                        {
-                            app.multi_manager_save();
-                        }
-                        if ui.button("Reload").clicked() {
-                            self.confirm.reload = true;
-                        }
-                        if ui.button("Save HWND Snapshot").clicked() {
-                            app.multi_manager_save_bindings();
-                        }
-                        if ui.button("Restore HWND Snapshot").clicked() {
-                            app.multi_manager_restore_bindings();
-                        }
-                        let reconnect_active = app
-                            .multi_manager
-                            .reconnect_in_progress
-                            .load(Ordering::Acquire);
-                        if ui
-                            .add_enabled(
-                                reconnect_button_enabled(reconnect_active),
-                                egui::Button::new(reconnect_button_text(reconnect_active)),
-                            )
-                            .clicked()
-                        {
-                            app.multi_manager_start_manual_reconnect();
-                        }
-                        if ui.button("Refresh Titles").clicked() {
-                            app.multi_manager_refresh_titles();
-                        }
-                        if ui.button("Refresh Desktops").clicked() {
-                            self.refresh_virtual_desktops();
-                        }
-                        if ui.button("Send All Home").clicked() {
-                            send_all(app, true);
-                        }
-                        if ui.button("Recapture All").clicked() {
-                            app.multi_manager_start_recapture_all();
-                        }
-                        if ui
-                            .button(expand_all_button_label(self.all_expanded))
-                            .clicked()
-                        {
-                            toggle_expand_all(&mut self.all_expanded, &mut self.expand_all_signal);
-                        }
-                        if app.multi_manager.dirty {
-                            widgets::semantic_status(ui, StatusTone::Warning, "● dirty", None);
-                        } else {
-                            widgets::semantic_status(ui, StatusTone::Success, "saved", None);
-                        }
-                        let last = app
-                            .multi_manager
-                            .last_hotkey_info
-                            .lock()
-                            .ok()
-                            .and_then(|g| g.clone())
-                            .map(|(s, _)| s)
-                            .unwrap_or_else(|| "none".into());
-                        widgets::semantic_status(ui, StatusTone::Info, "last hotkey", Some(&last));
-                    });
-                    if self.confirm.reload {
+            .show_utility(
+                ctx,
+                "multi-manager",
+                egui::Id::new("MultiManager"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                ),
+                |ui| {
+                    self.capture_banner(ui, app);
+                    ui.add_enabled_ui(app.multi_manager.pending_capture.is_none(), |ui| {
                         ui.horizontal_wrapped(|ui| {
+                            if ui.button("Add Workspace").clicked() {
+                                add_workspace(app);
+                            }
+                            let save = ui.button("Save");
+                            if widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary)
+                                .clicked()
+                            {
+                                app.multi_manager_save();
+                            }
+                            if ui.button("Reload").clicked() {
+                                self.confirm.reload = true;
+                            }
+                            if ui.button("Save HWND Snapshot").clicked() {
+                                app.multi_manager_save_bindings();
+                            }
+                            if ui.button("Restore HWND Snapshot").clicked() {
+                                app.multi_manager_restore_bindings();
+                            }
+                            let reconnect_active = app
+                                .multi_manager
+                                .reconnect_in_progress
+                                .load(Ordering::Acquire);
+                            if ui
+                                .add_enabled(
+                                    reconnect_button_enabled(reconnect_active),
+                                    egui::Button::new(reconnect_button_text(reconnect_active)),
+                                )
+                                .clicked()
+                            {
+                                app.multi_manager_start_manual_reconnect();
+                            }
+                            if ui.button("Refresh Titles").clicked() {
+                                app.multi_manager_refresh_titles();
+                            }
+                            if ui.button("Refresh Desktops").clicked() {
+                                self.refresh_virtual_desktops();
+                            }
+                            if ui.button("Send All Home").clicked() {
+                                send_all(app, true);
+                            }
+                            if ui.button("Recapture All").clicked() {
+                                app.multi_manager_start_recapture_all();
+                            }
+                            if ui
+                                .button(expand_all_button_label(self.all_expanded))
+                                .clicked()
+                            {
+                                toggle_expand_all(
+                                    &mut self.all_expanded,
+                                    &mut self.expand_all_signal,
+                                );
+                            }
+                            if app.multi_manager.dirty {
+                                widgets::semantic_status(ui, StatusTone::Warning, "● dirty", None);
+                            } else {
+                                widgets::semantic_status(ui, StatusTone::Success, "saved", None);
+                            }
+                            let last = app
+                                .multi_manager
+                                .last_hotkey_info
+                                .lock()
+                                .ok()
+                                .and_then(|g| g.clone())
+                                .map(|(s, _)| s)
+                                .unwrap_or_else(|| "none".into());
                             widgets::semantic_status(
                                 ui,
-                                StatusTone::Warning,
-                                "Reload and discard unsaved changes?",
-                                None,
+                                StatusTone::Info,
+                                "last hotkey",
+                                Some(&last),
                             );
-                            let confirm = ui.button("Confirm");
-                            if widgets::with_button_emphasis(
-                                ui,
-                                confirm,
-                                ButtonEmphasis::Destructive,
-                            )
-                            .clicked()
-                            {
-                                app.multi_manager_reload();
-                                self.confirm.reload = false;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.confirm.reload = false;
-                            }
                         });
-                    }
-                    widgets::compact_section_heading(
-                        ui,
-                        "Workspaces",
-                        Some("Capture windows, review bindings, and manage positions."),
-                    );
-                    let ids = app
-                        .multi_manager
-                        .workspaces
-                        .lock()
-                        .map(|w| w.iter().map(|x| x.id.clone()).collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    for id in ids {
-                        self.workspace_card(ui, app, &id);
-                    }
-                    self.expand_all_signal = None;
-                });
-            });
+                        if self.confirm.reload {
+                            ui.horizontal_wrapped(|ui| {
+                                widgets::semantic_status(
+                                    ui,
+                                    StatusTone::Warning,
+                                    "Reload and discard unsaved changes?",
+                                    None,
+                                );
+                                let confirm = ui.button("Confirm");
+                                if widgets::with_button_emphasis(
+                                    ui,
+                                    confirm,
+                                    ButtonEmphasis::Destructive,
+                                )
+                                .clicked()
+                                {
+                                    app.multi_manager_reload();
+                                    self.confirm.reload = false;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    self.confirm.reload = false;
+                                }
+                            });
+                        }
+                        widgets::compact_section_heading(
+                            ui,
+                            "Workspaces",
+                            Some("Capture windows, review bindings, and manage positions."),
+                        );
+                        let ids = app
+                            .multi_manager
+                            .workspaces
+                            .lock()
+                            .map(|w| w.iter().map(|x| x.id.clone()).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        for id in ids {
+                            self.workspace_card(ui, app, &id);
+                        }
+                        self.expand_all_signal = None;
+                    });
+                },
+            );
         self.open = open;
     }
 
@@ -891,9 +910,17 @@ impl MultiManagerSettingsDialog {
             return;
         }
         let mut open = self.open;
-        egui::Window::new("MultiManager Settings")
-            .open(&mut open)
-            .show(ctx, |ui| {
+        egui::Window::new("MultiManager Settings").show_utility(
+            ctx,
+            "multi-manager-settings",
+            egui::Id::new("MultiManager Settings"),
+            Some(&mut open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                egui::Vec2::ZERO,
+                [None, None],
+            ),
+            |ui| {
                 let mut s = app.multi_manager_settings.clone();
                 let form = show_settings_form(ui, &mut s);
                 if form.changed {
@@ -913,7 +940,8 @@ impl MultiManagerSettingsDialog {
                             .report_error_message("multi_manager.settings.save", format!("{err}")),
                     }
                 }
-            });
+            },
+        );
         self.open = open;
     }
 }

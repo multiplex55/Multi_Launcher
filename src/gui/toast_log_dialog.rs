@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::toast_log::TOAST_LOG_FILE;
 use eframe::egui;
 
@@ -30,28 +31,40 @@ impl ToastLogDialog {
         egui::Window::new("Toast Log")
             .resizable(true)
             .default_size((360.0, 200.0))
-            .open(&mut self.open)
-            .show(ctx, |ui| {
-                let footer_height = toast_log_footer_reserved_height(ui);
-                egui::ScrollArea::vertical()
-                    .id_salt("toast_log_content")
-                    .min_scrolled_height(0.0)
-                    .max_height((ui.available_height() - footer_height).max(0.0))
-                    .show(ui, |ui| {
-                        for line in &self.lines {
-                            ui.label(line);
+            .show_utility(
+                ctx,
+                "toast-log",
+                egui::Id::new("Toast Log"),
+                Some(&mut self.open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((360.0, 200.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                ),
+                |ui| {
+                    let footer_height = toast_log_footer_reserved_height(ui);
+                    egui::ScrollArea::vertical()
+                        .id_salt("toast_log_content")
+                        .min_scrolled_height(0.0)
+                        .max_height((ui.available_height() - footer_height).max(0.0))
+                        .show(ui, |ui| {
+                            for line in &self.lines {
+                                ui.label(line);
+                            }
+                        });
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Refresh").clicked() {
+                            self.lines = Self::read_last_lines(TOAST_LOG_FILE, 20);
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
                         }
                     });
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Refresh").clicked() {
-                        self.lines = Self::read_last_lines(TOAST_LOG_FILE, 20);
-                    }
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
-                });
-            });
+                },
+            );
         if close {
             self.open = false;
         }

@@ -2,6 +2,7 @@ use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::plugins::shell::{SHELL_CMDS_FILE, ShellCmdEntry, load_shell_cmds, replace_shell_cmds};
 use eframe::egui;
 
@@ -158,321 +159,341 @@ impl ShellCmdDialog {
             .default_size((560.0, 400.0))
             .max_width(ctx.content_rect().width().max(1.0))
             .max_height(ctx.content_rect().height().max(1.0))
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                #[cfg(test)]
-                {
-                    test_visible = ui.is_visible();
-                    test_sizing_pass = ui.is_sizing_pass();
-                }
-
-                if let Some(error) = &self.load_error {
-                    let footer_height = shell_footer_reserved_height(ui, &["Close"]);
-                    let error_height = (ui.available_height() - footer_height).max(0.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("shell_cmd_load_error")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(error_height)
-                        .show(ui, |ui| {
-                            semantic_status(
-                                ui,
-                                StatusTone::Error,
-                                "Shell commands are read-only because loading failed",
-                                Some(error),
-                            );
-                        });
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        #[cfg(test)]
-                        {
-                            test_footer_clip_rect = ui.clip_rect();
-                        }
-                        let button = ui.button("Close");
-                        let button = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
-                        #[cfg(test)]
-                        {
-                            test_primary_rect = button.rect;
-                            test_close_clicked |= button.clicked();
-                        }
-                        if button.clicked() {
-                            close = true;
-                        }
-                    });
-                    return;
-                }
-
-                if let Some(idx) = self.edit_idx {
-                    compact_section_heading(
-                        ui,
-                        if idx == self.entries.len() {
-                            "New command"
-                        } else {
-                            "Edit command"
-                        },
-                        Some("Enter inserts a new line in the command text."),
-                    );
-                    let name_response = ui
-                        .horizontal_wrapped(|ui| {
-                            let label = ui.label("Name");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.name)
-                                    .desired_width(ui.available_width().min(360.0).max(72.0)),
-                            )
-                            .labelled_by(label.id)
-                        })
-                        .inner;
-                    let command_label = ui.label("Command");
-                    let footer_height =
-                        shell_editor_footer_reserved_height(ui, &["Save", "Cancel"]);
-                    let editor_max_height = (ui.available_height() - footer_height).max(0.0);
-                    #[cfg(test)]
-                    let parent_max_rect = ui.max_rect();
-                    #[cfg(test)]
-                    let mut parent_clip_rect = egui::Rect::NOTHING;
-                    #[cfg(test)]
-                    let mut editor_clip_rect = egui::Rect::NOTHING;
-                    #[cfg(test)]
-                    let mut editor_args_id = None;
-                    #[cfg(test)]
-                    let mut editor_has_focus = false;
-                    let _editor_output = egui::ScrollArea::vertical()
-                        .id_salt("shell_cmd_args_scroll")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(editor_max_height)
-                        .show(ui, |ui| {
-                            #[cfg(test)]
-                            {
-                                parent_clip_rect = ui.clip_rect();
-                            }
-                            let output = egui::TextEdit::multiline(&mut self.args)
-                                .id_salt("shell_cmd_args")
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(12)
-                                .show(ui);
-                            #[cfg(test)]
-                            {
-                                editor_args_id = Some(output.response.id);
-                                editor_clip_rect = output.text_clip_rect.intersect(ui.clip_rect());
-                            }
-                            let response = egui::Response::clone(&output.response)
-                                .labelled_by(command_label.id);
-                            #[cfg(test)]
-                            {
-                                editor_has_focus = response.has_focus();
-                            }
-                            if response.has_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            {
-                                let modifiers = ui.input(|input| input.modifiers);
-                                ui.input_mut(|input| {
-                                    input.consume_key(modifiers, egui::Key::Enter)
-                                });
-                            }
-                            response
-                        });
-
-                    let keep_open_response =
-                        ui.checkbox(&mut self.keep_open, "Keep command prompt open after run");
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        #[cfg(test)]
-                        {
-                            test_footer_clip_rect = ui.clip_rect();
-                        }
-                        let save_button = ui.button("Save");
-                        let save_button =
-                            with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
-                        #[cfg(test)]
-                        {
-                            test_primary_rect = save_button.rect;
-                        }
-                        if save_button.clicked() {
-                            if self.name.trim().is_empty() || self.args.trim().is_empty() {
-                                app.report_error_message("ui operation", "Both fields required");
-                            } else {
-                                let mut candidate = self.entries.clone();
-                                if idx == candidate.len() {
-                                    candidate.push(ShellCmdEntry {
-                                        name: self.name.clone(),
-                                        args: self.args.clone(),
-                                        autocomplete: true,
-                                        keep_open: self.keep_open,
-                                    });
-                                } else if let Some(entry) = candidate.get_mut(idx) {
-                                    entry.name = self.name.clone();
-                                    entry.args = self.args.clone();
-                                    entry.keep_open = self.keep_open;
-                                }
-                                save_candidate = Some(candidate);
-                            }
-                        }
-                        let cancel_button = ui.button("Cancel");
-                        #[cfg(test)]
-                        {
-                            test_secondary_rect = cancel_button.rect;
-                        }
-                        if cancel_button.clicked() {
-                            self.edit_idx = None;
-                        }
-                    });
-
+            .show_utility(
+                ctx,
+                "shell-commands",
+                egui::Id::new("Shell Commands"),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from((560.0, 400.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_max_width(ctx.content_rect().width().max(1.0))
+                .with_max_height(ctx.content_rect().height().max(1.0)),
+                |ui| {
                     #[cfg(test)]
                     {
-                        test_body = Some(ShellBodyLayout::Editor {
-                            scroll: ShellScrollLayout {
-                                parent_max_rect,
-                                viewport_clip_rect: parent_clip_rect,
-                                content_size: _editor_output.content_size,
-                            },
-                            name_rect: name_response.rect,
-                            editor_clip_rect,
-                            args_id: editor_args_id.expect("the command editor should have an id"),
-                            args_has_focus: editor_has_focus,
-                            keep_open_rect: keep_open_response.rect,
-                        });
+                        test_visible = ui.is_visible();
+                        test_sizing_pass = ui.is_sizing_pass();
                     }
-                    #[cfg(not(test))]
-                    let _ = (name_response, keep_open_response);
-                } else {
-                    compact_section_heading(ui, "Saved commands", None);
-                    let footer_height = shell_footer_reserved_height(ui, &["Add Command", "Close"]);
-                    let list_height = (ui.available_height() - footer_height).max(0.0);
-                    let mut remove = None;
-                    #[cfg(test)]
-                    let parent_max_rect = ui.max_rect();
-                    #[cfg(test)]
-                    let mut parent_clip_rect = egui::Rect::NOTHING;
-                    #[cfg(test)]
-                    let mut first_name_rect = egui::Rect::NOTHING;
-                    #[cfg(test)]
-                    let mut first_command_rect = egui::Rect::NOTHING;
-                    #[cfg(test)]
-                    let mut first_edit_rect = egui::Rect::NOTHING;
-                    #[cfg(test)]
-                    let mut first_remove_rect = egui::Rect::NOTHING;
-                    let list_output = egui::ScrollArea::vertical()
-                        .id_salt("shell_cmd_list")
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.0)
-                        .max_height(list_height)
-                        .show(ui, |ui| {
+
+                    if let Some(error) = &self.load_error {
+                        let footer_height = shell_footer_reserved_height(ui, &["Close"]);
+                        let error_height = (ui.available_height() - footer_height).max(0.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("shell_cmd_load_error")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(error_height)
+                            .show(ui, |ui| {
+                                semantic_status(
+                                    ui,
+                                    StatusTone::Error,
+                                    "Shell commands are read-only because loading failed",
+                                    Some(error),
+                                );
+                            });
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
                             #[cfg(test)]
                             {
-                                parent_clip_rect = ui.clip_rect();
+                                test_footer_clip_rect = ui.clip_rect();
                             }
-                            for idx in 0..self.entries.len() {
-                                let name = self.entries[idx].name.clone();
-                                let args = self.entries[idx].args.clone();
-                                let keep_open = self.entries[idx].keep_open;
-                                let row = ui.push_id(("shell_cmd_row", idx), |ui| {
-                                    ui.vertical(|ui| {
-                                        let name_response =
-                                            ui.label(egui::RichText::new(name).strong());
-                                        let command_response =
-                                            ui.add(egui::Label::new(args).wrap());
-                                        let mut edit_clicked = false;
-                                        let mut remove_clicked = false;
-                                        ui.horizontal_wrapped(|ui| {
-                                            let edit_button = ui.button("Edit");
-                                            edit_clicked = edit_button.clicked();
-                                            #[cfg(test)]
-                                            if idx == 0 {
-                                                first_edit_rect = edit_button.rect;
-                                            }
-                                            let remove_button = ui.button("Remove");
-                                            let remove_button = with_button_emphasis(
-                                                ui,
-                                                remove_button,
-                                                ButtonEmphasis::Destructive,
-                                            );
-                                            remove_clicked = remove_button.clicked();
-                                            #[cfg(test)]
-                                            if idx == 0 {
-                                                first_remove_rect = remove_button.rect;
-                                            }
+                            let button = ui.button("Close");
+                            let button = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
+                            #[cfg(test)]
+                            {
+                                test_primary_rect = button.rect;
+                                test_close_clicked |= button.clicked();
+                            }
+                            if button.clicked() {
+                                close = true;
+                            }
+                        });
+                        return;
+                    }
+
+                    if let Some(idx) = self.edit_idx {
+                        compact_section_heading(
+                            ui,
+                            if idx == self.entries.len() {
+                                "New command"
+                            } else {
+                                "Edit command"
+                            },
+                            Some("Enter inserts a new line in the command text."),
+                        );
+                        let name_response = ui
+                            .horizontal_wrapped(|ui| {
+                                let label = ui.label("Name");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.name)
+                                        .desired_width(ui.available_width().min(360.0).max(72.0)),
+                                )
+                                .labelled_by(label.id)
+                            })
+                            .inner;
+                        let command_label = ui.label("Command");
+                        let footer_height =
+                            shell_editor_footer_reserved_height(ui, &["Save", "Cancel"]);
+                        let editor_max_height = (ui.available_height() - footer_height).max(0.0);
+                        #[cfg(test)]
+                        let parent_max_rect = ui.max_rect();
+                        #[cfg(test)]
+                        let mut parent_clip_rect = egui::Rect::NOTHING;
+                        #[cfg(test)]
+                        let mut editor_clip_rect = egui::Rect::NOTHING;
+                        #[cfg(test)]
+                        let mut editor_args_id = None;
+                        #[cfg(test)]
+                        let mut editor_has_focus = false;
+                        let _editor_output = egui::ScrollArea::vertical()
+                            .id_salt("shell_cmd_args_scroll")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(editor_max_height)
+                            .show(ui, |ui| {
+                                #[cfg(test)]
+                                {
+                                    parent_clip_rect = ui.clip_rect();
+                                }
+                                let output = egui::TextEdit::multiline(&mut self.args)
+                                    .id_salt("shell_cmd_args")
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(12)
+                                    .show(ui);
+                                #[cfg(test)]
+                                {
+                                    editor_args_id = Some(output.response.id);
+                                    editor_clip_rect =
+                                        output.text_clip_rect.intersect(ui.clip_rect());
+                                }
+                                let response = egui::Response::clone(&output.response)
+                                    .labelled_by(command_label.id);
+                                #[cfg(test)]
+                                {
+                                    editor_has_focus = response.has_focus();
+                                }
+                                if response.has_focus()
+                                    && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                                {
+                                    let modifiers = ui.input(|input| input.modifiers);
+                                    ui.input_mut(|input| {
+                                        input.consume_key(modifiers, egui::Key::Enter)
+                                    });
+                                }
+                                response
+                            });
+
+                        let keep_open_response =
+                            ui.checkbox(&mut self.keep_open, "Keep command prompt open after run");
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            #[cfg(test)]
+                            {
+                                test_footer_clip_rect = ui.clip_rect();
+                            }
+                            let save_button = ui.button("Save");
+                            let save_button =
+                                with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
+                            #[cfg(test)]
+                            {
+                                test_primary_rect = save_button.rect;
+                            }
+                            if save_button.clicked() {
+                                if self.name.trim().is_empty() || self.args.trim().is_empty() {
+                                    app.report_error_message(
+                                        "ui operation",
+                                        "Both fields required",
+                                    );
+                                } else {
+                                    let mut candidate = self.entries.clone();
+                                    if idx == candidate.len() {
+                                        candidate.push(ShellCmdEntry {
+                                            name: self.name.clone(),
+                                            args: self.args.clone(),
+                                            autocomplete: true,
+                                            keep_open: self.keep_open,
                                         });
-                                        ui.separator();
-                                        (
-                                            name_response,
-                                            command_response,
-                                            edit_clicked,
-                                            remove_clicked,
-                                        )
-                                    })
-                                    .inner
-                                });
-                                if idx == 0 {
-                                    #[cfg(test)]
-                                    {
-                                        first_name_rect = row.inner.0.rect;
-                                        first_command_rect = row.inner.1.rect;
+                                    } else if let Some(entry) = candidate.get_mut(idx) {
+                                        entry.name = self.name.clone();
+                                        entry.args = self.args.clone();
+                                        entry.keep_open = self.keep_open;
+                                    }
+                                    save_candidate = Some(candidate);
+                                }
+                            }
+                            let cancel_button = ui.button("Cancel");
+                            #[cfg(test)]
+                            {
+                                test_secondary_rect = cancel_button.rect;
+                            }
+                            if cancel_button.clicked() {
+                                self.edit_idx = None;
+                            }
+                        });
+
+                        #[cfg(test)]
+                        {
+                            test_body = Some(ShellBodyLayout::Editor {
+                                scroll: ShellScrollLayout {
+                                    parent_max_rect,
+                                    viewport_clip_rect: parent_clip_rect,
+                                    content_size: _editor_output.content_size,
+                                },
+                                name_rect: name_response.rect,
+                                editor_clip_rect,
+                                args_id: editor_args_id
+                                    .expect("the command editor should have an id"),
+                                args_has_focus: editor_has_focus,
+                                keep_open_rect: keep_open_response.rect,
+                            });
+                        }
+                        #[cfg(not(test))]
+                        let _ = (name_response, keep_open_response);
+                    } else {
+                        compact_section_heading(ui, "Saved commands", None);
+                        let footer_height =
+                            shell_footer_reserved_height(ui, &["Add Command", "Close"]);
+                        let list_height = (ui.available_height() - footer_height).max(0.0);
+                        let mut remove = None;
+                        #[cfg(test)]
+                        let parent_max_rect = ui.max_rect();
+                        #[cfg(test)]
+                        let mut parent_clip_rect = egui::Rect::NOTHING;
+                        #[cfg(test)]
+                        let mut first_name_rect = egui::Rect::NOTHING;
+                        #[cfg(test)]
+                        let mut first_command_rect = egui::Rect::NOTHING;
+                        #[cfg(test)]
+                        let mut first_edit_rect = egui::Rect::NOTHING;
+                        #[cfg(test)]
+                        let mut first_remove_rect = egui::Rect::NOTHING;
+                        let list_output = egui::ScrollArea::vertical()
+                            .id_salt("shell_cmd_list")
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.0)
+                            .max_height(list_height)
+                            .show(ui, |ui| {
+                                #[cfg(test)]
+                                {
+                                    parent_clip_rect = ui.clip_rect();
+                                }
+                                for idx in 0..self.entries.len() {
+                                    let name = self.entries[idx].name.clone();
+                                    let args = self.entries[idx].args.clone();
+                                    let keep_open = self.entries[idx].keep_open;
+                                    let row = ui.push_id(("shell_cmd_row", idx), |ui| {
+                                        ui.vertical(|ui| {
+                                            let name_response =
+                                                ui.label(egui::RichText::new(name).strong());
+                                            let command_response =
+                                                ui.add(egui::Label::new(args).wrap());
+                                            let mut edit_clicked = false;
+                                            let mut remove_clicked = false;
+                                            ui.horizontal_wrapped(|ui| {
+                                                let edit_button = ui.button("Edit");
+                                                edit_clicked = edit_button.clicked();
+                                                #[cfg(test)]
+                                                if idx == 0 {
+                                                    first_edit_rect = edit_button.rect;
+                                                }
+                                                let remove_button = ui.button("Remove");
+                                                let remove_button = with_button_emphasis(
+                                                    ui,
+                                                    remove_button,
+                                                    ButtonEmphasis::Destructive,
+                                                );
+                                                remove_clicked = remove_button.clicked();
+                                                #[cfg(test)]
+                                                if idx == 0 {
+                                                    first_remove_rect = remove_button.rect;
+                                                }
+                                            });
+                                            ui.separator();
+                                            (
+                                                name_response,
+                                                command_response,
+                                                edit_clicked,
+                                                remove_clicked,
+                                            )
+                                        })
+                                        .inner
+                                    });
+                                    if idx == 0 {
+                                        #[cfg(test)]
+                                        {
+                                            first_name_rect = row.inner.0.rect;
+                                            first_command_rect = row.inner.1.rect;
+                                        }
+                                    }
+                                    if row.inner.2 {
+                                        self.edit_idx = Some(idx);
+                                        self.name.clone_from(&self.entries[idx].name);
+                                        self.args.clone_from(&self.entries[idx].args);
+                                        self.keep_open = keep_open;
+                                    }
+                                    if row.inner.3 {
+                                        remove = Some(idx);
                                     }
                                 }
-                                if row.inner.2 {
-                                    self.edit_idx = Some(idx);
-                                    self.name.clone_from(&self.entries[idx].name);
-                                    self.args.clone_from(&self.entries[idx].args);
-                                    self.keep_open = keep_open;
-                                }
-                                if row.inner.3 {
-                                    remove = Some(idx);
-                                }
+                            });
+                        if let Some(idx) = remove {
+                            let mut candidate = self.entries.clone();
+                            candidate.remove(idx);
+                            save_candidate = Some(candidate);
+                        }
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            #[cfg(test)]
+                            {
+                                test_footer_clip_rect = ui.clip_rect();
+                            }
+                            let add_button = ui.button("Add Command");
+                            let add_button =
+                                with_button_emphasis(ui, add_button, ButtonEmphasis::Primary);
+                            #[cfg(test)]
+                            {
+                                test_primary_rect = add_button.rect;
+                            }
+                            if add_button.clicked() {
+                                self.edit_idx = Some(self.entries.len());
+                                self.name.clear();
+                                self.args.clear();
+                                self.keep_open = false;
+                            }
+                            let close_button = ui.button("Close");
+                            #[cfg(test)]
+                            {
+                                test_secondary_rect = close_button.rect;
+                                test_close_clicked |= close_button.clicked();
+                            }
+                            if close_button.clicked() {
+                                close = true;
                             }
                         });
-                    if let Some(idx) = remove {
-                        let mut candidate = self.entries.clone();
-                        candidate.remove(idx);
-                        save_candidate = Some(candidate);
+                        #[cfg(test)]
+                        {
+                            test_body = Some(ShellBodyLayout::Browse {
+                                scroll: ShellScrollLayout {
+                                    parent_max_rect,
+                                    viewport_clip_rect: parent_clip_rect,
+                                    content_size: list_output.content_size,
+                                },
+                                first_name_rect,
+                                first_command_rect,
+                                first_edit_rect,
+                                first_remove_rect,
+                            });
+                        }
+                        #[cfg(not(test))]
+                        let _ = list_output;
                     }
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        #[cfg(test)]
-                        {
-                            test_footer_clip_rect = ui.clip_rect();
-                        }
-                        let add_button = ui.button("Add Command");
-                        let add_button =
-                            with_button_emphasis(ui, add_button, ButtonEmphasis::Primary);
-                        #[cfg(test)]
-                        {
-                            test_primary_rect = add_button.rect;
-                        }
-                        if add_button.clicked() {
-                            self.edit_idx = Some(self.entries.len());
-                            self.name.clear();
-                            self.args.clear();
-                            self.keep_open = false;
-                        }
-                        let close_button = ui.button("Close");
-                        #[cfg(test)]
-                        {
-                            test_secondary_rect = close_button.rect;
-                            test_close_clicked |= close_button.clicked();
-                        }
-                        if close_button.clicked() {
-                            close = true;
-                        }
-                    });
-                    #[cfg(test)]
-                    {
-                        test_body = Some(ShellBodyLayout::Browse {
-                            scroll: ShellScrollLayout {
-                                parent_max_rect,
-                                viewport_clip_rect: parent_clip_rect,
-                                content_size: list_output.content_size,
-                            },
-                            first_name_rect,
-                            first_command_rect,
-                            first_edit_rect,
-                            first_remove_rect,
-                        });
-                    }
-                    #[cfg(not(test))]
-                    let _ = list_output;
-                }
-            });
+                },
+            );
 
         self.open = window_open || pinned;
         #[cfg(test)]

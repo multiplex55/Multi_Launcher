@@ -8,6 +8,7 @@ use crate::file_operations::{
     RenameScanStatus, RenameScanTicket, VerifiedRenamePlan, VerifiedRenamePreview,
     VerifiedRenameSnapshot,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui::{self, Align, Layout};
 use egui_extras::{Column, TableBuilder};
 use std::collections::HashMap;
@@ -825,92 +826,107 @@ impl BatchRenameDialogState {
         let mut window_open = self.open;
         egui::Window::new("Batch Renamer")
             .id(egui::Id::new(WINDOW_ID))
-            .open(&mut window_open)
             .resizable(true)
             .default_size(egui::vec2(1040.0, 760.0))
             .min_size(egui::vec2(520.0, 360.0))
             .vscroll(true)
-            .show(ctx, |ui| {
-                ui.add_enabled_ui(native_ui_owner, |ui| {
-                    // Window sizing/invisible passes expose a disabled content
-                    // UI. Only the first visible pass may commit ordinary
-                    // planning edits; the Close path retains its pre-existing
-                    // availability while a worker is active.
-                    let native_visible = native_window_pass
-                        && ui.is_visible()
-                        && !ui.is_sizing_pass()
-                        && ui.is_enabled();
-                    let process_interactions = native_visible
-                        && !runtime.operation_active
-                        && !self.apply_confirmation_open
-                        && self.undo_confirmation.is_none();
-                    self.draw_header(
-                        ui,
-                        &mut commands,
-                        process_interactions,
-                        parent_scope,
-                        &mut visual_order,
-                    );
-                    ui.separator();
-                    self.draw_rule_editor(
-                        ui,
-                        process_interactions,
-                        parent_scope,
-                        &mut visual_order,
-                    );
-                    ui.separator();
-                    self.draw_preview(
-                        ui,
-                        &mut commands,
-                        process_interactions,
-                        parent_scope,
-                        &mut visual_order,
-                    );
-                    ui.separator();
-                    self.draw_operation_footer(
-                        ui,
-                        runtime,
-                        &mut commands,
-                        process_interactions,
-                        native_visible,
-                        parent_scope,
-                        native_parent_instance,
-                        self.session_epoch,
-                        &mut visual_order,
-                    );
-                    ui.horizontal(|ui| {
-                        let close = ui.button("Close");
-                        register_batch_target(
-                            parent_scope,
+            .show_utility(
+                ctx,
+                "batch-rename",
+                egui::Id::new("Batch Renamer"),
+                Some(&mut window_open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
+                        1040.0, 760.0,
+                    )),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(egui::vec2(520.0, 360.0)),
+                |ui| {
+                    ui.add_enabled_ui(native_ui_owner, |ui| {
+                        // Window sizing/invisible passes expose a disabled content
+                        // UI. Only the first visible pass may commit ordinary
+                        // planning edits; the Close path retains its pre-existing
+                        // availability while a worker is active.
+                        let native_visible = native_window_pass
+                            && ui.is_visible()
+                            && !ui.is_sizing_pass()
+                            && ui.is_enabled();
+                        let process_interactions = native_visible
+                            && !runtime.operation_active
+                            && !self.apply_confirmation_open
+                            && self.undo_confirmation.is_none();
+                        self.draw_header(
                             ui,
-                            &close,
-                            "close",
-                            "Close Batch Renamer",
-                            crate::gui::jump_mode::TargetKind::Button,
+                            &mut commands,
+                            process_interactions,
+                            parent_scope,
                             &mut visual_order,
                         );
-                        if close.clicked() && native_visible {
-                            commands.push(BatchRenameUiCommand::Closed);
-                        }
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let preview = ui
-                                .add_enabled(self.snapshot.is_some(), egui::Button::new("Preview"));
+                        ui.separator();
+                        self.draw_rule_editor(
+                            ui,
+                            process_interactions,
+                            parent_scope,
+                            &mut visual_order,
+                        );
+                        ui.separator();
+                        self.draw_preview(
+                            ui,
+                            &mut commands,
+                            process_interactions,
+                            parent_scope,
+                            &mut visual_order,
+                        );
+                        ui.separator();
+                        self.draw_operation_footer(
+                            ui,
+                            runtime,
+                            &mut commands,
+                            process_interactions,
+                            native_visible,
+                            parent_scope,
+                            native_parent_instance,
+                            self.session_epoch,
+                            &mut visual_order,
+                        );
+                        ui.horizontal(|ui| {
+                            let close = ui.button("Close");
                             register_batch_target(
                                 parent_scope,
                                 ui,
-                                &preview,
-                                "preview",
-                                "Preview rename plan",
+                                &close,
+                                "close",
+                                "Close Batch Renamer",
                                 crate::gui::jump_mode::TargetKind::Button,
                                 &mut visual_order,
                             );
-                            if preview.clicked() && process_interactions {
-                                self.rebuild_preview();
+                            if close.clicked() && native_visible {
+                                commands.push(BatchRenameUiCommand::Closed);
                             }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let preview = ui.add_enabled(
+                                    self.snapshot.is_some(),
+                                    egui::Button::new("Preview"),
+                                );
+                                register_batch_target(
+                                    parent_scope,
+                                    ui,
+                                    &preview,
+                                    "preview",
+                                    "Preview rename plan",
+                                    crate::gui::jump_mode::TargetKind::Button,
+                                    &mut visual_order,
+                                );
+                                if preview.clicked() && process_interactions {
+                                    self.rebuild_preview();
+                                }
+                            });
                         });
                     });
-                });
-            });
+                },
+            );
 
         if native_window_pass && (!window_open || commands.contains(&BatchRenameUiCommand::Closed))
         {

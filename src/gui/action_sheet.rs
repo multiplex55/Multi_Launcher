@@ -1,3 +1,4 @@
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -295,64 +296,78 @@ pub(crate) fn render(
         .collapsible(false)
         .resizable(true)
         .default_width(440.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.filter)
-                    .id(egui::Id::new("universal_action_sheet_filter"))
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Filter actions"),
-            );
-            #[cfg(feature = "qa-framebuffer-capture")]
-            if observe_target_repair {
-                let rect = response.rect;
-                qa_filter = Some((
-                    response.id,
-                    [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
-                    response.enabled() && ui.is_enabled(),
-                    ui.is_visible()
-                        && !ui.is_sizing_pass()
-                        && rect.is_positive()
-                        && rect.intersects(ui.clip_rect()),
-                    ctx.memory(|memory| memory.has_focus(response.id)),
-                    response.layer_id,
-                ));
-            }
-            if state.request_filter_focus {
-                response.request_focus();
-                state.request_filter_focus = false;
-            }
-            if response.changed() {
-                let filter = state.filter.clone();
-                state.set_filter(filter, matcher);
-            }
+        .show_utility(
+            ctx,
+            "action-sheet",
+            egui::Id::new("universal_action_sheet"),
+            Some(&mut open),
+            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::width(440.0),
+                egui::Vec2::ZERO,
+                [None, None],
+            ),
+            |ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.filter)
+                        .id(egui::Id::new("universal_action_sheet_filter"))
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Filter actions"),
+                );
+                #[cfg(feature = "qa-framebuffer-capture")]
+                if observe_target_repair {
+                    let rect = response.rect;
+                    qa_filter = Some((
+                        response.id,
+                        [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
+                        response.enabled() && ui.is_enabled(),
+                        ui.is_visible()
+                            && !ui.is_sizing_pass()
+                            && rect.is_positive()
+                            && rect.intersects(ui.clip_rect()),
+                        ctx.memory(|memory| memory.has_focus(response.id)),
+                        response.layer_id,
+                    ));
+                }
+                if state.request_filter_focus {
+                    response.request_focus();
+                    state.request_filter_focus = false;
+                }
+                if response.changed() {
+                    let filter = state.filter.clone();
+                    state.set_filter(filter, matcher);
+                }
 
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .max_height(360.0)
-                .show(ui, |ui| {
-                    let mut previous_group: Option<ActionGroup> = None;
-                    let visible = state.filtered_indices.clone();
-                    for (position, action_index) in visible.into_iter().enumerate() {
-                        let action = state.actions[action_index].clone();
-                        let presentation =
-                            action.effective_presentation(ActionSurface::ActionSheet);
-                        if previous_group.is_some() && previous_group != Some(presentation.group) {
-                            ui.separator();
-                        }
-                        previous_group = Some(presentation.group);
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        let mut previous_group: Option<ActionGroup> = None;
+                        let visible = state.filtered_indices.clone();
+                        for (position, action_index) in visible.into_iter().enumerate() {
+                            let action = state.actions[action_index].clone();
+                            let presentation =
+                                action.effective_presentation(ActionSurface::ActionSheet);
+                            if previous_group.is_some()
+                                && previous_group != Some(presentation.group)
+                            {
+                                ui.separator();
+                            }
+                            previous_group = Some(presentation.group);
 
-                        let mut label = presentation.label;
-                        if let Some(reason) = action.availability.disabled_reason() {
-                            label.push_str(&format!(" — {reason}"));
-                        }
-                        let response = ui.add_enabled(
-                            action.is_available(),
-                            egui::Button::selectable(state.selected_index == Some(position), label),
-                        );
-                        #[cfg(feature = "qa-framebuffer-capture")]
-                        if observe_target_repair {
-                            let kind = if action.id.as_str()
+                            let mut label = presentation.label;
+                            if let Some(reason) = action.availability.disabled_reason() {
+                                label.push_str(&format!(" — {reason}"));
+                            }
+                            let response = ui.add_enabled(
+                                action.is_available(),
+                                egui::Button::selectable(
+                                    state.selected_index == Some(position),
+                                    label,
+                                ),
+                            );
+                            #[cfg(feature = "qa-framebuffer-capture")]
+                            if observe_target_repair {
+                                let kind = if action.id.as_str()
                                 == crate::universal_actions::action_ids::CUSTOM_ACTION_REPAIR_TARGET
                                     .as_str()
                             {
@@ -365,36 +380,39 @@ pub(crate) fn render(
                             } else {
                                 None
                             };
-                            if let Some(kind) = kind {
-                                let rect = super::qa_framebuffer::qa_clipped_response_rect(
-                                    response.rect,
-                                    ui.clip_rect(),
+                                if let Some(kind) = kind {
+                                    let rect = super::qa_framebuffer::qa_clipped_response_rect(
+                                        response.rect,
+                                        ui.clip_rect(),
+                                    );
+                                    qa_controls.push(TargetRepairActionSheetControlPaint {
+                                        action_id: action.id.as_str().to_owned(),
+                                        kind,
+                                        response_id: format!("{:?}", response.id),
+                                        rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
+                                        enabled: response.enabled() && ui.is_enabled(),
+                                        painted: ui.is_visible()
+                                            && !ui.is_sizing_pass()
+                                            && rect.is_positive(),
+                                    });
+                                }
+                            }
+                            if response.hovered() && action.is_available() {
+                                state.select_filtered_position(position);
+                            }
+                            if response.clicked() {
+                                selected = state.invocation_at_filtered_position(
+                                    position,
+                                    ActivationSource::Click,
                                 );
-                                qa_controls.push(TargetRepairActionSheetControlPaint {
-                                    action_id: action.id.as_str().to_owned(),
-                                    kind,
-                                    response_id: format!("{:?}", response.id),
-                                    rect: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
-                                    enabled: response.enabled() && ui.is_enabled(),
-                                    painted: ui.is_visible()
-                                        && !ui.is_sizing_pass()
-                                        && rect.is_positive(),
-                                });
                             }
                         }
-                        if response.hovered() && action.is_available() {
-                            state.select_filtered_position(position);
+                        if state.filtered_indices.is_empty() {
+                            ui.weak("No matching actions");
                         }
-                        if response.clicked() {
-                            selected = state
-                                .invocation_at_filtered_position(position, ActivationSource::Click);
-                        }
-                    }
-                    if state.filtered_indices.is_empty() {
-                        ui.weak("No matching actions");
-                    }
-                });
-        });
+                    });
+            },
+        );
 
     #[cfg(feature = "qa-framebuffer-capture")]
     {

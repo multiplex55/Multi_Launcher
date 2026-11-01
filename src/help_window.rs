@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::gui::LauncherApp;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use eframe::egui;
 use std::collections::HashSet;
 
@@ -35,13 +36,13 @@ impl HelpWindow {
         if self.overlay_open {
             let mut open = self.overlay_open;
             let window_output = egui::Window::new("Quick Help")
-                .open(&mut open)
+
                 .resizable(true)
                 .max_width(ctx.content_rect().width().max(1.0))
                 .max_height(ctx.content_rect().height().max(1.0))
                 .default_size((300.0, 200.0))
                 .collapsible(false)
-                .show(ctx, |ui| {
+                .show_utility(ctx, "quick-help", egui::Id::new("Quick Help"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((300.0, 200.0))), egui::Vec2::ZERO, [None, None]).with_max_width(ctx.content_rect().width().max(1.0)).with_max_height(ctx.content_rect().height().max(1.0)), |ui| {
                     let (_filter_label_response, _filter_response) = ui
                         .horizontal(|ui| {
                             let label = ui.label("Filter:");
@@ -253,12 +254,12 @@ impl HelpWindow {
         }
         let mut open = self.open;
         let window_output = egui::Window::new("Command Help")
-            .open(&mut open)
+
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
             .max_height(ctx.content_rect().height().max(1.0))
             .default_size((400.0, 300.0))
-            .show(ctx, |ui| {
+            .show_utility(ctx, "command-help", egui::Id::new("Command Help"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((400.0, 300.0))), egui::Vec2::ZERO, [None, None]).with_max_width(ctx.content_rect().width().max(1.0)).with_max_height(ctx.content_rect().height().max(1.0)), |ui| {
                 ui.vertical_centered(|ui| ui.heading("Available commands"));
                 ui.separator();
                 let mut show_examples = self.show_examples;

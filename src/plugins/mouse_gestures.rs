@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::common::json_watch::watch_json;
 use crate::common::strip_prefix_ci;
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mouse_gestures::db::{
     BindingMatchContext, GESTURES_FILE, GestureDb, SharedGestureDb, format_gesture_label,
     format_search_result_label, load_gestures,
@@ -932,36 +933,51 @@ impl Plugin for MouseGesturesPlugin {
         if self.window_picker_open {
             let mut open = self.window_picker_open;
             egui::Window::new("Select window to ignore")
-                .open(&mut open)
                 .resizable(true)
-                .show(ui.ctx(), |ui| {
-                    if let Some(err) = &self.window_picker_error {
-                        semantic_status(ui, StatusTone::Error, "Window picker error", Some(err));
-                        ui.separator();
-                    }
+                .show_utility(
+                    ui.ctx(),
+                    "gesture-ignore-window-picker",
+                    egui::Id::new("Select window to ignore"),
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::intrinsic(),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    ),
+                    |ui| {
+                        if let Some(err) = &self.window_picker_error {
+                            semantic_status(
+                                ui,
+                                StatusTone::Error,
+                                "Window picker error",
+                                Some(err),
+                            );
+                            ui.separator();
+                        }
 
-                    if self.window_picker_titles.is_empty() {
-                        ui.label("No windows found.");
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .max_height(220.0)
-                            .show(ui, |ui| {
-                                for title in self.window_picker_titles.clone() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(&title);
-                                        if ui.button("Add").clicked()
-                                            && add_ignore_window_title(
-                                                &mut cfg.ignore_window_titles,
-                                                &title,
-                                            )
-                                        {
-                                            changed = true;
-                                        }
-                                    });
-                                }
-                            });
-                    }
-                });
+                        if self.window_picker_titles.is_empty() {
+                            ui.label("No windows found.");
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .max_height(220.0)
+                                .show(ui, |ui| {
+                                    for title in self.window_picker_titles.clone() {
+                                        ui.horizontal(|ui| {
+                                            ui.label(&title);
+                                            if ui.button("Add").clicked()
+                                                && add_ignore_window_title(
+                                                    &mut cfg.ignore_window_titles,
+                                                    &title,
+                                                )
+                                            {
+                                                changed = true;
+                                            }
+                                        });
+                                    }
+                                });
+                        }
+                    },
+                );
             self.window_picker_open = open;
         }
 
@@ -1158,5 +1174,70 @@ mod persistence_tests {
         let duplicate = hotkey_directory_source_from_runtime(&runtime);
         assert_eq!(duplicate.revision, after.revision);
         assert_eq!(duplicate.candidates, after.candidates);
+    }
+
+    #[test]
+    fn utility_size_inventory_plugin_picker_shares_parent_context_without_locking_contents() {
+        use crate::gui::utility_dialog_size::{UtilityDialogSizeManager, UtilityWindowSizeRecipe};
+        use crate::settings::Settings;
+        use crate::settings_save::SettingsSaveWorkerRegistry;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let settings = Settings::default();
+        settings.save(path.to_str().unwrap()).unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let ctx = egui::Context::default();
+        let manager = UtilityDialogSizeManager::new(
+            path.to_string_lossy().into_owned(),
+            workers.clone(),
+            settings.utility_dialog_sizes.clone(),
+        );
+        manager.install_in_context(&ctx);
+
+        let mut plugin = MouseGesturesPlugin {
+            window_picker_open: true,
+            window_picker_titles: vec!["Inert fixture window".to_owned()],
+            ..Default::default()
+        };
+        let mut plugin_value = serde_json::to_value(MouseGestureSettings::default()).unwrap();
+        let mut parent_open = true;
+        let parent_id = egui::Id::new("Settings");
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_ui(input, |root| {
+            let ctx = root.ctx().clone();
+            manager.begin_frame(&ctx).unwrap();
+            egui::Window::new("Settings").id(parent_id).show_utility(
+                &ctx,
+                "settings",
+                parent_id,
+                Some(&mut parent_open),
+                UtilityWindowSizeRecipe::intrinsic(),
+                |ui| {
+                    <MouseGesturesPlugin as Plugin>::settings_ui(
+                        &mut plugin,
+                        ui,
+                        &mut plugin_value,
+                    );
+                },
+            );
+        })
+        .drop_without_applying_deltas();
+
+        let tracked = manager.tracked_windows();
+        assert!(tracked.iter().any(|(_, key)| key.as_str() == "settings"));
+        assert!(
+            tracked
+                .iter()
+                .any(|(_, key)| key.as_str() == "gesture-ignore-window-picker"),
+            "nested plugin picker did not use the installed context capability: {tracked:?}"
+        );
+        workers.join_all();
     }
 }

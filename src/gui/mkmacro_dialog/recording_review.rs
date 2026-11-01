@@ -6,6 +6,7 @@
 
 use super::MkMacroDialog;
 use crate::gui::theme::widgets::{StatusTone, semantic_status};
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mkmacro::{
     PlannedStep, RecordedStep, RecordingPlan, RecordingResult, RecordingSourceSpan,
     RecordingSuggestion, RecordingSuggestionId, RecordingTarget, ReviewStepId,
@@ -656,11 +657,11 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
     });
     eframe::egui::Window::new("Recording Review")
         .id(eframe::egui::Id::new("mkmacro_recording_review"))
-        .open(&mut open)
+
         .collapsible(false)
         .default_size([780.0, 620.0])
         .resizable(true)
-        .show(ctx, |ui| {
+        .show_utility(ctx, "mkmacro-recording-review", eframe::egui::Id::new("Recording Review"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(eframe::egui::Vec2::from([780.0, 620.0])), eframe::egui::Vec2::ZERO, [None, None]), |ui| {
             let footer_labels: &[&str] = if preview_active {
                 &["Stop Preview", "Apply", "Cancel"]
             } else {

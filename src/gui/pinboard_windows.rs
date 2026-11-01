@@ -1,5 +1,6 @@
 //! Native child viewports and actions for the session-only screenshot pinboard.
 
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::mkmacro::ScreenRect;
 use crate::pinboard::live::{
     PinLiveChildWake, PinLiveFrameLease, PinLiveFrameSource, PinLiveStatus,
@@ -1264,10 +1265,10 @@ impl PinWindowPresenter {
         let mut opacity_reset_widgets = BTreeMap::new();
         egui::Window::new("Screenshot Pins")
             .id(egui::Id::new("screenshot-pin-list"))
-            .open(open)
+
             .resizable(true)
             .default_size([620.0, 420.0])
-            .show(ctx, |ui| {
+            .show_utility(ctx, "screenshot-pin-list", egui::Id::new("Screenshot Pins"), Some(open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from([620.0, 420.0])), egui::Vec2::ZERO, [None, None]), |ui| {
                 ui.label(
                     "Tab or Shift+Tab moves between controls; Space or Enter activates a focused control.",
                 );
