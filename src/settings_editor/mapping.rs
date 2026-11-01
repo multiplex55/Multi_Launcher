@@ -416,6 +416,9 @@ impl SettingsEditor {
             // MkMacro view preferences are independent of this editor's
             // draft and may have changed while the dialog was open.
             mkmacro_properties: current.mkmacro_properties.clone(),
+            // Utility sizes are independent of this editor draft and can be
+            // updated while the Settings window is open.
+            utility_dialog_sizes: current.utility_dialog_sizes.clone(),
             table_utility_resources: current.table_utility_resources,
             radial_submenu_migration: current.radial_submenu_migration.clone(),
         })

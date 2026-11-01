@@ -44,6 +44,27 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Apply a settings transaction and skip the disk write when its persisted
+    /// representation is unchanged. The comparison and optional commit share
+    /// the same transaction lock as every other settings update.
+    pub(crate) fn update_if_changed<T>(
+        path: &str,
+        mutate: impl FnOnce(&mut Self) -> anyhow::Result<T>,
+    ) -> anyhow::Result<(bool, T)> {
+        let _transaction = transaction_guard();
+        let mut settings = load_effective(path)?;
+        let before = serde_json::to_value(&settings)
+            .context("failed to serialize settings before update")?;
+        let result = mutate(&mut settings)?;
+        let after =
+            serde_json::to_value(&settings).context("failed to serialize settings after update")?;
+        if before == after {
+            return Ok((false, result));
+        }
+        save_json_atomic(path, &settings)?;
+        Ok((true, result))
+    }
+
     /// Read the latest settings while serialized with settings updates.
     pub fn read_current(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let _transaction = transaction_guard();
