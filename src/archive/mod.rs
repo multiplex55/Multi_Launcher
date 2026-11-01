@@ -8,6 +8,8 @@ mod catalog;
 mod model;
 #[cfg(windows)]
 mod native;
+#[cfg(windows)]
+mod native_io;
 mod plan;
 
 pub use catalog::read_catalog;
