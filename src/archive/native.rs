@@ -7,6 +7,7 @@
 #![allow(dead_code)] // Native operations remain private until workflow activation.
 
 use super::native_io::{ArchiveIoControl, OverlappedArchiveReader, VerifiedOverlappedFile};
+use super::plan::DestinationOccupancy;
 use super::{
     ArchiveCatalog, ArchiveLimits, ArchiveRevision, ArchiveSource, CatalogError,
     ValidatedRelativePath,
@@ -475,6 +476,23 @@ impl NativeArchiveDestination {
         self.root.verify_identity()
     }
 
+    pub(crate) fn probe_occupancy(
+        &self,
+        path: &ValidatedRelativePath,
+    ) -> Result<DestinationOccupancy, io::ErrorKind> {
+        let (parent, leaf) = match self.open_parent_for(path) {
+            Ok(parent) => parent,
+            Err(error) if is_missing_relative_component(&error) => {
+                return Ok(DestinationOccupancy::Vacant);
+            }
+            Err(error) => return Err(error.kind()),
+        };
+        parent
+            .probe_leaf_occupancy(&leaf)
+            .map(|occupancy| occupancy.unwrap_or(DestinationOccupancy::Vacant))
+            .map_err(|error| error.kind())
+    }
+
     pub(crate) fn open_descendant(
         &self,
         components: &[&str],
@@ -623,6 +641,50 @@ impl NativeDirectoryHandle {
             ));
         }
         Ok(file)
+    }
+
+    fn probe_leaf_occupancy(
+        &self,
+        leaf: &OsStr,
+    ) -> Result<Option<DestinationOccupancy>, NativeArchiveError> {
+        validate_single_component(leaf, "validated occupancy leaf")?;
+        let (file, _) = match open_relative(
+            &self.directory,
+            leaf,
+            windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
+                | windows::Win32::Storage::FileSystem::SYNCHRONIZE,
+            windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
+            windows::Wdk::Storage::FileSystem::FILE_OPEN,
+            windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT
+                | windows::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
+            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+            "NtCreateFile(FILE_OPEN relative occupancy leaf)",
+            || Ok(()),
+        ) {
+            Ok(opened) => opened,
+            Err(error) if is_missing_relative_component(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata().map_err(|error| {
+            NativeArchiveError::from_io(
+                "File::metadata(relative occupancy leaf)",
+                error,
+                Some(self.directory.identity),
+            )
+        })?;
+        let occupancy = if metadata.file_attributes()
+            & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+            != 0
+        {
+            DestinationOccupancy::ReparsePoint
+        } else if metadata.is_dir() {
+            DestinationOccupancy::Directory
+        } else if metadata.is_file() {
+            DestinationOccupancy::File
+        } else {
+            DestinationOccupancy::Other
+        };
+        Ok(Some(occupancy))
     }
 
     #[cfg(test)]

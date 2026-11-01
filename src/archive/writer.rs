@@ -150,7 +150,7 @@ struct WriterTestHooks {
 }
 
 #[cfg(test)]
-struct WriterTestGate {
+pub(super) struct WriterTestGate {
     reached: SyncSender<()>,
     resume: Mutex<Receiver<()>>,
 }
@@ -314,12 +314,45 @@ impl ArchiveWriteJob {
         destination: NativeArchiveDestination,
         cancellation: ScanCancellation,
     ) -> io::Result<Self> {
-        Self::start_with_control(
+        Self::start_shared(source, Arc::new(catalog), plan, destination, cancellation)
+    }
+
+    pub(crate) fn start_shared(
+        source: NativeArchiveSource,
+        catalog: Arc<ArchiveCatalog>,
+        plan: ExtractionPlan,
+        destination: NativeArchiveDestination,
+        cancellation: ScanCancellation,
+    ) -> io::Result<Self> {
+        Self::start_with_shared_control_and_hooks(
             source,
             catalog,
             plan,
             destination,
             ArchiveIoControl::new(cancellation),
+            WriterTestHooks::default(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn start_shared_with_before_flush_gate(
+        source: NativeArchiveSource,
+        catalog: Arc<ArchiveCatalog>,
+        plan: ExtractionPlan,
+        destination: NativeArchiveDestination,
+        cancellation: ScanCancellation,
+        gate: Arc<WriterTestGate>,
+    ) -> io::Result<Self> {
+        Self::start_with_shared_control_and_hooks(
+            source,
+            catalog,
+            plan,
+            destination,
+            ArchiveIoControl::new(cancellation),
+            WriterTestHooks {
+                before_flush: Some(gate),
+                ..WriterTestHooks::default()
+            },
         )
     }
 
@@ -348,6 +381,24 @@ impl ArchiveWriteJob {
         io: ArchiveIoControl,
         test_hooks: WriterTestHooks,
     ) -> io::Result<Self> {
+        Self::start_with_shared_control_and_hooks(
+            source,
+            Arc::new(catalog),
+            plan,
+            destination,
+            io,
+            test_hooks,
+        )
+    }
+
+    fn start_with_shared_control_and_hooks(
+        source: NativeArchiveSource,
+        catalog: Arc<ArchiveCatalog>,
+        plan: ExtractionPlan,
+        destination: NativeArchiveDestination,
+        io: ArchiveIoControl,
+        test_hooks: WriterTestHooks,
+    ) -> io::Result<Self> {
         let run_id = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
         let revision = plan.source().revision;
         let progress = ArchiveWriteProgress {
@@ -368,7 +419,7 @@ impl ArchiveWriteJob {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     execute_pipeline(
                         source,
-                        catalog,
+                        &catalog,
                         plan,
                         destination,
                         &worker_control,
@@ -440,6 +491,18 @@ impl ArchiveWriteJob {
 
     pub(crate) fn progress(&self) -> ArchiveWriteProgress {
         self.control.progress()
+    }
+
+    pub(crate) fn try_join_finished(&mut self) -> Option<ArchiveWriteReport> {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            Some(self.join_inner())
+        } else {
+            None
+        }
     }
 
     pub(crate) fn join(mut self) -> ArchiveWriteReport {
@@ -543,7 +606,7 @@ impl PipelineFailure {
 
 fn execute_pipeline(
     mut source: NativeArchiveSource,
-    catalog: ArchiveCatalog,
+    catalog: &ArchiveCatalog,
     plan: ExtractionPlan,
     destination: NativeArchiveDestination,
     control: &ArchiveWriteJobControl,
@@ -886,6 +949,17 @@ fn validate_selected_entries(
         }
     }
     Ok(layouts)
+}
+
+pub(super) fn validate_plan_for_preview(
+    source: &NativeArchiveSource,
+    catalog: &ArchiveCatalog,
+    plan: &ExtractionPlan,
+    io: &ArchiveIoControl,
+) -> Result<(), (ArchiveWriteFailureKind, Option<ArchiveEntryId>)> {
+    validate_selected_entries(source, catalog, plan, io)
+        .map(|_| ())
+        .map_err(|failure| (failure.kind, failure.entry))
 }
 
 fn validate_entry_layout(
@@ -1579,7 +1653,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 impl WriterTestGate {
-    fn new() -> (Arc<Self>, Receiver<()>, SyncSender<()>) {
+    pub(super) fn new() -> (Arc<Self>, Receiver<()>, SyncSender<()>) {
         let (reached_tx, reached_rx) = mpsc::sync_channel(1);
         let (resume_tx, resume_rx) = mpsc::sync_channel(1);
         (

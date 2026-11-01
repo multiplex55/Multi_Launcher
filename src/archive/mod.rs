@@ -13,6 +13,8 @@ mod native;
 mod native_io;
 mod plan;
 #[cfg(windows)]
+mod session;
+#[cfg(windows)]
 mod writer;
 
 pub use catalog::read_catalog;
@@ -26,4 +28,10 @@ pub use plan::{
     ArchiveSelection, CapturedOutputPolicy, DestinationOccupancy, ExtractionPlan, PlanBuildError,
     PlanIssue, PlanIssueReason, PlanLimit, PlanReport, PlannedOutput, SelectionAddError,
     SelectionTarget, build_extraction_plan,
+};
+
+#[cfg(windows)]
+pub(crate) use session::{
+    ArchivePreviewSummary, ArchiveSession, ArchiveSessionFailure, ArchiveSessionPhase,
+    ArchiveSessionRequestError, ArchiveSessionSnapshot, PreviewToken,
 };
