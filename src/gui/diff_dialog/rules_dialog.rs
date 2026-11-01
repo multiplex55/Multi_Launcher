@@ -243,6 +243,7 @@ mod tests {
             left: Some(left),
             right: Some(right),
             relative_path: None,
+            origin: crate::diff::model::TextCompareOrigin::FileBacked,
         };
         let mut model = TextViewModel::load(&state, &Default::default()).unwrap();
         model.recalculate_at = None;

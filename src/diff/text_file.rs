@@ -5,12 +5,21 @@
 //! as a binary digest/length, rather than being reported as an I/O failure.
 
 use crate::common::atomic_file::save_atomic;
+use crate::diff::text_compare::{IgnoredLineRange, normalize_ignored_ranges};
 use std::collections::hash_map::DefaultHasher;
+use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+
+static NEXT_TEXT_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_text_source_id() -> u64 {
+    NEXT_TEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextEncoding {
@@ -259,10 +268,15 @@ pub struct LineEdit {
 struct UndoRecord {
     before: String,
     after: String,
+    ignored_before: Vec<IgnoredLineRange>,
+    ignored_after: Vec<IgnoredLineRange>,
+    bookmarks_before: Vec<usize>,
+    bookmarks_after: Vec<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TextDocument {
+    source_id: u64,
     source: String,
     pub revision: u64,
     pub saved_revision: u64,
@@ -271,13 +285,44 @@ pub struct TextDocument {
     has_bom: bool,
     line_ending: LineEnding,
     trailing_newline: bool,
+    preserve_source_line_endings: bool,
     undo: Vec<UndoRecord>,
     redo: Vec<UndoRecord>,
+    ignored_line_ranges: Vec<IgnoredLineRange>,
+    ignored_range_invalidation: bool,
+    bookmarks: Vec<usize>,
+    bookmark_invalidation: bool,
 }
+
+impl fmt::Debug for TextDocument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextDocument")
+            .field("source", &"<redacted>")
+            .field("source_id", &self.source_id)
+            .field("revision", &self.revision)
+            .field("saved_revision", &self.saved_revision)
+            .field("read_only", &self.read_only)
+            .field("encoding", &self.encoding)
+            .field("has_bom", &self.has_bom)
+            .field("line_ending", &self.line_ending)
+            .field("trailing_newline", &self.trailing_newline)
+            .field(
+                "preserve_source_line_endings",
+                &self.preserve_source_line_endings,
+            )
+            .field("undo_depth", &self.undo.len())
+            .field("redo_depth", &self.redo.len())
+            .field("ignored_range_count", &self.ignored_line_ranges.len())
+            .field("bookmark_count", &self.bookmarks.len())
+            .finish()
+    }
+}
+
 impl TextDocument {
     /// Creates an editable, UTF-8 document for a side which does not exist yet.
     pub fn empty() -> Self {
         Self {
+            source_id: next_text_source_id(),
             source: String::new(),
             revision: 0,
             saved_revision: 0,
@@ -286,8 +331,38 @@ impl TextDocument {
             has_bom: false,
             line_ending: LineEnding::Lf,
             trailing_newline: false,
+            preserve_source_line_endings: false,
             undo: vec![],
             redo: vec![],
+            ignored_line_ranges: vec![],
+            ignored_range_invalidation: false,
+            bookmarks: vec![],
+            bookmark_invalidation: false,
+        }
+    }
+
+    /// Creates an editable UTF-8 document from explicit memory input without
+    /// normalizing line endings, trailing blank lines, or Unicode content.
+    pub fn from_memory_source(source: String) -> Self {
+        let (line_ending, trailing_newline) =
+            content_text_policy(&LoadedContent::Text(source.clone()));
+        Self {
+            source_id: next_text_source_id(),
+            source,
+            revision: 0,
+            saved_revision: 0,
+            read_only: false,
+            encoding: TextEncoding::Utf8,
+            has_bom: false,
+            line_ending,
+            trailing_newline,
+            preserve_source_line_endings: true,
+            undo: vec![],
+            redo: vec![],
+            ignored_line_ranges: vec![],
+            ignored_range_invalidation: false,
+            bookmarks: vec![],
+            bookmark_invalidation: false,
         }
     }
     #[cfg(test)]
@@ -298,6 +373,7 @@ impl TextDocument {
     }
     pub fn from_loaded(file: &LoadedTextFile) -> Option<Self> {
         Some(Self {
+            source_id: next_text_source_id(),
             source: file.text()?.into(),
             revision: 0,
             saved_revision: 0,
@@ -306,12 +382,79 @@ impl TextDocument {
             has_bom: file.has_bom,
             line_ending: file.line_ending,
             trailing_newline: file.trailing_newline,
+            preserve_source_line_endings: false,
             undo: vec![],
             redo: vec![],
+            ignored_line_ranges: vec![],
+            ignored_range_invalidation: false,
+            bookmarks: vec![],
+            bookmark_invalidation: false,
         })
     }
     pub fn source(&self) -> &str {
         &self.source
+    }
+    pub fn source_id(&self) -> u64 {
+        self.source_id
+    }
+    pub fn ignored_line_ranges(&self) -> &[IgnoredLineRange] {
+        &self.ignored_line_ranges
+    }
+    pub fn bookmarks(&self) -> &[usize] {
+        &self.bookmarks
+    }
+    pub fn is_bookmarked(&self, source_line: usize) -> bool {
+        self.bookmarks.binary_search(&source_line).is_ok()
+    }
+    pub fn toggle_bookmark(&mut self, source_line: usize) -> bool {
+        match self.bookmarks.binary_search(&source_line) {
+            Ok(index) => {
+                self.bookmarks.remove(index);
+                false
+            }
+            Err(index) => {
+                self.bookmarks.insert(index, source_line);
+                true
+            }
+        }
+    }
+    pub fn take_bookmark_invalidation(&mut self) -> bool {
+        std::mem::take(&mut self.bookmark_invalidation)
+    }
+    /// Returns the exact source bytes for a half-open source-line interval,
+    /// including each selected line's original delimiter.
+    pub fn raw_line_range(&self, start: usize, end: usize) -> Option<&str> {
+        if start >= end {
+            return None;
+        }
+        let mut byte_offset = 0;
+        let mut start_byte = None;
+        for (line, part) in self.source.split_inclusive('\n').enumerate() {
+            if line == start {
+                start_byte = Some(byte_offset);
+            }
+            byte_offset += part.len();
+            if line + 1 == end {
+                let start_byte = start_byte?;
+                return Some(&self.source[start_byte..byte_offset]);
+            }
+        }
+        None
+    }
+    pub(crate) fn set_ignored_line_ranges(
+        &mut self,
+        ranges: Vec<IgnoredLineRange>,
+    ) -> Result<bool, String> {
+        let normalized = normalize_ignored_ranges(&ranges, usize::MAX)?;
+        if self.ignored_line_ranges == normalized {
+            return Ok(false);
+        }
+        self.ignored_line_ranges = normalized;
+        self.ignored_range_invalidation = false;
+        Ok(true)
+    }
+    pub(crate) fn take_ignored_range_invalidation(&mut self) -> bool {
+        std::mem::take(&mut self.ignored_range_invalidation)
     }
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
@@ -326,10 +469,18 @@ impl TextDocument {
             return Ok(false);
         }
         let before = std::mem::replace(&mut self.source, source);
+        let ignored_before = std::mem::take(&mut self.ignored_line_ranges);
+        let bookmarks_before = std::mem::take(&mut self.bookmarks);
+        self.ignored_range_invalidation = false;
+        self.bookmark_invalidation = !bookmarks_before.is_empty();
         self.revision += 1;
         self.undo.push(UndoRecord {
             before,
             after: self.source.clone(),
+            ignored_before,
+            ignored_after: self.ignored_line_ranges.clone(),
+            bookmarks_before,
+            bookmarks_after: self.bookmarks.clone(),
         });
         self.redo.clear();
         Ok(true)
@@ -345,23 +496,52 @@ impl TextDocument {
             return Err("document is read-only".into());
         }
         let before = self.source.clone();
-        let mut lines = source_lines(&self.source);
-        let mut ordered = edits.to_vec();
-        ordered.sort_by_key(|e| std::cmp::Reverse(e.start));
-        for e in ordered {
-            if e.start > lines.len() || e.start + e.delete_count > lines.len() {
-                return Err("line edit is out of bounds".into());
+        let ignored_before = self.ignored_line_ranges.clone();
+        let bookmarks_before = self.bookmarks.clone();
+        let (mapped_ignored, invalidated) = map_ignored_ranges(&self.ignored_line_ranges, edits)?;
+        let bookmark_ranges = self
+            .bookmarks
+            .iter()
+            .map(|line| {
+                line.checked_add(1)
+                    .map(|end| IgnoredLineRange { start: *line, end })
+                    .ok_or_else(|| "bookmark line is out of bounds".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (mapped_bookmark_ranges, bookmark_invalidated) =
+            map_ignored_ranges(&bookmark_ranges, edits)?;
+        self.source = if self.preserve_source_line_endings {
+            apply_memory_line_edits(&self.source, edits)?
+        } else {
+            let mut lines = source_lines(&self.source);
+            let mut ordered = edits.to_vec();
+            ordered.sort_by_key(|e| std::cmp::Reverse(e.start));
+            for e in ordered {
+                if e.start > lines.len() || e.start + e.delete_count > lines.len() {
+                    return Err("line edit is out of bounds".into());
+                }
+                lines.splice(e.start..e.start + e.delete_count, e.replacement);
             }
-            lines.splice(e.start..e.start + e.delete_count, e.replacement);
-        }
-        self.source = lines.join("\n");
+            lines.join("\n")
+        };
         if self.source == before {
             return Ok(());
         }
+        self.ignored_line_ranges = mapped_ignored;
+        self.ignored_range_invalidation = invalidated;
+        self.bookmarks = mapped_bookmark_ranges
+            .into_iter()
+            .map(|range| range.start)
+            .collect();
+        self.bookmark_invalidation = bookmark_invalidated;
         self.revision += 1;
         self.undo.push(UndoRecord {
             before,
             after: self.source.clone(),
+            ignored_before,
+            ignored_after: self.ignored_line_ranges.clone(),
+            bookmarks_before,
+            bookmarks_after: self.bookmarks.clone(),
         });
         self.redo.clear();
         Ok(())
@@ -371,6 +551,10 @@ impl TextDocument {
             return false;
         };
         self.source = r.before.clone();
+        self.ignored_line_ranges = r.ignored_before.clone();
+        self.bookmarks = r.bookmarks_before.clone();
+        self.ignored_range_invalidation = false;
+        self.bookmark_invalidation = false;
         self.revision += 1;
         self.redo.push(r);
         true
@@ -380,6 +564,10 @@ impl TextDocument {
             return false;
         };
         self.source = r.after.clone();
+        self.ignored_line_ranges = r.ignored_after.clone();
+        self.bookmarks = r.bookmarks_after.clone();
+        self.ignored_range_invalidation = false;
+        self.bookmark_invalidation = false;
         self.revision += 1;
         self.undo.push(r);
         true
@@ -387,6 +575,17 @@ impl TextDocument {
     pub fn save(&mut self, path: &Path) -> anyhow::Result<()> {
         let bytes = self.encoded()?;
         save_atomic(path, &bytes)?;
+        self.saved_revision = self.revision;
+        Ok(())
+    }
+
+    /// Saves the current in-memory source as exact UTF-8 bytes. Unlike file
+    /// save, this intentionally does not apply the document's newline policy.
+    pub fn save_as_exact_utf8(&mut self, path: &Path) -> anyhow::Result<()> {
+        if self.read_only {
+            anyhow::bail!("document is read-only");
+        }
+        save_atomic(path, self.source.as_bytes())?;
         self.saved_revision = self.revision;
         Ok(())
     }
@@ -431,6 +630,164 @@ impl TextDocument {
         Ok(out)
     }
 }
+
+#[derive(Clone)]
+struct MemoryLine {
+    content: String,
+    ending: String,
+}
+
+fn memory_lines(source: &str) -> Vec<MemoryLine> {
+    let bytes = source.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let content_end = if index > start && bytes[index - 1] == b'\r' {
+            index - 1
+        } else {
+            index
+        };
+        lines.push(MemoryLine {
+            content: source[start..content_end].to_owned(),
+            ending: source[content_end..=index].to_owned(),
+        });
+        start = index + 1;
+    }
+    if start < source.len() {
+        lines.push(MemoryLine {
+            content: source[start..].to_owned(),
+            ending: String::new(),
+        });
+    }
+    lines
+}
+
+/// Applies line-based merges without rewriting any untouched memory-source
+/// delimiters. Newly inserted boundaries use a nearby destination delimiter.
+fn apply_memory_line_edits(source: &str, edits: &[LineEdit]) -> Result<String, String> {
+    let preserve_terminal_newline = source.ends_with('\n');
+    let mut lines = memory_lines(source);
+    let mut ordered = edits.to_vec();
+    ordered.sort_by_key(|edit| std::cmp::Reverse(edit.start));
+    for edit in ordered {
+        let end = edit
+            .start
+            .checked_add(edit.delete_count)
+            .ok_or_else(|| "line edit is out of bounds".to_string())?;
+        if edit.start > lines.len() || end > lines.len() {
+            return Err("line edit is out of bounds".into());
+        }
+        let deleted = &lines[edit.start..end];
+        let delimiter = deleted
+            .iter()
+            .find(|line| !line.ending.is_empty())
+            .or_else(|| {
+                lines[..edit.start]
+                    .iter()
+                    .rev()
+                    .find(|line| !line.ending.is_empty())
+            })
+            .or_else(|| lines[end..].iter().find(|line| !line.ending.is_empty()))
+            .map_or_else(|| "\n".to_string(), |line| line.ending.clone());
+        let final_ending = deleted
+            .last()
+            .map(|line| line.ending.clone())
+            .unwrap_or_else(|| delimiter.clone());
+        let replacement_count = edit.replacement.len();
+        let replacement = edit
+            .replacement
+            .into_iter()
+            .enumerate()
+            .map(|(index, content)| MemoryLine {
+                content,
+                ending: if index + 1 == replacement_count {
+                    final_ending.clone()
+                } else {
+                    delimiter.clone()
+                },
+            })
+            .collect::<Vec<_>>();
+        lines.splice(edit.start..end, replacement);
+    }
+    let fallback_delimiter = lines
+        .iter()
+        .find(|line| !line.ending.is_empty())
+        .map_or_else(|| "\n".to_string(), |line| line.ending.clone());
+    let last_index = lines.len().saturating_sub(1);
+    for line in lines.iter_mut().take(last_index) {
+        if line.ending.is_empty() {
+            line.ending = fallback_delimiter.clone();
+        }
+    }
+    if let Some(last) = lines.last_mut() {
+        if preserve_terminal_newline {
+            if last.ending.is_empty() {
+                last.ending = fallback_delimiter;
+            }
+        } else {
+            last.ending.clear();
+        }
+    }
+    let mut output = String::new();
+    for line in lines {
+        output.push_str(&line.content);
+        output.push_str(&line.ending);
+    }
+    Ok(output)
+}
+
+fn map_ignored_ranges(
+    ranges: &[IgnoredLineRange],
+    edits: &[LineEdit],
+) -> Result<(Vec<IgnoredLineRange>, bool), String> {
+    let mut ordered = edits.to_vec();
+    ordered.sort_by_key(|edit| edit.start);
+    let mut mapped = Vec::with_capacity(ranges.len());
+    let mut invalidated = false;
+    for range in ranges {
+        let mut shift: isize = 0;
+        let mut intersects = false;
+        for edit in &ordered {
+            let edit_end = edit
+                .start
+                .checked_add(edit.delete_count)
+                .ok_or_else(|| "line edit is out of bounds".to_string())?;
+            if edit.start == edit_end {
+                if edit.start > range.start && edit.start < range.end {
+                    intersects = true;
+                    break;
+                }
+                if edit.start <= range.start {
+                    shift += edit.replacement.len() as isize;
+                }
+                continue;
+            }
+            if edit.start < range.end && edit_end > range.start {
+                intersects = true;
+                break;
+            }
+            if edit_end <= range.start {
+                shift += edit.replacement.len() as isize - edit.delete_count as isize;
+            }
+        }
+        if intersects {
+            invalidated = true;
+            continue;
+        }
+        let start = (range.start as isize + shift)
+            .try_into()
+            .map_err(|_| "line edit moved an ignored range out of bounds".to_string())?;
+        let end = (range.end as isize + shift)
+            .try_into()
+            .map_err(|_| "line edit moved an ignored range out of bounds".to_string())?;
+        mapped.push(IgnoredLineRange { start, end });
+    }
+    Ok((mapped, invalidated))
+}
+
 fn source_lines(s: &str) -> Vec<String> {
     // `str::lines` treats CRLF as one delimiter (splitting on either byte
     // independently would manufacture a blank line between CR and LF).
@@ -477,6 +834,7 @@ mod tests {
     #[test]
     fn grouped_revision() {
         let mut d = TextDocument {
+            source_id: next_text_source_id(),
             source: "a\nb".into(),
             revision: 0,
             saved_revision: 0,
@@ -485,8 +843,13 @@ mod tests {
             has_bom: false,
             line_ending: LineEnding::Lf,
             trailing_newline: false,
+            preserve_source_line_endings: false,
             undo: vec![],
             redo: vec![],
+            ignored_line_ranges: vec![],
+            ignored_range_invalidation: false,
+            bookmarks: vec![],
+            bookmark_invalidation: false,
         };
         d.apply_edits(&[
             LineEdit {
@@ -505,5 +868,148 @@ mod tests {
         assert_eq!(d.source(), "x\ny");
         assert!(d.undo());
         assert_eq!(d.source(), "a\nb")
+    }
+
+    #[test]
+    fn raw_line_range_preserves_delimiters_and_terminal_newline() {
+        let source = "α\r\nignored\r\nz\r\n\nend\n";
+        let document = TextDocument::from_memory_source(source.into());
+        assert_eq!(document.raw_line_range(1, 3), Some("ignored\r\nz\r\n"));
+        assert_eq!(document.raw_line_range(3, 4), Some("\n"));
+        assert_eq!(document.raw_line_range(4, 5), Some("end\n"));
+        assert_eq!(document.raw_line_range(5, 6), None);
+        assert_eq!(document.raw_line_range(2, 2), None);
+    }
+
+    #[test]
+    fn bookmarks_map_and_restore_inside_the_existing_undo_records() {
+        let mut document = TextDocument::from_memory_source("zero\none\ntwo\nthree".into());
+        assert!(document.toggle_bookmark(1));
+        assert!(document.toggle_bookmark(3));
+        assert!(!document.toggle_bookmark(1));
+        assert!(document.toggle_bookmark(1));
+        assert_eq!(document.bookmarks(), &[1, 3]);
+
+        document
+            .apply_edits(&[LineEdit {
+                start: 0,
+                delete_count: 0,
+                replacement: vec!["inserted".into()],
+            }])
+            .unwrap();
+        assert_eq!(document.bookmarks(), &[2, 4]);
+        assert!(!document.take_bookmark_invalidation());
+        assert!(document.undo());
+        assert_eq!(document.bookmarks(), &[1, 3]);
+        assert!(document.redo());
+        assert_eq!(document.bookmarks(), &[2, 4]);
+
+        document
+            .apply_edits(&[LineEdit {
+                start: 2,
+                delete_count: 1,
+                replacement: vec!["replaced".into()],
+            }])
+            .unwrap();
+        assert_eq!(document.bookmarks(), &[4]);
+        assert!(document.take_bookmark_invalidation());
+        assert!(document.undo());
+        assert_eq!(document.bookmarks(), &[2, 4]);
+        assert!(document.redo());
+        assert_eq!(document.bookmarks(), &[4]);
+
+        document.replace_source("replacement".into()).unwrap();
+        assert!(document.bookmarks().is_empty());
+        assert!(document.take_bookmark_invalidation());
+        assert!(document.undo());
+        assert_eq!(document.bookmarks(), &[4]);
+        assert!(document.redo());
+        assert!(document.bookmarks().is_empty());
+    }
+
+    #[test]
+    fn ignored_lines_shift_or_invalidate_inside_the_existing_undo_record() {
+        let mut document = TextDocument::from_memory_source("a\nb\nc\nd".into());
+        document
+            .set_ignored_line_ranges(vec![IgnoredLineRange { start: 2, end: 3 }])
+            .unwrap();
+        document
+            .apply_edits(&[LineEdit {
+                start: 0,
+                delete_count: 0,
+                replacement: vec!["before".into()],
+            }])
+            .unwrap();
+        assert_eq!(
+            document.ignored_line_ranges(),
+            &[IgnoredLineRange { start: 3, end: 4 }]
+        );
+        assert!(!document.take_ignored_range_invalidation());
+        assert!(document.undo());
+        assert_eq!(
+            document.ignored_line_ranges(),
+            &[IgnoredLineRange { start: 2, end: 3 }]
+        );
+        assert!(document.redo());
+        assert_eq!(
+            document.ignored_line_ranges(),
+            &[IgnoredLineRange { start: 3, end: 4 }]
+        );
+
+        let mut document = TextDocument::from_memory_source("a\nb\nc\nd".into());
+        document
+            .set_ignored_line_ranges(vec![IgnoredLineRange { start: 1, end: 3 }])
+            .unwrap();
+        document
+            .apply_edits(&[LineEdit {
+                start: 2,
+                delete_count: 1,
+                replacement: vec!["changed".into()],
+            }])
+            .unwrap();
+        assert!(document.ignored_line_ranges().is_empty());
+        assert!(document.take_ignored_range_invalidation());
+        assert!(document.undo());
+        assert_eq!(
+            document.ignored_line_ranges(),
+            &[IgnoredLineRange { start: 1, end: 3 }]
+        );
+    }
+
+    #[test]
+    fn memory_text_document_preserves_exact_unicode_newlines_and_redacts_debug() {
+        let sentinel = "MEMORY_BODY_SECRET_SENTINEL_83fd5e";
+        let source = format!("{sentinel}α\0\u{200b}\r\nline\rsecond\n\n");
+        let document = TextDocument::from_memory_source(source.clone());
+        assert_eq!(document.source(), source);
+        assert!(!document.is_dirty());
+        let debug = format!("{document:?}");
+        assert!(!debug.contains(sentinel));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn memory_text_save_as_writes_exact_source_and_acknowledges_only_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exact output.txt");
+        let mut document = TextDocument::from_memory_source("a\r\nb\r\n\nλ".into());
+        document.replace_source("a\r\nb\r\n\nλ\r".into()).unwrap();
+        let expected = document.source().as_bytes().to_vec();
+        document.save_as_exact_utf8(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(!document.is_dirty());
+
+        document.replace_source("unsaved".into()).unwrap();
+        let saved_revision = document.saved_revision;
+        let parent_file = directory.path().join("not a directory");
+        std::fs::write(&parent_file, b"block").unwrap();
+        assert!(
+            document
+                .save_as_exact_utf8(&parent_file.join("output.txt"))
+                .is_err()
+        );
+        assert!(document.is_dirty());
+        assert_eq!(document.saved_revision, saved_revision);
+        assert_eq!(document.source(), "unsaved");
     }
 }

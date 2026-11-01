@@ -299,11 +299,20 @@ mod folder_rule_tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextCompareOrigin {
+    FileBacked,
+    Memory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextCompareState {
     pub left: Option<PathBuf>,
     pub right: Option<PathBuf>,
     pub relative_path: Option<PathBuf>,
+    /// `None` paths may denote a missing folder-child side. Origin identifies
+    /// memory text explicitly instead of inferring it from absent paths.
+    pub origin: TextCompareOrigin,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryCompareState {
@@ -463,6 +472,7 @@ impl DiffWorkspace {
                     left: Some(lp.clone()),
                     right: Some(rp.clone()),
                     relative_path: None,
+                    origin: TextCompareOrigin::FileBacked,
                 })
             }
         } else if lm.is_dir() && rm.is_dir() {
@@ -517,6 +527,7 @@ impl DiffWorkspace {
                     left,
                     right,
                     relative_path: Some(relative_path),
+                    origin: TextCompareOrigin::FileBacked,
                 })
             },
         };
@@ -531,6 +542,25 @@ impl DiffWorkspace {
         } else {
             false
         }
+    }
+
+    /// Pushes a new memory comparison while retaining the current view and its
+    /// model identity for Back navigation.
+    pub fn push_memory_text_compare(&mut self) -> u64 {
+        let next = RetainedView {
+            id: id(),
+            view: DiffView::TextCompare(TextCompareState {
+                left: None,
+                right: None,
+                relative_path: None,
+                origin: TextCompareOrigin::Memory,
+            }),
+        };
+        let next_id = next.id;
+        let old = std::mem::replace(&mut self.current_view, next);
+        self.navigation_stack.push(old);
+        self.current_job_generation = self.current_job_generation.wrapping_add(1);
+        next_id
     }
 
     /// Replaces a folder child with the adjacent differing file from the
@@ -613,6 +643,7 @@ impl DiffWorkspace {
                     left,
                     right,
                     relative_path: Some(relative_path),
+                    origin: TextCompareOrigin::FileBacked,
                 })
             },
         };
@@ -829,11 +860,15 @@ impl TextScrollState {
     }
 
     pub fn target_measured_row(&mut self, comparison_row: usize, cache: &RowMeasurementCache) {
-        let projected = cache
+        let Some(projected) = cache
             .comparison_to_projected
             .get(comparison_row)
             .and_then(|row| *row)
-            .unwrap_or_else(|| comparison_row.min(cache.heights.len()));
+        else {
+            self.aligned_row = comparison_row;
+            self.within_row = 0.0;
+            return;
+        };
         self.aligned_row = comparison_row;
         self.within_row = 0.0;
         let y = cache.offset_for_row(projected) as f32;
@@ -865,9 +900,12 @@ pub enum CloseChoice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowMeasureKey {
+    pub left_source_id: u64,
+    pub right_source_id: u64,
     pub left_revision: u64,
     pub right_revision: u64,
     pub comparison_revision: u64,
+    pub annotation_revision: u64,
     pub left_text_width_bits: u32,
     pub right_text_width_bits: u32,
     pub font_theme: u64,
@@ -876,6 +914,18 @@ pub struct RowMeasureKey {
     pub wrap: bool,
     pub projection_mode: u8,
     pub projection_context: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingScrollRequest {
+    row: usize,
+    generation: u64,
+}
+
+impl PendingScrollRequest {
+    pub fn row(self) -> usize {
+        self.row
+    }
 }
 
 pub const MIN_VISUAL_LINE_HEIGHT: f32 = 20.0;
@@ -1023,9 +1073,12 @@ pub fn visible_row_range(
     let mut cache = RowMeasurementCache::default();
     cache.rebuild(
         RowMeasureKey {
+            left_source_id: 0,
+            right_source_id: 0,
             left_revision: 0,
             right_revision: 0,
             comparison_revision: 0,
+            annotation_revision: 0,
             left_text_width_bits: 0,
             right_text_width_bits: 0,
             font_theme: 0,
@@ -1060,14 +1113,144 @@ pub fn restore_anchor(rows: &[AlignedDiffRow], anchor: ScrollAnchor) -> usize {
         .unwrap_or_else(|| rows.len().saturating_sub(1))
 }
 
-struct CompareMessage {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompareRequestStamp {
     generation: u64,
+    left_source_id: u64,
+    right_source_id: u64,
+    left_revision: u64,
+    right_revision: u64,
+    rules_revision: u64,
+    annotation_revision: u64,
+}
+
+impl CompareRequestStamp {
+    fn matches_model(self, model: &TextViewModel) -> bool {
+        self.generation == model.generation
+            && self.left_source_id == model.left.source_id()
+            && self.right_source_id == model.right.source_id()
+            && self.left_revision == model.left.revision
+            && self.right_revision == model.right.revision
+            && self.rules_revision == model.rules.revision
+            && self.annotation_revision == model.annotation_revision
+    }
+
+    fn matches_result(self, result: &TextComparisonResult) -> bool {
+        !result.is_stale(
+            self.left_source_id,
+            self.right_source_id,
+            self.left_revision,
+            self.right_revision,
+            self.rules_revision,
+            self.annotation_revision,
+        )
+    }
+}
+
+struct CompareOutput {
     result: TextComparisonResult,
+    excluded_alignments: Vec<ManualTextAlignment>,
+}
+
+struct CompareMessage {
+    stamp: CompareRequestStamp,
+    result: Result<CompareOutput, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CurrentTextRowIdentity {
+    left_source_id: u64,
+    right_source_id: u64,
+    left_revision: u64,
+    right_revision: u64,
+    source_rows: (Option<usize>, Option<usize>),
+}
+
+fn current_text_row_identity(
+    comparison: &TextComparisonResult,
+    row_index: usize,
+) -> Option<CurrentTextRowIdentity> {
+    let row = comparison.rows.get(row_index)?;
+    Some(CurrentTextRowIdentity {
+        left_source_id: comparison.left_source_id,
+        right_source_id: comparison.right_source_id,
+        left_revision: comparison.left_revision,
+        right_revision: comparison.right_revision,
+        source_rows: (row.left, row.right),
+    })
+}
+
+fn hunk_range_for_row(
+    comparison: &TextComparisonResult,
+    row_index: usize,
+) -> Option<std::ops::Range<usize>> {
+    let hunk = comparison
+        .navigation
+        .row_to_hunk
+        .get(row_index)
+        .and_then(|hunk_index| *hunk_index)
+        .and_then(|hunk_index| comparison.hunks.get(hunk_index))?;
+    (hunk.start_row <= row_index && row_index < hunk.end_row)
+        .then_some(hunk.start_row..hunk.end_row)
+}
+
+fn same_hunk_source_membership(
+    old: &TextComparisonResult,
+    old_row: usize,
+    new: &TextComparisonResult,
+    new_row: usize,
+) -> bool {
+    match (
+        hunk_range_for_row(old, old_row),
+        hunk_range_for_row(new, new_row),
+    ) {
+        (Some(old_range), Some(new_range)) => {
+            let (Some(old_rows), Some(new_rows)) =
+                (old.rows.get(old_range), new.rows.get(new_range))
+            else {
+                return false;
+            };
+            old_rows.len() == new_rows.len()
+                && old_rows.iter().zip(new_rows).all(|(old, new)| {
+                    (old.left, old.right, old.kind) == (new.left, new.right, new.kind)
+                })
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLineSelection {
+    pub source_id: u64,
+    pub revision: u64,
+    pub side: DiffSide,
+    pub anchor_line: usize,
+    pub focus_line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SelectedSourceText {
+    pub source_id: u64,
+    pub revision: u64,
+    pub side: DiffSide,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTextAlignment {
+    pub source_id: u64,
+    pub revision: u64,
+    pub side: DiffSide,
+    pub source_line: usize,
 }
 
 /// Non-egui controller for a retained text comparison. The last accepted
 /// alignment remains available while `recalculating` is true.
 pub struct TextViewModel {
+    pub origin: TextCompareOrigin,
     pub left_path: Option<PathBuf>,
     pub right_path: Option<PathBuf>,
     pub left: TextDocument,
@@ -1076,8 +1259,13 @@ pub struct TextViewModel {
     pub rules: TextComparisonRules,
     pub active_side: DiffSide,
     pub current_row: Option<usize>,
+    /// Source-coordinate identity for the current comparison row and, when it
+    /// belongs to a difference, the complete source membership of that hunk.
+    current_row_identity: Option<CurrentTextRowIdentity>,
     /// A model-row navigation target waiting to be consumed by the view.
     pub pending_scroll_row: Option<usize>,
+    pending_scroll_generation: u64,
+    pending_find_scroll_request: Option<PendingScrollRequest>,
     pub scroll: TextScrollState,
     pub row_measurements: RowMeasurementCache,
     pub projection_mode: RowProjectionMode,
@@ -1096,14 +1284,22 @@ pub struct TextViewModel {
     pub text_details_open: bool,
     pub text_details_height: f32,
     pub manual_alignments: Vec<ManualTextAlignment>,
-    pub pending_alignment: Option<(DiffSide, usize)>,
+    pub pending_alignment: Option<PendingTextAlignment>,
     pub alignment_error: Option<String>,
+    pub source_line_selection: Option<SourceLineSelection>,
+    pub annotation_revision: u64,
+    pub annotation_notice: Option<String>,
+    pub projection_notice: Option<String>,
+    manual_alignment_source_ids: (u64, u64),
+    manual_alignment_source_revisions: (u64, u64),
     pub current_intraline: Option<IntralineLocation>,
     pub syntax_cache: crate::diff::syntax::SyntaxCache,
     pub large_file_tier: crate::diff::worker::LargeFileTier,
+    large_file_policy: crate::diff::worker::LargeFilePolicy,
     pub splitter: f32,
     pub recalculate_at: Option<Instant>,
     pub recalculating: bool,
+    pub comparison_error: Option<String>,
     pub left_error: Option<String>,
     pub right_error: Option<String>,
     pub external_conflict: [bool; 2],
@@ -1117,20 +1313,9 @@ pub struct TextViewModel {
 impl TextViewModel {
     #[cfg(test)]
     pub(crate) fn from_test_text(left: String, right: String) -> Self {
-        let mut model = Self::load(
-            &TextCompareState {
-                left: None,
-                right: None,
-                relative_path: None,
-            },
-            &DiffConfigV1::default(),
-        )
-        .unwrap();
-        model.left = TextDocument::from_test_text(left);
-        model.right = TextDocument::from_test_text(right);
+        let mut model = Self::new_memory(left, right, &DiffConfigV1::default()).unwrap();
         model.wrap = false;
         model.scroll.wrapped = false;
-        model.start_compare();
         for _ in 0..100 {
             model.poll();
             if model.comparison.is_some() {
@@ -1156,24 +1341,48 @@ impl TextViewModel {
             &mut self.scroll.right_vertical,
         );
         self.active_side = other(self.active_side);
+        self.source_line_selection = self.source_line_selection.map(|mut selection| {
+            selection.side = other(selection.side);
+            selection
+        });
         if let Some(cursor) = &mut self.cursor {
             cursor.side = other(cursor.side);
         }
         for anchor in &mut self.manual_alignments {
             std::mem::swap(&mut anchor.left_line, &mut anchor.right_line);
         }
-        self.pending_alignment = self
-            .pending_alignment
-            .take()
-            .map(|(s, line)| (other(s), line));
+        self.pending_alignment = self.pending_alignment.map(|mut anchor| {
+            anchor.side = other(anchor.side);
+            anchor
+        });
+        self.manual_alignment_source_ids = (
+            self.manual_alignment_source_ids.1,
+            self.manual_alignment_source_ids.0,
+        );
+        self.manual_alignment_source_revisions = (
+            self.manual_alignment_source_revisions.1,
+            self.manual_alignment_source_revisions.0,
+        );
+        if self.current_row.is_some() {
+            self.invalidate_current_row_identity();
+        } else {
+            self.current_row_identity = None;
+        }
+        self.request_scroll_row(None);
         self.current_intraline = None;
         self.comparison = None;
         self.row_measurements = Default::default();
+        self.annotation_revision = self.annotation_revision.wrapping_add(1);
         self.schedule_compare();
     }
 
     /// Reload is intentionally all-or-nothing with respect to dirty buffers.
     pub fn reload_files(&mut self) -> Result<(), String> {
+        if self.origin == TextCompareOrigin::Memory {
+            return Err(
+                "In-memory text has no files to reload; use Recompare or Edit Inputs".into(),
+            );
+        }
         if self.has_dirty() {
             return Err(
                 "Reload would discard unsaved edits; save or discard them explicitly first".into(),
@@ -1192,9 +1401,31 @@ impl TextViewModel {
         };
         let left = load(self.left_path.as_ref())?;
         let right = load(self.right_path.as_ref())?;
+        let cleared_bookmarks =
+            !self.left.bookmarks().is_empty() || !self.right.bookmarks().is_empty();
+        let cleared_active_difference = self.current_row.is_some();
+        let cleared_annotations = !self.left.ignored_line_ranges().is_empty()
+            || !self.right.ignored_line_ranges().is_empty()
+            || !self.manual_alignments.is_empty()
+            || self.source_line_selection.is_some()
+            || self.pending_alignment.is_some();
         self.left = left;
         self.right = right;
         self.external_conflict = [false; 2];
+        self.manual_alignments.clear();
+        self.pending_alignment = None;
+        self.source_line_selection = None;
+        self.current_row = None;
+        self.current_row_identity = None;
+        self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
+        self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
+        self.annotation_revision = self.annotation_revision.wrapping_add(1);
+        if cleared_annotations || cleared_bookmarks || cleared_active_difference {
+            self.annotation_notice = Some(
+                "Reload cleared source annotations, bookmarks, selections, anchors, or the active difference for the replaced sources."
+                    .into(),
+            );
+        }
         self.schedule_compare();
         Ok(())
     }
@@ -1211,6 +1442,21 @@ impl TextViewModel {
     ) -> Result<(), String> {
         let replacement = TextDocument::from_loaded(loaded)
             .ok_or_else(|| "externally changed file is no longer text".to_string())?;
+        let had_ignored = match side {
+            DiffSide::Left => !self.left.ignored_line_ranges().is_empty(),
+            DiffSide::Right => !self.right.ignored_line_ranges().is_empty(),
+        };
+        let had_bookmarks = match side {
+            DiffSide::Left => !self.left.bookmarks().is_empty(),
+            DiffSide::Right => !self.right.bookmarks().is_empty(),
+        };
+        let had_selection = self
+            .source_line_selection
+            .is_some_and(|selection| selection.side == side)
+            || self
+                .pending_alignment
+                .is_some_and(|pending| pending.side == side);
+        let had_active_difference = self.current_row.is_some();
         let document = match side {
             DiffSide::Left => &mut self.left,
             DiffSide::Right => &mut self.right,
@@ -1219,11 +1465,37 @@ impl TextViewModel {
         *document = replacement;
         document.revision = next;
         document.saved_revision = next;
+        self.manual_alignments.clear();
+        if self
+            .pending_alignment
+            .is_some_and(|pending| pending.side == side)
+        {
+            self.pending_alignment = None;
+        }
+        self.alignment_error = Some("Reload cleared anchors tied to the replaced source.".into());
+        if self
+            .source_line_selection
+            .is_some_and(|selection| selection.side == side)
+        {
+            self.source_line_selection = None;
+        }
+        self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
+        self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
+        self.annotation_revision = self.annotation_revision.wrapping_add(1);
+        if had_ignored || had_selection || had_bookmarks || had_active_difference {
+            self.annotation_notice = Some(
+                "Reload cleared ignored-line ranges, bookmarks, source selection, or the active difference for the reloaded source."
+                    .into(),
+            );
+        }
         self.external_conflict[if side == DiffSide::Left { 0 } else { 1 }] = false;
         self.schedule_compare();
         Ok(())
     }
     pub fn load(state: &TextCompareState, settings: &DiffConfigV1) -> Result<Self, String> {
+        if state.origin == TextCompareOrigin::Memory {
+            return Err("Memory comparisons must be created from explicit text input".into());
+        }
         fn doc(path: Option<&PathBuf>) -> Result<TextDocument, String> {
             path.map(|p| {
                 load_text_file(p)
@@ -1237,6 +1509,40 @@ impl TextViewModel {
         }
         let left = doc(state.left.as_ref())?;
         let right = doc(state.right.as_ref())?;
+        Self::from_documents(state, settings, left, right)
+    }
+
+    /// Creates a memory-backed comparison using the same comparison model and
+    /// worker as file-backed text views.
+    pub fn new_memory(
+        left: String,
+        right: String,
+        settings: &DiffConfigV1,
+    ) -> Result<Self, String> {
+        validate_memory_text(&left)?;
+        validate_memory_text(&right)?;
+        let state = TextCompareState {
+            left: None,
+            right: None,
+            relative_path: None,
+            origin: TextCompareOrigin::Memory,
+        };
+        Self::from_documents(
+            &state,
+            settings,
+            TextDocument::from_memory_source(left),
+            TextDocument::from_memory_source(right),
+        )
+    }
+
+    fn from_documents(
+        state: &TextCompareState,
+        settings: &DiffConfigV1,
+        left: TextDocument,
+        right: TextDocument,
+    ) -> Result<Self, String> {
+        let manual_alignment_source_ids = (left.source_id(), right.source_id());
+        let manual_alignment_source_revisions = (left.revision, right.revision);
         let wrap =
             if crate::diff::syntax::code_like(state.left.as_deref().or(state.right.as_deref())) {
                 false
@@ -1244,24 +1550,31 @@ impl TextViewModel {
                 settings.wrap_text
             };
         let bytes = left.source().len().saturating_add(right.source().len()) as u64;
-        let estimated_rows =
+        let estimated_rows = if state.origin == TextCompareOrigin::Memory {
+            memory_text_line_count(left.source()).max(memory_text_line_count(right.source())) as u64
+        } else {
             left.source()
                 .bytes()
                 .filter(|b| *b == b'\n')
                 .count()
                 .max(right.source().bytes().filter(|b| *b == b'\n').count()) as u64
-                + 1;
+                + 1
+        };
         let large_file_tier = settings.large_file_policy().tier(bytes, estimated_rows);
         let mut out = Self {
             left_path: state.left.clone(),
             right_path: state.right.clone(),
+            origin: state.origin,
             left,
             right,
             comparison: None,
             rules: TextComparisonRules::default(),
             active_side: DiffSide::Left,
             current_row: None,
+            current_row_identity: None,
             pending_scroll_row: None,
+            pending_scroll_generation: 0,
+            pending_find_scroll_request: None,
             scroll: TextScrollState::default(),
             row_measurements: RowMeasurementCache::default(),
             projection_mode: RowProjectionMode::All,
@@ -1282,12 +1595,20 @@ impl TextViewModel {
             manual_alignments: vec![],
             pending_alignment: None,
             alignment_error: None,
+            source_line_selection: None,
+            annotation_revision: 0,
+            annotation_notice: None,
+            projection_notice: None,
+            manual_alignment_source_ids,
+            manual_alignment_source_revisions,
             current_intraline: None,
             syntax_cache: Default::default(),
             large_file_tier,
+            large_file_policy: settings.large_file_policy(),
             splitter: validated_splitter(settings.pane_split),
             recalculate_at: Some(Instant::now()),
             recalculating: true,
+            comparison_error: None,
             left_error: None,
             right_error: None,
             external_conflict: [false, false],
@@ -1299,55 +1620,345 @@ impl TextViewModel {
         out.start_compare();
         Ok(out)
     }
+
+    /// Commits edited memory inputs through each document's revision/undo
+    /// owner. Validation and read-only checks run for both sides before either
+    /// source changes.
+    pub fn replace_memory_sources(&mut self, left: String, right: String) -> Result<bool, String> {
+        if self.origin != TextCompareOrigin::Memory {
+            return Err("Only an in-memory comparison can replace text inputs".into());
+        }
+        validate_memory_text(&left)?;
+        validate_memory_text(&right)?;
+        if self.left.read_only || self.right.read_only {
+            return Err("In-memory text documents must be editable".into());
+        }
+
+        let mut next_left = self.left.clone();
+        let mut next_right = self.right.clone();
+        let had_alignments = !self.manual_alignments.is_empty();
+        let had_active_difference = self.current_row.is_some();
+        let left_changed = next_left.replace_source(left)?;
+        let right_changed = next_right.replace_source(right)?;
+        if !left_changed && !right_changed {
+            return Ok(false);
+        }
+        let cleared_ignored = (left_changed && !self.left.ignored_line_ranges().is_empty())
+            || (right_changed && !self.right.ignored_line_ranges().is_empty());
+        let cleared_bookmarks = (left_changed && !self.left.bookmarks().is_empty())
+            || (right_changed && !self.right.bookmarks().is_empty());
+        let cleared_selection = self.source_line_selection.is_some_and(|selection| {
+            (left_changed && selection.side == DiffSide::Left)
+                || (right_changed && selection.side == DiffSide::Right)
+        }) || self.pending_alignment.is_some_and(|pending| {
+            (left_changed && pending.side == DiffSide::Left)
+                || (right_changed && pending.side == DiffSide::Right)
+        });
+
+        next_left.take_bookmark_invalidation();
+        next_right.take_bookmark_invalidation();
+
+        self.left = next_left;
+        self.right = next_right;
+        self.manual_alignments.clear();
+        if left_changed
+            && self
+                .pending_alignment
+                .is_some_and(|pending| pending.side == DiffSide::Left)
+            || right_changed
+                && self
+                    .pending_alignment
+                    .is_some_and(|pending| pending.side == DiffSide::Right)
+        {
+            self.pending_alignment = None;
+        }
+        if left_changed
+            && self
+                .source_line_selection
+                .is_some_and(|selection| selection.side == DiffSide::Left)
+            || right_changed
+                && self
+                    .source_line_selection
+                    .is_some_and(|selection| selection.side == DiffSide::Right)
+        {
+            self.source_line_selection = None;
+        }
+        if had_alignments {
+            self.alignment_error = Some(
+                "Replacing a source cleared manual alignments tied to the previous text.".into(),
+            );
+        } else {
+            self.alignment_error = None;
+        }
+        self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
+        self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
+        self.annotation_revision = self.annotation_revision.wrapping_add(1);
+        let mut notices = Vec::new();
+        if cleared_ignored || cleared_selection {
+            notices.push(
+                "Replacing text inputs cleared ignored ranges or source selection for the changed source.",
+            );
+        }
+        if cleared_bookmarks {
+            notices.push("Replacing text inputs cleared bookmarks for the changed source.");
+        }
+        if had_active_difference {
+            notices.push(
+                "Replacing text inputs cleared the active difference for the changed source.",
+            );
+        }
+        if !notices.is_empty() {
+            self.annotation_notice = Some(notices.join(" "));
+        }
+        self.current_intraline = None;
+        self.cursor = None;
+        self.current_row = None;
+        self.current_row_identity = None;
+        self.pending_scroll_row = None;
+        self.row_measurements = Default::default();
+        self.find_matches.clear();
+        self.current_find_match = None;
+        self.comparison = None;
+        self.generation = self.generation.wrapping_add(1);
+        self.receiver = None;
+        self.large_file_tier = self.large_file_policy.tier(
+            self.left
+                .source()
+                .len()
+                .saturating_add(self.right.source().len()) as u64,
+            memory_text_line_count(self.left.source())
+                .max(memory_text_line_count(self.right.source())) as u64,
+        );
+        self.schedule_compare();
+        Ok(true)
+    }
     pub fn schedule_compare(&mut self) {
+        self.cancel_pending_find_scroll();
+        self.find_matches.clear();
+        self.current_find_match = None;
         self.recalculate_at = Some(Instant::now() + Duration::from_millis(250));
         self.recalculating = true;
+        self.comparison_error = None;
     }
+
+    fn cancel_pending_find_scroll(&mut self) {
+        let request = self.pending_find_scroll_request.take();
+        if request.is_some_and(|request| self.pending_scroll_request() == Some(request)) {
+            self.request_scroll_row(None);
+        }
+    }
+
+    fn invalidate_current_row_identity(&mut self) {
+        self.current_row = None;
+        self.current_row_identity = None;
+        self.current_intraline = None;
+        let notice = "The active difference changed with the source or comparison rows; select a difference again before copying.";
+        self.annotation_notice = Some(match self.annotation_notice.take() {
+            Some(previous) => format!("{previous} {notice}"),
+            None => notice.to_string(),
+        });
+    }
+
+    fn reconcile_current_row(&mut self, comparison: &TextComparisonResult) {
+        let Some(identity) = self.current_row_identity.take() else {
+            if self.current_row.is_some() {
+                self.invalidate_current_row_identity();
+            }
+            return;
+        };
+        if identity.left_source_id != comparison.left_source_id
+            || identity.right_source_id != comparison.right_source_id
+            || identity.left_revision != comparison.left_revision
+            || identity.right_revision != comparison.right_revision
+        {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        let Some(previous_comparison) = self.comparison.as_ref() else {
+            self.invalidate_current_row_identity();
+            return;
+        };
+        if previous_comparison.left_source_id != identity.left_source_id
+            || previous_comparison.right_source_id != identity.right_source_id
+            || previous_comparison.left_revision != identity.left_revision
+            || previous_comparison.right_revision != identity.right_revision
+        {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        let Some(previous_row) = self.current_row else {
+            self.invalidate_current_row_identity();
+            return;
+        };
+        if previous_comparison
+            .rows
+            .get(previous_row)
+            .is_none_or(|row| (row.left, row.right) != identity.source_rows)
+        {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        let mut matching_rows = comparison
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| (row.left, row.right) == identity.source_rows);
+        let Some((row_index, _)) = matching_rows.next() else {
+            self.invalidate_current_row_identity();
+            return;
+        };
+        if matching_rows.next().is_some() {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        if !same_hunk_source_membership(previous_comparison, previous_row, comparison, row_index) {
+            self.invalidate_current_row_identity();
+            return;
+        }
+        self.current_row = Some(row_index);
+        self.current_row_identity = current_text_row_identity(comparison, row_index);
+    }
+
     pub fn poll(&mut self) {
         if self.recalculate_at.is_some_and(|t| Instant::now() >= t) {
             self.start_compare();
         }
-        if let Some(rx) = &self.receiver
-            && let Ok(m) = rx.try_recv()
-            && m.generation == self.generation
-            && !m
-                .result
-                .is_stale(self.left.revision, self.right.revision, self.rules.revision)
+        let message = self.receiver.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(message) = message
+            && message.stamp.matches_model(self)
         {
-            let anchor = self.cursor.map(|p| ScrollAnchor {
-                side: p.side,
-                source_line: p.line,
-                offset: 0.0,
-            });
-            self.current_row = anchor
-                .map(|a| restore_anchor(&m.result.rows, a))
-                .or(self.current_row);
-            self.comparison = Some(m.result);
-            self.recalculating = false;
+            match message.result {
+                Ok(mut output) if message.stamp.matches_result(&output.result) => {
+                    let mut annotation_changed = false;
+                    if !output.excluded_alignments.is_empty() {
+                        let old_count = self.manual_alignments.len();
+                        self.manual_alignments
+                            .retain(|anchor| !output.excluded_alignments.contains(anchor));
+                        annotation_changed = self.manual_alignments.len() != old_count;
+                        if annotation_changed {
+                            self.alignment_error = Some(
+                                "Manual alignments were cleared because their endpoints are excluded by the current comparison rules.".into(),
+                            );
+                        }
+                    }
+                    if self.pending_alignment.is_some_and(|pending| {
+                        let still_compared =
+                            output.result.rows.iter().any(|row| match pending.side {
+                                DiffSide::Left => row.left == Some(pending.source_line),
+                                DiffSide::Right => row.right == Some(pending.source_line),
+                            });
+                        !still_compared
+                    }) {
+                        self.pending_alignment = None;
+                        self.alignment_error = Some(
+                            "The pending alignment endpoint was excluded by the current comparison rules; select a visible source line again.".into(),
+                        );
+                    }
+                    if annotation_changed {
+                        self.annotation_revision = self.annotation_revision.wrapping_add(1);
+                        output.result.annotation_revision = self.annotation_revision;
+                        self.row_measurements = Default::default();
+                    }
+                    self.reconcile_current_row(&output.result);
+                    self.comparison = Some(output.result);
+                    self.comparison_error = None;
+                    self.recalculating = false;
+                    self.refresh_find();
+                    if let Some(row) = self.pending_scroll_row {
+                        self.request_scroll_row(Some(row));
+                    }
+                }
+                Ok(_) => {
+                    self.comparison_error = Some(
+                        "Text comparison produced a result for different source or rule versions. Please compare again.".into(),
+                    );
+                    self.recalculating = false;
+                }
+                Err(error) => {
+                    self.comparison_error = Some(format!("Text comparison failed: {error}"));
+                    self.recalculating = false;
+                }
+            }
         }
     }
     fn start_compare(&mut self) {
         self.recalculate_at = None;
+        let source_ids = (self.left.source_id(), self.right.source_id());
+        let source_revisions = (self.left.revision, self.right.revision);
+        if self.manual_alignment_source_ids != source_ids
+            || self.manual_alignment_source_revisions != source_revisions
+        {
+            self.manual_alignments.clear();
+            self.pending_alignment = None;
+            self.manual_alignment_source_ids = source_ids;
+            self.manual_alignment_source_revisions = source_revisions;
+            self.alignment_error = Some(
+                "Manual alignments were cleared because their source documents changed.".into(),
+            );
+        }
         self.generation += 1;
         let generation = self.generation;
-        let (l, r, lr, rr, rules, anchors) = (
+        let (
+            l,
+            r,
+            left_id,
+            right_id,
+            lr,
+            rr,
+            rules,
+            anchors,
+            left_ignored,
+            right_ignored,
+            annotation_revision,
+        ) = (
             self.left.source().to_owned(),
             self.right.source().to_owned(),
+            self.left.source_id(),
+            self.right.source_id(),
             self.left.revision,
             self.right.revision,
             self.rules.clone(),
             self.manual_alignments.clone(),
+            self.left.ignored_line_ranges().to_vec(),
+            self.right.ignored_line_ranges().to_vec(),
+            self.annotation_revision,
         );
+        let stamp = CompareRequestStamp {
+            generation,
+            left_source_id: left_id,
+            right_source_id: right_id,
+            left_revision: lr,
+            right_revision: rr,
+            rules_revision: rules.revision,
+            annotation_revision,
+        };
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
         self.recalculating = true;
         std::thread::spawn(move || {
-            if let Ok(c) = CompiledRules::compile(&rules)
-                && let Ok(result) =
-                    text_compare::compare_with_alignments(&l, &r, lr, rr, &c, 4096, &anchors)
-            {
-                let _ = tx.send(CompareMessage { generation, result });
-            }
+            let result = CompiledRules::compile(&rules)
+                .map_err(|errors| errors.join("; "))
+                .and_then(|compiled| {
+                    text_compare::compare_with_annotations_pruning_excluded_anchors(
+                        &l,
+                        &r,
+                        left_id,
+                        right_id,
+                        lr,
+                        rr,
+                        &compiled,
+                        4096,
+                        &anchors,
+                        &left_ignored,
+                        &right_ignored,
+                        annotation_revision,
+                    )
+                })
+                .map(|(result, excluded_alignments)| CompareOutput {
+                    result,
+                    excluded_alignments,
+                });
+            let _ = tx.send(CompareMessage { stamp, result });
         });
     }
     pub fn projected_rows(&self) -> Vec<usize> {
@@ -1355,7 +1966,28 @@ impl TextViewModel {
             text_compare::row_projection(c, self.projection_mode, self.projection_context)
         })
     }
+    pub fn set_row_projection(&mut self, mode: RowProjectionMode, context: usize) {
+        let context = context.min(text_compare::MAX_ROW_PROJECTION_CONTEXT);
+        if self.projection_mode == mode && self.projection_context == context {
+            return;
+        }
+        self.projection_mode = mode;
+        self.projection_context = context;
+        self.row_measurements = Default::default();
+        if self.find_projection_only {
+            self.refresh_find();
+        }
+        if let Some(row) = self.pending_scroll_row {
+            self.request_scroll_row(Some(row));
+        }
+    }
     pub fn refresh_find(&mut self) {
+        self.cancel_pending_find_scroll();
+        if !self.comparison_is_fresh() {
+            self.find_matches.clear();
+            self.current_find_match = None;
+            return;
+        }
         let projection = self.find_projection_only.then(|| self.projected_rows());
         self.find_matches = self.comparison.as_ref().map_or_else(Vec::new, |c| {
             text_compare::find_matches(
@@ -1372,6 +2004,10 @@ impl TextViewModel {
         self.current_find_match = None;
     }
     pub fn navigate_find(&mut self, forward: bool) {
+        if !self.comparison_is_fresh() {
+            self.cancel_pending_find_scroll();
+            return;
+        }
         self.current_find_match =
             text_compare::navigate_match(&self.find_matches, self.current_find_match, forward);
         if let Some(m) = self
@@ -1380,6 +2016,7 @@ impl TextViewModel {
         {
             self.active_side = m.side;
             self.request_scroll_row(Some(m.row));
+            self.pending_find_scroll_request = self.pending_scroll_request();
         }
     }
     pub fn request_overview_scroll(&mut self, y: f32, height: f32) {
@@ -1391,31 +2028,517 @@ impl TextViewModel {
     pub fn navigate(&mut self, direction: NavigationDirection) {
         if let Some(c) = &self.comparison {
             let row = c.navigate(self.current_row, direction, false, true);
-            self.current_row = row;
-            self.request_scroll_row(row);
+            self.set_current_row(row);
         }
     }
     pub fn navigate_intraline(&mut self, direction: NavigationDirection) {
-        if let Some(c) = &self.comparison {
-            self.current_intraline = c.navigate_intraline(self.current_intraline, direction, false);
-            if let Some(location) = self.current_intraline {
-                self.active_side = location.side;
-                self.current_row = Some(location.row);
-                self.request_scroll_row(Some(location.row));
-            }
+        let location = self.comparison.as_ref().and_then(|comparison| {
+            comparison.navigate_intraline(self.current_intraline, direction, false)
+        });
+        if let Some(location) = location {
+            self.current_intraline = Some(location);
+            self.active_side = location.side;
+            self.set_current_row(Some(location.row));
         }
     }
+    pub fn select_source_line(&mut self, side: DiffSide, line: usize, extend: bool) -> bool {
+        let document = match side {
+            DiffSide::Left => &self.left,
+            DiffSide::Right => &self.right,
+        };
+        let count =
+            text_compare::source_line_count(document.source(), self.rules.line_ending_equivalence);
+        if line >= count {
+            return false;
+        }
+        let source_id = document.source_id();
+        let revision = document.revision;
+        let anchor_line = if extend {
+            self.source_line_selection
+                .filter(|selection| {
+                    selection.side == side
+                        && selection.source_id == source_id
+                        && selection.revision == revision
+                })
+                .map_or(line, |selection| selection.anchor_line)
+        } else {
+            line
+        };
+        self.source_line_selection = Some(SourceLineSelection {
+            source_id,
+            revision,
+            side,
+            anchor_line,
+            focus_line: line,
+            start: anchor_line.min(line),
+            end: anchor_line.max(line) + 1,
+        });
+        self.active_side = side;
+        true
+    }
+
+    pub fn move_source_selection(&mut self, side: DiffSide, delta: isize, extend: bool) -> bool {
+        let existing = self.source_line_selection.filter(|selection| {
+            let document = match side {
+                DiffSide::Left => &self.left,
+                DiffSide::Right => &self.right,
+            };
+            selection.side == side
+                && selection.source_id == document.source_id()
+                && selection.revision == document.revision
+        });
+        let current = existing.map(|selection| selection.focus_line);
+        let current = current.or_else(|| {
+            self.current_row
+                .and_then(|row| self.comparison.as_ref()?.rows.get(row))
+                .and_then(|row| visual_to_source(row, side))
+        });
+        let document = match side {
+            DiffSide::Left => &self.left,
+            DiffSide::Right => &self.right,
+        };
+        let count =
+            text_compare::source_line_count(document.source(), self.rules.line_ending_equivalence);
+        if count == 0 {
+            return false;
+        }
+        let next = current.map_or(0, |line| {
+            if delta < 0 {
+                line.saturating_sub(delta.unsigned_abs())
+            } else {
+                line.saturating_add(delta as usize).min(count - 1)
+            }
+        });
+        self.select_source_line(side, next, extend)
+    }
+
+    pub fn source_line_is_ignored(&self, side: DiffSide, line: usize) -> bool {
+        let document = match side {
+            DiffSide::Left => &self.left,
+            DiffSide::Right => &self.right,
+        };
+        text_compare::line_is_ignored(document.ignored_line_ranges(), line)
+    }
+
+    pub fn has_fresh_source_selection(&self) -> bool {
+        self.fresh_source_selection().is_ok()
+    }
+
+    /// Captures the selected source lines exactly as stored, including original
+    /// Unicode bytes, delimiters, and any ignored source lines in the interval.
+    pub fn selected_raw_source_text(&self) -> Result<SelectedSourceText, String> {
+        let selection = self.fresh_source_selection()?;
+        let document = match selection.side {
+            DiffSide::Left => &self.left,
+            DiffSide::Right => &self.right,
+        };
+        let text = document
+            .raw_line_range(selection.start, selection.end)
+            .ok_or_else(|| "Source selection no longer maps to raw text".to_string())?;
+        Ok(SelectedSourceText {
+            source_id: selection.source_id,
+            revision: selection.revision,
+            side: selection.side,
+            text: text.to_owned(),
+        })
+    }
+
+    pub fn toggle_bookmark_at_selection(&mut self) -> Result<bool, String> {
+        let selection = self.fresh_source_selection()?;
+        let document = match selection.side {
+            DiffSide::Left => &mut self.left,
+            DiffSide::Right => &mut self.right,
+        };
+        Ok(document.toggle_bookmark(selection.focus_line))
+    }
+
+    /// Navigates bookmarks in comparison-row order, left before right on ties.
+    /// It only updates source selection and scroll state, leaving the active
+    /// difference/hunk unchanged.
+    pub fn navigate_bookmark(&mut self, forward: bool) -> Result<(), String> {
+        let has_selection = self.source_line_selection.is_some();
+        let selected = if has_selection {
+            Some(self.fresh_source_selection()?)
+        } else {
+            None
+        };
+        let (bookmarks, current) = {
+            let comparison = self.fresh_comparison()?;
+            let mut bookmarks = Vec::new();
+            for (row_index, row) in comparison.rows.iter().enumerate() {
+                if let Some(line) = row.left
+                    && self.left.is_bookmarked(line)
+                {
+                    bookmarks.push((row_index, DiffSide::Left, line));
+                }
+                if let Some(line) = row.right
+                    && self.right.is_bookmarked(line)
+                {
+                    bookmarks.push((row_index, DiffSide::Right, line));
+                }
+            }
+            let current = selected
+                .map(|selection| {
+                    let row = comparison
+                        .rows
+                        .iter()
+                        .position(|row| {
+                            visual_to_source(row, selection.side) == Some(selection.focus_line)
+                        })
+                        .ok_or_else(|| {
+                            "Focused source line has no current comparison row".to_string()
+                        })?;
+                    Ok::<_, String>((row, selection.side))
+                })
+                .transpose()?;
+            (bookmarks, current)
+        };
+        let target = match (current, forward) {
+            (Some((row, side)), true) => bookmarks
+                .iter()
+                .find(|(candidate_row, candidate_side, _)| {
+                    (*candidate_row, bookmark_side_order(*candidate_side))
+                        > (row, bookmark_side_order(side))
+                })
+                .copied(),
+            (Some((row, side)), false) => bookmarks
+                .iter()
+                .rev()
+                .find(|(candidate_row, candidate_side, _)| {
+                    (*candidate_row, bookmark_side_order(*candidate_side))
+                        < (row, bookmark_side_order(side))
+                })
+                .copied(),
+            (None, true) => bookmarks.first().copied(),
+            (None, false) => bookmarks.last().copied(),
+        }
+        .ok_or_else(|| {
+            if bookmarks.is_empty() {
+                "No source bookmarks are available".to_string()
+            } else if forward {
+                "There is no later source bookmark".to_string()
+            } else {
+                "There is no earlier source bookmark".to_string()
+            }
+        })?;
+        let (row, side, line) = target;
+        if !self.select_source_line(side, line, false) {
+            return Err("Bookmark no longer maps to a source line".into());
+        }
+        self.request_scroll_row(Some(row));
+        Ok(())
+    }
+
+    fn fresh_source_selection(&self) -> Result<SourceLineSelection, String> {
+        let selection = self
+            .source_line_selection
+            .ok_or("Select one or more source lines first")?;
+        let document = match selection.side {
+            DiffSide::Left => &self.left,
+            DiffSide::Right => &self.right,
+        };
+        if selection.source_id != document.source_id() || selection.revision != document.revision {
+            return Err("Source selection is stale; select the lines again".into());
+        }
+        Ok(selection)
+    }
+
+    pub fn ignore_selected_lines(&mut self) -> Result<(), String> {
+        let selection = self.fresh_source_selection()?;
+        let document = match selection.side {
+            DiffSide::Left => &mut self.left,
+            DiffSide::Right => &mut self.right,
+        };
+        let line_count =
+            text_compare::source_line_count(document.source(), self.rules.line_ending_equivalence);
+        let mut ranges = document.ignored_line_ranges().to_vec();
+        ranges.push(text_compare::IgnoredLineRange {
+            start: selection.start,
+            end: selection.end,
+        });
+        let ranges = text_compare::normalize_ignored_ranges(&ranges, line_count)?;
+        if !document.set_ignored_line_ranges(ranges)? {
+            return Ok(());
+        }
+        let mut removed_anchor = false;
+        self.manual_alignments.retain(|anchor| {
+            let endpoint_is_selected = match selection.side {
+                DiffSide::Left => (selection.start..selection.end).contains(&anchor.left_line),
+                DiffSide::Right => (selection.start..selection.end).contains(&anchor.right_line),
+            };
+            removed_anchor |= endpoint_is_selected;
+            !endpoint_is_selected
+        });
+        if self.pending_alignment.is_some_and(|pending| {
+            pending.side == selection.side
+                && (selection.start..selection.end).contains(&pending.source_line)
+        }) {
+            self.pending_alignment = None;
+            removed_anchor = true;
+        }
+        if removed_anchor {
+            self.alignment_error =
+                Some("Ignored lines cannot remain manual-alignment endpoints; restore a line before aligning it.".into());
+        }
+        self.annotation_revision = self.annotation_revision.wrapping_add(1);
+        self.row_measurements = Default::default();
+        self.schedule_compare();
+        Ok(())
+    }
+
+    pub fn restore_selected_ignored_lines(&mut self) -> Result<(), String> {
+        let selection = self.fresh_source_selection()?;
+        let document = match selection.side {
+            DiffSide::Left => &mut self.left,
+            DiffSide::Right => &mut self.right,
+        };
+        let mut changed = false;
+        let mut restored = Vec::new();
+        for range in document.ignored_line_ranges() {
+            if range.end <= selection.start || range.start >= selection.end {
+                restored.push(*range);
+                continue;
+            }
+            changed = true;
+            if range.start < selection.start {
+                restored.push(text_compare::IgnoredLineRange {
+                    start: range.start,
+                    end: selection.start,
+                });
+            }
+            if range.end > selection.end {
+                restored.push(text_compare::IgnoredLineRange {
+                    start: selection.end,
+                    end: range.end,
+                });
+            }
+        }
+        if !changed {
+            return Err("The selected source lines are not ignored".into());
+        }
+        document.set_ignored_line_ranges(restored)?;
+        self.annotation_revision = self.annotation_revision.wrapping_add(1);
+        self.row_measurements = Default::default();
+        self.schedule_compare();
+        Ok(())
+    }
+
+    pub fn clear_ignored_ranges(&mut self) -> bool {
+        let mut changed = false;
+        changed |= self.left.set_ignored_line_ranges(vec![]).unwrap_or(false);
+        changed |= self.right.set_ignored_line_ranges(vec![]).unwrap_or(false);
+        if changed {
+            self.annotation_revision = self.annotation_revision.wrapping_add(1);
+            self.row_measurements = Default::default();
+            self.schedule_compare();
+        }
+        changed
+    }
+
+    fn validate_manual_alignment_endpoint(
+        &self,
+        side: DiffSide,
+        source_id: u64,
+        revision: u64,
+        source_line: usize,
+    ) -> Result<(), String> {
+        let document = match side {
+            DiffSide::Left => &self.left,
+            DiffSide::Right => &self.right,
+        };
+        if document.source_id() != source_id || document.revision != revision {
+            return Err("Alignment endpoint is stale; select a current source line again".into());
+        }
+        let comparison = self.fresh_comparison()?;
+        let line_count =
+            text_compare::source_line_count(document.source(), self.rules.line_ending_equivalence);
+        if source_line >= line_count {
+            return Err("Alignment endpoint is outside the current source".into());
+        }
+        if text_compare::line_is_ignored(document.ignored_line_ranges(), source_line) {
+            return Err(
+                "Ignored source lines cannot be manual-alignment endpoints; restore the line first."
+                    .into(),
+            );
+        }
+        let compared = comparison.rows.iter().any(|row| match side {
+            DiffSide::Left => row.left == Some(source_line),
+            DiffSide::Right => row.right == Some(source_line),
+        });
+        if !compared {
+            return Err(
+                "Source lines excluded by the current comparison rules cannot be alignment endpoints."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Starts an alignment from the focused line of a current source selection.
+    /// A multi-line selection is allowed, but only its focus line is the endpoint.
+    pub fn begin_manual_alignment_from_selection(&mut self) -> Result<(), String> {
+        let selection = self.fresh_source_selection()?;
+        self.validate_manual_alignment_endpoint(
+            selection.side,
+            selection.source_id,
+            selection.revision,
+            selection.focus_line,
+        )?;
+        self.pending_alignment = Some(PendingTextAlignment {
+            source_id: selection.source_id,
+            revision: selection.revision,
+            side: selection.side,
+            source_line: selection.focus_line,
+        });
+        self.alignment_error = None;
+        Ok(())
+    }
+
+    /// Whether the current fresh selection can complete the pending alignment.
+    pub fn can_complete_manual_alignment_from_selection(&self) -> bool {
+        let Some(pending) = self.pending_alignment else {
+            return false;
+        };
+        let Ok(selection) = self.fresh_source_selection() else {
+            return false;
+        };
+        selection.side != pending.side
+            && self
+                .validate_manual_alignment_endpoint(
+                    pending.side,
+                    pending.source_id,
+                    pending.revision,
+                    pending.source_line,
+                )
+                .is_ok()
+            && self
+                .validate_manual_alignment_endpoint(
+                    selection.side,
+                    selection.source_id,
+                    selection.revision,
+                    selection.focus_line,
+                )
+                .is_ok()
+    }
+
+    /// Completes a pending alignment with the focused line on the opposite side.
+    pub fn complete_manual_alignment_from_selection(
+        &mut self,
+    ) -> Result<ManualTextAlignment, String> {
+        let pending = self
+            .pending_alignment
+            .ok_or_else(|| "Start an alignment from a source line first".to_string())?;
+        self.validate_manual_alignment_endpoint(
+            pending.side,
+            pending.source_id,
+            pending.revision,
+            pending.source_line,
+        )?;
+        let selection = self.fresh_source_selection()?;
+        if selection.side == pending.side {
+            return Err("Select a source line on the other side to confirm alignment".into());
+        }
+        self.validate_manual_alignment_endpoint(
+            selection.side,
+            selection.source_id,
+            selection.revision,
+            selection.focus_line,
+        )?;
+        let anchor = ManualTextAlignment {
+            left_line: if pending.side == DiffSide::Left {
+                pending.source_line
+            } else {
+                selection.focus_line
+            },
+            right_line: if pending.side == DiffSide::Right {
+                pending.source_line
+            } else {
+                selection.focus_line
+            },
+        };
+        self.add_manual_alignment(anchor)?;
+        self.pending_alignment = None;
+        Ok(anchor)
+    }
+
+    pub fn cancel_manual_alignment(&mut self) -> bool {
+        let cancelled = self.pending_alignment.take().is_some();
+        if cancelled {
+            self.alignment_error = None;
+        }
+        cancelled
+    }
+
+    pub fn reveal_pending_manual_alignment_origin(&mut self) -> Result<(), String> {
+        let pending = self
+            .pending_alignment
+            .ok_or_else(|| "There is no pending alignment endpoint to reveal".to_string())?;
+        self.validate_manual_alignment_endpoint(
+            pending.side,
+            pending.source_id,
+            pending.revision,
+            pending.source_line,
+        )?;
+        let comparison = self.fresh_comparison()?;
+        let row = comparison
+            .rows
+            .iter()
+            .position(|row| match pending.side {
+                DiffSide::Left => row.left == Some(pending.source_line),
+                DiffSide::Right => row.right == Some(pending.source_line),
+            })
+            .ok_or_else(|| {
+                "Alignment origin no longer maps to a current comparison row".to_string()
+            })?;
+        self.request_scroll_row(Some(row));
+        Ok(())
+    }
+
     pub fn set_manual_alignments(
         &mut self,
         anchors: Vec<ManualTextAlignment>,
     ) -> Result<(), String> {
-        let left_lines = self.left.source().lines().count();
-        let right_lines = self.right.source().lines().count();
+        let left_lines =
+            text_compare::source_line_count(self.left.source(), self.rules.line_ending_equivalence);
+        let right_lines = text_compare::source_line_count(
+            self.right.source(),
+            self.rules.line_ending_equivalence,
+        );
         let anchors = text_compare::validate_manual_alignments(&anchors, left_lines, right_lines)?;
+        if anchors.iter().any(|anchor| {
+            self.source_line_is_ignored(DiffSide::Left, anchor.left_line)
+                || self.source_line_is_ignored(DiffSide::Right, anchor.right_line)
+        }) {
+            return Err(
+                "Manual alignment endpoints cannot be ignored lines; restore them before aligning."
+                    .into(),
+            );
+        }
+        if !anchors.is_empty() {
+            let comparison = self.fresh_comparison()?;
+            for anchor in &anchors {
+                let left_compared = comparison
+                    .rows
+                    .iter()
+                    .any(|row| row.left == Some(anchor.left_line));
+                let right_compared = comparison
+                    .rows
+                    .iter()
+                    .any(|row| row.right == Some(anchor.right_line));
+                if !left_compared || !right_compared {
+                    return Err(
+                        "Manual alignment endpoints excluded by the current comparison rules cannot be accepted."
+                            .into(),
+                    );
+                }
+            }
+        }
         self.manual_alignments = anchors;
+        self.manual_alignment_source_ids = (self.left.source_id(), self.right.source_id());
+        self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
         self.alignment_error = None;
+        self.annotation_revision = self.annotation_revision.wrapping_add(1);
         self.row_measurements = Default::default();
-        self.pending_scroll_row = self.current_row.or(Some(self.scroll.aligned_row));
         self.schedule_compare();
         Ok(())
     }
@@ -1428,6 +2551,7 @@ impl TextViewModel {
         let before = self.manual_alignments.len();
         self.manual_alignments.retain(|a| *a != anchor);
         if self.manual_alignments.len() != before {
+            self.annotation_revision = self.annotation_revision.wrapping_add(1);
             self.row_measurements = Default::default();
             self.schedule_compare();
             true
@@ -1435,47 +2559,173 @@ impl TextViewModel {
             false
         }
     }
+
+    /// Reveals an accepted alignment using its exact current comparison row.
+    /// This changes projection/scroll only; it leaves the active hunk untouched.
+    pub fn reveal_manual_alignment(&mut self, anchor: ManualTextAlignment) -> Result<(), String> {
+        if !self.manual_alignments.contains(&anchor)
+            || self.manual_alignment_source_ids != (self.left.source_id(), self.right.source_id())
+            || self.manual_alignment_source_revisions != (self.left.revision, self.right.revision)
+        {
+            return Err("Manual alignment is stale or no longer present".into());
+        }
+        let comparison = self.fresh_comparison()?;
+        let row = comparison
+            .rows
+            .iter()
+            .position(|row| {
+                row.left == Some(anchor.left_line) && row.right == Some(anchor.right_line)
+            })
+            .ok_or_else(|| {
+                "Manual alignment no longer maps to a current comparison row".to_string()
+            })?;
+        self.request_scroll_row(Some(row));
+        Ok(())
+    }
     pub fn set_current_row(&mut self, row: Option<usize>) {
         self.current_row = row;
+        self.current_row_identity = row.and_then(|row| {
+            self.comparison
+                .as_ref()
+                .and_then(|comparison| current_text_row_identity(comparison, row))
+        });
         self.request_scroll_row(row);
     }
+    pub fn pending_scroll_request(&self) -> Option<PendingScrollRequest> {
+        self.pending_scroll_row.map(|row| PendingScrollRequest {
+            row,
+            generation: self.pending_scroll_generation,
+        })
+    }
+    pub fn accept_pending_scroll_request(
+        &mut self,
+        request: PendingScrollRequest,
+        measurement_key: &RowMeasureKey,
+    ) -> bool {
+        if self.pending_scroll_row != Some(request.row)
+            || self.pending_scroll_generation != request.generation
+            || self.row_measurements.key.as_ref() != Some(measurement_key)
+            || self
+                .row_measurements
+                .comparison_to_projected
+                .get(request.row)
+                .and_then(|projected| *projected)
+                .is_none()
+        {
+            return false;
+        }
+        self.pending_scroll_row = None;
+        if self.pending_find_scroll_request == Some(request) {
+            self.pending_find_scroll_request = None;
+        }
+        true
+    }
     pub fn request_scroll_row(&mut self, row: Option<usize>) {
+        self.pending_find_scroll_request = None;
+        self.pending_scroll_generation = self.pending_scroll_generation.wrapping_add(1);
+        if let Some(row) = row
+            && let Some(comparison) = self.comparison.as_ref()
+        {
+            if row >= comparison.rows.len() {
+                self.projection_notice =
+                    Some("The requested row no longer exists in this comparison.".into());
+                self.pending_scroll_row = None;
+                return;
+            }
+            let projected = text_compare::row_projection(
+                comparison,
+                self.projection_mode,
+                self.projection_context,
+            );
+            if projected.binary_search(&row).is_err() {
+                self.projection_mode = RowProjectionMode::All;
+                self.row_measurements = Default::default();
+                self.projection_notice =
+                    Some("Showing all rows to reveal the requested source line or match.".into());
+                if self.find_projection_only {
+                    self.refresh_find();
+                }
+            }
+        }
         self.pending_scroll_row = row;
         if let Some(row) = row {
             self.scroll.target_measured_row(row, &self.row_measurements);
         }
     }
     pub fn set_ignore_all_whitespace(&mut self, value: bool) {
-        if self.rules.ignore_all_whitespace != value {
-            self.rules.ignore_all_whitespace = value;
-            self.rules.revision = self.rules.revision.wrapping_add(1);
-            self.schedule_compare();
-        }
+        let mut rules = self.rules.clone();
+        rules.ignore_all_whitespace = value;
+        self.set_rules(rules);
     }
     pub fn set_rules(&mut self, mut rules: TextComparisonRules) {
         rules.revision = self.rules.revision;
         if rules != self.rules {
             rules.revision = self.rules.revision.wrapping_add(1);
             self.rules = rules;
+            self.row_measurements = Default::default();
             self.schedule_compare();
         }
     }
     pub fn undo(&mut self) -> bool {
-        let changed = match self.active_side {
+        let changed_side = self.active_side;
+        let changed = match changed_side {
             DiffSide::Left => self.left.undo(),
             DiffSide::Right => self.right.undo(),
         };
         if changed {
+            self.annotation_revision = self.annotation_revision.wrapping_add(1);
+            if self
+                .source_line_selection
+                .is_some_and(|selection| selection.side == changed_side)
+            {
+                self.source_line_selection = None;
+            }
+            if self
+                .pending_alignment
+                .is_some_and(|pending| pending.side == changed_side)
+            {
+                self.pending_alignment = None;
+            }
+            if !self.manual_alignments.is_empty() {
+                self.manual_alignments.clear();
+                self.alignment_error =
+                    Some("Undo changed source coordinates; manual alignments were cleared.".into());
+            }
+            self.annotation_notice =
+                Some("Undo restored the source and its ignored-line ranges.".into());
+            self.row_measurements = Default::default();
             self.schedule_compare()
         }
         changed
     }
     pub fn redo(&mut self) -> bool {
-        let changed = match self.active_side {
+        let changed_side = self.active_side;
+        let changed = match changed_side {
             DiffSide::Left => self.left.redo(),
             DiffSide::Right => self.right.redo(),
         };
         if changed {
+            self.annotation_revision = self.annotation_revision.wrapping_add(1);
+            if self
+                .source_line_selection
+                .is_some_and(|selection| selection.side == changed_side)
+            {
+                self.source_line_selection = None;
+            }
+            if self
+                .pending_alignment
+                .is_some_and(|pending| pending.side == changed_side)
+            {
+                self.pending_alignment = None;
+            }
+            if !self.manual_alignments.is_empty() {
+                self.manual_alignments.clear();
+                self.alignment_error =
+                    Some("Redo changed source coordinates; manual alignments were cleared.".into());
+            }
+            self.annotation_notice =
+                Some("Redo restored the source and its ignored-line ranges.".into());
+            self.row_measurements = Default::default();
             self.schedule_compare()
         }
         changed
@@ -1487,10 +2737,7 @@ impl TextViewModel {
         if self.external_conflict != [false, false] {
             return Err("Resolve external-change conflict before merging".into());
         }
-        let c = self
-            .comparison
-            .as_ref()
-            .ok_or("Comparison is still calculating")?;
+        let c = self.fresh_comparison()?;
         let row = self.current_row.ok_or("Select a difference first")?;
         let hi = c
             .navigation
@@ -1500,9 +2747,11 @@ impl TextViewModel {
             .ok_or("Current row is not a difference")?;
         let h = &c.hunks[hi];
         let mut replacement = Vec::new();
+        let mut replacement_lines = Vec::new();
         let mut destination = Vec::new();
         for r in &c.rows[h.start_row..h.end_row] {
             if let Some(n) = visual_to_source(r, from) {
+                replacement_lines.push(n);
                 replacement.push(source_line(
                     match from {
                         DiffSide::Left => self.left.source(),
@@ -1515,6 +2764,9 @@ impl TextViewModel {
                 destination.push(n);
             }
         }
+        if !source_lines_contiguous(&replacement_lines) || !source_lines_contiguous(&destination) {
+            return Err("This difference is not a contiguous source-line hunk".into());
+        }
         let start = destination
             .first()
             .copied()
@@ -1524,12 +2776,110 @@ impl TextViewModel {
             delete_count: destination.len(),
             replacement,
         };
-        match other(from) {
-            DiffSide::Left => self.left.apply_edits(&[edit])?,
-            DiffSide::Right => self.right.apply_edits(&[edit])?,
+        let before_ignored = match other(from) {
+            DiffSide::Left => self.left.ignored_line_ranges().to_vec(),
+            DiffSide::Right => self.right.ignored_line_ranges().to_vec(),
         };
+        let source_selection_cleared = self
+            .source_line_selection
+            .is_some_and(|selection| selection.side == other(from));
+        match other(from) {
+            DiffSide::Left => self.left.apply_edits(&[edit.clone()])?,
+            DiffSide::Right => self.right.apply_edits(&[edit.clone()])?,
+        };
+        let target_document = match other(from) {
+            DiffSide::Left => &mut self.left,
+            DiffSide::Right => &mut self.right,
+        };
+        let invalidated = target_document.take_ignored_range_invalidation();
+        let bookmarks_invalidated = target_document.take_bookmark_invalidation();
+        let ignored_changed = before_ignored != target_document.ignored_line_ranges();
+        if ignored_changed {
+            self.annotation_revision = self.annotation_revision.wrapping_add(1);
+        }
+        if invalidated {
+            self.annotation_notice = Some(
+                "Ignored ranges intersecting the copied edit were cleared; unaffected ranges were retained."
+                    .into(),
+            );
+        }
+        if source_selection_cleared {
+            self.annotation_notice =
+                Some("The copied edit cleared selection on the changed source side.".into());
+        }
+        if bookmarks_invalidated {
+            self.annotation_notice = Some(
+                "The copied edit replaced bookmarked source lines; those bookmarks were cleared."
+                    .into(),
+            );
+        }
+        self.map_manual_alignments_after_edit(other(from), &edit);
+        if self
+            .source_line_selection
+            .is_some_and(|selection| selection.side == other(from))
+        {
+            self.source_line_selection = None;
+        }
+        if self
+            .pending_alignment
+            .is_some_and(|pending| pending.side == other(from))
+        {
+            self.pending_alignment = None;
+        }
+        self.row_measurements = Default::default();
         self.schedule_compare();
         Ok(())
+    }
+
+    fn fresh_comparison(&self) -> Result<&TextComparisonResult, String> {
+        if !self.comparison_is_fresh() {
+            return Err("Comparison or ignored-line projection is still calculating".into());
+        }
+        self.comparison
+            .as_ref()
+            .ok_or_else(|| "Comparison is still calculating".to_string())
+    }
+
+    pub fn comparison_is_fresh(&self) -> bool {
+        if self.recalculating || self.recalculate_at.is_some() {
+            return false;
+        }
+        let Some(comparison) = self.comparison.as_ref() else {
+            return false;
+        };
+        !comparison.is_stale(
+            self.left.source_id(),
+            self.right.source_id(),
+            self.left.revision,
+            self.right.revision,
+            self.rules.revision,
+            self.annotation_revision,
+        )
+    }
+
+    fn map_manual_alignments_after_edit(&mut self, side: DiffSide, edit: &LineEdit) {
+        let mut invalidated = false;
+        self.manual_alignments.retain_mut(|anchor| {
+            let endpoint = match side {
+                DiffSide::Left => &mut anchor.left_line,
+                DiffSide::Right => &mut anchor.right_line,
+            };
+            match map_source_line(*endpoint, edit) {
+                Some(mapped) => {
+                    *endpoint = mapped;
+                    true
+                }
+                None => {
+                    invalidated = true;
+                    false
+                }
+            }
+        });
+        if invalidated {
+            self.alignment_error =
+                Some("Manual alignments intersecting the copied edit were cleared.".into());
+        }
+        self.manual_alignment_source_revisions = (self.left.revision, self.right.revision);
     }
     pub fn save(&mut self, side: DiffSide) -> bool {
         let (doc, path, err) = match side {
@@ -1554,9 +2904,73 @@ impl TextViewModel {
         }
         result.is_ok()
     }
+
+    /// Saves one memory side to an explicitly chosen destination while
+    /// retaining its memory origin and pathless document identity.
+    pub fn save_as_memory(&mut self, side: DiffSide, path: &Path) -> bool {
+        if self.origin != TextCompareOrigin::Memory {
+            let error = "Save As is only available for in-memory text".to_string();
+            match side {
+                DiffSide::Left => self.left_error = Some(error),
+                DiffSide::Right => self.right_error = Some(error),
+            }
+            return false;
+        }
+        let (document, error) = match side {
+            DiffSide::Left => (&mut self.left, &mut self.left_error),
+            DiffSide::Right => (&mut self.right, &mut self.right_error),
+        };
+        let result = document.save_as_exact_utf8(path);
+        *error = result.as_ref().err().map(ToString::to_string);
+        result.is_ok()
+    }
     pub fn has_dirty(&self) -> bool {
         self.left.is_dirty() || self.right.is_dirty()
     }
+}
+
+pub const MEMORY_TEXT_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub const MEMORY_TEXT_MAX_LINES: usize = 100_000;
+
+/// Rejects oversized input before it enters a retained comparison. Content is
+/// never truncated or silently normalized.
+pub fn validate_memory_text(source: &str) -> Result<(), String> {
+    if source.len() > MEMORY_TEXT_MAX_BYTES {
+        return Err(format!(
+            "Text input exceeds the {} MiB per-side limit",
+            MEMORY_TEXT_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+    let lines = memory_text_line_count(source);
+    if lines > MEMORY_TEXT_MAX_LINES {
+        return Err(format!(
+            "Text input exceeds the {MEMORY_TEXT_MAX_LINES}-line per-side limit"
+        ));
+    }
+    Ok(())
+}
+
+fn memory_text_line_count(source: &str) -> usize {
+    if source.is_empty() {
+        return 0;
+    }
+    let bytes = source.as_bytes();
+    let mut lines = 1usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                lines = lines.saturating_add(1);
+                if bytes.get(index + 1) == Some(&b'\n') {
+                    index += 1;
+                }
+            }
+            b'\n' => lines = lines.saturating_add(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    lines
 }
 fn other(s: DiffSide) -> DiffSide {
     match s {
@@ -1564,8 +2978,35 @@ fn other(s: DiffSide) -> DiffSide {
         DiffSide::Right => DiffSide::Left,
     }
 }
+
+fn bookmark_side_order(side: DiffSide) -> u8 {
+    match side {
+        DiffSide::Left => 0,
+        DiffSide::Right => 1,
+    }
+}
 fn source_line(s: &str, n: usize) -> String {
     s.lines().nth(n).unwrap_or_default().to_owned()
+}
+fn source_lines_contiguous(lines: &[usize]) -> bool {
+    lines.windows(2).all(|pair| pair[1] == pair[0] + 1)
+}
+fn map_source_line(line: usize, edit: &LineEdit) -> Option<usize> {
+    let end = edit.start.checked_add(edit.delete_count)?;
+    if edit.delete_count == 0 {
+        if edit.start <= line {
+            line.checked_add(edit.replacement.len())
+        } else {
+            Some(line)
+        }
+    } else if line < edit.start {
+        Some(line)
+    } else if line >= end {
+        line.checked_add(edit.replacement.len())?
+            .checked_sub(edit.delete_count)
+    } else {
+        None
+    }
 }
 fn insertion_line(rows: &[AlignedDiffRow], at: usize, side: DiffSide) -> usize {
     rows[..at]
@@ -1578,6 +3019,1418 @@ fn insertion_line(rows: &[AlignedDiffRow], at: usize, side: DiffSide) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_for_text_comparison(model: &mut TextViewModel) {
+        for _ in 0..500 {
+            model.poll();
+            if !model.recalculating
+                && (model.comparison_is_fresh() || model.comparison_error.is_some())
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            !model.recalculating
+                && (model.comparison_is_fresh() || model.comparison_error.is_some()),
+            "text comparison reached a terminal state"
+        );
+    }
+
+    #[test]
+    fn memory_text_constructor_preserves_exact_sources_and_uses_text_engine() {
+        let left = "α\0\u{200b}\r\nsame\r\n\nlast\r".to_string();
+        let right = "α\0\u{200b}\r\nsame\r\n\nchanged\r".to_string();
+        let mut model =
+            TextViewModel::new_memory(left.clone(), right.clone(), &DiffConfigV1::default())
+                .unwrap();
+        assert_eq!(model.origin, TextCompareOrigin::Memory);
+        assert_eq!(model.left_path, None);
+        assert_eq!(model.right_path, None);
+        assert_eq!(model.left.source(), left);
+        assert_eq!(model.right.source(), right);
+        wait_for_text_comparison(&mut model);
+        assert!(!model.comparison.as_ref().unwrap().hunks.is_empty());
+
+        let empty =
+            TextViewModel::new_memory(String::new(), String::new(), &Default::default()).unwrap();
+        assert_eq!(empty.left.source(), "");
+        assert_eq!(empty.right.source(), "");
+
+        model.swap_sides();
+        assert_eq!(model.origin, TextCompareOrigin::Memory);
+        assert_eq!(model.left.source(), right);
+        assert_eq!(model.right.source(), left);
+    }
+
+    #[test]
+    fn memory_text_limits_reject_without_truncating_or_mutating_existing_sources() {
+        let mut model =
+            TextViewModel::new_memory("left".into(), "right".into(), &Default::default()).unwrap();
+        let before = (
+            model.left.source().to_owned(),
+            model.right.source().to_owned(),
+            model.left.revision,
+            model.right.revision,
+        );
+        let oversized = "x".repeat(MEMORY_TEXT_MAX_BYTES + 1);
+        assert!(validate_memory_text(&oversized).is_err());
+        assert!(validate_memory_text(&"\n".repeat(MEMORY_TEXT_MAX_LINES)).is_err());
+        assert!(
+            model
+                .replace_memory_sources("accepted".into(), oversized)
+                .is_err()
+        );
+        assert_eq!(model.left.source(), before.0);
+        assert_eq!(model.right.source(), before.1);
+        assert_eq!(model.left.revision, before.2);
+        assert_eq!(model.right.revision, before.3);
+    }
+
+    #[test]
+    fn memory_text_replacement_rejects_old_comparison_and_invalidates_alignment() {
+        let mut model =
+            TextViewModel::new_memory("a\nb".into(), "a\nb".into(), &Default::default()).unwrap();
+        wait_for_text_comparison(&mut model);
+        model
+            .set_manual_alignments(vec![ManualTextAlignment {
+                left_line: 0,
+                right_line: 0,
+            }])
+            .unwrap();
+        let previous_revision = model.left.revision;
+        let old_generation = model.generation;
+        assert!(
+            model
+                .replace_memory_sources("changed\nb".into(), "a\nb".into())
+                .unwrap()
+        );
+        assert!(model.generation > old_generation);
+        assert_eq!(model.left.revision, previous_revision + 1);
+        assert!(model.manual_alignments.is_empty());
+        assert!(model.comparison.is_none());
+        wait_for_text_comparison(&mut model);
+        let result = model.comparison.as_ref().unwrap();
+        assert_eq!(result.left_revision, model.left.revision);
+        assert_eq!(result.right_revision, model.right.revision);
+        assert!(!model.saved_filesystem_mutation);
+    }
+
+    #[test]
+    fn memory_text_hunk_copy_and_undo_use_document_revision_owner() {
+        let original_left = "prefix\r\nleft\nsuffix\r";
+        let original_right = "prefix\r\nright\nsuffix\r";
+        let mut model = TextViewModel::new_memory(
+            original_left.into(),
+            original_right.into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row.kind,
+                    crate::diff::text_compare::DiffRowKind::Modified
+                        | crate::diff::text_compare::DiffRowKind::Deleted
+                        | crate::diff::text_compare::DiffRowKind::Inserted
+                )
+            })
+            .unwrap();
+        model.current_row = Some(row);
+        model.copy_hunk(DiffSide::Left).unwrap();
+        assert_eq!(model.right.source(), original_left);
+        assert!(model.right.is_dirty());
+        model.active_side = DiffSide::Right;
+        assert!(model.undo());
+        assert_eq!(model.right.source(), original_right);
+    }
+
+    #[test]
+    fn ignored_lines_restore_raw_text_and_exclude_only_the_selected_side() {
+        let original_left = "keep\nextra\nend";
+        let original_right = "keep\nend";
+        let mut model = TextViewModel::new_memory(
+            original_left.into(),
+            original_right.into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.select_source_line(DiffSide::Left, 1, false);
+        model.ignore_selected_lines().unwrap();
+        assert_eq!(model.left.source(), original_left);
+        assert_eq!(model.right.source(), original_right);
+        wait_for_text_comparison(&mut model);
+        let comparison = model.comparison.as_ref().unwrap();
+        assert!(!comparison.raw_equal);
+        assert!(comparison.equal_under_rules);
+        assert!(comparison.rows.iter().any(|row| {
+            row.kind == crate::diff::text_compare::DiffRowKind::Ignored
+                && row.left == Some(1)
+                && row.right.is_none()
+        }));
+        assert!(comparison.navigation.all_difference_rows.is_empty());
+        assert!(!model.left.is_dirty());
+        assert!(!model.right.is_dirty());
+        assert!(!model.saved_filesystem_mutation);
+
+        model.restore_selected_ignored_lines().unwrap();
+        assert_eq!(model.left.source(), original_left);
+        assert_eq!(model.right.source(), original_right);
+        wait_for_text_comparison(&mut model);
+        assert!(!model.comparison.as_ref().unwrap().equal_under_rules);
+        model.select_source_line(DiffSide::Right, 0, false);
+        model.ignore_selected_lines().unwrap();
+        assert!(model.clear_ignored_ranges());
+        assert!(model.left.ignored_line_ranges().is_empty());
+        assert!(model.right.ignored_line_ranges().is_empty());
+    }
+
+    #[test]
+    fn ignored_lines_merge_adjacent_ranges_and_restore_a_middle_selection_as_a_split() {
+        let mut model = TextViewModel::new_memory(
+            "a\nb\nc\nd\ne".into(),
+            "a\nb\nc\nd\ne".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.select_source_line(DiffSide::Left, 1, false);
+        model.ignore_selected_lines().unwrap();
+        model.select_source_line(DiffSide::Left, 2, false);
+        model.ignore_selected_lines().unwrap();
+        model.select_source_line(DiffSide::Left, 3, false);
+        model.ignore_selected_lines().unwrap();
+        assert_eq!(
+            model.left.ignored_line_ranges(),
+            &[crate::diff::text_compare::IgnoredLineRange { start: 1, end: 4 }]
+        );
+        let source = model.left.source().to_owned();
+        model.select_source_line(DiffSide::Left, 2, false);
+        model.restore_selected_ignored_lines().unwrap();
+        assert_eq!(model.left.source(), source);
+        assert_eq!(
+            model.left.ignored_line_ranges(),
+            &[
+                crate::diff::text_compare::IgnoredLineRange { start: 1, end: 2 },
+                crate::diff::text_compare::IgnoredLineRange { start: 3, end: 4 },
+            ]
+        );
+    }
+
+    #[test]
+    fn ignored_lines_mouse_and_keyboard_selection_use_source_coordinates() {
+        let mut model = TextViewModel::new_memory(
+            "one\ntwo\nthree\nfour".into(),
+            "one\ntwo\nthree\nfour".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        assert!(model.move_source_selection(DiffSide::Left, 2, true));
+        assert_eq!(
+            model.source_line_selection,
+            Some(SourceLineSelection {
+                source_id: model.left.source_id(),
+                revision: model.left.revision,
+                side: DiffSide::Left,
+                anchor_line: 1,
+                focus_line: 3,
+                start: 1,
+                end: 4,
+            })
+        );
+        assert!(model.move_source_selection(DiffSide::Left, -1, true));
+        assert_eq!(
+            model.source_line_selection.unwrap().start..model.source_line_selection.unwrap().end,
+            1..3
+        );
+        model.select_source_line(DiffSide::Right, 2, false);
+        assert_eq!(model.source_line_selection.unwrap().side, DiffSide::Right);
+        assert_eq!(
+            model.source_line_selection.unwrap().source_id,
+            model.right.source_id()
+        );
+    }
+
+    #[test]
+    fn m3c_selected_raw_source_text_keeps_exact_bytes_and_ignored_lines() {
+        let original = "α\r\nignored\r\nlast\n";
+        let mut model =
+            TextViewModel::new_memory(original.into(), "right".into(), &DiffConfigV1::default())
+                .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.select_source_line(DiffSide::Left, 1, false);
+        model.ignore_selected_lines().unwrap();
+        let selected = model.selected_raw_source_text().unwrap();
+        assert_eq!(selected.side, DiffSide::Left);
+        assert_eq!(selected.source_id, model.left.source_id());
+        assert_eq!(selected.revision, model.left.revision);
+        assert_eq!(selected.text, "ignored\r\n");
+        assert_eq!(model.left.source(), original);
+
+        model
+            .left
+            .replace_source("changed\r\nignored\r\nlast\n".into())
+            .unwrap();
+        assert!(
+            model
+                .selected_raw_source_text()
+                .err()
+                .unwrap()
+                .contains("selection is stale")
+        );
+    }
+
+    #[test]
+    fn m3c_bookmarks_navigate_by_row_and_side_without_moving_the_active_hunk() {
+        let mut model = TextViewModel::new_memory(
+            "same\nleft change".into(),
+            "same\nright change".into(),
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let difference_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .navigation
+            .all_difference_rows[0];
+        model.current_row = Some(difference_row);
+        model.projection_mode = RowProjectionMode::DifferencesOnly;
+        model.projection_context = 0;
+
+        let annotation_revision = model.annotation_revision;
+        let left_revision = model.left.revision;
+        let right_revision = model.right.revision;
+        model.select_source_line(DiffSide::Left, 0, false);
+        assert!(model.toggle_bookmark_at_selection().unwrap());
+        model.select_source_line(DiffSide::Right, 0, false);
+        assert!(model.toggle_bookmark_at_selection().unwrap());
+        assert_eq!(model.annotation_revision, annotation_revision);
+        assert_eq!(model.left.revision, left_revision);
+        assert_eq!(model.right.revision, right_revision);
+        assert!(!model.left.is_dirty() && !model.right.is_dirty());
+        model.source_line_selection = None;
+
+        model.navigate_bookmark(true).unwrap();
+        assert_eq!(
+            model.source_line_selection.unwrap().side,
+            DiffSide::Left,
+            "left wins a same-row tie"
+        );
+        assert_eq!(model.source_line_selection.unwrap().focus_line, 0);
+        assert_eq!(model.current_row, Some(difference_row));
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert!(model.projection_notice.is_some());
+
+        model.navigate_bookmark(true).unwrap();
+        assert_eq!(model.source_line_selection.unwrap().side, DiffSide::Right);
+        assert_eq!(model.current_row, Some(difference_row));
+        assert!(model.navigate_bookmark(true).is_err());
+        model.navigate_bookmark(false).unwrap();
+        assert_eq!(model.source_line_selection.unwrap().side, DiffSide::Left);
+        assert_eq!(model.current_row, Some(difference_row));
+    }
+
+    #[test]
+    fn m3c_bookmarks_follow_swaps_and_source_replacement() {
+        let mut model = TextViewModel::new_memory(
+            "left\nsecond".into(),
+            "right\nsecond".into(),
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        model.left.toggle_bookmark(0);
+        model.right.toggle_bookmark(1);
+        model.swap_sides();
+        assert!(model.left.is_bookmarked(1));
+        assert!(model.right.is_bookmarked(0));
+
+        let preserved_right = model.right.source().to_owned();
+        model
+            .replace_memory_sources("replacement left".into(), preserved_right)
+            .unwrap();
+        assert!(model.left.bookmarks().is_empty());
+        assert!(model.right.is_bookmarked(0));
+        assert!(
+            model
+                .annotation_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("bookmarks"))
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let left_path = directory.path().join("left.txt");
+        let right_path = directory.path().join("right.txt");
+        let replacement_path = directory.path().join("replacement.txt");
+        fs::write(&left_path, "left\nline").unwrap();
+        fs::write(&right_path, "right\nline").unwrap();
+        fs::write(&replacement_path, "reloaded\ntext").unwrap();
+        let mut file_model = TextViewModel::load(
+            &TextCompareState {
+                left: Some(left_path),
+                right: Some(right_path),
+                relative_path: None,
+                origin: TextCompareOrigin::FileBacked,
+            },
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        file_model.left.toggle_bookmark(0);
+        file_model.right.toggle_bookmark(1);
+        let reloaded = crate::diff::text_file::load_text_file(replacement_path).unwrap();
+        file_model
+            .reload_external(DiffSide::Left, &reloaded)
+            .unwrap();
+        assert!(file_model.left.bookmarks().is_empty());
+        assert!(file_model.right.is_bookmarked(1));
+        assert!(
+            file_model
+                .annotation_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("bookmarks"))
+        );
+    }
+
+    #[test]
+    fn m3c_projection_changes_are_presentation_only_and_refresh_limited_find() {
+        let mut model = TextViewModel::new_memory(
+            "same\nleft change".into(),
+            "same\nright change".into(),
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.find_query = "same".into();
+        model.find_projection_only = true;
+        model.refresh_find();
+        assert!(!model.find_matches.is_empty());
+        let row_ids: Vec<_> = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        let hunk_ids: Vec<_> = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .hunks
+            .iter()
+            .map(|hunk| hunk.id)
+            .collect();
+        let rules_revision = model.rules.revision;
+        let annotation_revision = model.annotation_revision;
+
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        assert!(model.find_matches.is_empty());
+        model.set_row_projection(RowProjectionMode::IdenticalOnly, 0);
+        assert!(!model.find_matches.is_empty());
+        model.set_row_projection(RowProjectionMode::All, usize::MAX);
+        assert_eq!(
+            model.projection_context,
+            text_compare::MAX_ROW_PROJECTION_CONTEXT
+        );
+        assert_eq!(model.rules.revision, rules_revision);
+        assert_eq!(model.annotation_revision, annotation_revision);
+        assert!(!model.recalculating);
+        assert_eq!(
+            model
+                .comparison
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            row_ids
+        );
+        assert_eq!(
+            model
+                .comparison
+                .as_ref()
+                .unwrap()
+                .hunks
+                .iter()
+                .map(|hunk| hunk.id)
+                .collect::<Vec<_>>(),
+            hunk_ids
+        );
+
+        model.find_projection_only = false;
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        model.refresh_find();
+        model.navigate_find(true);
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert!(model.projection_notice.is_some());
+    }
+
+    #[test]
+    fn m3c_find_matches_refresh_after_annotation_publication_and_stale_targets_are_cancelled() {
+        let source = "head\nnoise\nsentinel";
+        let mut model =
+            TextViewModel::new_memory(source.into(), source.into(), &DiffConfigV1::default())
+                .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.find_query = "sentinel".into();
+        model.refresh_find();
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(model.find_matches.iter().all(|matched| matched.row == 2));
+        model.navigate_find(true);
+        assert_eq!(model.pending_scroll_request().unwrap().row(), 2);
+
+        let mut invalid_rules = model.rules.clone();
+        invalid_rules.unimportant_sections.push("(".into());
+        model.set_rules(invalid_rules);
+        assert!(model.find_matches.is_empty());
+        assert!(model.pending_scroll_request().is_none());
+        model.navigate_find(true);
+        assert!(model.pending_scroll_request().is_none());
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_error.is_some());
+        model.navigate_find(true);
+        assert!(model.pending_scroll_request().is_none());
+
+        let mut valid_rules = model.rules.clone();
+        valid_rules.unimportant_sections.clear();
+        model.set_rules(valid_rules);
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(model.find_matches.iter().all(|matched| matched.row == 2));
+
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        model.ignore_selected_lines().unwrap();
+        assert!(model.pending_scroll_request().is_none());
+        model.navigate_find(true);
+        assert!(model.pending_scroll_request().is_none());
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        assert_eq!(model.find_matches.len(), 2);
+        assert_eq!(model.find_query, "sentinel");
+        assert!(model.find_matches.iter().all(|matched| matched.row == 3));
+
+        assert!(model.select_source_line(DiffSide::Right, 1, false));
+        model.ignore_selected_lines().unwrap();
+        wait_for_text_comparison(&mut model);
+        let sentinel_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        assert_eq!(sentinel_row, 3);
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(
+            model
+                .find_matches
+                .iter()
+                .all(|matched| matched.row == sentinel_row)
+        );
+        model.navigate_find(true);
+        assert_eq!(model.pending_scroll_request().unwrap().row(), sentinel_row);
+
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        model.restore_selected_ignored_lines().unwrap();
+        assert!(model.pending_scroll_request().is_none());
+        wait_for_text_comparison(&mut model);
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(model.find_matches.iter().all(|matched| matched.row == 3));
+        assert!(model.select_source_line(DiffSide::Right, 1, false));
+        model.restore_selected_ignored_lines().unwrap();
+        assert!(model.pending_scroll_request().is_none());
+        wait_for_text_comparison(&mut model);
+        let restored_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        assert_eq!(restored_row, 2);
+        assert_eq!(model.find_matches.len(), 2);
+        assert!(
+            model
+                .find_matches
+                .iter()
+                .all(|matched| matched.row == restored_row)
+        );
+        model.navigate_find(true);
+        assert_eq!(model.pending_scroll_request().unwrap().row(), restored_row);
+    }
+
+    #[test]
+    fn m3c_scroll_reveal_requires_exact_measurements_and_preserves_newer_requests() {
+        let mut model = TextViewModel::new_memory(
+            "same\nleft change".into(),
+            "same\nright change".into(),
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let comparison = model.comparison.as_ref().unwrap();
+        let target = comparison
+            .rows
+            .iter()
+            .position(|row| row.kind == text_compare::DiffRowKind::Equal)
+            .unwrap();
+        let row_count = comparison.rows.len();
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        assert!(!model.projected_rows().contains(&target));
+        model.scroll.left_vertical = 321.0;
+        model.request_scroll_row(Some(target));
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert_eq!(model.pending_scroll_row, Some(target));
+        assert_eq!(model.scroll.left_vertical, 321.0);
+
+        let key = measure_key(false, 100.0, 100.0);
+        let projected = model.projected_rows();
+        model.row_measurements.rebuild(
+            key.clone(),
+            projected.clone(),
+            row_count,
+            vec![20.0; projected.len()],
+        );
+        let first = model.pending_scroll_request().unwrap();
+        assert!(model.accept_pending_scroll_request(first, &key));
+        assert_eq!(model.pending_scroll_row, None);
+
+        model.request_scroll_row(Some(target));
+        let captured = model.pending_scroll_request().unwrap();
+        model.request_scroll_row(Some(target));
+        let newer = model.pending_scroll_request().unwrap();
+        assert_ne!(captured, newer, "even the same-row re-request is distinct");
+        assert!(!model.accept_pending_scroll_request(captured, &key));
+        assert_eq!(model.pending_scroll_request(), Some(newer));
+        assert!(model.accept_pending_scroll_request(newer, &key));
+
+        model.request_scroll_row(Some(row_count + 1));
+        assert_eq!(model.pending_scroll_row, None);
+        assert!(
+            model
+                .projection_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("no longer exists"))
+        );
+    }
+
+    #[test]
+    fn ignored_lines_preserve_gap_during_final_hunk_copy_and_undo() {
+        let left = "keep\nnoise\nleft";
+        let right = "keep\nother\nright";
+        let mut model =
+            TextViewModel::new_memory(left.into(), right.into(), &Default::default()).unwrap();
+        wait_for_text_comparison(&mut model);
+        for side in [DiffSide::Left, DiffSide::Right] {
+            model.select_source_line(side, 1, false);
+            model.ignore_selected_lines().unwrap();
+        }
+        wait_for_text_comparison(&mut model);
+        let final_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        model.current_row = Some(final_row);
+        model.copy_hunk(DiffSide::Left).unwrap();
+        assert_eq!(model.right.source(), "keep\nother\nleft");
+        assert_eq!(model.left.source(), left);
+        assert_eq!(
+            model.right.ignored_line_ranges(),
+            &[crate::diff::text_compare::IgnoredLineRange { start: 1, end: 2 }]
+        );
+
+        let mixed_left = "keep\r\nnoise\nleft\r";
+        let mixed_right = "keep\r\nother\nright\r";
+        let mut mixed =
+            TextViewModel::new_memory(mixed_left.into(), mixed_right.into(), &Default::default())
+                .unwrap();
+        wait_for_text_comparison(&mut mixed);
+        for side in [DiffSide::Left, DiffSide::Right] {
+            mixed.select_source_line(side, 1, false);
+            mixed.ignore_selected_lines().unwrap();
+        }
+        wait_for_text_comparison(&mut mixed);
+        let final_row = mixed
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        mixed.current_row = Some(final_row);
+        mixed.copy_hunk(DiffSide::Left).unwrap();
+        assert_eq!(mixed.right.source(), "keep\r\nother\nleft\r");
+        assert_eq!(mixed.left.source(), mixed_left);
+        assert_eq!(
+            mixed.right.ignored_line_ranges(),
+            &[crate::diff::text_compare::IgnoredLineRange { start: 1, end: 2 }]
+        );
+        model.active_side = DiffSide::Right;
+        assert!(model.undo());
+        assert_eq!(model.right.source(), right);
+        assert_eq!(
+            model.right.ignored_line_ranges(),
+            &[crate::diff::text_compare::IgnoredLineRange { start: 1, end: 2 }]
+        );
+    }
+
+    #[test]
+    fn ignored_lines_follow_sources_on_swap_and_preserve_unchanged_side_selection() {
+        let mut model = TextViewModel::new_memory(
+            "left\nnoise\nend".into(),
+            "right\nnoise\nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.select_source_line(DiffSide::Left, 1, false);
+        model.ignore_selected_lines().unwrap();
+        wait_for_text_comparison(&mut model);
+        model
+            .set_manual_alignments(vec![ManualTextAlignment {
+                left_line: 0,
+                right_line: 0,
+            }])
+            .unwrap();
+        model.swap_sides();
+        assert_eq!(model.right.ignored_line_ranges().len(), 1);
+        assert_eq!(model.source_line_selection.unwrap().side, DiffSide::Right);
+        assert_eq!(model.manual_alignments[0].left_line, 0);
+        assert_eq!(model.manual_alignments[0].right_line, 0);
+
+        wait_for_text_comparison(&mut model);
+        model.select_source_line(DiffSide::Right, 1, false);
+        let preserved_id = model.right.source_id();
+        let preserved_revision = model.right.revision;
+        let right_source = model.right.source().to_owned();
+        model
+            .replace_memory_sources("replacement\nleft".into(), right_source)
+            .unwrap();
+        assert_eq!(model.source_line_selection.unwrap().side, DiffSide::Right);
+        assert_eq!(model.right.source_id(), preserved_id);
+        assert_eq!(model.right.revision, preserved_revision);
+        assert_eq!(model.right.ignored_line_ranges().len(), 1);
+        assert!(model.manual_alignments.is_empty());
+        wait_for_text_comparison(&mut model);
+
+        model.select_source_line(DiffSide::Left, 0, false);
+        model.ignore_selected_lines().unwrap();
+        let right_ranges = model.right.ignored_line_ranges().to_vec();
+        let preserved_source = model.right.source().to_owned();
+        model
+            .replace_memory_sources("fully replaced left".into(), preserved_source)
+            .unwrap();
+        assert_eq!(model.right.source_id(), preserved_id);
+        assert_eq!(model.right.revision, preserved_revision);
+        assert!(model.source_line_selection.is_none());
+        assert!(model.left.ignored_line_ranges().is_empty());
+        assert_eq!(model.right.ignored_line_ranges(), right_ranges);
+    }
+
+    #[test]
+    fn ignored_lines_reject_manual_anchors_and_stale_completions() {
+        let mut model =
+            TextViewModel::new_memory("a\nb\nc".into(), "a\nb\nc".into(), &Default::default())
+                .unwrap();
+        let initial_revision = model.annotation_revision;
+        model.select_source_line(DiffSide::Left, 1, false);
+        model.ignore_selected_lines().unwrap();
+        assert!(model.annotation_revision > initial_revision);
+        assert!(
+            model
+                .set_manual_alignments(vec![ManualTextAlignment {
+                    left_line: 1,
+                    right_line: 1,
+                }])
+                .unwrap_err()
+                .contains("cannot be ignored")
+        );
+        wait_for_text_comparison(&mut model);
+        assert!(
+            model
+                .add_manual_alignment(ManualTextAlignment {
+                    left_line: 0,
+                    right_line: 0,
+                })
+                .is_ok()
+        );
+        model.select_source_line(DiffSide::Left, 0, false);
+        model.ignore_selected_lines().unwrap();
+        assert!(model.manual_alignments.is_empty());
+        assert!(
+            model
+                .alignment_error
+                .as_deref()
+                .is_some_and(|message| message.contains("cannot remain"))
+        );
+
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        assert_eq!(
+            model.comparison.as_ref().unwrap().annotation_revision,
+            model.annotation_revision
+        );
+        let previous = model.comparison.as_ref().unwrap().clone();
+        let current_right = model.right.source().to_owned();
+        model
+            .replace_memory_sources("replacement\na\nc".into(), current_right)
+            .unwrap();
+        assert!(!model.comparison_is_fresh());
+        assert!(previous.is_stale(
+            model.left.source_id(),
+            model.right.source_id(),
+            model.left.revision,
+            model.right.revision,
+            model.rules.revision,
+            model.annotation_revision,
+        ));
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        assert_eq!(
+            model.comparison.as_ref().unwrap().left_source_id,
+            model.left.source_id()
+        );
+    }
+
+    #[test]
+    fn m3d_alignment_begin_cancel_and_opposite_side_confirm_preserve_text_and_hunk() {
+        let mut model = TextViewModel::new_memory(
+            "head\nleft\nend".into(),
+            "head\nright\nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let modified_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.kind == text_compare::DiffRowKind::Modified)
+            .unwrap();
+        model.set_current_row(Some(modified_row));
+        let original = (
+            model.left.source().to_owned(),
+            model.right.source().to_owned(),
+            model.left.revision,
+            model.right.revision,
+            model.left.is_dirty(),
+            model.right.is_dirty(),
+            model.annotation_revision,
+            model.current_row,
+        );
+
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert_eq!(
+            model.pending_alignment,
+            Some(PendingTextAlignment {
+                source_id: model.left.source_id(),
+                revision: model.left.revision,
+                side: DiffSide::Left,
+                source_line: 0,
+            })
+        );
+        assert!(model.cancel_manual_alignment());
+        assert_eq!(model.pending_alignment, None);
+        assert_eq!(model.annotation_revision, original.6);
+        assert_eq!(model.current_row, original.7);
+        assert_eq!(model.left.source(), original.0);
+        assert_eq!(model.right.source(), original.1);
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        assert!(!model.can_complete_manual_alignment_from_selection());
+        assert!(
+            model
+                .complete_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("other side")
+        );
+        assert!(model.manual_alignments.is_empty());
+        assert!(model.pending_alignment.is_some());
+
+        assert!(model.select_source_line(DiffSide::Right, 0, false));
+        assert!(model.can_complete_manual_alignment_from_selection());
+        let accepted = model.complete_manual_alignment_from_selection().unwrap();
+        assert_eq!(accepted.left_line, 0);
+        assert_eq!(accepted.right_line, 0);
+        assert_eq!(model.manual_alignments, vec![accepted]);
+        assert_eq!(model.pending_alignment, None);
+        assert_eq!(model.current_row, original.7);
+        assert_eq!(model.left.source(), original.0);
+        assert_eq!(model.right.source(), original.1);
+        assert_eq!(model.left.revision, original.2);
+        assert_eq!(model.right.revision, original.3);
+        assert_eq!(model.left.is_dirty(), original.4);
+        assert_eq!(model.right.is_dirty(), original.5);
+        assert!(model.annotation_revision > original.6);
+
+        wait_for_text_comparison(&mut model);
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        let accepted_before_cancel = model.manual_alignments.clone();
+        assert!(model.cancel_manual_alignment());
+        assert_eq!(model.manual_alignments, accepted_before_cancel);
+        assert_eq!(model.current_row, original.7);
+        assert_eq!(model.left.source(), original.0);
+        assert_eq!(model.right.source(), original.1);
+        assert_eq!(model.left.revision, original.2);
+        assert_eq!(model.right.revision, original.3);
+    }
+
+    #[test]
+    fn m3d_alignment_rejects_ignored_stale_and_out_of_bounds_endpoints() {
+        let mut model = TextViewModel::new_memory(
+            "head\nleft\nend".into(),
+            "head\nright\nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        model.schedule_compare();
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        assert!(
+            model
+                .begin_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("calculating")
+        );
+        assert_eq!(model.pending_alignment, None);
+        wait_for_text_comparison(&mut model);
+        let existing = ManualTextAlignment {
+            left_line: 0,
+            right_line: 0,
+        };
+        model.set_manual_alignments(vec![existing]).unwrap();
+        wait_for_text_comparison(&mut model);
+        for side in [DiffSide::Left, DiffSide::Right] {
+            assert!(model.select_source_line(side, 1, false));
+            model.ignore_selected_lines().unwrap();
+            wait_for_text_comparison(&mut model);
+        }
+        let comparison = model.comparison.as_ref().unwrap();
+        assert!(!comparison.raw_equal);
+        assert!(comparison.equal_under_rules);
+
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert!(model.select_source_line(DiffSide::Right, 1, false));
+        assert!(!model.can_complete_manual_alignment_from_selection());
+        assert!(
+            model
+                .complete_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("Ignored source lines")
+        );
+        assert_eq!(model.manual_alignments, vec![existing]);
+        assert_eq!(model.current_row, None);
+
+        assert!(
+            model
+                .validate_manual_alignment_endpoint(
+                    DiffSide::Left,
+                    model.left.source_id(),
+                    model.left.revision,
+                    3,
+                )
+                .unwrap_err()
+                .contains("outside the current source")
+        );
+        let pending = model.pending_alignment.unwrap();
+        model.pending_alignment = Some(PendingTextAlignment {
+            revision: pending.revision.wrapping_add(1),
+            ..pending
+        });
+        assert!(model.select_source_line(DiffSide::Right, 0, false));
+        assert!(
+            model
+                .complete_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("stale")
+        );
+        assert_eq!(model.manual_alignments, vec![existing]);
+        assert_eq!(model.current_row, None);
+        assert!(model.cancel_manual_alignment());
+    }
+
+    #[test]
+    fn m3d_rule_excluded_blank_lines_reject_pending_and_direct_anchors() {
+        let mut model = TextViewModel::new_memory(
+            "head\n\nend".into(),
+            "head\n \nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        let mut rules = model.rules.clone();
+        rules.ignore_blank_lines = true;
+        model.set_rules(rules);
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        let comparison = model.comparison.as_ref().unwrap();
+        assert!(!comparison.raw_equal);
+        assert!(comparison.equal_under_rules);
+
+        let existing = ManualTextAlignment {
+            left_line: 0,
+            right_line: 0,
+        };
+        model.set_manual_alignments(vec![existing]).unwrap();
+        wait_for_text_comparison(&mut model);
+
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        assert!(
+            model
+                .begin_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("excluded by the current comparison rules")
+        );
+        assert_eq!(model.pending_alignment, None);
+
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        assert!(model.select_source_line(DiffSide::Right, 1, false));
+        assert!(
+            model
+                .complete_manual_alignment_from_selection()
+                .unwrap_err()
+                .contains("excluded by the current comparison rules")
+        );
+        assert_eq!(model.pending_alignment.unwrap().source_line, 0);
+
+        let error = model
+            .set_manual_alignments(vec![ManualTextAlignment {
+                left_line: 1,
+                right_line: 1,
+            }])
+            .unwrap_err();
+        assert!(error.contains("excluded by the current comparison rules"));
+        assert_eq!(model.manual_alignments, vec![existing]);
+        assert_eq!(model.left.source(), "head\n\nend");
+        assert_eq!(model.right.source(), "head\n \nend");
+    }
+
+    #[test]
+    fn m3d_rule_change_clears_excluded_anchors_and_publishes_fresh_comparison() {
+        let mut model = TextViewModel::new_memory(
+            "head\n\nend".into(),
+            "head\n \nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let anchor = ManualTextAlignment {
+            left_line: 1,
+            right_line: 1,
+        };
+        model.set_manual_alignments(vec![anchor]).unwrap();
+        wait_for_text_comparison(&mut model);
+        assert_eq!(model.manual_alignments, vec![anchor]);
+
+        let raw_sources = (
+            model.left.source().to_owned(),
+            model.right.source().to_owned(),
+        );
+        let mut rules = model.rules.clone();
+        rules.ignore_blank_lines = true;
+        model.set_rules(rules);
+        wait_for_text_comparison(&mut model);
+
+        assert!(model.comparison_is_fresh());
+        assert!(!model.recalculating);
+        assert!(model.comparison_error.is_none());
+        assert!(model.manual_alignments.is_empty());
+        assert!(
+            model
+                .alignment_error
+                .as_deref()
+                .is_some_and(|error| error.contains("excluded by the current comparison rules"))
+        );
+        assert_eq!(model.left.source(), raw_sources.0);
+        assert_eq!(model.right.source(), raw_sources.1);
+        let result = model.comparison.as_ref().unwrap();
+        assert!(!result.raw_equal);
+        assert!(result.equal_under_rules);
+        assert_eq!(result.annotation_revision, model.annotation_revision);
+    }
+
+    #[test]
+    fn m3d_compare_errors_are_terminal_and_stale_errors_are_ignored() {
+        let mut model = TextViewModel::from_test_text("left".into(), "right".into());
+        let mut invalid_rules = model.rules.clone();
+        invalid_rules.unimportant_sections.push("(".into());
+        model.set_rules(invalid_rules);
+        wait_for_text_comparison(&mut model);
+        assert!(!model.recalculating);
+        assert!(
+            model
+                .comparison_error
+                .as_deref()
+                .is_some_and(|error| error.contains("unimportant expression"))
+        );
+
+        let stale_stamp = CompareRequestStamp {
+            generation: model.generation,
+            left_source_id: model.left.source_id(),
+            right_source_id: model.right.source_id(),
+            left_revision: model.left.revision,
+            right_revision: model.right.revision,
+            rules_revision: model.rules.revision,
+            annotation_revision: model.annotation_revision,
+        };
+        let mut current_rules = model.rules.clone();
+        current_rules.unimportant_sections.clear();
+        model.set_rules(current_rules);
+        assert!(model.recalculating);
+        assert!(model.comparison_error.is_none());
+
+        let (tx, rx) = mpsc::channel();
+        model.receiver = Some(rx);
+        tx.send(CompareMessage {
+            stamp: stale_stamp,
+            result: Err("stale test error".into()),
+        })
+        .unwrap();
+        model.poll();
+        assert!(model.recalculating);
+        assert!(model.comparison_error.is_none());
+
+        wait_for_text_comparison(&mut model);
+        assert!(model.comparison_is_fresh());
+        assert!(model.comparison_error.is_none());
+    }
+
+    #[test]
+    fn m3d_alignment_reveal_uses_exact_hidden_row_and_pending_source_follows_swap() {
+        let mut model = TextViewModel::new_memory(
+            "same\nleft\nend".into(),
+            "same\nright\nend".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        wait_for_text_comparison(&mut model);
+        let anchor = ManualTextAlignment {
+            left_line: 0,
+            right_line: 0,
+        };
+        model.set_manual_alignments(vec![anchor]).unwrap();
+        wait_for_text_comparison(&mut model);
+        let modified_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.kind == text_compare::DiffRowKind::Modified)
+            .unwrap();
+        model.set_current_row(Some(modified_row));
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        assert!(!model.projected_rows().contains(&0));
+        model.reveal_manual_alignment(anchor).unwrap();
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert_eq!(model.pending_scroll_row, Some(0));
+        assert_eq!(model.current_row, Some(modified_row));
+        assert!(
+            model
+                .projection_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Showing all rows"))
+        );
+
+        model.set_row_projection(RowProjectionMode::DifferencesOnly, 0);
+        assert!(model.select_source_line(DiffSide::Left, 0, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        model.reveal_pending_manual_alignment_origin().unwrap();
+        assert_eq!(model.projection_mode, RowProjectionMode::All);
+        assert_eq!(model.pending_scroll_row, Some(0));
+        assert_eq!(model.current_row, Some(modified_row));
+        assert!(model.cancel_manual_alignment());
+
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        let pending_source_id = model.pending_alignment.unwrap().source_id;
+        model.swap_sides();
+        assert_eq!(model.pending_alignment.unwrap().side, DiffSide::Right);
+        assert_eq!(
+            model.pending_alignment.unwrap().source_id,
+            pending_source_id
+        );
+        assert_eq!(
+            model.pending_alignment.unwrap().source_id,
+            model.right.source_id()
+        );
+        wait_for_text_comparison(&mut model);
+        assert!(model.select_source_line(DiffSide::Left, 2, false));
+        let swapped_anchor = model.complete_manual_alignment_from_selection().unwrap();
+        assert_eq!(
+            swapped_anchor,
+            ManualTextAlignment {
+                left_line: 2,
+                right_line: 2,
+            }
+        );
+
+        wait_for_text_comparison(&mut model);
+        assert!(model.select_source_line(DiffSide::Left, 1, false));
+        model.begin_manual_alignment_from_selection().unwrap();
+        model
+            .replace_memory_sources("replacement\nleft\nend".into(), "same\nright\nend".into())
+            .unwrap();
+        assert_eq!(model.pending_alignment, None);
+        assert!(model.manual_alignments.is_empty());
+        assert!(
+            model
+                .alignment_error
+                .as_deref()
+                .is_some_and(|message| message.contains("Replacing a source"))
+        );
+    }
+
+    #[test]
+    fn m3d_active_hunk_identity_survives_earlier_ignored_rows_before_copy() {
+        let left = "same 0\nleft A\nsame 2\nleft B\nsame 4\nleft C\nend";
+        let right = "same 0\nright A\nsame 2\nright B\nsame 4\nright C\nend";
+        let mut model =
+            TextViewModel::new_memory(left.into(), right.into(), &Default::default()).unwrap();
+        wait_for_text_comparison(&mut model);
+        let target_row = model
+            .comparison
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|row| row.left == Some(5) && row.right == Some(5))
+            .unwrap();
+        model.set_current_row(Some(target_row));
+
+        for line in [0, 2] {
+            for side in [DiffSide::Left, DiffSide::Right] {
+                assert!(model.select_source_line(side, line, false));
+                model.ignore_selected_lines().unwrap();
+            }
+        }
+        wait_for_text_comparison(&mut model);
+
+        let ignored_row = model
+            .current_row
+            .expect("the unchanged source hunk maps through ignored-row insertion");
+        assert_ne!(ignored_row, target_row);
+        for line in [0, 2] {
+            for side in [DiffSide::Left, DiffSide::Right] {
+                assert!(model.select_source_line(side, line, false));
+                model.restore_selected_ignored_lines().unwrap();
+            }
+        }
+        wait_for_text_comparison(&mut model);
+        assert_eq!(model.current_row, Some(target_row));
+        assert!(model.left.ignored_line_ranges().is_empty());
+        assert!(model.right.ignored_line_ranges().is_empty());
+
+        for line in [0, 2] {
+            for side in [DiffSide::Left, DiffSide::Right] {
+                assert!(model.select_source_line(side, line, false));
+                model.ignore_selected_lines().unwrap();
+            }
+        }
+        wait_for_text_comparison(&mut model);
+
+        let current_row = model
+            .current_row
+            .expect("the unchanged source hunk has one exact identity match");
+        let comparison = model.comparison.as_ref().unwrap();
+        assert_eq!(
+            (
+                comparison.rows[current_row].left,
+                comparison.rows[current_row].right
+            ),
+            (Some(5), Some(5)),
+            "the same complete source hunk survives preceding ignored-row insertions"
+        );
+        assert_ne!(current_row, target_row);
+        model.copy_hunk(DiffSide::Left).unwrap();
+        assert_eq!(
+            model.right.source(),
+            "same 0\nright A\nsame 2\nright B\nsame 4\nleft C\nend"
+        );
+        assert_eq!(model.left.source(), left);
+    }
+
+    #[test]
+    fn m3d_active_hunk_invalidation_rejects_copy_after_membership_changes() {
+        let left = "head\nleft one\nleft two\ntail";
+        let right = "head\nright one\nright two\ntail";
+        let mut model =
+            TextViewModel::new_memory(left.into(), right.into(), &Default::default()).unwrap();
+        wait_for_text_comparison(&mut model);
+        let comparison = model.comparison.as_ref().unwrap();
+        let first = comparison
+            .rows
+            .iter()
+            .position(|row| row.left == Some(1) && row.right == Some(1))
+            .unwrap();
+        let second = comparison
+            .rows
+            .iter()
+            .position(|row| row.left == Some(2) && row.right == Some(2))
+            .unwrap();
+        assert_eq!(
+            comparison.navigation.row_to_hunk[first], comparison.navigation.row_to_hunk[second],
+            "adjacent changes start in the same logical hunk"
+        );
+        model.set_current_row(Some(second));
+
+        for side in [DiffSide::Left, DiffSide::Right] {
+            assert!(model.select_source_line(side, 1, false));
+            model.ignore_selected_lines().unwrap();
+        }
+        wait_for_text_comparison(&mut model);
+        assert_eq!(model.current_row, None);
+        assert!(
+            model
+                .annotation_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("active difference changed"))
+        );
+        assert!(model.copy_hunk(DiffSide::Left).is_err());
+        assert_eq!(model.left.source(), left);
+        assert_eq!(model.right.source(), right);
+    }
+
+    #[test]
+    fn memory_text_hunk_copy_at_eof_preserves_empty_and_terminal_newline_policy() {
+        for (left, right, expected) in [
+            ("a\nb", "a", "a\nb"),
+            ("b", "", "b"),
+            ("a\nb\n", "a\n", "a\nb\n"),
+        ] {
+            let mut model =
+                TextViewModel::new_memory(left.into(), right.into(), &Default::default()).unwrap();
+            wait_for_text_comparison(&mut model);
+            let row = model
+                .comparison
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .position(|row| {
+                    matches!(
+                        row.kind,
+                        crate::diff::text_compare::DiffRowKind::Modified
+                            | crate::diff::text_compare::DiffRowKind::Deleted
+                            | crate::diff::text_compare::DiffRowKind::Inserted
+                    )
+                })
+                .unwrap();
+            model.current_row = Some(row);
+            model.copy_hunk(DiffSide::Left).unwrap();
+            assert_eq!(model.right.source(), expected);
+        }
+    }
+
+    #[test]
+    fn memory_text_reload_is_inert_and_save_as_keeps_memory_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("saved text.txt");
+        let mut model = TextViewModel::new_memory(
+            "left\r\n".into(),
+            "right\r\n\r\n".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        model.left.replace_source("edited\r\n".into()).unwrap();
+        let before = (model.left.source().to_owned(), model.left.revision);
+        assert!(model.reload_files().is_err());
+        assert_eq!(model.left.source(), before.0);
+        assert_eq!(model.left.revision, before.1);
+        assert!(model.save_as_memory(DiffSide::Left, &path));
+        assert_eq!(fs::read(&path).unwrap(), b"edited\r\n");
+        assert_eq!(model.origin, TextCompareOrigin::Memory);
+        assert_eq!(model.left_path, None);
+        assert!(!model.saved_filesystem_mutation);
+        assert!(model.left_error.is_none());
+        assert!(!model.has_dirty());
+
+        model.left.replace_source("still edited".into()).unwrap();
+        let saved_revision = model.left.saved_revision;
+        let parent_file = directory.path().join("not a directory");
+        fs::write(&parent_file, b"block").unwrap();
+        assert!(!model.save_as_memory(DiffSide::Left, &parent_file.join("output.txt")));
+        assert_eq!(model.left.saved_revision, saved_revision);
+        assert!(model.left.is_dirty());
+        assert_eq!(model.left.source(), "still edited");
+    }
+
+    #[test]
+    fn memory_text_workspace_push_and_back_retain_previous_view_identity() {
+        let mut workspace = DiffWorkspace::default();
+        workspace.current_view = RetainedView {
+            id: 761,
+            view: DiffView::TextCompare(TextCompareState {
+                left: None,
+                right: Some("right".into()),
+                relative_path: Some("child.txt".into()),
+                origin: TextCompareOrigin::FileBacked,
+            }),
+        };
+        let memory_id = workspace.push_memory_text_compare();
+        assert_eq!(workspace.current_view.id, memory_id);
+        assert!(matches!(
+            &workspace.current_view.view,
+            DiffView::TextCompare(state)
+                if state.origin == TextCompareOrigin::Memory
+                    && state.left.is_none()
+                    && state.right.is_none()
+        ));
+        assert!(workspace.back());
+        assert_eq!(workspace.current_view.id, 761);
+        assert!(matches!(
+            &workspace.current_view.view,
+            DiffView::TextCompare(state)
+                if state.origin == TextCompareOrigin::FileBacked
+                    && state.left.is_none()
+                    && state.right.as_deref() == Some(Path::new("right"))
+                    && state.relative_path.as_deref() == Some(Path::new("child.txt"))
+        ));
+    }
+
+    #[test]
+    fn memory_text_missing_folder_child_side_remains_file_backed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("left.txt");
+        fs::write(&path, "left").unwrap();
+        let state = TextCompareState {
+            left: Some(path),
+            right: None,
+            relative_path: Some("child.txt".into()),
+            origin: TextCompareOrigin::FileBacked,
+        };
+        let mut model = TextViewModel::load(&state, &Default::default()).unwrap();
+        assert_eq!(model.origin, TextCompareOrigin::FileBacked);
+        assert_eq!(model.left.source(), "left");
+        assert_eq!(model.right.source(), "");
+        assert!(model.reload_files().is_ok());
+        assert_eq!(model.origin, TextCompareOrigin::FileBacked);
+    }
     #[test]
     fn swap_sides_round_trips_text_binary_and_folder() {
         for view in [
@@ -1585,6 +4438,7 @@ mod tests {
                 left: Some("l".into()),
                 right: Some("r".into()),
                 relative_path: None,
+                origin: TextCompareOrigin::FileBacked,
             }),
             DiffView::BinaryCompare(BinaryCompareState {
                 left: Some("l".into()),
@@ -1909,9 +4763,12 @@ mod tests {
 
     fn measure_key(wrap: bool, left_width: f32, right_width: f32) -> RowMeasureKey {
         RowMeasureKey {
+            left_source_id: 0,
+            right_source_id: 0,
             left_revision: 1,
             right_revision: 2,
             comparison_revision: 3,
+            annotation_revision: 0,
             left_text_width_bits: left_width.to_bits(),
             right_text_width_bits: right_width.to_bits(),
             font_theme: 4,

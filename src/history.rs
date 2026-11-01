@@ -128,6 +128,15 @@ fn load_history_from_path(path: impl AsRef<Path>) -> anyhow::Result<VecDeque<His
     Ok(list.into())
 }
 
+/// Load a persisted history fixture through the same parser used by startup.
+/// This remains test-only so measurement helpers do not widen the runtime API.
+#[cfg(test)]
+pub(crate) fn load_startup_profile_history(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<VecDeque<HistoryEntry>> {
+    load_history_from_path(path)
+}
+
 /// Save the current HISTORY list to `history.json`.
 pub fn save_history() -> anyhow::Result<()> {
     let _transaction = history_transaction_guard();

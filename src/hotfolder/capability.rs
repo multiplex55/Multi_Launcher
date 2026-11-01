@@ -464,6 +464,11 @@ fn evaluate_mkmacro(
                         reason: "MkMacro clipboard text actions are not allowed in unattended execution",
                     };
                 }
+                MkAction::OpenFolder(_) | MkAction::OpenUrl(_) => {
+                    return ActionCapability::Unsupported {
+                        reason: "MkMacro direct-open actions are not allowed in unattended execution",
+                    };
+                }
                 MkAction::Process(process) if !process.wait => {
                     strong_confirmation = true;
                 }
@@ -1031,5 +1036,104 @@ mod tests {
                 reason: "MkMacro is disabled in the current document"
             }
         ));
+    }
+
+    #[test]
+    fn direct_open_policy_rejects_enabled_direct_and_nested_macros_only() {
+        use crate::mkmacro::{
+            MkAction, MkCallMacroPayload, MkMacro, MkMacroDocument, MkOpenFolderPayload,
+            MkOpenUrlPayload, MkStep,
+        };
+
+        let step = |id, action, enabled| MkStep {
+            metadata: Default::default(),
+            id,
+            enabled,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action,
+        };
+        let macro_ = |id, name: &str, steps| MkMacro {
+            signature: Default::default(),
+            id,
+            name: name.into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps,
+        };
+        let actions = [
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: "${folder}".into(),
+            }),
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://${host}/".into(),
+            }),
+        ];
+        let adapter = AvailableAdapter;
+        let empty_targets = [];
+        let roots = roots();
+
+        for (index, action) in actions.into_iter().enumerate() {
+            let direct_document = MkMacroDocument {
+                macros: vec![macro_(7, "direct", vec![step(1, action.clone(), true)])],
+                ..Default::default()
+            };
+            let bound = bind_mkmacro_action(&direct_document, 7).unwrap();
+            let context = capability_context(&empty_targets, &direct_document, &roots)
+                .with_external_action_adapter(&adapter);
+            assert!(matches!(
+                evaluate_action_capability(&rule(bound), &context),
+                ActionCapability::Unsupported { reason }
+                    if reason.contains("direct-open actions")
+            ));
+
+            let nested_document = MkMacroDocument {
+                macros: vec![
+                    macro_(
+                        7,
+                        "parent",
+                        vec![step(
+                            1,
+                            MkAction::CallMacro(MkCallMacroPayload {
+                                macro_id: 8,
+                                ..Default::default()
+                            }),
+                            true,
+                        )],
+                    ),
+                    macro_(8, "child", vec![step(1, action.clone(), true)]),
+                ],
+                ..Default::default()
+            };
+            let bound = bind_mkmacro_action(&nested_document, 7).unwrap();
+            let context = capability_context(&empty_targets, &nested_document, &roots)
+                .with_external_action_adapter(&adapter);
+            assert!(matches!(
+                evaluate_action_capability(&rule(bound), &context),
+                ActionCapability::Unsupported { reason }
+                    if reason.contains("direct-open actions")
+            ));
+
+            let disabled_document = MkMacroDocument {
+                macros: vec![macro_(7, "disabled action", vec![step(1, action, false)])],
+                ..Default::default()
+            };
+            let bound = bind_mkmacro_action(&disabled_document, 7).unwrap();
+            let context = capability_context(&empty_targets, &disabled_document, &roots)
+                .with_external_action_adapter(&adapter);
+            assert_eq!(
+                evaluate_action_capability(&rule(bound), &context),
+                ActionCapability::Supported {
+                    enablement: ActionEnablement::Standard,
+                },
+                "disabled direct-open variant {index} should remain allowed by the existing policy"
+            );
+        }
     }
 }

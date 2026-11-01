@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
-// Schema 14 adds persisted recorder settings and the expanded physical-key model.
-// Existing schema-13 documents retain their macro content and receive defaults.
-pub const SCHEMA_VERSION: u32 = 14;
+// Schema 15 adds typed direct-open Macro actions. Existing schema-14 documents
+// retain their content and receive a version-only upgrade.
+pub const SCHEMA_VERSION: u32 = 15;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -1497,6 +1497,8 @@ pub enum MkAction {
     Delay(MkDelayPayload),
     Process(MkProcessPayload),
     LauncherCommand(MkLauncherCommandPayload),
+    OpenFolder(MkOpenFolderPayload),
+    OpenUrl(MkOpenUrlPayload),
     WindowActivate(MkWindowPayload),
     WindowClose(MkWindowMatcher),
     WindowWait(MkWindowPayload),
@@ -1584,6 +1586,42 @@ impl fmt::Debug for MkWriteClipboardTextPayload {
         };
         f.debug_struct("MkWriteClipboardTextPayload")
             .field("source_kind", &source_kind)
+            .finish()
+    }
+}
+
+/// A folder path template for the typed direct-open action.
+///
+/// Paths are omitted from `Debug`, including when this payload is nested in a
+/// derived action, step, document, or runtime diagnostic.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MkOpenFolderPayload {
+    pub path: String,
+}
+
+impl fmt::Debug for MkOpenFolderPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MkOpenFolderPayload")
+            .field("path", &"[redacted]")
+            .finish()
+    }
+}
+
+/// An HTTP(S) URL template for the typed direct-open action.
+///
+/// URLs are omitted from `Debug`, including when this payload is nested in a
+/// derived action, step, document, or runtime diagnostic.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MkOpenUrlPayload {
+    pub url: String,
+}
+
+impl fmt::Debug for MkOpenUrlPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MkOpenUrlPayload")
+            .field("url", &"[redacted]")
             .finish()
     }
 }
@@ -1828,6 +1866,70 @@ mod clipboard_action_model_tests {
             ..Default::default()
         };
         assert!(!format!("{document:?}").contains(sentinel));
+    }
+}
+
+#[cfg(test)]
+mod direct_open_action_model_tests {
+    use super::*;
+
+    #[test]
+    fn direct_open_actions_round_trip_with_redacted_nested_debug() {
+        let actions = [
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: r"C:\private direct open folder sentinel".into(),
+            }),
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://example.test/path?token=private_direct_open_url_sentinel#section"
+                    .into(),
+            }),
+        ];
+        for (action, expected_tag) in actions.iter().zip(["open_folder", "open_url"]) {
+            let encoded = serde_json::to_value(action).unwrap();
+            assert_eq!(encoded["type"], expected_tag);
+            assert_eq!(
+                serde_json::from_value::<MkAction>(encoded).unwrap(),
+                *action
+            );
+        }
+
+        let folder_sentinel = "private direct open folder sentinel";
+        let url_sentinel = "private_direct_open_url_sentinel";
+        let document = MkMacroDocument {
+            macros: vec![MkMacro {
+                signature: Default::default(),
+                id: 1,
+                name: "direct open fixture".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
+                playback: Default::default(),
+                steps: actions
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, action)| MkStep {
+                        metadata: Default::default(),
+                        id: index as u64 + 1,
+                        enabled: true,
+                        breakpoint: false,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: Default::default(),
+                        action,
+                    })
+                    .collect(),
+            }],
+            ..Default::default()
+        };
+        let action_debug = format!("{:?}", document.macros[0].steps);
+        let document_debug = format!("{document:?}");
+        assert!(!action_debug.contains(folder_sentinel));
+        assert!(!action_debug.contains(url_sentinel));
+        assert!(!document_debug.contains(folder_sentinel));
+        assert!(!document_debug.contains(url_sentinel));
+        assert!(document_debug.contains("[redacted]"));
     }
 }
 

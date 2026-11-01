@@ -29,6 +29,7 @@ pub enum FieldPart {
     Program,
     WorkingDirectory,
     Query,
+    Url,
     Variable,
     Value,
     DefaultValue,
@@ -108,6 +109,7 @@ impl std::fmt::Display for FieldPath {
                         FieldPart::Program => "Program",
                         FieldPart::WorkingDirectory => "Working directory",
                         FieldPart::Query => "Launcher query",
+                        FieldPart::Url => "URL",
                         FieldPart::Variable => "Variable",
                         FieldPart::Value => "Value",
                         FieldPart::DefaultValue => "Default value",
@@ -502,6 +504,10 @@ pub fn visit_step_fields(step: &mut MkStep, visit: &mut Visitor<'_>) {
                 value.legacy_resolved_action = None;
             }
         }
+        MkAction::OpenFolder(value) => {
+            string(&path, Path, &mut value.path, FieldKind::Template, visit)
+        }
+        MkAction::OpenUrl(value) => string(&path, Url, &mut value.url, FieldKind::Template, visit),
         MkAction::WindowActivate(value) | MkAction::WindowWait(value) => {
             matcher(&path.child(Window), &mut value.matcher, visit)
         }
@@ -1108,6 +1114,61 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn direct_open_templates_participate_in_shared_field_search_and_replacement() {
+        let mut action_folder = step(
+            1,
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: "${folder}".into(),
+            }),
+        );
+        let mut action_url = step(
+            2,
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://${host}/path?q=${query}".into(),
+            }),
+        );
+
+        let folder_fields = step_fields(&action_folder);
+        let folder_field = folder_fields
+            .iter()
+            .find(|field| field.path.to_string() == "Path")
+            .unwrap();
+        assert_eq!(folder_field.kind, FieldKind::Template);
+        assert_eq!(folder_field.value, "${folder}");
+
+        let url_fields = step_fields(&action_url);
+        let url_field = url_fields
+            .iter()
+            .find(|field| field.path.to_string() == "URL")
+            .unwrap();
+        assert_eq!(url_field.kind, FieldKind::Template);
+        assert_eq!(url_field.value, "https://${host}/path?q=${query}");
+
+        visit_step_fields(&mut action_folder, &mut |_, mut field| {
+            if field.kind() == FieldKind::Template {
+                field
+                    .replace(field.value().replace("folder", "replacement"))
+                    .unwrap();
+            }
+        });
+        visit_step_fields(&mut action_url, &mut |_, mut field| {
+            if field.kind() == FieldKind::Template {
+                field
+                    .replace(field.value().replace("query", "search"))
+                    .unwrap();
+            }
+        });
+        assert!(matches!(
+            action_folder.action,
+            MkAction::OpenFolder(MkOpenFolderPayload { path }) if path == "${replacement}"
+        ));
+        assert!(matches!(
+            action_url.action,
+            MkAction::OpenUrl(MkOpenUrlPayload { url }) if url == "https://${host}/path?q=${search}"
+        ));
     }
 
     #[test]

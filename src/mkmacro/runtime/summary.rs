@@ -66,6 +66,7 @@ pub enum SummaryActionCategory {
     Screen,
     Ocr,
     Launcher,
+    DirectOpen,
     Clipboard,
     Prompt,
     NotificationSound,
@@ -84,6 +85,7 @@ impl SummaryActionCategory {
             Self::Screen => "Screen or image",
             Self::Ocr => "OCR",
             Self::Launcher => "Launcher or process",
+            Self::DirectOpen => "Direct open",
             Self::Clipboard => "Clipboard",
             Self::Prompt => "Prompt",
             Self::NotificationSound => "Notification or sound",
@@ -787,6 +789,7 @@ fn action_category(
         Some(MkAction::Process(_) | MkAction::LauncherCommand(_)) => {
             SummaryActionCategory::Launcher
         }
+        Some(MkAction::OpenFolder(_) | MkAction::OpenUrl(_)) => SummaryActionCategory::DirectOpen,
         Some(MkAction::ReadClipboardText { .. } | MkAction::WriteClipboardText(_)) => {
             SummaryActionCategory::Clipboard
         }
@@ -811,8 +814,9 @@ fn action_category(
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        MkCallMacroPayload, MkDelayPayload, MkMacro, MkMacroDocument, MkStep, MkTextMode,
-        MkTextPayload, compiler::compile_program, executor::ExecutionDiagnostic,
+        MkCallMacroPayload, MkDelayPayload, MkMacro, MkMacroDocument, MkOpenFolderPayload,
+        MkOpenUrlPayload, MkStep, MkTextMode, MkTextPayload, compiler::compile_program,
+        executor::ExecutionDiagnostic,
     };
     use std::{
         sync::atomic::{AtomicU64, Ordering},
@@ -905,6 +909,44 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn direct_open_steps_have_a_safe_distinct_summary_category() {
+        let program = compile_program(
+            &MkMacroDocument {
+                macros: vec![macro_(
+                    1,
+                    vec![
+                        step(
+                            1,
+                            MkAction::OpenFolder(MkOpenFolderPayload {
+                                path: "C:\\private summary path".into(),
+                            }),
+                        ),
+                        step(
+                            2,
+                            MkAction::OpenUrl(MkOpenUrlPayload {
+                                url: "https://example.test/?token=private_summary_url".into(),
+                            }),
+                        ),
+                    ],
+                )],
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            action_category(&program, 1, 1),
+            SummaryActionCategory::DirectOpen
+        );
+        assert_eq!(
+            action_category(&program, 1, 2),
+            SummaryActionCategory::DirectOpen
+        );
+        assert_eq!(SummaryActionCategory::DirectOpen.label(), "Direct open");
     }
 
     #[test]

@@ -1508,12 +1508,7 @@ mod file_source_tests {
         bytes: &[u8],
         options: TableFileParseOptions,
     ) -> Arc<TableFileBackedSource> {
-        let path = std::env::temp_dir().join(format!(
-            "table-source-test-{}.csv",
-            NEXT_FILE_SOURCE_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::write(&path, bytes).unwrap();
-        let file = File::open(&path).unwrap();
+        let (path, file) = candidate_file(bytes);
         let (pool, workspace) = workspace();
         let source = TableFileBackedSource::scan(
             file,
@@ -1529,13 +1524,31 @@ mod file_source_tests {
     }
 
     fn candidate_file(bytes: &[u8]) -> (std::path::PathBuf, File) {
-        let path = std::env::temp_dir().join(format!(
-            "table-delimiter-candidate-{}.csv",
-            NEXT_FILE_SOURCE_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::write(&path, bytes).unwrap();
-        let file = File::open(&path).unwrap();
-        (path, file)
+        static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(1);
+
+        // Nextest runs each test in its own process, so a process-local
+        // counter alone aliases other tests' files in the shared temp dir.
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "table-source-test-{}-{}.csv",
+                std::process::id(),
+                NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut writer) => {
+                    writer.write_all(bytes).unwrap();
+                    drop(writer);
+                    let file = File::open(&path).unwrap();
+                    return (path, file);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create owned table test fixture: {error}"),
+            }
+        }
     }
 
     fn scan_with_column_limit(

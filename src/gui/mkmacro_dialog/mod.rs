@@ -2926,6 +2926,8 @@ mod tests {
             MkAction::Delay(_) => (EditorKind::Timing, true),
             MkAction::Process(_) => (EditorKind::Process, true),
             MkAction::LauncherCommand(_) => (EditorKind::Launcher, true),
+            MkAction::OpenFolder(_) => (EditorKind::OpenFolder, cfg!(windows)),
+            MkAction::OpenUrl(_) => (EditorKind::OpenUrl, cfg!(windows)),
             MkAction::WindowActivate(_)
             | MkAction::WindowClose(_)
             | MkAction::WindowWait(_)
@@ -3174,6 +3176,111 @@ mod tests {
             action_catalog::draft_validation_contract(&read),
             action_catalog::DraftValidationContract::CommitReady
         ));
+    }
+
+    #[test]
+    fn direct_open_actions_are_typed_discoverable_and_configurable() {
+        use crate::mkmacro::{MkOpenFolderPayload, MkOpenUrlPayload};
+
+        let actions = [
+            (
+                MkAction::OpenFolder(MkOpenFolderPayload {
+                    path: "C:\\work with spaces\\notes".into(),
+                }),
+                action_catalog::EditorKind::OpenFolder,
+                "Open Folder",
+                "C:\\work with spaces\\notes",
+            ),
+            (
+                MkAction::OpenUrl(MkOpenUrlPayload {
+                    url: "https://example.test/path?token=visible-in-authoring#part".into(),
+                }),
+                action_catalog::EditorKind::OpenUrl,
+                "Open URL",
+                "https://example.test/path?token=visible-in-authoring#part",
+            ),
+        ];
+
+        for (action, editor, name, detail) in actions {
+            assert_eq!(action_catalog::action_name(&action), name);
+            assert_eq!(action_catalog::action_details(&action), detail);
+            assert_eq!(action_catalog::editor_for_action(&action), editor);
+            assert!(action_catalog::editor_route_recognizes(&action, editor));
+            let descriptor = action_catalog::descriptors()
+                .into_iter()
+                .find(|descriptor| descriptor.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from the action palette"));
+            assert_eq!(
+                descriptor.category,
+                action_catalog::ActionCategory::ProgramsLauncher
+            );
+            assert_eq!(descriptor.editor, editor);
+            assert_eq!(
+                descriptor.runtime == action_catalog::RuntimeAvailability::Supported,
+                cfg!(windows)
+            );
+            assert_eq!(
+                descriptor.availability,
+                action_catalog::ActionAvailability::Ready
+            );
+            assert!(!descriptor.description.trim().is_empty());
+            assert_eq!(
+                action_catalog::editor_contract(editor),
+                Some(action_catalog::EditorContract::Configurable { field_count: 1 })
+            );
+            let completeness = action_catalog::editor_completeness(editor).unwrap();
+            assert!(completeness.has_primary_control);
+            assert!(!completeness.intentionally_disabled);
+            assert!(completeness.placeholder_copy.is_none());
+            assert_eq!(
+                action_catalog::is_available_in_palette(&descriptor),
+                cfg!(windows)
+            );
+            assert_eq!(
+                crate::mkmacro::executor::has_runtime_support(&action),
+                cfg!(windows)
+            );
+            assert_eq!(
+                action_catalog::group_visible_descriptors(name)
+                    .iter()
+                    .flat_map(|(_, rows)| rows)
+                    .any(|row| row.name == name),
+                cfg!(windows)
+            );
+        }
+        let descriptor_order = action_catalog::descriptors()
+            .iter()
+            .map(|descriptor| descriptor.name)
+            .collect::<Vec<_>>();
+        assert!(
+            descriptor_order
+                .iter()
+                .position(|name| *name == "Run Program")
+                < descriptor_order
+                    .iter()
+                    .position(|name| *name == "Launcher Command")
+        );
+        assert!(
+            descriptor_order
+                .iter()
+                .position(|name| *name == "Launcher Command")
+                < descriptor_order
+                    .iter()
+                    .position(|name| *name == "Open Folder")
+        );
+        assert!(
+            descriptor_order
+                .iter()
+                .position(|name| *name == "Open Folder")
+                < descriptor_order.iter().position(|name| *name == "Open URL")
+        );
+        for (name, keyword) in [("Open Folder", "explorer"), ("Open URL", "https")] {
+            let descriptor = action_catalog::descriptors()
+                .into_iter()
+                .find(|descriptor| descriptor.name == name)
+                .unwrap();
+            assert!(action_catalog::matches(&descriptor, keyword));
+        }
     }
 
     #[test]

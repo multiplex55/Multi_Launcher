@@ -1,7 +1,7 @@
 use crate::diff::folder_runtime::{
     FolderComparisonIdentity, FolderOperationContext, FolderOperationFeedback,
 };
-use crate::diff::model::{DiffView, DiffWorkspace};
+use crate::diff::model::{DiffView, DiffWorkspace, TextCompareOrigin, TextCompareState};
 use crate::diff::query::DiffOpenPayload;
 use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use eframe::egui;
@@ -88,8 +88,91 @@ fn render_retained_folder(
 
 struct WorkspaceRenderOutcome {
     folder_action: folder_view::FolderViewAction,
+    text_action: Option<text_view::TextViewAction>,
     error: Option<String>,
     recent_to_open: Option<crate::diff::persistence::DisplayPathPairV1>,
+}
+
+#[derive(Clone, Copy)]
+enum TextInputPurpose {
+    NewComparison,
+    EditInputs { view_id: u64 },
+}
+
+struct TextInputDraft {
+    purpose: TextInputPurpose,
+    left: String,
+    right: String,
+    expected_sources: Option<(TextInputSourceSnapshot, TextInputSourceSnapshot)>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextInputSourceSnapshot {
+    source_id: u64,
+    revision: u64,
+}
+
+impl TextInputSourceSnapshot {
+    fn capture(document: &crate::diff::text_file::TextDocument) -> Self {
+        Self {
+            source_id: document.source_id(),
+            revision: document.revision,
+        }
+    }
+}
+
+fn paste_memory_input(
+    accepted: &mut String,
+    read_clipboard: impl FnOnce() -> Result<String, String>,
+) -> Result<(), String> {
+    let text = read_clipboard()?;
+    crate::diff::model::validate_memory_text(&text)?;
+    *accepted = text;
+    Ok(())
+}
+
+fn configure_text_model(
+    model: &mut crate::diff::model::TextViewModel,
+    settings: &crate::diff::settings::DiffConfigV1,
+    persistence: &crate::diff::persistence::DiffPersistenceV1,
+) {
+    let mut rules = model.rules.clone();
+    rules.ignore_all_whitespace = settings.ignore_whitespace;
+    rules.case_sensitive = settings.case_sensitive;
+    rules.replacements = persistence
+        .replacement_rules
+        .iter()
+        .filter(|rule| rule.enabled)
+        .map(|rule| crate::diff::text_compare::RegexReplacement {
+            pattern: rule.pattern.clone(),
+            replacement: rule.replacement.clone(),
+        })
+        .collect();
+    rules.unimportant_sections = persistence
+        .unimportant_section_rules
+        .iter()
+        .filter(|rule| rule.enabled)
+        .map(|rule| rule.pattern.clone())
+        .collect();
+    model.set_rules(rules);
+}
+
+type RestoredTextPreferences = (bool, bool, bool, bool, u8, u8);
+
+fn apply_restored_text_preferences(
+    model: &mut crate::diff::model::TextViewModel,
+    (details, whitespace, vertical, horizontal, projection, context): RestoredTextPreferences,
+) {
+    model.text_details_open = details;
+    model.visible_whitespace = whitespace;
+    model.scroll.set_sync(vertical, horizontal);
+    let mode = match projection {
+        1 => crate::diff::text_compare::RowProjectionMode::DifferencesOnly,
+        2 => crate::diff::text_compare::RowProjectionMode::IdenticalOnly,
+        _ => crate::diff::text_compare::RowProjectionMode::All,
+    };
+    model.set_row_projection(mode, context as usize);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -161,7 +244,8 @@ pub struct DiffDialogState {
     operation_preview: Option<operation_preview::OperationPreview>,
     binary_views: HashMap<u64, crate::diff::binary_compare::BinaryViewModel>,
     watch_views: HashMap<u64, crate::diff::watch::ViewWatchRuntime>,
-    restored_text_preferences: HashMap<u64, (bool, bool, bool, bool, u8)>,
+    restored_text_preferences: HashMap<u64, RestoredTextPreferences>,
+    text_input: Option<TextInputDraft>,
     close_prompt: bool,
     pub persistence: crate::diff::persistence::DiffPersistenceV1,
 }
@@ -230,6 +314,273 @@ impl DiffDialogState {
         }
     }
 
+    fn begin_text_input(&mut self, purpose: TextInputPurpose) {
+        let (left, right, expected_sources) = match purpose {
+            TextInputPurpose::NewComparison => (String::new(), String::new(), None),
+            TextInputPurpose::EditInputs { view_id } => {
+                let Some(model) = self.text_views.get(&view_id) else {
+                    self.workspace.error = Some("The in-memory text view is not loaded".into());
+                    return;
+                };
+                if model.origin != TextCompareOrigin::Memory {
+                    self.workspace.error =
+                        Some("Only in-memory text comparisons have editable inputs".into());
+                    return;
+                }
+                (
+                    model.left.source().to_owned(),
+                    model.right.source().to_owned(),
+                    Some((
+                        TextInputSourceSnapshot::capture(&model.left),
+                        TextInputSourceSnapshot::capture(&model.right),
+                    )),
+                )
+            }
+        };
+        self.text_input = Some(TextInputDraft {
+            purpose,
+            left,
+            right,
+            expected_sources,
+            error: None,
+        });
+    }
+
+    fn compare_selection_with_clipboard_using(
+        &mut self,
+        view_id: u64,
+        read_clipboard: impl FnOnce() -> Result<String, String>,
+    ) -> Result<(), String> {
+        let origin = match &self.workspace.current_view.view {
+            DiffView::TextCompare(state) if self.workspace.current_view.id == view_id => {
+                state.origin
+            }
+            _ => return Err("The selected text comparison is no longer active".into()),
+        };
+        let model = self
+            .text_views
+            .get(&view_id)
+            .ok_or_else(|| "The selected text view is not loaded".to_string())?;
+        if model.origin != origin {
+            return Err("The selected text view no longer matches its comparison".into());
+        }
+        let selected = model.selected_raw_source_text()?;
+        crate::diff::model::validate_memory_text(&selected.text)?;
+
+        let clipboard = read_clipboard()?;
+        crate::diff::model::validate_memory_text(&clipboard)?;
+
+        if self.workspace.current_view.id != view_id
+            || !matches!(
+                &self.workspace.current_view.view,
+                DiffView::TextCompare(state) if state.origin == origin
+            )
+        {
+            return Err("The selected text comparison changed while reading the clipboard".into());
+        }
+        let model = self
+            .text_views
+            .get(&view_id)
+            .ok_or_else(|| "The in-memory text view is no longer available".to_string())?;
+        let source = match selected.side {
+            crate::diff::model::DiffSide::Left => &model.left,
+            crate::diff::model::DiffSide::Right => &model.right,
+        };
+        if source.source_id() != selected.source_id || source.revision != selected.revision {
+            return Err("The selected source changed while reading the clipboard".into());
+        }
+
+        let empty_clipboard = clipboard.is_empty();
+        let mut new_model = crate::diff::model::TextViewModel::new_memory(
+            selected.text,
+            clipboard,
+            &self.workspace.settings,
+        )?;
+        configure_text_model(&mut new_model, &self.workspace.settings, &self.persistence);
+        let new_view_id = self.workspace.push_memory_text_compare();
+        self.text_views.insert(new_view_id, new_model);
+        self.watch_views.remove(&new_view_id);
+        self.workspace.error = None;
+        self.workspace.status = Some(if empty_clipboard {
+            "Selected text compared with empty clipboard text; empty text is valid".into()
+        } else {
+            "Selected text compared with clipboard text".into()
+        });
+        self.reconcile_runtime_resources();
+        Ok(())
+    }
+
+    fn apply_text_input(&mut self, draft: TextInputDraft) -> Result<(), (TextInputDraft, String)> {
+        if let Err(error) = crate::diff::model::validate_memory_text(&draft.left)
+            .and_then(|()| crate::diff::model::validate_memory_text(&draft.right))
+        {
+            return Err((draft, error));
+        }
+        match draft.purpose {
+            TextInputPurpose::NewComparison => {
+                let mut model = match crate::diff::model::TextViewModel::new_memory(
+                    draft.left.clone(),
+                    draft.right.clone(),
+                    &self.workspace.settings,
+                ) {
+                    Ok(model) => model,
+                    Err(error) => return Err((draft, error)),
+                };
+                configure_text_model(&mut model, &self.workspace.settings, &self.persistence);
+                let view_id = self.workspace.push_memory_text_compare();
+                self.text_views.insert(view_id, model);
+                self.watch_views.remove(&view_id);
+                self.workspace.error = None;
+                self.workspace.status = Some("In-memory text comparison ready".into());
+                self.reconcile_runtime_resources();
+                Ok(())
+            }
+            TextInputPurpose::EditInputs { view_id } => {
+                if self.workspace.current_view.id != view_id {
+                    return Err((
+                        draft,
+                        "The active comparison changed while Edit Inputs was open. Reopen it to edit the current comparison.".into(),
+                    ));
+                }
+                let Some(model) = self.text_views.get_mut(&view_id) else {
+                    return Err((
+                        draft,
+                        "The in-memory text view is no longer available".into(),
+                    ));
+                };
+                let Some(expected_sources) = draft.expected_sources else {
+                    return Err((
+                        draft,
+                        "The Edit Inputs draft is no longer tied to its source documents. Reopen it to continue.".into(),
+                    ));
+                };
+                let current_sources = (
+                    TextInputSourceSnapshot::capture(&model.left),
+                    TextInputSourceSnapshot::capture(&model.right),
+                );
+                if current_sources != expected_sources {
+                    return Err((
+                        draft,
+                        "The comparison sources changed while Edit Inputs was open. Reopen it to review the latest text.".into(),
+                    ));
+                }
+                match model.replace_memory_sources(draft.left.clone(), draft.right.clone()) {
+                    Ok(_) => {
+                        self.workspace.error = None;
+                        self.workspace.status = Some("In-memory text inputs updated".into());
+                        Ok(())
+                    }
+                    Err(error) => Err((draft, error)),
+                }
+            }
+        }
+    }
+
+    fn show_text_input(&mut self, ctx: &egui::Context) {
+        let Some(draft) = self.text_input.as_mut() else {
+            return;
+        };
+        let mut open = true;
+        let mut submit = false;
+        let mut cancel = false;
+        let title = match draft.purpose {
+            TextInputPurpose::NewComparison => "Compare Text",
+            TextInputPurpose::EditInputs { .. } => "Edit Text Inputs",
+        };
+        let identity = match draft.purpose {
+            TextInputPurpose::NewComparison => 0,
+            TextInputPurpose::EditInputs { view_id } => view_id,
+        };
+        egui::Window::new(title)
+            .id(egui::Id::new((self.workspace.workspace_id, "text_input", identity)))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(760.0, 540.0))
+            .show(ctx, |ui| {
+                ui.label("Enter text for both sides. Empty text is allowed.");
+                ui.label(
+                    "Each side is limited to 8 MiB and 100,000 lines. Oversized input is rejected without truncation.",
+                );
+                ui.label(
+                    "Text remains in Diff memory until you explicitly use Save As or Export.",
+                );
+                ui.columns(2, |columns| {
+                    for (side, input, label) in [
+                        (crate::diff::model::DiffSide::Left, &mut draft.left, "Left text"),
+                        (
+                            crate::diff::model::DiffSide::Right,
+                            &mut draft.right,
+                            "Right text",
+                        ),
+                    ] {
+                        let column = if side == crate::diff::model::DiffSide::Left {
+                            &mut columns[0]
+                        } else {
+                            &mut columns[1]
+                        };
+                        column.label(label);
+                        column.add(
+                            egui::TextEdit::multiline(input)
+                                .id(egui::Id::new((
+                                    self.workspace.workspace_id,
+                                    "memory_text_source",
+                                    identity,
+                                    side,
+                                )))
+                                .desired_rows(16)
+                                .desired_width(f32::INFINITY)
+                                .code_editor(),
+                        );
+                        column.horizontal(|ui| {
+                            if ui.button(format!("Paste {side:?}")).clicked() {
+                                let result = paste_memory_input(input, || {
+                                    crate::actions::clipboard::get_text().map_err(|_| {
+                                        "Clipboard is unavailable or does not contain plain text"
+                                            .to_string()
+                                    })
+                                });
+                                match result {
+                                    Ok(()) => draft.error = None,
+                                    Err(error) => draft.error = Some(error),
+                                }
+                            }
+                            ui.label(format!("{} bytes", input.len()));
+                        });
+                    }
+                });
+                if let Some(error) = &draft.error {
+                    semantic_status(ui, StatusTone::Error, error, None);
+                }
+                ui.horizontal(|ui| {
+                    let label = match draft.purpose {
+                        TextInputPurpose::NewComparison => "Compare",
+                        TextInputPurpose::EditInputs { .. } => "Apply Inputs",
+                    };
+                    if ui.button(label).clicked() {
+                        submit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                        ui.close();
+                    }
+                });
+            });
+        if submit {
+            if let Some(draft) = self.text_input.take() {
+                match self.apply_text_input(draft) {
+                    Ok(()) => {}
+                    Err((mut draft, error)) => {
+                        draft.error = Some(error);
+                        self.text_input = Some(draft);
+                    }
+                }
+            }
+        } else if cancel || !open {
+            self.text_input = None;
+        }
+    }
+
     fn refresh_folder(&mut self) {
         let id = self.workspace.current_view.id;
         if let DiffView::FolderCompare(state) = &mut self.workspace.current_view.view {
@@ -243,7 +594,28 @@ impl DiffDialogState {
                 Some("Refresh Folder is available for Folder comparisons".into());
         }
     }
+
+    fn ensure_memory_replacement_is_safe(&mut self) -> Result<(), String> {
+        if self
+            .text_views
+            .values()
+            .any(|model| model.origin == TextCompareOrigin::Memory && model.has_dirty())
+        {
+            let error = "Opening another comparison would discard edited in-memory text. Save As, or close Diff and choose Save modified, Discard, or Cancel before replacing it.".to_string();
+            self.workspace.error = Some(error.clone());
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn cancel_close_prompt(&mut self, open: &mut bool) {
+        self.close_prompt = false;
+        *open = true;
+    }
+
     pub fn open_payload(&mut self, payload: DiffOpenPayload) -> Result<(), String> {
+        self.ensure_memory_replacement_is_safe()?;
         self.open = true;
         self.clear_runtime_resources();
         self.workspace = DiffWorkspace::new(self.persistence.config.clone());
@@ -254,6 +626,7 @@ impl DiffDialogState {
     }
 
     fn open_and_record(&mut self, left: String, right: String) -> Result<(), String> {
+        self.ensure_memory_replacement_is_safe()?;
         self.workspace.open_paths(left.clone(), right.clone())?;
         let mode = match self.workspace.current_view.view {
             DiffView::TextCompare(_) => crate::diff::persistence::ComparisonModeV1::Text,
@@ -273,6 +646,15 @@ impl DiffDialogState {
         use crate::diff::persistence::{
             ComparisonModeV1, ContentComparisonModeV1, SavedDiffSessionV1,
         };
+        if matches!(
+            &self.workspace.current_view.view,
+            DiffView::TextCompare(state) if state.origin == TextCompareOrigin::Memory
+        ) {
+            return Err(
+                "In-memory text comparisons cannot be saved as named sessions; use Export or Save As"
+                    .into(),
+            );
+        }
         let (mode, includes, excludes, display, content) = match &self.workspace.current_view.view {
             DiffView::TextCompare(_) => (
                 ComparisonModeV1::Text,
@@ -402,14 +784,15 @@ impl DiffDialogState {
             visible_whitespace: text_model.is_some_and(|m| m.visible_whitespace),
             sync_vertical: text_model.is_none_or(|m| m.scroll.sync_vertical),
             sync_horizontal: text_model.is_none_or(|m| m.scroll.sync_horizontal),
-            projection_mode: text_model.map_or(0, |m| {
-                if m.projection_mode
-                    == crate::diff::text_compare::RowProjectionMode::DifferencesOnly
-                {
-                    1
-                } else {
-                    0
-                }
+            projection_mode: text_model.map_or(0, |m| match m.projection_mode {
+                crate::diff::text_compare::RowProjectionMode::All => 0,
+                crate::diff::text_compare::RowProjectionMode::DifferencesOnly => 1,
+                crate::diff::text_compare::RowProjectionMode::IdenticalOnly => 2,
+            }),
+            projection_context: text_model.map_or(3, |m| {
+                m.projection_context
+                    .min(crate::diff::text_compare::MAX_ROW_PROJECTION_CONTEXT)
+                    as u8
             }),
         })
     }
@@ -418,6 +801,7 @@ impl DiffDialogState {
         &mut self,
         session: &crate::diff::persistence::SavedDiffSessionV1,
     ) -> Result<(), String> {
+        self.ensure_memory_replacement_is_safe()?;
         let (left, right) =
             crate::diff::persistence::reopen_session(session).map_err(|e| e.to_string())?;
         self.workspace.settings.pane_split = session.pane_split;
@@ -438,6 +822,7 @@ impl DiffDialogState {
                 session.sync_vertical,
                 session.sync_horizontal,
                 session.projection_mode,
+                session.projection_context,
             ),
         );
         if let DiffView::FolderCompare(folder) = &mut self.workspace.current_view.view {
@@ -554,6 +939,7 @@ impl DiffDialogState {
         if let Some(position) = initial_position {
             window = window.default_pos(position);
         }
+        let mut text_input_request = None;
         let response = window.show(ctx, |ui| {
             let body_viewport = DiffViewport::remaining(ui);
             allocate_viewport(ui, body_viewport, |ui| {
@@ -599,6 +985,19 @@ impl DiffDialogState {
                                     &mut self.workspace,
                                     crate::diff::model::DiffSide::Right,
                                 );
+                                if ui.button("Compare Text…").clicked() {
+                                    text_input_request = Some(TextInputPurpose::NewComparison);
+                                }
+                                if matches!(
+                                    &self.workspace.current_view.view,
+                                    DiffView::TextCompare(state)
+                                        if state.origin == TextCompareOrigin::Memory
+                                ) && ui.button("Edit Inputs…").clicked()
+                                {
+                                    text_input_request = Some(TextInputPurpose::EditInputs {
+                                        view_id: self.workspace.current_view.id,
+                                    });
+                                }
                                 if ui
                                     .button("Compare")
                                     .on_hover_text("Compare/change paths (Ctrl+O)")
@@ -624,19 +1023,33 @@ impl DiffDialogState {
                                         self.swap_sides();
                                         ui.close();
                                     }
-                                    let files = matches!(
+                                    let active_comparison = matches!(
                                         self.workspace.current_view.view,
                                         DiffView::TextCompare(_) | DiffView::BinaryCompare(_)
                                     );
+                                    let reloadable = matches!(
+                                        &self.workspace.current_view.view,
+                                        DiffView::TextCompare(state)
+                                            if state.origin == TextCompareOrigin::FileBacked
+                                    ) || matches!(
+                                        self.workspace.current_view.view,
+                                        DiffView::BinaryCompare(_)
+                                    );
                                     if ui
-                                        .add_enabled(files, egui::Button::new("Reload Files"))
+                                        .add_enabled(reloadable, egui::Button::new("Reload Files"))
+                                        .on_disabled_hover_text(
+                                            "In-memory text has no files to reload",
+                                        )
                                         .clicked()
                                     {
                                         self.reload_files();
                                         ui.close();
                                     }
                                     if ui
-                                        .add_enabled(files, egui::Button::new("Recompare"))
+                                        .add_enabled(
+                                            active_comparison,
+                                            egui::Button::new("Recompare"),
+                                        )
                                         .clicked()
                                     {
                                         self.recompare();
@@ -672,6 +1085,15 @@ impl DiffDialogState {
                 if let Some(error) = outcome.error {
                     self.workspace.error = Some(error);
                 }
+                if let Some(text_view::TextViewAction::CompareSelectionWithClipboard { view_id }) =
+                    outcome.text_action
+                    && let Err(error) = self.compare_selection_with_clipboard_using(view_id, || {
+                        crate::actions::clipboard::get_text()
+                            .map_err(|error| format!("Clipboard text is unavailable: {error}"))
+                    })
+                {
+                    self.workspace.error = Some(error);
+                }
                 if let Some(recent) = outcome.recent_to_open {
                     match crate::diff::persistence::reopen_recent(&recent) {
                         Ok((left, right)) => {
@@ -685,6 +1107,10 @@ impl DiffDialogState {
             })
             .inner
         });
+        if let Some(purpose) = text_input_request {
+            self.begin_text_input(purpose);
+        }
+        self.show_text_input(ctx);
         self.show_operation_preview(ctx);
         if let Some(response) = response
             && let Some(inner_size) = response.inner
@@ -709,10 +1135,12 @@ impl DiffDialogState {
                             let ok = self.text_views.values_mut().all(|m| {
                                 let mut ok = true;
                                 if m.left.is_dirty() {
-                                    ok &= m.save(crate::diff::model::DiffSide::Left)
+                                    ok &=
+                                        text_view::save_side(m, crate::diff::model::DiffSide::Left)
                                 }
                                 if m.right.is_dirty() {
-                                    ok &= m.save(crate::diff::model::DiffSide::Right)
+                                    ok &=
+                                        text_view::save_side(m, crate::diff::model::DiffSide::Right)
                                 }
                                 ok
                             });
@@ -726,8 +1154,7 @@ impl DiffDialogState {
                             open = false;
                         }
                         if ui.button("Cancel").clicked() {
-                            self.close_prompt = false;
-                            open = true;
+                            self.cancel_close_prompt(&mut open);
                         }
                     });
                 });
@@ -751,6 +1178,7 @@ impl DiffDialogState {
         let view_id = self.workspace.current_view.id;
         let settings = self.workspace.settings.clone();
         let mut action = folder_view::FolderViewAction::Noop;
+        let mut text_action = None;
         let mut render_error = None;
         let mut recent_to_open = None;
         match &mut self.workspace.current_view.view {
@@ -772,37 +1200,11 @@ impl DiffDialogState {
                 if !self.text_views.contains_key(&view_id) {
                     match crate::diff::model::TextViewModel::load(s, &settings) {
                         Ok(mut m) => {
-                            m.rules.ignore_all_whitespace = settings.ignore_whitespace;
-                            m.rules.case_sensitive = settings.case_sensitive;
-                            m.rules.replacements = self
-                                .persistence
-                                .replacement_rules
-                                .iter()
-                                .filter(|r| r.enabled)
-                                .map(|r| crate::diff::text_compare::RegexReplacement {
-                                    pattern: r.pattern.clone(),
-                                    replacement: r.replacement.clone(),
-                                })
-                                .collect();
-                            m.rules.unimportant_sections = self
-                                .persistence
-                                .unimportant_section_rules
-                                .iter()
-                                .filter(|r| r.enabled)
-                                .map(|r| r.pattern.clone())
-                                .collect();
-                            m.schedule_compare();
-                            if let Some((details, whitespace, vertical, horizontal, projection)) =
+                            configure_text_model(&mut m, &settings, &self.persistence);
+                            if let Some(preferences) =
                                 self.restored_text_preferences.remove(&view_id)
                             {
-                                m.text_details_open = details;
-                                m.visible_whitespace = whitespace;
-                                m.scroll.set_sync(vertical, horizontal);
-                                m.projection_mode = if projection == 1 {
-                                    crate::diff::text_compare::RowProjectionMode::DifferencesOnly
-                                } else {
-                                    crate::diff::text_compare::RowProjectionMode::All
-                                };
+                                apply_restored_text_preferences(&mut m, preferences);
                             }
                             self.text_views.insert(view_id, m);
                         }
@@ -811,32 +1213,39 @@ impl DiffDialogState {
                         }
                     }
                 }
-                let tag = crate::diff::watch::WatchTag {
-                    workspace: workspace_id,
-                    view: view_id,
-                    generation: 1,
-                };
-                if self
-                    .watch_views
-                    .get(&view_id)
-                    .is_none_or(|watch| watch.tag != tag)
-                {
-                    self.watch_views.insert(
-                        view_id,
-                        crate::diff::watch::ViewWatchRuntime::text(
-                            tag,
-                            s.left.clone(),
-                            s.right.clone(),
-                        ),
-                    );
+                if s.origin == TextCompareOrigin::Memory {
+                    self.watch_views.remove(&view_id);
+                } else {
+                    let tag = crate::diff::watch::WatchTag {
+                        workspace: workspace_id,
+                        view: view_id,
+                        generation: 1,
+                    };
+                    if self
+                        .watch_views
+                        .get(&view_id)
+                        .is_none_or(|watch| watch.tag != tag)
+                    {
+                        self.watch_views.insert(
+                            view_id,
+                            crate::diff::watch::ViewWatchRuntime::text(
+                                tag,
+                                s.left.clone(),
+                                s.right.clone(),
+                            ),
+                        );
+                    }
                 }
                 if let Some(m) = self.text_views.get_mut(&view_id) {
                     let dirty = [m.left.is_dirty(), m.right.is_dirty()];
-                    let actions = self
-                        .watch_views
-                        .get_mut(&view_id)
-                        .map(|w| w.poll(std::time::Instant::now(), dirty))
-                        .unwrap_or_default();
+                    let actions = if s.origin == TextCompareOrigin::Memory {
+                        Vec::new()
+                    } else {
+                        self.watch_views
+                            .get_mut(&view_id)
+                            .map(|w| w.poll(std::time::Instant::now(), dirty))
+                            .unwrap_or_default()
+                    };
                     for action in actions {
                         match action {
                             crate::diff::watch::ViewWatchAction::TextReload { side, loaded } => {
@@ -881,14 +1290,22 @@ impl DiffDialogState {
                             });
                         }
                     }
-                    text_view::show(ui, workspace_id, view_id, m);
+                    text_action = text_view::show(ui, workspace_id, view_id, m);
                 }
-                ui.label(format!(
-                    "Right: {}",
-                    s.right
-                        .as_ref()
-                        .map_or("(missing)".into(), |p| p.display().to_string())
-                ));
+                let source_label = |path: Option<&std::path::PathBuf>| {
+                    if s.origin == TextCompareOrigin::Memory {
+                        "In-memory text".to_string()
+                    } else {
+                        path.map_or_else(
+                            || "(missing folder side)".into(),
+                            |path| path.display().to_string(),
+                        )
+                    }
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("Left: {}", source_label(s.left.as_ref())));
+                    ui.label(format!("Right: {}", source_label(s.right.as_ref())));
+                });
             }
             DiffView::BinaryCompare(s) => {
                 if let std::collections::hash_map::Entry::Vacant(entry) =
@@ -1009,6 +1426,7 @@ impl DiffDialogState {
         }
         WorkspaceRenderOutcome {
             folder_action: action,
+            text_action,
             error: render_error,
             recent_to_open,
         }
@@ -1259,6 +1677,20 @@ impl DiffDialogState {
 
     /// The single Back transition used by both keyboard and button activation.
     fn navigate_back(&mut self) -> bool {
+        let current_view_id = self.workspace.current_view.id;
+        if matches!(
+            &self.workspace.current_view.view,
+            DiffView::TextCompare(state) if state.origin == TextCompareOrigin::Memory
+        ) && self
+            .text_views
+            .get(&current_view_id)
+            .is_some_and(|model| model.has_dirty())
+        {
+            self.workspace.error = Some(
+                "Going Back would discard edited in-memory text. Save As first, or close Diff and choose Save modified, Discard, or Cancel.".into(),
+            );
+            return false;
+        }
         let changed_relative = match &self.workspace.current_view.view {
             DiffView::TextCompare(state) => self
                 .text_views
@@ -1632,6 +2064,56 @@ mod tests {
     use super::*;
     use crate::diff::file_ops::{ExecutionReport, ItemOutcome, ItemResult, OperationEvent};
     use crate::diff::model::{DiffView, FolderCompareState, RetainedView};
+
+    fn dirty_memory_dialog() -> (DiffDialogState, u64) {
+        let mut dialog = DiffDialogState {
+            open: true,
+            ..Default::default()
+        };
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "initial left".into();
+        draft.right = "initial right".into();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let view_id = dialog.workspace.current_view.id;
+        dialog
+            .text_views
+            .get_mut(&view_id)
+            .unwrap()
+            .left
+            .replace_source("edited scratch".into())
+            .unwrap();
+        (dialog, view_id)
+    }
+
+    fn memory_dialog_with_inputs(left: &str, right: &str) -> (DiffDialogState, u64) {
+        let mut dialog = DiffDialogState::default();
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = left.to_owned();
+        draft.right = right.to_owned();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let view_id = dialog.workspace.current_view.id;
+        (dialog, view_id)
+    }
+
+    fn push_memory_child(dialog: &mut DiffDialogState, left: &str, right: &str) -> u64 {
+        let view_id = dialog.workspace.push_memory_text_compare();
+        let model = crate::diff::model::TextViewModel::new_memory(
+            left.to_owned(),
+            right.to_owned(),
+            &dialog.workspace.settings,
+        )
+        .unwrap();
+        dialog.text_views.insert(view_id, model);
+        view_id
+    }
 
     fn folder_dialog(id: u64) -> DiffDialogState {
         let mut dialog = DiffDialogState::default();
@@ -3039,5 +3521,898 @@ mod tests {
             assert!(editor >= 24.0);
             assert!(editor * 2.0 <= width.max(48.0));
         }
+    }
+
+    #[test]
+    fn memory_text_explicit_paste_reads_once_and_preserves_input_on_failure_or_oversize() {
+        use std::cell::Cell;
+
+        let mut accepted = "accepted".to_string();
+        let reads = Cell::new(0);
+        paste_memory_input(&mut accepted, || {
+            reads.set(reads.get() + 1);
+            Ok("pasted α\r\ntext".into())
+        })
+        .unwrap();
+        assert_eq!(reads.get(), 1);
+        assert_eq!(accepted, "pasted α\r\ntext");
+
+        let before = accepted.clone();
+        let reads = Cell::new(0);
+        assert!(
+            paste_memory_input(&mut accepted, || {
+                reads.set(reads.get() + 1);
+                Err("clipboard has no plain text".into())
+            })
+            .is_err()
+        );
+        assert_eq!(reads.get(), 1);
+        assert_eq!(accepted, before);
+
+        let reads = Cell::new(0);
+        let too_large = "λ".repeat(crate::diff::model::MEMORY_TEXT_MAX_BYTES / 2 + 1);
+        assert!(
+            paste_memory_input(&mut accepted, || {
+                reads.set(reads.get() + 1);
+                Ok(too_large)
+            })
+            .is_err()
+        );
+        assert_eq!(reads.get(), 1);
+        assert_eq!(accepted, before);
+    }
+
+    #[test]
+    fn memory_text_input_renders_two_editors_and_keeps_invalid_draft_open() {
+        let context = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0));
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(screen);
+        let mut dialog = DiffDialogState::default();
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let draft = dialog.text_input.as_mut().unwrap();
+        draft.left = "typed left".into();
+        draft.right = "typed right".into();
+        let frame = context.run_ui(input, |ctx| dialog.show_text_input(ctx));
+        assert!(!frame.shapes.is_empty());
+        frame.drop_without_applying_deltas();
+        assert_eq!(dialog.text_input.as_ref().unwrap().left, "typed left");
+        assert_eq!(dialog.text_input.as_ref().unwrap().right, "typed right");
+
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "x".repeat(crate::diff::model::MEMORY_TEXT_MAX_BYTES + 1);
+        let (mut draft, error) = dialog.apply_text_input(draft).unwrap_err();
+        draft.error = Some(error);
+        assert!(dialog.workspace.navigation_stack.is_empty());
+        assert_eq!(dialog.text_views.len(), 0);
+        assert!(draft.error.is_some());
+        assert!(draft.left.len() > crate::diff::model::MEMORY_TEXT_MAX_BYTES);
+    }
+
+    #[test]
+    fn memory_text_comparisons_are_retained_private_and_absent_from_session_history() {
+        let mut dialog = DiffDialogState::default();
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "first scratch sentinel".into();
+        draft.right = "first right".into();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let first_id = dialog.workspace.current_view.id;
+        assert_eq!(dialog.persistence.recent_comparisons.len(), 0);
+        assert!(!dialog.watch_views.contains_key(&first_id));
+        assert!(dialog.snapshot_session("scratch".into()).is_err());
+
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "second left".into();
+        draft.right = String::new();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let second_id = dialog.workspace.current_view.id;
+        assert_ne!(first_id, second_id);
+        assert_eq!(
+            dialog.workspace.navigation_stack.last().unwrap().id,
+            first_id
+        );
+        assert!(dialog.text_views.contains_key(&first_id));
+
+        assert!(dialog.navigate_back());
+        assert_eq!(dialog.workspace.current_view.id, first_id);
+        assert_eq!(
+            dialog.text_views.get(&first_id).unwrap().left.source(),
+            "first scratch sentinel"
+        );
+        assert!(dialog.snapshot_session("scratch".into()).is_err());
+        let debug = format!("{:?}", dialog.workspace);
+        assert!(!debug.contains("first scratch sentinel"));
+    }
+
+    #[test]
+    fn m3c_selected_raw_lines_compare_with_one_clipboard_read_and_back_restores_original() {
+        use crate::diff::text_compare::IgnoredLineRange;
+        use std::cell::Cell;
+
+        let (mut dialog, origin_id) =
+            memory_dialog_with_inputs("α\r\nignored\r\nlast\r\n", "original right");
+        let origin = dialog.text_views.get_mut(&origin_id).unwrap();
+        origin
+            .left
+            .replace_source("edited α\r\nignored\r\nlast\r\n".into())
+            .unwrap();
+        origin
+            .left
+            .set_ignored_line_ranges(vec![IgnoredLineRange { start: 1, end: 2 }])
+            .unwrap();
+        assert!(origin.select_source_line(crate::diff::model::DiffSide::Left, 1, false));
+        let original_source = origin.left.source().to_owned();
+        let original_revision = origin.left.revision;
+        let original_dirty = origin.left.is_dirty();
+        let original_has_undo = origin.left.can_undo();
+        let original_selection = origin.source_line_selection;
+        let original_ignored = origin.left.ignored_line_ranges().to_vec();
+        let original_recents = dialog.persistence.recent_comparisons.clone();
+        let reads = Cell::new(0);
+
+        dialog
+            .compare_selection_with_clipboard_using(origin_id, || {
+                reads.set(reads.get() + 1);
+                Ok("clipboard\r\ntext".into())
+            })
+            .unwrap();
+
+        assert_eq!(reads.get(), 1);
+        let comparison_id = dialog.workspace.current_view.id;
+        assert_ne!(comparison_id, origin_id);
+        let comparison = dialog.text_views.get(&comparison_id).unwrap();
+        assert_eq!(comparison.left.source(), "ignored\r\n");
+        assert_eq!(comparison.right.source(), "clipboard\r\ntext");
+        assert_eq!(
+            dialog.workspace.navigation_stack.last().unwrap().id,
+            origin_id
+        );
+        assert_eq!(dialog.persistence.recent_comparisons, original_recents);
+
+        assert!(dialog.navigate_back());
+        assert_eq!(dialog.workspace.current_view.id, origin_id);
+        let origin = dialog.text_views.get(&origin_id).unwrap();
+        assert_eq!(origin.left.source(), original_source);
+        assert_eq!(origin.left.revision, original_revision);
+        assert_eq!(origin.left.is_dirty(), original_dirty);
+        assert_eq!(origin.left.can_undo(), original_has_undo);
+        assert_eq!(origin.source_line_selection, original_selection);
+        assert_eq!(origin.left.ignored_line_ranges(), original_ignored);
+    }
+
+    #[test]
+    fn m3c_clipboard_compare_rejects_missing_selection_and_preserves_on_error_or_oversize() {
+        use std::cell::Cell;
+
+        let (mut dialog, origin_id) = memory_dialog_with_inputs("left\nselected", "right");
+        let initial_navigation = dialog.workspace.navigation_stack.clone();
+        let initial_sources = (
+            dialog.text_views[&origin_id].left.source().to_owned(),
+            dialog.text_views[&origin_id].right.source().to_owned(),
+        );
+        let initial_source_ids = (
+            dialog.text_views[&origin_id].left.source_id(),
+            dialog.text_views[&origin_id].right.source_id(),
+        );
+        let reads = Cell::new(0);
+        let error = dialog
+            .compare_selection_with_clipboard_using(origin_id, || {
+                reads.set(reads.get() + 1);
+                Ok("clipboard".into())
+            })
+            .unwrap_err();
+        assert!(error.contains("Select one or more source lines"));
+        assert_eq!(reads.get(), 0, "missing selection must not read clipboard");
+        assert_eq!(dialog.workspace.current_view.id, origin_id);
+        assert_eq!(dialog.workspace.navigation_stack, initial_navigation);
+        assert_eq!(
+            (
+                dialog.text_views[&origin_id].left.source(),
+                dialog.text_views[&origin_id].right.source(),
+            ),
+            (initial_sources.0.as_str(), initial_sources.1.as_str())
+        );
+        assert_eq!(
+            (
+                dialog.text_views[&origin_id].left.source_id(),
+                dialog.text_views[&origin_id].right.source_id(),
+            ),
+            initial_source_ids
+        );
+
+        let model = dialog.text_views.get_mut(&origin_id).unwrap();
+        model.select_source_line(crate::diff::model::DiffSide::Left, 1, false);
+        model
+            .left
+            .replace_source("changed\nselected".into())
+            .unwrap();
+        let reads = Cell::new(0);
+        assert!(
+            dialog
+                .compare_selection_with_clipboard_using(origin_id, || {
+                    reads.set(reads.get() + 1);
+                    Ok("clipboard".into())
+                })
+                .unwrap_err()
+                .contains("Source selection is stale")
+        );
+        assert_eq!(reads.get(), 0, "stale selection must not read clipboard");
+
+        dialog
+            .text_views
+            .get_mut(&origin_id)
+            .unwrap()
+            .select_source_line(crate::diff::model::DiffSide::Left, 1, false);
+        let accepted_source = dialog.text_views[&origin_id].left.source().to_owned();
+        let before_navigation = dialog.workspace.navigation_stack.clone();
+        let reads = Cell::new(0);
+        assert!(
+            dialog
+                .compare_selection_with_clipboard_using(origin_id, || {
+                    reads.set(reads.get() + 1);
+                    Err("clipboard has no plain text".into())
+                })
+                .unwrap_err()
+                .contains("clipboard has no plain text")
+        );
+        assert_eq!(reads.get(), 1);
+
+        let oversized = "x".repeat(crate::diff::model::MEMORY_TEXT_MAX_BYTES + 1);
+        let reads = Cell::new(0);
+        assert!(
+            dialog
+                .compare_selection_with_clipboard_using(origin_id, || {
+                    reads.set(reads.get() + 1);
+                    Ok(oversized)
+                })
+                .unwrap_err()
+                .contains("per-side limit")
+        );
+        assert_eq!(reads.get(), 1);
+        assert_eq!(dialog.workspace.current_view.id, origin_id);
+        assert_eq!(dialog.workspace.navigation_stack, before_navigation);
+        assert_eq!(dialog.text_views[&origin_id].left.source(), accepted_source);
+
+        dialog
+            .compare_selection_with_clipboard_using(origin_id, || Ok(String::new()))
+            .unwrap();
+        let empty_comparison = dialog.text_views[&dialog.workspace.current_view.id]
+            .right
+            .source();
+        assert_eq!(empty_comparison, "");
+        assert_eq!(
+            dialog.workspace.status.as_deref(),
+            Some("Selected text compared with empty clipboard text; empty text is valid")
+        );
+    }
+
+    #[test]
+    fn m3c_file_folder_child_selection_compares_once_and_back_restores_file_state() {
+        use std::cell::Cell;
+
+        let left_root = tempfile::tempdir().unwrap();
+        let right_root = tempfile::tempdir().unwrap();
+        let left_path = left_root.path().join("source.txt");
+        let right_path = right_root.path().join("source.txt");
+        std::fs::write(&left_path, "before\r\nselected\r\nlast\r\n").unwrap();
+        std::fs::write(&right_path, "right side\r\n").unwrap();
+
+        let mut dialog = DiffDialogState::default();
+        dialog
+            .workspace
+            .open_paths(
+                left_root.path().display().to_string(),
+                right_root.path().display().to_string(),
+            )
+            .unwrap();
+        let folder_id = dialog.workspace.current_view.id;
+        dialog
+            .workspace
+            .push_file_compare(
+                std::path::PathBuf::from("source.txt"),
+                Some(left_path.clone()),
+                Some(right_path.clone()),
+            )
+            .unwrap();
+        let origin_id = dialog.workspace.current_view.id;
+        let DiffView::TextCompare(state) = &dialog.workspace.current_view.view else {
+            panic!("folder child is a text comparison")
+        };
+        assert_eq!(state.origin, TextCompareOrigin::FileBacked);
+        assert_eq!(
+            state.relative_path.as_deref(),
+            Some(std::path::Path::new("source.txt"))
+        );
+        let mut model =
+            crate::diff::model::TextViewModel::load(state, &dialog.workspace.settings).unwrap();
+        configure_text_model(&mut model, &dialog.workspace.settings, &dialog.persistence);
+        assert_eq!(model.left.source(), "before\r\nselected\r\nlast\r\n");
+        assert!(model.select_source_line(crate::diff::model::DiffSide::Left, 1, false));
+        let source_id = model.left.source_id();
+        let source_revision = model.left.revision;
+        let original_recents = dialog.persistence.recent_comparisons.clone();
+        dialog.text_views.insert(origin_id, model);
+
+        let reads = Cell::new(0);
+        dialog
+            .compare_selection_with_clipboard_using(origin_id, || {
+                reads.set(reads.get() + 1);
+                Ok("clipboard text".into())
+            })
+            .unwrap();
+        assert_eq!(reads.get(), 1);
+        let memory_id = dialog.workspace.current_view.id;
+        assert_eq!(dialog.text_views[&memory_id].left.source(), "selected\r\n");
+        assert_eq!(
+            dialog.text_views[&memory_id].right.source(),
+            "clipboard text"
+        );
+        assert_eq!(dialog.persistence.recent_comparisons, original_recents);
+        assert_eq!(
+            std::fs::read_to_string(&left_path).unwrap(),
+            "before\r\nselected\r\nlast\r\n"
+        );
+
+        assert!(dialog.navigate_back());
+        assert_eq!(dialog.workspace.current_view.id, origin_id);
+        let restored = &dialog.text_views[&origin_id];
+        assert_eq!(restored.origin, TextCompareOrigin::FileBacked);
+        assert_eq!(restored.left_path.as_deref(), Some(left_path.as_path()));
+        assert_eq!(restored.left.source_id(), source_id);
+        assert_eq!(restored.left.revision, source_revision);
+        assert_eq!(restored.left.source(), "before\r\nselected\r\nlast\r\n");
+        assert!(dialog.navigate_back());
+        assert_eq!(dialog.workspace.current_view.id, folder_id);
+    }
+
+    #[test]
+    fn m3c_projection_preferences_round_trip_without_source_annotations() {
+        use crate::diff::text_compare::RowProjectionMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let left_path = directory.path().join("left.txt");
+        let right_path = directory.path().join("right.txt");
+        std::fs::write(&left_path, "same\nleft").unwrap();
+        std::fs::write(&right_path, "same\nright").unwrap();
+        let left = left_path.display().to_string();
+        let right = right_path.display().to_string();
+
+        let mut dialog = DiffDialogState::default();
+        dialog.open_and_record(left, right).unwrap();
+        let original_id = dialog.workspace.current_view.id;
+        let DiffView::TextCompare(state) = &dialog.workspace.current_view.view else {
+            panic!("text comparison opened")
+        };
+        let mut model =
+            crate::diff::model::TextViewModel::load(state, &dialog.workspace.settings).unwrap();
+        model.text_details_open = true;
+        model.visible_whitespace = true;
+        model.scroll.set_sync(false, true);
+        model.set_row_projection(RowProjectionMode::IdenticalOnly, 7);
+        dialog.text_views.insert(original_id, model);
+
+        let session = dialog
+            .snapshot_session("projection preferences".into())
+            .unwrap();
+        assert_eq!(session.projection_mode, 2);
+        assert_eq!(session.projection_context, 7);
+        let serialized = serde_json::to_string(&session).unwrap();
+        assert!(!serialized.contains("bookmarks"));
+        assert!(!serialized.contains("source_line_selection"));
+        assert!(!serialized.contains("same\\nleft"));
+
+        dialog.reopen_saved_session(&session).unwrap();
+        let reopened_id = dialog.workspace.current_view.id;
+        let preferences = dialog
+            .restored_text_preferences
+            .remove(&reopened_id)
+            .unwrap();
+        assert_eq!(preferences, (true, true, false, true, 2, 7));
+        let mut restored = crate::diff::model::TextViewModel::new_memory(
+            "one".into(),
+            "two".into(),
+            &Default::default(),
+        )
+        .unwrap();
+        apply_restored_text_preferences(&mut restored, preferences);
+        assert_eq!(restored.projection_mode, RowProjectionMode::IdenticalOnly);
+        assert_eq!(restored.projection_context, 7);
+        assert!(restored.text_details_open && restored.visible_whitespace);
+    }
+
+    #[test]
+    fn memory_text_edit_inputs_apply_only_after_validation_and_keep_memory_origin() {
+        let mut dialog = DiffDialogState::default();
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "before left".into();
+        draft.right = "before right".into();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let view_id = dialog.workspace.current_view.id;
+        let model = dialog.text_views.get(&view_id).unwrap();
+        let left_revision = model.left.revision;
+        let left_source = model.left.source().to_owned();
+
+        dialog.begin_text_input(TextInputPurpose::EditInputs { view_id });
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "after left\r\n".into();
+        draft.right = "after right".into();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let model = dialog.text_views.get(&view_id).unwrap();
+        assert_eq!(model.origin, TextCompareOrigin::Memory);
+        assert_eq!(model.left.source(), "after left\r\n");
+        assert_eq!(model.left.revision, left_revision + 1);
+        assert!(model.left.is_dirty());
+
+        let before_cancel = model.left.source().to_owned();
+        dialog.begin_text_input(TextInputPurpose::EditInputs { view_id });
+        dialog.text_input = None;
+        assert_eq!(
+            dialog.text_views.get(&view_id).unwrap().left.source(),
+            before_cancel
+        );
+        assert_ne!(before_cancel, left_source);
+    }
+
+    #[test]
+    fn memory_text_edit_inputs_reject_stale_revision_and_view_drafts() {
+        let mut dialog = DiffDialogState::default();
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "initial left".into();
+        draft.right = "initial right".into();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let view_id = dialog.workspace.current_view.id;
+
+        dialog.begin_text_input(TextInputPurpose::EditInputs { view_id });
+        let mut stale_revision_draft = dialog.text_input.take().unwrap();
+        stale_revision_draft.left = "stale draft text".into();
+        let model = dialog.text_views.get_mut(&view_id).unwrap();
+        model
+            .left
+            .replace_source("newer accepted text".into())
+            .unwrap();
+        let latest_revision = model.left.revision;
+        let latest_source = model.left.source().to_owned();
+        let (stale_revision_draft, error) =
+            dialog.apply_text_input(stale_revision_draft).unwrap_err();
+        assert!(error.contains("changed while Edit Inputs was open"));
+        assert_eq!(stale_revision_draft.left, "stale draft text");
+        let model = dialog.text_views.get(&view_id).unwrap();
+        assert_eq!(model.left.source(), latest_source);
+        assert_eq!(model.left.revision, latest_revision);
+
+        dialog.begin_text_input(TextInputPurpose::EditInputs { view_id });
+        let mut stale_view_draft = dialog.text_input.take().unwrap();
+        stale_view_draft.left = "draft for previous view".into();
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut other_view = dialog.text_input.take().unwrap();
+        other_view.left = "other view left".into();
+        other_view.right = "other view right".into();
+        dialog
+            .apply_text_input(other_view)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let current_view_id = dialog.workspace.current_view.id;
+        assert_ne!(current_view_id, view_id);
+
+        let (stale_view_draft, error) = dialog.apply_text_input(stale_view_draft).unwrap_err();
+        assert!(error.contains("active comparison changed"));
+        assert_eq!(stale_view_draft.left, "draft for previous view");
+        assert_eq!(
+            dialog.text_views.get(&view_id).unwrap().left.source(),
+            latest_source
+        );
+        assert_eq!(dialog.workspace.current_view.id, current_view_id);
+    }
+
+    #[test]
+    fn memory_text_edit_inputs_reject_equal_revision_swapped_sources() {
+        let mut dialog = DiffDialogState::default();
+        dialog.begin_text_input(TextInputPurpose::NewComparison);
+        let mut draft = dialog.text_input.take().unwrap();
+        draft.left = "initial left".into();
+        draft.right = "initial right".into();
+        dialog
+            .apply_text_input(draft)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let view_id = dialog.workspace.current_view.id;
+
+        let model = dialog.text_views.get_mut(&view_id).unwrap();
+        model.left.replace_source("edited left".into()).unwrap();
+        model.right.replace_source("edited right".into()).unwrap();
+        assert_eq!(model.left.revision, model.right.revision);
+        assert!(model.left.can_undo());
+        assert!(model.right.can_undo());
+        let original_left_source_id = model.left.source_id();
+        let original_right_source_id = model.right.source_id();
+
+        dialog.begin_text_input(TextInputPurpose::EditInputs { view_id });
+        let mut stale_draft = dialog.text_input.take().unwrap();
+        stale_draft.left = "draft left".into();
+        stale_draft.right = "draft right".into();
+
+        dialog.swap_sides();
+        let model = dialog.text_views.get(&view_id).unwrap();
+        assert_eq!(model.left.source_id(), original_right_source_id);
+        assert_eq!(model.right.source_id(), original_left_source_id);
+        assert_eq!(model.left.revision, model.right.revision);
+        assert_eq!(model.left.source(), "edited right");
+        assert_eq!(model.right.source(), "edited left");
+
+        let (stale_draft, error) = dialog.apply_text_input(stale_draft).unwrap_err();
+        assert!(error.contains("sources changed while Edit Inputs was open"));
+        assert_eq!(stale_draft.left, "draft left");
+        assert_eq!(stale_draft.right, "draft right");
+
+        let model = dialog.text_views.get_mut(&view_id).unwrap();
+        assert_eq!(model.left.source_id(), original_right_source_id);
+        assert_eq!(model.right.source_id(), original_left_source_id);
+        assert_eq!(model.left.source(), "edited right");
+        assert_eq!(model.right.source(), "edited left");
+        assert!(model.left.can_undo());
+        assert!(model.right.can_undo());
+
+        model.active_side = crate::diff::model::DiffSide::Left;
+        assert!(model.undo());
+        assert_eq!(model.left.source(), "initial right");
+        assert_eq!(model.right.source(), "edited left");
+    }
+
+    #[test]
+    fn memory_text_dirty_replacement_routes_preserve_retained_document_and_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let left_path = directory.path().join("left.txt");
+        let right_path = directory.path().join("right.txt");
+        std::fs::write(&left_path, "left file").unwrap();
+        std::fs::write(&right_path, "right file").unwrap();
+        let left = left_path.display().to_string();
+        let right = right_path.display().to_string();
+
+        let (mut dialog, view_id) = dirty_memory_dialog();
+        dialog.workspace.settings.pane_split = 0.63;
+        dialog.workspace.settings.syntax_theme = "preserved theme".into();
+        dialog.persistence.recent_comparisons = vec![crate::diff::persistence::DisplayPathPairV1 {
+            left: "preserved recent left".into(),
+            right: "preserved recent right".into(),
+            mode: crate::diff::persistence::ComparisonModeV1::Text,
+        }];
+        dialog.persistence.replacement_rules = vec![crate::diff::settings::ReplacementRuleV1 {
+            id: "preserved-rule".into(),
+            pattern: "before".into(),
+            replacement: "after".into(),
+            enabled: true,
+        }];
+        dialog.persistence.unimportant_section_rules =
+            vec![crate::diff::settings::UnimportantSectionRuleV1 {
+                id: "preserved-section".into(),
+                pattern: "section".into(),
+                enabled: true,
+            }];
+        let current_view = dialog.workspace.current_view.clone();
+        let navigation_stack = dialog.workspace.navigation_stack.clone();
+        let visible_paths = (
+            dialog.workspace.left_visible.clone(),
+            dialog.workspace.right_visible.clone(),
+        );
+        let settings = dialog.workspace.settings.clone();
+        let persistence = dialog.persistence.clone();
+        let (left_source, left_revision, left_saved_revision, left_can_undo) = {
+            let model = dialog.text_views.get(&view_id).unwrap();
+            (
+                model.left.source().to_owned(),
+                model.left.revision,
+                model.left.saved_revision,
+                model.left.can_undo(),
+            )
+        };
+        assert!(left_can_undo);
+
+        let assert_preserved = |dialog: &DiffDialogState| {
+            assert!(dialog.open, "the active comparison remains open");
+            assert_eq!(dialog.workspace.current_view, current_view);
+            assert_eq!(dialog.workspace.navigation_stack, navigation_stack);
+            assert_eq!(
+                (
+                    dialog.workspace.left_visible.clone(),
+                    dialog.workspace.right_visible.clone()
+                ),
+                visible_paths
+            );
+            assert_eq!(dialog.workspace.settings, settings);
+            assert_eq!(dialog.persistence, persistence);
+            assert_eq!(dialog.text_views.len(), 1);
+            let model = dialog.text_views.get(&view_id).unwrap();
+            assert_eq!(model.origin, TextCompareOrigin::Memory);
+            assert_eq!(model.left.source(), left_source);
+            assert_eq!(model.left.revision, left_revision);
+            assert_eq!(model.left.saved_revision, left_saved_revision);
+            assert_eq!(model.left.can_undo(), left_can_undo);
+            assert_eq!(model.right.source(), "initial right");
+        };
+
+        let error = dialog
+            .open_payload(DiffOpenPayload {
+                left: Some(left.clone()),
+                right: Some(right.clone()),
+            })
+            .unwrap_err();
+        assert!(error.contains("Save As"));
+        assert_eq!(dialog.workspace.error.as_deref(), Some(error.as_str()));
+        assert_preserved(&dialog);
+
+        let recent = crate::diff::persistence::DisplayPathPairV1 {
+            left: left.clone(),
+            right: right.clone(),
+            mode: crate::diff::persistence::ComparisonModeV1::Text,
+        };
+        let (recent_left, recent_right) = crate::diff::persistence::reopen_recent(&recent).unwrap();
+        let error = dialog
+            .open_and_record(recent_left, recent_right)
+            .unwrap_err();
+        assert!(error.contains("Save As"));
+        assert_eq!(dialog.workspace.error.as_deref(), Some(error.as_str()));
+        assert_preserved(&dialog);
+
+        let mut session = crate::diff::persistence::SavedDiffSessionV1::default();
+        session.left = left;
+        session.right = right;
+        session.pane_split = 0.91;
+        session.wrap_text = true;
+        session.syntax_highlighting = false;
+        session.syntax_theme = "replacement theme".into();
+        session.ignore_whitespace = true;
+        session.case_sensitive = false;
+        session.replacement_rules = vec![crate::diff::settings::ReplacementRuleV1 {
+            id: "replacement-rule".into(),
+            pattern: "left".into(),
+            replacement: "changed".into(),
+            enabled: true,
+        }];
+        session.unimportant_section_rules = vec![crate::diff::settings::UnimportantSectionRuleV1 {
+            id: "replacement-section".into(),
+            pattern: "header".into(),
+            enabled: true,
+        }];
+        let error = dialog.reopen_saved_session(&session).unwrap_err();
+        assert!(error.contains("Save As"));
+        assert_eq!(dialog.workspace.error.as_deref(), Some(error.as_str()));
+        assert_preserved(&dialog);
+
+        let model = dialog.text_views.get_mut(&view_id).unwrap();
+        assert!(
+            model.left.undo(),
+            "the original scratch edit remains undoable"
+        );
+        assert_eq!(model.left.source(), "initial left");
+    }
+
+    #[test]
+    fn memory_text_close_cancel_keeps_dirty_comparison_and_undo() {
+        let (mut dialog, view_id) = dirty_memory_dialog();
+        dialog.close_prompt = true;
+        let source = dialog.text_views[&view_id].left.source().to_owned();
+        let revision = dialog.text_views[&view_id].left.revision;
+        let mut open_after_close_request = false;
+        dialog.cancel_close_prompt(&mut open_after_close_request);
+        dialog.open = open_after_close_request;
+
+        assert!(dialog.open);
+        assert!(!dialog.close_prompt);
+        assert_eq!(dialog.workspace.current_view.id, view_id);
+        let model = dialog.text_views.get(&view_id).unwrap();
+        assert_eq!(model.left.source(), source);
+        assert_eq!(model.left.revision, revision);
+        assert!(model.left.is_dirty());
+        assert!(model.left.can_undo());
+    }
+
+    #[test]
+    fn memory_text_back_refuses_dirty_child_but_allows_clean_child_to_dirty_parent() {
+        let (mut dialog, parent_id) = dirty_memory_dialog();
+        let parent_source = dialog.text_views[&parent_id].left.source().to_owned();
+        let parent_revision = dialog.text_views[&parent_id].left.revision;
+        let child_id = push_memory_child(&mut dialog, "child left\nend", "child right\nend");
+        dialog
+            .text_views
+            .get_mut(&child_id)
+            .unwrap()
+            .replace_memory_sources(
+                "edited child left\nend".into(),
+                "edited child right\nend".into(),
+            )
+            .unwrap();
+        {
+            let child = dialog.text_views.get_mut(&child_id).unwrap();
+            for _ in 0..500 {
+                child.poll();
+                if !child.recalculating
+                    && (child.comparison_is_fresh() || child.comparison_error.is_some())
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(child.comparison_is_fresh());
+            assert!(child.select_source_line(crate::diff::model::DiffSide::Left, 0, false));
+            child.toggle_bookmark_at_selection().unwrap();
+            assert!(child.select_source_line(crate::diff::model::DiffSide::Left, 1, false));
+            child.ignore_selected_lines().unwrap();
+            for _ in 0..500 {
+                child.poll();
+                if child.comparison_is_fresh() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            child
+                .set_manual_alignments(vec![crate::diff::text_compare::ManualTextAlignment {
+                    left_line: 0,
+                    right_line: 0,
+                }])
+                .unwrap();
+            for _ in 0..500 {
+                child.poll();
+                if child.comparison_is_fresh() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(child.comparison_is_fresh());
+        }
+
+        let current = dialog.workspace.current_view.clone();
+        let stack = dialog.workspace.navigation_stack.clone();
+        let settings = dialog.workspace.settings.clone();
+        let persistence = dialog.persistence.clone();
+        let child_documents_before = {
+            let child = &dialog.text_views[&child_id];
+            (
+                child.left.source().to_owned(),
+                child.right.source().to_owned(),
+                child.left.revision,
+                child.right.revision,
+                child.left.saved_revision,
+                child.right.saved_revision,
+                child.left.can_undo(),
+                child.right.can_undo(),
+            )
+        };
+        let child_annotations_before = {
+            let child = &dialog.text_views[&child_id];
+            (
+                child.left.ignored_line_ranges().to_vec(),
+                child.left.bookmarks().to_vec(),
+                child.manual_alignments.clone(),
+                child.annotation_revision,
+                child.source_line_selection,
+            )
+        };
+        assert!(dialog.text_views[&child_id].has_dirty());
+        assert!(!dialog.navigate_back());
+        assert_eq!(dialog.workspace.current_view, current);
+        assert_eq!(dialog.workspace.navigation_stack, stack);
+        assert_eq!(dialog.workspace.settings, settings);
+        assert_eq!(dialog.persistence, persistence);
+        assert!(
+            dialog
+                .workspace
+                .error
+                .as_deref()
+                .is_some_and(|error| { error.contains("Save As") && error.contains("close Diff") })
+        );
+        let child = &dialog.text_views[&child_id];
+        assert_eq!(
+            (
+                child.left.source().to_owned(),
+                child.right.source().to_owned(),
+                child.left.revision,
+                child.right.revision,
+                child.left.saved_revision,
+                child.right.saved_revision,
+                child.left.can_undo(),
+                child.right.can_undo(),
+            ),
+            child_documents_before
+        );
+        assert_eq!(
+            (
+                child.left.ignored_line_ranges().to_vec(),
+                child.left.bookmarks().to_vec(),
+                child.manual_alignments.clone(),
+                child.annotation_revision,
+                child.source_line_selection,
+            ),
+            child_annotations_before
+        );
+        assert_eq!(dialog.text_views[&parent_id].left.source(), parent_source);
+        assert_eq!(dialog.text_views[&parent_id].left.revision, parent_revision);
+        assert!(dialog.text_views[&parent_id].has_dirty());
+
+        let (mut clean_dialog, dirty_parent_id) = dirty_memory_dialog();
+        let dirty_parent_source = clean_dialog.text_views[&dirty_parent_id]
+            .left
+            .source()
+            .to_owned();
+        let clean_child_id =
+            push_memory_child(&mut clean_dialog, "clean child left", "clean child right");
+        assert!(!clean_dialog.text_views[&clean_child_id].has_dirty());
+        assert!(clean_dialog.navigate_back());
+        assert_eq!(clean_dialog.workspace.current_view.id, dirty_parent_id);
+        assert!(!clean_dialog.text_views.contains_key(&clean_child_id));
+        assert!(clean_dialog.text_views[&dirty_parent_id].has_dirty());
+        assert_eq!(
+            clean_dialog.text_views[&dirty_parent_id].left.source(),
+            dirty_parent_source
+        );
+    }
+
+    #[test]
+    fn memory_text_configured_rules_advance_revision_and_recompute() {
+        let mut model =
+            crate::diff::model::TextViewModel::from_test_text("a b".into(), "a  b".into());
+        let initial = model.comparison.as_ref().unwrap();
+        assert_eq!(initial.rules_revision, 0);
+        assert!(!initial.equal_under_rules);
+
+        let settings = crate::diff::settings::DiffConfigV1 {
+            ignore_whitespace: true,
+            ..Default::default()
+        };
+        configure_text_model(
+            &mut model,
+            &settings,
+            &crate::diff::persistence::DiffPersistenceV1::default(),
+        );
+        assert_eq!(model.rules.revision, 1);
+        assert!(model.recalculating);
+        assert!(model.comparison.as_ref().unwrap().is_stale(
+            model.left.source_id(),
+            model.right.source_id(),
+            model.left.revision,
+            model.right.revision,
+            model.rules.revision,
+            model.annotation_revision,
+        ));
+
+        for _ in 0..1000 {
+            model.poll();
+            if model.comparison.as_ref().is_some_and(|result| {
+                !result.is_stale(
+                    model.left.source_id(),
+                    model.right.source_id(),
+                    model.left.revision,
+                    model.right.revision,
+                    model.rules.revision,
+                    model.annotation_revision,
+                )
+            }) && !model.recalculating
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let result = model.comparison.as_ref().unwrap();
+        assert_eq!(result.rules_revision, 1);
+        assert!(result.equal_under_rules);
+        assert!(!model.recalculating);
     }
 }

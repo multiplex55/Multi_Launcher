@@ -61,7 +61,22 @@ fn ignored_changes_are_projected_but_source_and_navigation_survive() {
     assert!(!result.raw_equal);
     assert_eq!(result.navigation.all_difference_rows.len(), 1);
     assert!(result.navigation.important_difference_rows.is_empty());
-    assert!(result.is_stale(5, 7, rules.revision));
+    assert!(!result.is_stale(
+        result.left_source_id,
+        result.right_source_id,
+        4,
+        7,
+        rules.revision,
+        result.annotation_revision,
+    ));
+    assert!(result.is_stale(
+        result.left_source_id,
+        result.right_source_id,
+        5,
+        7,
+        rules.revision,
+        result.annotation_revision,
+    ));
 }
 
 #[test]

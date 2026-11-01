@@ -83,6 +83,8 @@ pub enum EditorKind {
     Window,
     Process,
     Launcher,
+    OpenFolder,
+    OpenUrl,
     VirtualDesktop,
     Image,
     OcrSearch,
@@ -104,8 +106,7 @@ pub enum EditorKind {
 }
 
 impl EditorKind {
-    /// Whether this strategy has a complete authoring transaction.  Keeping
-    /// this beside the enum prevents callers from inventing editor exceptions.
+    /// Returns the routed editor contract for this action kind.
     pub fn contract(self) -> Option<EditorContract> {
         editor_contract(self)
     }
@@ -632,6 +633,26 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             })
         ),
         d!(
+            ProgramsLauncher,
+            "Open Folder",
+            "Open a folder in File Explorer",
+            &["folder", "directory", "browse", "explorer", "path"],
+            OpenFolder,
+            MkAction::OpenFolder(MkOpenFolderPayload {
+                path: r"C:\Temp\DirectOpenDemo".into(),
+            })
+        ),
+        d!(
+            ProgramsLauncher,
+            "Open URL",
+            "Open an HTTP or HTTPS URL in the default browser",
+            &["url", "http", "https", "browser", "website", "direct"],
+            OpenUrl,
+            MkAction::OpenUrl(MkOpenUrlPayload {
+                url: "https://example.test/".into(),
+            })
+        ),
+        d!(
             Variables,
             "Set Variable",
             "Store a value",
@@ -976,6 +997,8 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         MkAction::Delay(_) => EditorKind::Timing,
         MkAction::Process(_) => EditorKind::Process,
         MkAction::LauncherCommand(_) => EditorKind::Launcher,
+        MkAction::OpenFolder(_) => EditorKind::OpenFolder,
+        MkAction::OpenUrl(_) => EditorKind::OpenUrl,
         MkAction::WindowActivate(_)
         | MkAction::WindowClose(_)
         | MkAction::WindowWait(_)
@@ -1058,6 +1081,8 @@ pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
         | EditorKind::Window
         | EditorKind::Process
         | EditorKind::Launcher
+        | EditorKind::OpenFolder
+        | EditorKind::OpenUrl
         | EditorKind::Image
         | EditorKind::OcrSearch
         | EditorKind::OcrRead
@@ -1171,7 +1196,7 @@ pub fn contains_placeholder_wording(value: &str) -> bool {
 }
 
 /// Authoritative routing contract. Every configurable value listed here has a
-/// concrete `action_ui` branch; `None` means that no editor route is implemented.
+/// concrete `action_ui` branch.
 pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
     match editor {
         EditorKind::DirectInsert => Some(EditorContract::DirectInsert {
@@ -1188,7 +1213,9 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         | EditorKind::VirtualDesktop
         | EditorKind::Condition
         | EditorKind::Repeat
-        | EditorKind::Variable => Some(EditorContract::Configurable { field_count: 1 }),
+        | EditorKind::Variable
+        | EditorKind::OpenFolder
+        | EditorKind::OpenUrl => Some(EditorContract::Configurable { field_count: 1 }),
         EditorKind::PromptInput => Some(EditorContract::Configurable { field_count: 5 }),
         EditorKind::ReadClipboardText | EditorKind::WriteClipboardText => {
             Some(EditorContract::Configurable { field_count: 1 })
@@ -1278,6 +1305,8 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::Delay(_) => "Delay",
         MkAction::Process(_) => "Run Program",
         MkAction::LauncherCommand(_) => "Launcher Command",
+        MkAction::OpenFolder(_) => "Open Folder",
+        MkAction::OpenUrl(_) => "Open URL",
         MkAction::WindowActivate(_) => "Activate Window",
         MkAction::WindowClose(_) => "Close Window",
         MkAction::WindowWait(_) => "Wait for Window",
@@ -1440,6 +1469,8 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
                 payload.query.clone()
             }
         }
+        MkAction::OpenFolder(payload) => payload.path.clone(),
+        MkAction::OpenUrl(payload) => payload.url.clone(),
         MkAction::SetVariable { name, .. } => format!("Set {name}"),
         MkAction::UnsetVariable { name } => format!("Unset {name}"),
         MkAction::ReadClipboardText { variable } => format!("Read text → {variable}"),

@@ -142,6 +142,12 @@ impl IsolatedWorkspace {
     /// Restore process-global test state and report directory cleanup errors.
     /// Drop remains a best-effort fallback for assertion panics.
     pub fn finish(mut self) -> io::Result<()> {
+        self.finish_in_place()
+    }
+
+    /// Finish while retaining the owner value so an outer fixture can restore
+    /// its environment before this workspace removes the temporary root.
+    pub(crate) fn finish_in_place(&mut self) -> io::Result<()> {
         let root = self
             .temp
             .as_ref()

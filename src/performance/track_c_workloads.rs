@@ -10,6 +10,7 @@ use crate::plugins::note::Note;
 #[cfg(test)]
 use eframe::egui;
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -126,6 +127,7 @@ impl BenchmarkMode {
 pub struct TrackCWorkspace {
     workspace: IsolatedWorkspace,
     previous_skip_clipboard_sync: Option<OsString>,
+    skip_clipboard_sync_restored: bool,
 }
 
 impl TrackCWorkspace {
@@ -138,11 +140,23 @@ impl TrackCWorkspace {
         Self {
             workspace,
             previous_skip_clipboard_sync,
+            skip_clipboard_sync_restored: false,
         }
     }
 
     pub fn root(&self) -> &Path {
         self.workspace.root()
+    }
+
+    pub(crate) fn scope_to_profile(&mut self, profile_root: &Path) -> io::Result<()> {
+        self.workspace.scope_to_profile(profile_root)
+    }
+
+    /// Restore Track C environment state before the wrapped workspace removes
+    /// its temporary root, matching the Drop ordering on the panic path.
+    pub(crate) fn finish(mut self) -> io::Result<()> {
+        self.restore_skip_clipboard_sync();
+        self.workspace.finish_in_place()
     }
 
     pub fn notes_dir(&self) -> PathBuf {
@@ -176,6 +190,20 @@ impl TrackCWorkspace {
     pub(crate) fn original_skip_clipboard_sync(&self) -> Option<OsString> {
         self.previous_skip_clipboard_sync.clone()
     }
+
+    fn restore_skip_clipboard_sync(&mut self) {
+        if self.skip_clipboard_sync_restored {
+            return;
+        }
+        unsafe {
+            if let Some(value) = self.previous_skip_clipboard_sync.take() {
+                std::env::set_var("ML_SKIP_CLIPBOARD_SYNC", value);
+            } else {
+                std::env::remove_var("ML_SKIP_CLIPBOARD_SYNC");
+            }
+        }
+        self.skip_clipboard_sync_restored = true;
+    }
 }
 
 impl Default for TrackCWorkspace {
@@ -188,13 +216,7 @@ impl Drop for TrackCWorkspace {
     fn drop(&mut self) {
         // `workspace` is dropped after this method, restoring CWD and cleaning
         // the owned TempDir only after the skip switch has been restored.
-        unsafe {
-            if let Some(value) = self.previous_skip_clipboard_sync.take() {
-                std::env::set_var("ML_SKIP_CLIPBOARD_SYNC", value);
-            } else {
-                std::env::remove_var("ML_SKIP_CLIPBOARD_SYNC");
-            }
-        }
+        self.restore_skip_clipboard_sync();
     }
 }
 

@@ -813,8 +813,8 @@ const SEEDS: &[Seed] = &[
         ids::LAUNCHER_JUMP_MODE,
         Application,
         S::Main(M::LauncherWindow),
-        "Experimental Jump Mode",
-        "Enable hint-based navigation for supported screens.",
+        "Jump Mode",
+        "Enable hint-based navigation on supported screens.",
         &["keyboard navigation", "jump hints"]
     ),
     seed!(
@@ -2533,6 +2533,11 @@ mod tests {
     #[test]
     fn settings_search_catalog_contains_the_rendered_main_settings_field_inventory() {
         let catalog = SettingsCatalog::default();
+        let jump_mode = catalog
+            .entry(ids::LAUNCHER_JUMP_MODE)
+            .expect("Jump Mode remains in the settings catalog");
+        assert_eq!(jump_mode.label, "Jump Mode");
+        assert_eq!(jump_mode.id.as_str(), "launcher.experimental_jump_mode");
         let expected_ids = [
             "hotkeys.launcher",
             "hotkeys.quit.enabled",

@@ -2311,14 +2311,16 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                     &admission.proof,
                     &opened,
                 ) {
-                    Ok(child_directory) => child_directory,
+                    Ok(child_directory) => Some(child_directory),
                     Err(error) if error.kind == BackendFailureKind::Inaccessible => {
                         result.summary.inaccessible_entries += 1;
                         record_failure(&mut result.summary, error);
                         if scan_status == RenameScanStatus::Complete {
                             scan_status = RenameScanStatus::Partial;
                         }
-                        continue;
+                        // Metadata was verified already. Retain this directory
+                        // as a sibling blocker even though traversal is denied.
+                        None
                     }
                     Err(error) => {
                         record_failure(&mut result.summary, error.clone());
@@ -2326,20 +2328,22 @@ fn scan_with_backend_bounded_progress<B: RenameScanBackend>(
                         break;
                     }
                 };
-                let child_directory = Arc::new(child_directory);
-                let mut guarded_chain = frame.guarded_chain.clone();
-                guarded_chain.push(Arc::clone(&child_directory));
-                discovered_directory_handle_path_bytes = discovered_directory_handle_path_bytes
-                    .saturating_add(child_directory_handle_path_bytes);
-                queued_frame_path_bytes =
-                    queued_frame_path_bytes.saturating_add(child_frame_path_bytes);
-                directories.push_back(DirectoryFrame {
-                    directory: child_directory,
-                    guarded_chain,
-                    relative_path: relative_path.clone(),
-                    chain: child_chain,
-                    path_bytes: child_frame_path_bytes,
-                });
+                if let Some(child_directory) = child_directory {
+                    let child_directory = Arc::new(child_directory);
+                    let mut guarded_chain = frame.guarded_chain.clone();
+                    guarded_chain.push(Arc::clone(&child_directory));
+                    discovered_directory_handle_path_bytes = discovered_directory_handle_path_bytes
+                        .saturating_add(child_directory_handle_path_bytes);
+                    queued_frame_path_bytes =
+                        queued_frame_path_bytes.saturating_add(child_frame_path_bytes);
+                    directories.push_back(DirectoryFrame {
+                        directory: child_directory,
+                        guarded_chain,
+                        relative_path: relative_path.clone(),
+                        chain: child_chain,
+                        path_bytes: child_frame_path_bytes,
+                    });
+                }
             }
             result_path_bytes = next_path_bytes;
             pending_rows.push(PendingRow {

@@ -113,9 +113,11 @@ pub struct SavedDiffSessionV1 {
     pub sync_vertical: bool,
     #[serde(default = "default_true")]
     pub sync_horizontal: bool,
-    /// 0 = all rows, 1 = differences only. Unknown values restore to 0.
+    /// 0 = all rows, 1 = differences only, 2 = identical only. Unknown values restore to 0.
     #[serde(default)]
     pub projection_mode: u8,
+    #[serde(default = "default_projection_context")]
+    pub projection_context: u8,
 }
 impl Default for SavedDiffSessionV1 {
     fn default() -> Self {
@@ -149,6 +151,7 @@ impl Default for SavedDiffSessionV1 {
             sync_vertical: true,
             sync_horizontal: true,
             projection_mode: 0,
+            projection_context: default_projection_context(),
         }
     }
 }
@@ -161,6 +164,9 @@ fn default_folder_display_filter() -> String {
 fn default_tolerance() -> f64 {
     2.0
 }
+fn default_projection_context() -> u8 {
+    3
+}
 
 impl SavedDiffSessionV1 {
     pub fn validate(mut self) -> Self {
@@ -171,9 +177,12 @@ impl SavedDiffSessionV1 {
         {
             self.folder_timestamp_tolerance_seconds = default_tolerance();
         }
-        if self.projection_mode > 1 {
+        if self.projection_mode > 2 {
             self.projection_mode = 0;
         }
+        self.projection_context = self
+            .projection_context
+            .min(crate::diff::text_compare::MAX_ROW_PROJECTION_CONTEXT as u8);
         self
     }
 }
@@ -504,6 +513,7 @@ mod tests {
         let old = r#"{"id":"1","name":"old","left":"l","right":"r","pane_split":0.5,"wrap_text":false,"syntax_highlighting":true,"syntax_theme":"x"}"#;
         let parsed: SavedDiffSessionV1 = serde_json::from_str(old).unwrap();
         assert!(parsed.folder_alignment_overrides.is_empty());
+        assert_eq!(parsed.projection_context, 3);
         let mut session = SavedDiffSessionV1::default();
         session
             .folder_alignment_overrides
@@ -522,7 +532,8 @@ mod tests {
         let mut session = SavedDiffSessionV1::default();
         session.visible_whitespace = true;
         session.sync_horizontal = false;
-        session.projection_mode = 1;
+        session.projection_mode = 2;
+        session.projection_context = 7;
         let decoded: SavedDiffSessionV1 =
             serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
         assert_eq!(decoded, session);
@@ -531,11 +542,16 @@ mod tests {
         session.folder_column_widths.left_path = f32::INFINITY;
         session.folder_timestamp_tolerance_seconds = -1.0;
         session.projection_mode = 99;
+        session.projection_context = u8::MAX;
         let safe = session.validate();
         assert_eq!(safe.pane_split, 0.5);
         assert!(safe.folder_column_widths.left_path.is_finite());
         assert_eq!(safe.folder_timestamp_tolerance_seconds, 2.0);
         assert_eq!(safe.projection_mode, 0);
+        assert_eq!(
+            safe.projection_context,
+            crate::diff::text_compare::MAX_ROW_PROJECTION_CONTEXT as u8
+        );
     }
 
     #[test]
@@ -548,6 +564,9 @@ mod tests {
             "find_query",
             "pending_mutation",
             "worker",
+            "bookmarks",
+            "source_line_selection",
+            "memory_source",
         ] {
             assert!(!json.contains(name), "serialized ephemeral field {name}");
         }

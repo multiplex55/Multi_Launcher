@@ -97,9 +97,9 @@ impl HelpWindow {
                             );
                             ui.label("Older query: Ctrl+Up");
                             ui.label("Newer query / restore draft: Ctrl+Down");
-                            ui.label(egui::RichText::new("Experimental Jump Mode").strong());
+                            ui.label(egui::RichText::new("Jump Mode").strong());
                             ui.label(
-                                "Jump Mode is off by default. Enable Experimental Jump Mode in Settings and save. On supported screens, Shift+Space shows hints for visible, enabled controls. Typing a hint only focuses or highlights its control; a later, separate Enter, Space, or normal typing interacts with it. Escape cancels hints. Existing Save, Apply, and confirmation steps still require their normal action.",
+                                "Jump Mode is off by default. Enable Jump Mode in Settings and save. On supported screens, Shift+Space shows hints for visible, enabled controls. Typing a hint only focuses or highlights its control; a later, separate Enter, Space, or normal typing interacts with it. Escape cancels hints. Existing Save, Apply, and confirmation steps still require their normal action.",
                             );
                             ui.label(
                                 "Coverage includes File Search; Snippets; Clipboard History; Dashboard commands and simple widgets; JSON, Regex, and XML tools; Mouse Settings and Gestures; Rename and Replace; and Dashboard and Radial editors. Pointer-only canvas drags, capture or recording, native picker internals, unknown popups, and hidden, clipped, or disabled controls are not hint targets.",
@@ -145,7 +145,27 @@ impl HelpWindow {
                                 "In the Signature Editor, String parameters can be Text, File picker, Folder picker, or an ordered Choice list with an optional default. Browse fills a path, and selecting a choice fills its value; neither runs the macro. Review the values and choose Run separately. Canceled or unavailable file and folder choosers leave the path editable.",
                             );
                             ui.label(
+                                "Add Action → Programs & Launcher → Open Folder or Open URL to author a direct open. Folder Browse only fills the path; Run opens it in Explorer. No folder or bookmark record is created. For example, use C:\\Users\\You\\AppData\\Local\\Temp\\DirectOpenDemo or https://example.test/. URLs must be explicit HTTP(S).",
+                            );
+                            ui.label(
+                                "Templates use ${name} for a current runtime value and $${name} for literal ${name}. String, Number, Boolean, and Point values use the shared formatting; Null is rejected. Folder existence and access are checked when the step runs. A URL handoff to Windows does not prove the site loaded, and canceling after handoff does not close the external window. Direct opens are unavailable in unattended Hot Folder runs.",
+                            );
+                            ui.label(
                                 "Read Clipboard Text reads into a named String variable when its step runs. Write Clipboard Text writes an exact literal or String variable only when its step runs; neither action pastes text or restores earlier clipboard contents.",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("Diff text workflows").strong());
+                            ui.label(
+                                "In Diff, choose Compare Text… to type both sides or use Paste Left/Paste Right for explicit clipboard input. Text input is limited to 8 MiB and 100,000 lines per side. Edit Inputs… changes that memory comparison; Save Left As… and Save Right As… choose explicit destinations, while file comparisons keep their ordinary Save behavior.",
+                            );
+                            ui.label(
+                                "To align, select a source line and choose Align from selected line, then select a line in the other pane and confirm. A multi-line selection uses its focused line. Cancel abandons the pending endpoint; accepted Left ↔ Right alignments can be revealed or removed. Alignment changes layout only and never edits or saves text. A hidden alignment target reveals the full row view.",
+                            );
+                            ui.label(
+                                "Ignore selected lines adds reversible whole-line ranges; regex rules can instead mark matching differences unimportant. Raw equality describes the original text, while effective equality reflects comparison rules and ignored ranges. Bookmarks belong to the current comparison. Identical only and the Differences only context control change the view; navigation to a hidden target reveals all rows.",
+                            );
+                            ui.label(
+                                "Compare selected lines with Clipboard reads plain text once, only after you choose it, and opens a temporary memory comparison with the captured source on the left. Back returns to the original comparison with its edits and annotations. The clipboard text is not added to recents or saved history.",
                             );
                             ui.separator();
                             ui.label(egui::RichText::new("Screenshot pinboard").strong());
