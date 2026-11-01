@@ -43,10 +43,10 @@ pub mod image_compare_smoke;
 pub mod image_crop_editor;
 mod image_panel;
 mod indexing;
-#[cfg(test)]
-mod m7_startup_measurement;
 mod json_utility_dialog;
 pub(crate) mod jump_mode;
+#[cfg(test)]
+mod m7_startup_measurement;
 pub use jump_mode::ui::JumpModeScope;
 mod macro_dialog;
 pub mod mkmacro_dialog;
@@ -106,6 +106,7 @@ mod track_c_query_observer;
 pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
+pub(crate) mod utility_dialog_size;
 pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
