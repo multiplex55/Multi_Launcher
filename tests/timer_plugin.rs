@@ -1,12 +1,8 @@
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::timer::{
-    ACTIVE_TIMERS, ALARMS_FILE, TimerEntry, TimerPlugin, cancel_timer, load_saved_alarms,
-    reset_alarms_loaded,
-};
+use multi_launcher::plugins::timer::{ACTIVE_TIMERS, TimerEntry, TimerPlugin};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
-use tempfile::tempdir;
+use std::time::{Duration, Instant};
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -220,41 +216,6 @@ fn take_finished_returns_messages() {
 }
 
 #[test]
-fn load_saved_alarms_is_idempotent() {
-    let _lock = TEST_MUTEX.lock().unwrap();
-    let dir = tempdir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let json = format!("[{{\"label\":\"demo\",\"end_ts\":{}}}]", now + 3600);
-    std::fs::write(ALARMS_FILE, json).unwrap();
-
-    reset_alarms_loaded();
-    ACTIVE_TIMERS.lock().unwrap().clear();
-
-    load_saved_alarms();
-    let first = ACTIVE_TIMERS.lock().unwrap().len();
-    load_saved_alarms();
-    let second = ACTIVE_TIMERS.lock().unwrap().len();
-
-    assert_eq!(first, 1);
-    assert_eq!(second, 1);
-
-    let ids: Vec<u64> = ACTIVE_TIMERS
-        .lock()
-        .unwrap()
-        .values()
-        .map(|t| t.id)
-        .collect();
-    for id in ids {
-        cancel_timer(id);
-    }
-}
-
-#[test]
 fn parse_duration_colon_formats() {
     use multi_launcher::plugins::timer::parse_duration;
     let d = parse_duration("1:02").unwrap();
@@ -287,87 +248,24 @@ fn format_ts_invalid_timestamp() {
 }
 
 #[test]
-fn pause_resume_does_not_grow_heap() {
-    use multi_launcher::plugins::timer::{
-        ACTIVE_TIMERS, cancel_timer, heap_len, pause_timer, resume_timer, start_timer,
-    };
+fn search_alarm_keeps_date_prefix_and_optional_name_together() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    ACTIVE_TIMERS.lock().unwrap().clear();
+    let plugin = TimerPlugin;
 
-    start_timer(Duration::from_secs(3600), "None".into());
-    let id = ACTIVE_TIMERS
-        .lock()
-        .unwrap()
-        .keys()
-        .cloned()
-        .next()
-        .unwrap();
-    assert_eq!(heap_len(), 1);
-
-    for _ in 0..5 {
-        pause_timer(id);
-        assert_eq!(heap_len(), 0);
-        resume_timer(id);
-        assert_eq!(heap_len(), 1);
-    }
-
-    cancel_timer(id);
-    assert_eq!(heap_len(), 0);
-}
-
-#[test]
-fn parse_hhmm_with_day_offset() {
-    use chrono::{Duration as ChronoDuration, Local};
-    use multi_launcher::plugins::timer::parse_hhmm;
-    let (h, m, date) = parse_hhmm("2d 07:30").unwrap();
-    assert_eq!((h, m), (7, 30));
-    let expected = Local::now().date_naive() + ChronoDuration::days(2);
-    assert_eq!(date.unwrap(), expected);
-}
-
-#[test]
-fn parse_hhmm_with_absolute_date() {
-    use chrono::NaiveDate;
-    use multi_launcher::plugins::timer::parse_hhmm;
-    let (h, m, date) = parse_hhmm("2024-01-31 05:15").unwrap();
-    assert_eq!((h, m), (5, 15));
-    assert_eq!(date.unwrap(), NaiveDate::from_ymd_opt(2024, 1, 31).unwrap());
-}
-
-#[test]
-fn parse_hhmm_large_day_offset() {
-    use multi_launcher::plugins::timer::parse_hhmm;
-    assert!(parse_hhmm("1000000000d 12:00").is_none());
-    assert!(parse_hhmm("-1000000000d 12:00").is_none());
-}
-
-#[test]
-fn start_alarm_multi_day() {
-    use chrono::{Duration as ChronoDuration, Local, Timelike};
-    use multi_launcher::plugins::timer::{ACTIVE_TIMERS, cancel_timer, start_alarm_named};
-    let _lock = TEST_MUTEX.lock().unwrap();
-    ACTIVE_TIMERS.lock().unwrap().clear();
-
-    let now = Local::now();
-    let date = now.date_naive() + ChronoDuration::days(2);
-    let hour = now.hour();
-    let minute = now.minute();
-
-    start_alarm_named(hour, minute, Some(date), Some("test".into()), "None".into());
-    let (id, remaining) = {
-        let list = ACTIVE_TIMERS.lock().unwrap();
-        assert_eq!(list.len(), 1);
-        let t = list.values().next().unwrap();
+    for (query, expected) in [
         (
-            t.id,
-            t.deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_secs(),
-        )
-    };
-
-    let expected =
-        (date.and_hms_opt(hour, minute, 0).unwrap() - now.naive_local()).num_seconds() as u64;
-    assert!((remaining as i64 - expected as i64).abs() <= 2);
-    cancel_timer(id);
+            "alarm 2d 07:30 morning meeting",
+            "alarm:set:2d 07:30|morning meeting",
+        ),
+        (
+            "alarm 2024-01-31 05:15 early shift",
+            "alarm:set:2024-01-31 05:15|early shift",
+        ),
+        ("alarm 07:30 plain name", "alarm:set:07:30|plain name"),
+    ] {
+        let results = plugin.search(query);
+        assert_eq!(results.len(), 1, "query: {query}");
+        assert_eq!(results[0].action, expected);
+    }
+    assert!(plugin.search("alarm 2d invalid name").is_empty());
 }

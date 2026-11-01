@@ -2535,6 +2535,20 @@ mod tests {
             })
         );
         assert_eq!(
+            parse("alarm:set:2d 07:30|morning meeting").command,
+            Command::Timer(TimerCommand::AlarmSet {
+                time: "2d 07:30".into(),
+                name: "morning meeting".into()
+            })
+        );
+        assert_eq!(
+            parse("alarm:set:2024-01-31 05:15|early shift").command,
+            Command::Timer(TimerCommand::AlarmSet {
+                time: "2024-01-31 05:15".into(),
+                name: "early shift".into()
+            })
+        );
+        assert_eq!(
             parse("stopwatch:show:7").command,
             Command::Timer(TimerCommand::StopwatchShow(7))
         );

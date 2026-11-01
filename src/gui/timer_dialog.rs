@@ -1,6 +1,8 @@
 use crate::gui::LauncherApp;
 use crate::gui::theme::widgets::{ButtonEmphasis, secondary_help, with_button_emphasis};
-use crate::plugins::timer::{parse_duration, parse_hhmm, start_alarm_named, start_timer_named};
+use crate::plugins::timer::{
+    parse_alarm_spec, parse_duration, try_start_alarm_named, try_start_timer_named,
+};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 #[derive(Default)]
@@ -246,41 +248,40 @@ impl TimerDialog {
                     );
                     if start_button.clicked() {
                         match self.mode {
-                            Mode::Timer => {
-                                if let Some(d) = parse_duration(&self.duration) {
-                                    start_timer_named(
-                                        d,
-                                        if self.label.is_empty() {
-                                            None
-                                        } else {
-                                            Some(self.label.clone())
-                                        },
-                                        crate::sound::SOUND_NAMES[self.sound_idx].to_string(),
-                                    );
-                                    close = true;
-                                    app.focus_input();
-                                } else {
-                                    app.report_error_message("ui operation", "Invalid duration");
+                            Mode::Timer => match parse_duration(&self.duration) {
+                                Some(duration) => match try_start_timer_named(
+                                    duration,
+                                    (!self.label.is_empty()).then(|| self.label.clone()),
+                                    crate::sound::SOUND_NAMES[self.sound_idx].to_string(),
+                                ) {
+                                    Ok(_) => {
+                                        close = true;
+                                        app.focus_input();
+                                    }
+                                    Err(error) => {
+                                        app.report_error_message("timer.start", error.to_string())
+                                    }
+                                },
+                                None => app.report_error_message(
+                                    "timer.start",
+                                    "Invalid or non-positive duration",
+                                ),
+                            },
+                            Mode::Alarm => match parse_alarm_spec(&self.time) {
+                                Ok(spec) => match try_start_alarm_named(
+                                    spec,
+                                    (!self.label.is_empty()).then(|| self.label.clone()),
+                                    crate::sound::SOUND_NAMES[self.sound_idx].to_string(),
+                                ) {
+                                    Ok(_) => close = true,
+                                    Err(error) => {
+                                        app.report_error_message("alarm.start", error.to_string())
+                                    }
+                                },
+                                Err(error) => {
+                                    app.report_error_message("alarm.start", error.to_string())
                                 }
-                            }
-                            Mode::Alarm => {
-                                if let Some((h, m, date)) = parse_hhmm(&self.time) {
-                                    start_alarm_named(
-                                        h,
-                                        m,
-                                        date,
-                                        if self.label.is_empty() {
-                                            None
-                                        } else {
-                                            Some(self.label.clone())
-                                        },
-                                        crate::sound::SOUND_NAMES[self.sound_idx].to_string(),
-                                    );
-                                    close = true;
-                                } else {
-                                    app.report_error_message("ui operation", "Invalid time");
-                                }
-                            }
+                            },
                         }
                     }
                     let cancel_button = ui.button("Cancel");

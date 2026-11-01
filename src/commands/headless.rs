@@ -824,8 +824,8 @@ fn execute_timer(command: TimerCommand, original: &Action) -> anyhow::Result<()>
         TimerCommand::Cancel(id) => timer::cancel_checked(id),
         TimerCommand::Pause(id) => timer::pause_checked(id),
         TimerCommand::Resume(id) => timer::resume_checked(id),
-        TimerCommand::Start { duration, name } => effect(|| timer::start(&duration, &name)),
-        TimerCommand::AlarmSet { time, name } => effect(|| timer::set_alarm(&time, &name)),
+        TimerCommand::Start { duration, name } => timer::start(&duration, &name),
+        TimerCommand::AlarmSet { time, name } => timer::set_alarm(&time, &name),
         TimerCommand::StopwatchPause(id) => stopwatch::pause_checked(id),
         TimerCommand::StopwatchResume(id) => stopwatch::resume_checked(id),
         TimerCommand::StopwatchStop(id) => stopwatch::stop_checked(id),
@@ -1135,6 +1135,22 @@ mod tests {
         ] {
             let error = execute_timer(command, &action("unused")).unwrap_err();
             assert!(error.to_string().contains("no longer available"));
+        }
+    }
+
+    #[test]
+    fn invalid_timer_start_and_alarm_commands_preserve_checked_errors() {
+        for command in [
+            TimerCommand::Start {
+                duration: "0s".into(),
+                name: "zero".into(),
+            },
+            TimerCommand::AlarmSet {
+                time: "2025-02-30 12:00".into(),
+                name: "invalid date".into(),
+            },
+        ] {
+            assert!(execute_timer(command, &action("unused")).is_err());
         }
     }
 
