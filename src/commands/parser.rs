@@ -327,23 +327,6 @@ mod radial_parser_tests {
 
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
-    let unicode_namespace = s.eq_ignore_ascii_case("unicode")
-        || s.split_once(':')
-            .is_some_and(|(namespace, _)| namespace.eq_ignore_ascii_case("unicode"));
-    if unicode_namespace {
-        if s == "unicode:open" && action.args.is_none() {
-            return Ok(Command::UnicodeInspector(UnicodeInspectorCommand::Open));
-        }
-        return Err(CommandError::new(
-            "unicode_inspector",
-            if action.args.is_some() {
-                "Unicode Inspector commands do not accept a path or content payload"
-            } else {
-                "unknown Unicode Inspector command"
-            },
-        )
-        .with_gui_failure_policy());
-    }
     if let Some(raw) = s.strip_prefix("pinboard:") {
         if action.args.is_some() {
             return Err(CommandError::new(
@@ -3139,64 +3122,5 @@ mod duplicate_finder_route_parser_tests {
             parse_action(&action("dffusion:open", None)).unwrap(),
             Command::External(_)
         ));
-    }
-}
-
-#[cfg(test)]
-mod unicode_inspector_parser_tests {
-    use super::*;
-
-    fn action(raw: &str, args: Option<&str>) -> Action {
-        Action {
-            label: "Unicode Inspector".into(),
-            desc: String::new(),
-            action: raw.into(),
-            args: args.map(str::to_owned),
-        }
-    }
-
-    #[test]
-    fn unicode_inspector_route_is_exact_typed_payload_free_and_never_external() {
-        let parsed = parse_command(
-            action("unicode:open", None),
-            Some("query override must not be applied".into()),
-            ActivationSource::Dashboard,
-        )
-        .unwrap();
-        assert_eq!(
-            parsed.command,
-            Command::UnicodeInspector(UnicodeInspectorCommand::Open)
-        );
-        assert_eq!(parsed.command.domain(), "unicode_inspector");
-        assert_eq!(parsed.command.kind_name(), "open");
-        assert_eq!(parsed.source, ActivationSource::Dashboard);
-        assert_eq!(
-            parsed.query_override.as_deref(),
-            Some("query override must not be applied")
-        );
-
-        for (wire, args) in [
-            ("unicode", None),
-            ("unicode:future", None),
-            ("unicode:open:extra", None),
-            ("unicode:open", Some("")),
-            ("unicode:open", Some("private text")),
-            ("Unicode:open", None),
-        ] {
-            let error = parse_action(&action(wire, args)).unwrap_err();
-            assert_eq!(error.domain, "unicode_inspector", "wire {wire:?}");
-            assert!(error.toast && error.refocus, "wire {wire:?}");
-            assert!(!error.message.contains("private text"));
-        }
-
-        for wire in ["unicodeish:open", "unicode_open", "Unicode Open"] {
-            assert!(
-                matches!(
-                    parse_action(&action(wire, None)).unwrap(),
-                    Command::External(_)
-                ),
-                "lookalike {wire:?} remains outside the reserved namespace"
-            );
-        }
     }
 }

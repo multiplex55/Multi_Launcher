@@ -7,7 +7,7 @@ use crate::commands::handlers::{
     handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence, handle_pinboard,
     handle_query, handle_radial, handle_screen_draw, handle_screenshot, handle_search_replace,
     handle_simple_dialog, handle_snippet_run, handle_table_utility, handle_todo,
-    handle_unicode_inspector, handle_xml_toolkit,
+    handle_xml_toolkit,
 };
 
 #[derive(Debug, Default)]
@@ -43,9 +43,6 @@ impl CommandBus {
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::JsonUtility(command) => Ok(handle_json_utility(host, command)),
-            Command::UnicodeInspector(command) => {
-                handle_unicode_inspector(host, command, invocation.source)
-            }
             Command::XmlToolkit(command) => Ok(handle_xml_toolkit(host, *command)),
             Command::TableUtility(command) => Ok(handle_table_utility(host, *command)),
             Command::BatchRename(command) => Ok(handle_batch_rename(host, *command)),
@@ -156,7 +153,6 @@ mod tests {
         color_pick_requests: usize,
         ocr_requests: usize,
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
-        unicode_inspector_opens: usize,
         xml_toolkit_opens: usize,
         duplicate_finder_opens: usize,
         table_utility_profiles: Vec<crate::table_utility::TableUtilityProfile>,
@@ -205,10 +201,6 @@ mod tests {
             self.qr_calls.push(initial_text.map(str::to_owned));
         }
         fn open_regex_tester_dialog(&mut self) {}
-
-        fn open_unicode_inspector(&mut self) {
-            self.unicode_inspector_opens += 1;
-        }
         fn open_help_dialog(&mut self) {
             self.dialog_calls += 1;
         }
@@ -866,36 +858,6 @@ mod tests {
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Skip);
-    }
-
-    #[test]
-    fn unicode_inspector_bus_dispatch_is_user_only_and_leaves_launcher_state_unchanged() {
-        let mut host = FakeHost::default();
-        let mut user_invocation = invocation(Command::UnicodeInspector(
-            crate::commands::UnicodeInspectorCommand::Open,
-        ));
-        user_invocation.source = crate::commands::ActivationSource::Click;
-        let outcome = CommandBus.dispatch(&user_invocation, &mut host).unwrap();
-        assert_eq!(host.unicode_inspector_opens, 1);
-        assert_eq!(outcome.query, QueryPolicy::Keep);
-        assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
-        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
-        assert_eq!(outcome.history, HistoryPolicy::Skip);
-
-        for source in [
-            crate::commands::ActivationSource::Macro,
-            crate::commands::ActivationSource::HotFolder,
-        ] {
-            let mut automated_invocation = invocation(Command::UnicodeInspector(
-                crate::commands::UnicodeInspectorCommand::Open,
-            ));
-            automated_invocation.source = source;
-            let error = CommandBus
-                .dispatch(&automated_invocation, &mut host)
-                .unwrap_err();
-            assert_eq!(error.domain, "unicode_inspector");
-            assert_eq!(host.unicode_inspector_opens, 1, "source {source:?}");
-        }
     }
 
     #[test]

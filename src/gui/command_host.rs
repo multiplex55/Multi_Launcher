@@ -220,9 +220,6 @@ impl DialogCommandHost for LauncherApp {
         self.qr_dialog.open(initial_text);
         self.focus_panel(super::Panel::QrDialog);
     }
-    fn open_unicode_inspector(&mut self) {
-        self.focus_panel(super::Panel::UnicodeInspectorDialog);
-    }
     fn open_regex_tester_dialog(&mut self) {
         self.regex_tester_dialog.open();
         self.focus_panel(super::Panel::RegexTesterDialog);
@@ -1619,7 +1616,6 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::Radial(_)
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
-            | Command::UnicodeInspector(_)
             | Command::XmlToolkit(_)
             | Command::BatchRename(_)
             | Command::HotFolder(_)
@@ -4556,64 +4552,6 @@ pub(in crate::gui) mod tests {
         );
         assert!(app.qr_dialog.open);
         assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::QrDialog));
-    }
-
-    #[test]
-    fn unicode_inspector_app_panel_is_session_only_and_ignores_query_override() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = inert_test_app_with_paste_shortcuts_disabled(directory.path());
-        app.query = "keep query".into();
-        let invocation = crate::commands::parse_command(
-            crate::actions::Action {
-                label: "Open Unicode Inspector".into(),
-                desc: String::new(),
-                action: "unicode:open".into(),
-                args: None,
-            },
-            Some("private query override".into()),
-            crate::commands::ActivationSource::Dashboard,
-        )
-        .unwrap();
-        assert!(!command_accepts_query_override(&invocation.command));
-
-        app.dispatch_command_invocation(invocation.clone());
-        assert!(app.is_panel_open(super::super::Panel::UnicodeInspectorDialog));
-        assert!(
-            app.panel_stack
-                .contains(&super::super::Panel::UnicodeInspectorDialog)
-        );
-        assert_eq!(
-            app.panel_stack
-                .iter()
-                .filter(|panel| **panel == super::super::Panel::UnicodeInspectorDialog)
-                .count(),
-            1
-        );
-        assert_eq!(app.query, "keep query");
-        assert!(app.usage.is_empty());
-        assert!(app.test_recorded_history_queries.is_empty());
-        app.unicode_inspector_dialog
-            .accept_for_test("private source\r\n雪".into());
-
-        app.dispatch_command_invocation(invocation.clone());
-        assert_eq!(
-            app.unicode_inspector_dialog.source_for_test(),
-            "private source\r\n雪",
-            "opening an already-open panel retains the current private session"
-        );
-        assert_eq!(app.query, "keep query");
-        assert!(app.usage.is_empty());
-        assert!(app.test_recorded_history_queries.is_empty());
-
-        assert!(app.close_front_dialog());
-        assert!(!app.is_panel_open(super::super::Panel::UnicodeInspectorDialog));
-        assert_eq!(app.unicode_inspector_dialog.source_for_test(), "");
-        app.dispatch_command_invocation(invocation);
-        assert!(app.is_panel_open(super::super::Panel::UnicodeInspectorDialog));
-        assert_eq!(app.unicode_inspector_dialog.source_for_test(), "");
-        assert_eq!(app.query, "keep query");
-        assert!(app.usage.is_empty());
-        assert!(app.test_recorded_history_queries.is_empty());
     }
 
     #[test]

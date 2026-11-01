@@ -26,7 +26,6 @@ mod search_replace;
 mod snippet_run;
 mod table_utility;
 mod todo;
-mod unicode_inspector;
 mod xml_toolkit;
 
 pub(crate) use batch_rename::handle_batch_rename;
@@ -57,5 +56,4 @@ pub(crate) use search_replace::handle_search_replace;
 pub(crate) use snippet_run::handle_snippet_run;
 pub(crate) use table_utility::handle_table_utility;
 pub(crate) use todo::handle_todo;
-pub(crate) use unicode_inspector::handle_unicode_inspector;
 pub(crate) use xml_toolkit::handle_xml_toolkit;

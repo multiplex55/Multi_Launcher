@@ -89,7 +89,6 @@ pub enum Command {
     Macro(MacroCommand),
     Crop(CropCommand),
     JsonUtility(JsonUtilityCommand),
-    UnicodeInspector(UnicodeInspectorCommand),
     XmlToolkit(XmlToolkitCommand),
     TableUtility(TableUtilityCommand),
     BatchRename(BatchRenameCommand),
@@ -136,7 +135,6 @@ impl Command {
             Self::Macro(_) => "macro",
             Self::Crop(_) => "crop",
             Self::JsonUtility(_) => "json_utility",
-            Self::UnicodeInspector(_) => "unicode_inspector",
             Self::XmlToolkit(_) => "xml_toolkit",
             Self::TableUtility(_) => "table_utility",
             Self::BatchRename(_) => "batch_rename",
@@ -182,7 +180,6 @@ impl Command {
             Self::Macro(v) => v.kind_name(),
             Self::Crop(v) => v.kind_name(),
             Self::JsonUtility(v) => v.kind_name(),
-            Self::UnicodeInspector(v) => v.kind_name(),
             Self::XmlToolkit(v) => v.kind_name(),
             Self::TableUtility(v) => v.kind_name(),
             Self::BatchRename(v) => v.kind_name(),
@@ -847,13 +844,6 @@ pub enum JsonUtilityCommand {
 }
 
 kinds!(JsonUtilityCommand, Self::Open { .. } => "open");
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnicodeInspectorCommand {
-    Open,
-}
-
-kinds!(UnicodeInspectorCommand, Self::Open => "open");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XmlToolkitCommand {
