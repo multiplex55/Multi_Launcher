@@ -8516,7 +8516,12 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
-        timer_dlg.ui_with_jump_mode(&ctx, self, timer_scope);
+        timer_dlg.ui_with_jump_mode(
+            &ctx,
+            self,
+            timer_scope,
+            first_ui_pass && frame_logic.should_be_visible,
+        );
         self.timer_dialog = timer_dlg;
         let mut comp = std::mem::take(&mut self.completion_dialog);
         comp.ui(&ctx);
