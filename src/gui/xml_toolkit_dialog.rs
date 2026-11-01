@@ -529,6 +529,10 @@ impl XmlToolkitDialogState {
         self.poll_file_worker();
         self.poll_session(ctx);
         if !self.open {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("xml-toolkit").unwrap(),
+            );
             if self.observed_presentation.take().is_some() {
                 self.native_jump_mode.cancel_all();
             }
@@ -564,6 +568,7 @@ impl XmlToolkitDialogState {
                 if independent {
                     let close = self.show_immediate_viewport(
                         child,
+                        class,
                         parent_instance,
                         application_input_allowed,
                         jump_mode_enabled,
@@ -659,6 +664,12 @@ impl XmlToolkitDialogState {
         if viewport_seen {
             self.process_intents(ctx, intents);
         }
+        if !self.open {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("xml-toolkit").unwrap(),
+            );
+        }
         self.poll_file_worker();
         self.poll_session(ctx);
         self.request_repaint_if_pending(ctx);
@@ -667,6 +678,7 @@ impl XmlToolkitDialogState {
     fn show_immediate_viewport(
         &mut self,
         child: &mut egui::Ui,
+        class: egui::ViewportClass,
         parent_instance: Option<u64>,
         application_input_allowed: bool,
         jump_mode_enabled: bool,
@@ -768,6 +780,15 @@ impl XmlToolkitDialogState {
         if close {
             self.native_jump_mode.cancel_all();
             self.native_jump_frame = None;
+        } else {
+            crate::gui::utility_dialog_size::apply_native_utility_size_restore(
+                child,
+                class,
+                crate::settings::UtilityToolKey::parse("xml-toolkit").unwrap(),
+                egui::vec2(1120.0, 760.0),
+                Some(egui::vec2(480.0, 340.0)),
+                None,
+            );
         }
 
         self.native_jump_mode.begin_ui_pass();

@@ -247,6 +247,10 @@ impl ParameterPromptUi {
 
     pub fn show(&mut self, ctx: &egui::Context, handle_ui_actions: bool) {
         if self.pending.is_none() && self.notice.is_none() {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("mkmacro-parameters").unwrap(),
+            );
             return;
         }
         let mut cancel = false;
@@ -260,10 +264,23 @@ impl ParameterPromptUi {
                 .with_min_inner_size([360.0, 240.0])
                 .with_max_inner_size([720.0, 720.0])
                 .with_always_on_top(),
-            |child, _| {
+            |child, class| {
+                let close_requested = child.input(|input| {
+                    input.viewport().close_requested() || input.key_pressed(egui::Key::Escape)
+                });
                 if self.first_frame {
                     child.send_viewport_cmd(egui::ViewportCommand::Focus);
                     self.first_frame = false;
+                }
+                if !close_requested {
+                    crate::gui::utility_dialog_size::apply_native_utility_size_restore(
+                        child,
+                        class,
+                        crate::settings::UtilityToolKey::parse("mkmacro-parameters").unwrap(),
+                        egui::vec2(460.0, 440.0),
+                        Some(egui::vec2(360.0, 240.0)),
+                        Some(egui::vec2(720.0, 720.0)),
+                    );
                 }
                 egui::Panel::bottom("invocation_actions").show(child, |ui| {
                     ui.horizontal(|ui| {
@@ -387,6 +404,12 @@ impl ParameterPromptUi {
                 }
                 Err(error) => self.error = Some(error.to_string()),
             }
+        }
+        if self.pending.is_none() && self.notice.is_none() {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("mkmacro-parameters").unwrap(),
+            );
         }
     }
 

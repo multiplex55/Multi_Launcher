@@ -272,6 +272,10 @@ impl QrDialogState {
         >,
     ) {
         if !self.open {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("qr-generator").unwrap(),
+            );
             return;
         }
         self.refresh_generation();
@@ -290,6 +294,14 @@ impl QrDialogState {
             if close {
                 self.close();
             } else if independent {
+                crate::gui::utility_dialog_size::apply_native_utility_size_restore(
+                    child,
+                    class,
+                    crate::settings::UtilityToolKey::parse("qr-generator").unwrap(),
+                    egui::vec2(620.0, 700.0),
+                    Some(egui::vec2(320.0, 420.0)),
+                    None,
+                );
                 egui::CentralPanel::default().show(child, |ui| {
                     self.body(ui);
                     #[cfg(feature = "qa-framebuffer-capture")]
@@ -336,6 +348,12 @@ impl QrDialogState {
             }
             if independent && !self.open {
                 child.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            if !self.open {
+                crate::gui::utility_dialog_size::close_native_utility_size_window(
+                    child.ctx(),
+                    crate::settings::UtilityToolKey::parse("qr-generator").unwrap(),
+                );
             }
             #[cfg(feature = "qa-framebuffer-capture")]
             if let Some(observation) = qa_observation.as_deref_mut() {

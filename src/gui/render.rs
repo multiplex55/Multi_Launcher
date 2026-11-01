@@ -3216,6 +3216,10 @@ impl LauncherApp {
 
     fn show_macro_prompt(&mut self, ctx: &egui::Context, handle_ui_actions: bool) {
         let Some(pending) = self.macro_prompt.pending.as_ref() else {
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("mkmacro-runtime-prompt").unwrap(),
+            );
             return;
         };
         let title = pending.request.title.clone();
@@ -3227,7 +3231,21 @@ impl LauncherApp {
                 .with_title(title)
                 .with_inner_size([420.0, 150.0])
                 .with_always_on_top(),
-            |child, _| {
+            |child, class| {
+                let closing = handle_ui_actions
+                    && child.input(|input| {
+                        input.viewport().close_requested() || input.key_pressed(egui::Key::Escape)
+                    });
+                if !closing {
+                    crate::gui::utility_dialog_size::apply_native_utility_size_restore(
+                        child,
+                        class,
+                        crate::settings::UtilityToolKey::parse("mkmacro-runtime-prompt").unwrap(),
+                        egui::vec2(420.0, 150.0),
+                        None,
+                        None,
+                    );
+                }
                 egui::CentralPanel::default().show(child, |ui| {
                     ui.label(prompt.as_str());
                     let response = ui.add(
@@ -3279,6 +3297,10 @@ impl LauncherApp {
             self.macro_prompt.text.clear();
             self.macro_prompt.first_frame = false;
             self.macro_prompt.bootstrap_pending = false;
+            crate::gui::utility_dialog_size::close_native_utility_size_window(
+                ctx,
+                crate::settings::UtilityToolKey::parse("mkmacro-runtime-prompt").unwrap(),
+            );
         }
     }
 }

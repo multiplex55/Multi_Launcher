@@ -149,6 +149,9 @@ pub struct SettingsEditor {
     /// retained egui pass after the search result has requested focus.
     pub(crate) search_enter_consumption_pending: bool,
     pub(crate) baseline_settings: Settings,
+    /// Session-only target for the independent utility-size reset controls.
+    pub(crate) utility_dialog_size_selected_tool:
+        Option<crate::settings::utility_dialog_sizes::UtilityToolKey>,
     pub(crate) paste_sequence: crate::settings::PasteSequencePreferences,
     pub(crate) paste_next_enabled: bool,
     pub(crate) paste_cancel_enabled: bool,

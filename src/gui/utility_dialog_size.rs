@@ -65,6 +65,23 @@ impl WindowInstance {
     }
 }
 
+#[derive(Debug)]
+struct NativeWindowInstance {
+    key: UtilityToolKey,
+    initial_restore_applied: bool,
+    last_reset_revision: Option<UtilitySizeRevision>,
+}
+
+impl NativeWindowInstance {
+    fn new(key: UtilityToolKey) -> Self {
+        Self {
+            key,
+            initial_restore_applied: false,
+            last_reset_revision: None,
+        }
+    }
+}
+
 /// Cloneable access to the one app-owned utility-size lifecycle and preference
 /// cache. The short state locks are never held while a Window renders content,
 /// so a nested utility can use the same capability from its content closure.
@@ -79,6 +96,7 @@ struct UtilityDialogSizeState {
     sizes: UtilityDialogSizes,
     frame: u64,
     instances: HashMap<Id, WindowInstance>,
+    native_instances: HashMap<Id, NativeWindowInstance>,
     accepted_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
     waiting_for_ack: HashMap<UtilityToolKey, UtilitySizeRevision>,
     local_resize_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
@@ -91,6 +109,27 @@ struct UtilityDialogSizeState {
 pub(crate) struct UtilityDialogSizeWriteFailure {
     pub(crate) key: UtilityToolKey,
     pub(crate) message: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct UtilityDialogSizeStatus {
+    pub(crate) available: bool,
+    pub(crate) preference: UtilitySizePreference,
+    pub(crate) acknowledged_revision: Option<UtilitySizeRevision>,
+    pub(crate) pending_revision: Option<UtilitySizeRevision>,
+    pub(crate) failure: Option<(UtilitySizeRevision, String)>,
+}
+
+impl Default for UtilityDialogSizeStatus {
+    fn default() -> Self {
+        Self {
+            available: false,
+            preference: UtilitySizePreference::Missing,
+            acknowledged_revision: None,
+            pending_revision: None,
+            failure: None,
+        }
+    }
 }
 
 impl UtilityDialogSizeManager {
@@ -106,6 +145,7 @@ impl UtilityDialogSizeManager {
                 sizes,
                 frame: 0,
                 instances: HashMap::new(),
+                native_instances: HashMap::new(),
                 accepted_revisions: HashMap::new(),
                 waiting_for_ack: HashMap::new(),
                 local_resize_revisions: HashMap::new(),
@@ -253,13 +293,115 @@ impl UtilityDialogSizeManager {
         self.lock().sizes.preference(key)
     }
 
-    /// Retry a retained failure only from an explicit controlled event.
-    pub(crate) fn retry_failed(&self) -> Result<(), String> {
-        let (workers, path) = {
-            let state = self.lock();
-            (state.workers.clone(), state.settings_path.clone())
+    fn status(&self, key: UtilityToolKey) -> UtilityDialogSizeStatus {
+        let state = self.lock();
+        let latest_revision = state.workers.utility_size_latest_revision(key);
+        let failure = state.workers.utility_size_write_failure(key);
+        let pending_revision = if failure.is_none() {
+            state.waiting_for_ack.get(&key).copied().filter(|revision| {
+                Some(*revision) == latest_revision
+                    && state.accepted_revisions.get(&key) != Some(revision)
+            })
+        } else {
+            None
         };
-        workers.retry_utility_size_mutations(path)
+        UtilityDialogSizeStatus {
+            available: true,
+            preference: state.sizes.preference(key),
+            acknowledged_revision: state.accepted_revisions.get(&key).copied(),
+            pending_revision,
+            failure,
+        }
+    }
+
+    fn restore_native_viewport(
+        &self,
+        key: UtilityToolKey,
+        viewport_info: &egui::ViewportInfo,
+        factory_inner_size: Vec2,
+        minimum_inner_size: Option<Vec2>,
+        maximum_inner_size: Option<Vec2>,
+    ) -> Option<Vec2> {
+        let mut state = self.lock();
+        let preference = state.sizes.preference(key);
+        let accepted_revision = state.accepted_revisions.get(&key).copied();
+        let instance_id = native_instance_id(key);
+        let instance = state
+            .native_instances
+            .entry(instance_id)
+            .or_insert_with(|| NativeWindowInstance::new(key));
+        if instance.key != key {
+            *instance = NativeWindowInstance::new(key);
+        }
+        if matches!(preference, UtilitySizePreference::Unsupported) {
+            instance.initial_restore_applied = true;
+            return None;
+        }
+        let reset_revision = matches!(preference, UtilitySizePreference::Reset)
+            .then_some(accepted_revision)
+            .flatten();
+        let reset_acknowledged =
+            reset_revision.is_some() && reset_revision != instance.last_reset_revision;
+        if instance.initial_restore_applied && !reset_acknowledged {
+            return None;
+        }
+
+        let applied = native_restore_inner_size(
+            viewport_info,
+            preference,
+            factory_inner_size,
+            minimum_inner_size,
+            maximum_inner_size,
+        )?;
+        instance.initial_restore_applied = true;
+        if matches!(preference, UtilitySizePreference::Reset) {
+            instance.last_reset_revision = reset_revision;
+        }
+        Some(applied)
+    }
+
+    fn close_native_viewport(&self, key: UtilityToolKey) {
+        let mut state = self.lock();
+        if let Some(instance) = state.native_instances.get_mut(&native_instance_id(key)) {
+            if instance.key == key {
+                instance.initial_restore_applied = false;
+            }
+        }
+    }
+
+    /// Retry a retained failure only from an explicit controlled event.
+    pub(crate) fn retry_failed(&self, ctx: &Context) -> Result<(), String> {
+        let (workers, path, known_keys) = {
+            let state = self.lock();
+            (
+                state.workers.clone(),
+                state.settings_path.clone(),
+                state.known_keys.iter().copied().collect::<Vec<_>>(),
+            )
+        };
+        let failed = known_keys
+            .into_iter()
+            .filter_map(|key| {
+                workers
+                    .utility_size_write_failure(key)
+                    .map(|(revision, _)| (key, revision))
+            })
+            .collect::<Vec<_>>();
+        workers.retry_utility_size_mutations(path)?;
+
+        let mut state = self.lock();
+        for (key, failed_revision) in failed {
+            let latest_revision = state.workers.utility_size_latest_revision(key);
+            if latest_revision == Some(failed_revision)
+                && state.accepted_revisions.get(&key) != Some(&failed_revision)
+            {
+                state.waiting_for_ack.insert(key, failed_revision);
+            }
+        }
+        drop(state);
+        ctx.request_repaint();
+        ctx.request_repaint_after(ACK_POLL_INTERVAL);
+        Ok(())
     }
 
     /// Admit a final write for any real grip release that was observed on the
@@ -760,12 +902,61 @@ fn show_unmanaged_window<R>(
 pub(crate) struct UtilityDialogSizeAccess(Option<UtilityDialogSizeManager>);
 
 impl UtilityDialogSizeAccess {
+    pub(crate) fn is_available(&self) -> bool {
+        self.0.is_some()
+    }
+
     pub(crate) fn preference(&self, key: UtilityToolKey) -> UtilitySizePreference {
         self.0
             .as_ref()
             .map_or(UtilitySizePreference::Missing, |capability| {
                 capability.preference(key)
             })
+    }
+
+    pub(crate) fn status(&self, key: UtilityToolKey) -> UtilityDialogSizeStatus {
+        self.0
+            .as_ref()
+            .map_or_else(UtilityDialogSizeStatus::default, |manager| {
+                manager.status(key)
+            })
+    }
+
+    pub(crate) fn reset(&self, key: UtilityToolKey) -> Result<UtilitySizeRevision, String> {
+        self.0
+            .as_ref()
+            .ok_or_else(|| "utility size settings are unavailable in this context".to_owned())?
+            .reset(key)
+    }
+
+    pub(crate) fn retry_failed(&self, ctx: &Context) -> Result<(), String> {
+        self.0
+            .as_ref()
+            .ok_or_else(|| "utility size settings are unavailable in this context".to_owned())?
+            .retry_failed(ctx)
+    }
+
+    fn restore_native_viewport(
+        &self,
+        key: UtilityToolKey,
+        viewport_info: &egui::ViewportInfo,
+        factory_inner_size: Vec2,
+        minimum_inner_size: Option<Vec2>,
+        maximum_inner_size: Option<Vec2>,
+    ) -> Option<Vec2> {
+        self.0.as_ref()?.restore_native_viewport(
+            key,
+            viewport_info,
+            factory_inner_size,
+            minimum_inner_size,
+            maximum_inner_size,
+        )
+    }
+
+    fn close_native_viewport(&self, key: UtilityToolKey) {
+        if let Some(manager) = &self.0 {
+            manager.close_native_viewport(key);
+        }
     }
 
     pub(crate) fn show_window<R>(
@@ -891,6 +1082,108 @@ impl UtilityDialogSizeAccess {
         );
         response
     }
+}
+
+/// Apply one child-viewport restore command from the same acknowledged utility
+/// size capability used by embedded Windows. Native observed geometry never
+/// becomes a preference; this adapter only restores on open/reset.
+pub(crate) fn apply_native_utility_size_restore(
+    child: &Ui,
+    class: egui::ViewportClass,
+    key: UtilityToolKey,
+    factory_inner_size: Vec2,
+    minimum_inner_size: Option<Vec2>,
+    maximum_inner_size: Option<Vec2>,
+) {
+    if class != egui::ViewportClass::Immediate {
+        return;
+    }
+    let ctx = child.ctx();
+    let viewport_info = child.input(|input| input.viewport().clone());
+    let access = UtilityDialogSizeManager::for_context(ctx);
+    if let Some(size) = access.restore_native_viewport(
+        key,
+        &viewport_info,
+        factory_inner_size,
+        minimum_inner_size,
+        maximum_inner_size,
+    ) {
+        child.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+    }
+}
+
+pub(crate) fn close_native_utility_size_window(ctx: &Context, key: UtilityToolKey) {
+    UtilityDialogSizeManager::for_context(ctx).close_native_viewport(key);
+}
+
+fn native_instance_id(key: UtilityToolKey) -> Id {
+    Id::new(("multi_launcher.native_utility_size", key))
+}
+
+fn native_restore_inner_size(
+    viewport_info: &egui::ViewportInfo,
+    preference: UtilitySizePreference,
+    factory_inner_size: Vec2,
+    minimum_inner_size: Option<Vec2>,
+    maximum_inner_size: Option<Vec2>,
+) -> Option<Vec2> {
+    if matches!(preference, UtilitySizePreference::Unsupported) {
+        return None;
+    }
+    let inner_rect = viewport_info.inner_rect?;
+    let outer_rect = viewport_info.outer_rect?;
+    let monitor_size = viewport_info.monitor_size?;
+    let inner_size = inner_rect.size();
+    let outer_size = outer_rect.size();
+    if !finite_rect(inner_rect)
+        || !finite_rect(outer_rect)
+        || !finite_positive_size(inner_size)
+        || !finite_positive_size(outer_size)
+        || !finite_positive_size(monitor_size)
+        || !finite_positive_size(factory_inner_size)
+    {
+        return None;
+    }
+
+    // ViewportInfo rectangles and monitor_size are already egui points. Do
+    // not apply native DPI or zoom a second time.
+    let chrome = (outer_size - inner_size).max(Vec2::ZERO);
+    let monitor_inner = (monitor_size - chrome).max(Vec2::ZERO);
+    if !finite_positive_size(monitor_inner) {
+        return None;
+    }
+    let maximum = maximum_inner_size
+        .unwrap_or(monitor_inner)
+        .min(monitor_inner)
+        .max(Vec2::ZERO);
+    let requested_minimum = minimum_inner_size.unwrap_or(Vec2::ZERO);
+    if !finite_size(requested_minimum) || !finite_size(maximum) {
+        return None;
+    }
+    let minimum = requested_minimum.max(Vec2::ZERO).min(maximum);
+    let requested_inner = match preference {
+        UtilitySizePreference::Preferred(size) => {
+            (Vec2::new(size.width, size.height) - chrome).max(Vec2::ZERO)
+        }
+        UtilitySizePreference::Missing | UtilitySizePreference::Reset => factory_inner_size,
+        UtilitySizePreference::Unsupported => return None,
+    };
+    Some(requested_inner.min(maximum).max(minimum))
+}
+
+fn finite_size(size: Vec2) -> bool {
+    size.x.is_finite() && size.y.is_finite()
+}
+
+fn finite_positive_size(size: Vec2) -> bool {
+    finite_size(size) && size.x > 0.0 && size.y > 0.0
+}
+
+fn finite_rect(rect: Rect) -> bool {
+    rect.min.x.is_finite()
+        && rect.min.y.is_finite()
+        && rect.max.x.is_finite()
+        && rect.max.y.is_finite()
 }
 
 impl UtilityDialogSizeState {
@@ -1150,6 +1443,31 @@ mod tests {
         input
     }
 
+    fn native_viewport_info(
+        inner_size: Vec2,
+        chrome: Vec2,
+        monitor_size: Vec2,
+    ) -> egui::ViewportInfo {
+        let inner_rect = Rect::from_min_size(Pos2::ZERO, inner_size);
+        let outer_rect = Rect::from_min_size(Pos2::ZERO, inner_size + chrome);
+        egui::ViewportInfo {
+            inner_rect: Some(inner_rect),
+            outer_rect: Some(outer_rect),
+            monitor_size: Some(monitor_size),
+            native_pixels_per_point: Some(2.0),
+            ..Default::default()
+        }
+    }
+
+    fn raw_input_with_native_viewport(info: egui::ViewportInfo) -> RawInput {
+        let mut input = raw_input(egui::vec2(800.0, 600.0), Vec::new(), 1.0);
+        *input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport exists in default RawInput") = info;
+        input
+    }
+
     fn render_window(
         ctx: &Context,
         manager: &UtilityDialogSizeManager,
@@ -1304,7 +1622,7 @@ mod tests {
 
     #[test]
     fn real_window_resize_grip_records_candidate_after_one_shot_restore() {
-        let (_directory, path, mut settings, ctx, workers, mut manager) =
+        let (_directory, path, mut settings, ctx, workers, manager) =
             setup(Some(PreferredWindowSize::new(400.0, 300.0).unwrap()));
         let id = Id::new("utility-real-resize-grip");
         for _ in 0..3 {
@@ -1409,7 +1727,7 @@ mod tests {
 
     #[test]
     fn omitted_window_reopens_with_latest_size_from_another_instance() {
-        let (_directory, path, mut settings, ctx, workers, mut manager) =
+        let (_directory, path, mut settings, ctx, workers, manager) =
             setup(Some(PreferredWindowSize::new(400.0, 300.0).unwrap()));
         let first = Id::new("utility-size-first-instance");
         let second = Id::new("utility-size-second-instance");
@@ -1729,7 +2047,7 @@ mod tests {
     #[test]
     fn viewport_clamp_and_discarded_pass_preserve_the_durable_preference() {
         let preferred = PreferredWindowSize::new(1200.0, 900.0).unwrap();
-        let (_directory, path, mut settings, ctx, workers, mut manager) = setup(Some(preferred));
+        let (_directory, path, mut settings, ctx, workers, manager) = setup(Some(preferred));
         let id = Id::new("utility-size-clamp-and-discard");
         render_window(
             &ctx,
@@ -1761,7 +2079,7 @@ mod tests {
     #[test]
     fn smaller_reset_reopens_over_stale_egui_size() {
         let large = PreferredWindowSize::new(720.0, 520.0).unwrap();
-        let (_directory, path, mut settings, ctx, workers, mut manager) = setup(Some(large));
+        let (_directory, path, mut settings, ctx, workers, manager) = setup(Some(large));
         let id = Id::new("utility-size-smaller-reset");
         for _ in 0..3 {
             render_window(
@@ -1886,7 +2204,7 @@ mod tests {
     #[test]
     fn title_drag_content_reflow_and_collapsed_window_do_not_save_size() {
         let preferred = PreferredWindowSize::new(400.0, 300.0).unwrap();
-        let (_directory, path, mut settings, ctx, workers, mut manager) = setup(Some(preferred));
+        let (_directory, path, mut settings, ctx, workers, manager) = setup(Some(preferred));
         let id = Id::new("utility-size-non-grip-control");
         for _ in 0..3 {
             render_window(
@@ -2280,5 +2598,440 @@ mod tests {
             settings_file(&path).utility_dialog_sizes.preference(tool),
             UtilitySizePreference::Reset
         );
+    }
+
+    #[test]
+    fn utility_size_integration_native_restore_uses_outer_chrome_and_monitor_points_once() {
+        let preferred = PreferredWindowSize::new(900.0, 700.0).unwrap();
+        let (_directory, path, _settings, _ctx, workers, manager) = setup(Some(preferred));
+        let viewport = native_viewport_info(
+            egui::vec2(400.0, 300.0),
+            egui::vec2(20.0, 40.0),
+            egui::vec2(1000.0, 800.0),
+        );
+
+        let applied = manager
+            .restore_native_viewport(
+                key(),
+                &viewport,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            )
+            .expect("finite child metadata permits a restore");
+        assert_eq!(
+            applied,
+            egui::vec2(880.0, 660.0),
+            "the saved value is an outer size; chrome is removed once and native DPI is not reapplied"
+        );
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &viewport,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            ),
+            None,
+            "normal subsequent callbacks do not reapply the opening size"
+        );
+
+        let constrained = native_viewport_info(
+            egui::vec2(400.0, 300.0),
+            egui::vec2(20.0, 40.0),
+            egui::vec2(600.0, 500.0),
+        );
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &constrained,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            ),
+            None,
+            "observed resize or monitor changes while open do not issue another restore"
+        );
+        assert_eq!(workers.utility_size_latest_revision(key()), None);
+        manager.close_native_viewport(key());
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &viewport,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                Some(egui::vec2(720.0, 720.0)),
+            ),
+            Some(egui::vec2(720.0, 660.0)),
+            "the caller's native maximum clamps applied inner geometry only"
+        );
+        manager.close_native_viewport(key());
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &constrained,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            ),
+            Some(egui::vec2(580.0, 460.0)),
+            "child monitor bounds clamp only the applied inner size"
+        );
+        assert_eq!(workers.utility_size_latest_revision(key()), None);
+        assert_eq!(
+            settings_file(&path).utility_dialog_sizes.preference(key()),
+            UtilitySizePreference::Preferred(preferred),
+            "native observations and monitor changes never write a preference"
+        );
+        workers.join_all();
+    }
+
+    #[test]
+    fn utility_size_integration_native_reset_ack_reapplies_once_and_reopen_uses_default() {
+        let preferred = PreferredWindowSize::new(760.0, 540.0).unwrap();
+        let (_directory, path, _settings, ctx, workers, manager) = setup(Some(preferred));
+        let viewport = native_viewport_info(
+            egui::vec2(400.0, 300.0),
+            egui::vec2(20.0, 40.0),
+            egui::vec2(1200.0, 900.0),
+        );
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &viewport,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            ),
+            Some(egui::vec2(740.0, 500.0))
+        );
+
+        let revision = manager.reset(key()).unwrap();
+        let pending = manager.status(key());
+        assert_eq!(pending.pending_revision, Some(revision));
+        wait_for_preference(
+            &ctx,
+            &manager,
+            key(),
+            UtilitySizePreference::Reset,
+            egui::vec2(1000.0, 800.0),
+        );
+        let acknowledged = manager.status(key());
+        assert_eq!(acknowledged.acknowledged_revision, Some(revision));
+        assert_eq!(acknowledged.pending_revision, None);
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &viewport,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            ),
+            Some(egui::vec2(620.0, 700.0)),
+            "only the acknowledged reset revision restores the native factory size"
+        );
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &viewport,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            ),
+            None,
+            "a reset revision is applied once while the native window stays open"
+        );
+
+        manager.close_native_viewport(key());
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &viewport,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            ),
+            Some(egui::vec2(620.0, 700.0)),
+            "reopening after reset restores the factory size once"
+        );
+        assert_eq!(workers.utility_size_latest_revision(key()), Some(revision));
+        workers.join_all();
+        assert_eq!(
+            settings_file(&path).utility_dialog_sizes.preference(key()),
+            UtilitySizePreference::Reset
+        );
+    }
+
+    #[test]
+    fn utility_size_integration_native_restore_defers_missing_metadata_without_mutation() {
+        let preferred = PreferredWindowSize::new(700.0, 500.0).unwrap();
+        let (_directory, path, _settings, _ctx, workers, manager) = setup(Some(preferred));
+        assert_eq!(
+            manager.restore_native_viewport(
+                key(),
+                &egui::ViewportInfo::default(),
+                egui::vec2(620.0, 440.0),
+                None,
+                None,
+            ),
+            None,
+            "incomplete child metadata defers restoration"
+        );
+        assert_eq!(workers.utility_size_latest_revision(key()), None);
+        let complete = native_viewport_info(
+            egui::vec2(400.0, 300.0),
+            egui::vec2(20.0, 40.0),
+            egui::vec2(1000.0, 800.0),
+        );
+        assert_eq!(
+            manager
+                .restore_native_viewport(key(), &complete, egui::vec2(620.0, 440.0), None, None,),
+            Some(egui::vec2(680.0, 460.0)),
+            "a later ordinary child callback can apply the still-pending opening restore"
+        );
+        assert_eq!(workers.utility_size_latest_revision(key()), None);
+        assert_eq!(
+            settings_file(&path).utility_dialog_sizes.preference(key()),
+            UtilitySizePreference::Preferred(preferred)
+        );
+        workers.join_all();
+    }
+
+    #[test]
+    fn utility_size_integration_native_restore_leaves_unsupported_preferences_inactive() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        Settings::default().save(path.to_str().unwrap()).unwrap();
+        let workers = SettingsSaveWorkerRegistry::default();
+        let opaque: UtilityDialogSizes =
+            serde_json::from_str(r#"{"version":99,"entries":{}}"#).unwrap();
+        let manager = UtilityDialogSizeManager::new(
+            path.to_string_lossy().into_owned(),
+            workers.clone(),
+            opaque,
+        );
+        let viewport = native_viewport_info(
+            egui::vec2(400.0, 300.0),
+            egui::vec2(20.0, 40.0),
+            egui::vec2(1000.0, 800.0),
+        );
+
+        assert_eq!(
+            manager.status(key()).preference,
+            UtilitySizePreference::Unsupported
+        );
+        assert_eq!(
+            manager
+                .restore_native_viewport(key(), &viewport, egui::vec2(620.0, 440.0), None, None,),
+            None,
+            "an unsupported subtree does not trigger a factory or saved-size viewport command"
+        );
+        assert_eq!(workers.utility_size_latest_revision(key()), None);
+        workers.join_all();
+    }
+
+    #[test]
+    fn utility_size_integration_native_adapter_only_commands_immediate_viewports_once() {
+        let preferred = PreferredWindowSize::new(700.0, 500.0).unwrap();
+        let (_directory, _path, _settings, ctx, workers, _manager) = setup(Some(preferred));
+        let viewport = native_viewport_info(
+            egui::vec2(400.0, 300.0),
+            egui::vec2(20.0, 40.0),
+            egui::vec2(1000.0, 800.0),
+        );
+        let embedded = ctx.run_ui(raw_input_with_native_viewport(viewport.clone()), |root| {
+            apply_native_utility_size_restore(
+                root,
+                egui::ViewportClass::EmbeddedWindow,
+                key(),
+                egui::vec2(620.0, 440.0),
+                None,
+                None,
+            );
+        });
+        let embedded_commands = &embedded
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport output is present")
+            .commands;
+        assert!(
+            embedded_commands
+                .iter()
+                .all(|command| !matches!(command, egui::ViewportCommand::InnerSize(_))),
+            "native restore adapter does not send child size commands for embedded viewports"
+        );
+        embedded.drop_without_applying_deltas();
+
+        let immediate = ctx.run_ui(raw_input_with_native_viewport(viewport.clone()), |root| {
+            apply_native_utility_size_restore(
+                root,
+                egui::ViewportClass::Immediate,
+                key(),
+                egui::vec2(620.0, 440.0),
+                None,
+                None,
+            );
+        });
+        let immediate_commands = &immediate
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport output is present")
+            .commands;
+        assert!(
+            immediate_commands.iter().any(|command| {
+                matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(680.0, 460.0))
+            }),
+            "the Immediate adapter sends the converted outer preference as inner points"
+        );
+        immediate.drop_without_applying_deltas();
+
+        let repeated = ctx.run_ui(raw_input_with_native_viewport(viewport), |root| {
+            apply_native_utility_size_restore(
+                root,
+                egui::ViewportClass::Immediate,
+                key(),
+                egui::vec2(620.0, 440.0),
+                None,
+                None,
+            );
+        });
+        assert!(
+            repeated
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .expect("root viewport output is present")
+                .commands
+                .iter()
+                .all(|command| !matches!(command, egui::ViewportCommand::InnerSize(_))),
+            "normal native frames do not resend the opening restore"
+        );
+        repeated.drop_without_applying_deltas();
+        assert_eq!(workers.utility_size_latest_revision(key()), None);
+        workers.join_all();
+    }
+
+    #[test]
+    fn utility_size_integration_retry_is_explicit_and_keeps_failure_visible_until_ack() {
+        let (directory, path, _settings, ctx, workers, manager) = setup(None);
+        let repaint_delays = Arc::new(Mutex::new(Vec::new()));
+        let captured_repaints = Arc::clone(&repaint_delays);
+        ctx.set_request_repaint_callback(move |info| {
+            captured_repaints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(info.delay);
+        });
+        let blocker = directory.path().join("not-a-directory");
+        std::fs::write(&blocker, "keep this parent path blocked").unwrap();
+        manager.rebind(
+            blocker.join("settings.json").to_string_lossy().into_owned(),
+            workers.clone(),
+        );
+
+        let revision = manager.reset(key()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let failure = loop {
+            manager.begin_frame(&ctx).unwrap();
+            if let Some(failure) = manager.status(key()).failure {
+                break failure;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the injected utility-size write failure"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        };
+        assert_eq!(failure.0, revision);
+        assert!(failure.1.contains("failed to persist"));
+        assert_eq!(manager.status(key()).pending_revision, None);
+        assert_eq!(
+            manager.snapshot().preference(key()),
+            UtilitySizePreference::Missing,
+            "a failed write does not publish Reset as committed state"
+        );
+        assert_eq!(
+            manager.take_new_write_failures().len(),
+            1,
+            "the app notification owner receives a new failure exactly once"
+        );
+        repaint_delays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        for _ in 0..3 {
+            manager.begin_frame(&ctx).unwrap();
+            assert_eq!(manager.status(key()).pending_revision, None);
+            assert_eq!(
+                manager.status(key()).failure.as_ref().map(|(rev, _)| *rev),
+                Some(revision)
+            );
+            assert!(manager.take_new_write_failures().is_empty());
+        }
+        assert!(
+            repaint_delays
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a retained failure does not create a repaint/retry loop"
+        );
+
+        let mut repaint_state_drained = !ctx.has_requested_repaint();
+        for _ in 0..8 {
+            if repaint_state_drained {
+                break;
+            }
+            let output = ctx.run_ui(
+                raw_input(egui::vec2(800.0, 600.0), Vec::new(), 1.0),
+                |root| manager.begin_frame(root.ctx()).unwrap(),
+            );
+            output.drop_without_applying_deltas();
+            repaint_state_drained = !ctx.has_requested_repaint();
+        }
+        assert!(
+            repaint_state_drained,
+            "bounded real egui passes consume pending repaint requests before explicit retry; causes={:?}",
+            ctx.repaint_causes()
+        );
+        repaint_delays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        manager.retry_failed(&ctx).unwrap();
+        assert!(
+            repaint_delays
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&Duration::ZERO),
+            "an explicit retry schedules an immediate UI update"
+        );
+        let retrying = manager.status(key());
+        assert!(
+            retrying.pending_revision == Some(revision) || retrying.failure.is_some(),
+            "an explicit retry is either pending or already has its bounded failure result: {retrying:?}"
+        );
+        if let Some((failed_revision, _)) = retrying.failure {
+            assert_eq!(failed_revision, revision);
+            assert_eq!(retrying.pending_revision, None);
+        }
+        let retry_deadline = Instant::now() + Duration::from_secs(3);
+        let retry_failure = loop {
+            manager.begin_frame(&ctx).unwrap();
+            if let Some(failure) = manager.status(key()).failure {
+                break failure;
+            }
+            assert!(
+                Instant::now() < retry_deadline,
+                "timed out waiting for the explicit retry result"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        };
+        assert_eq!(retry_failure.0, revision);
+        assert_eq!(manager.status(key()).pending_revision, None);
+        assert_eq!(
+            settings_file(&path).utility_dialog_sizes.preference(key()),
+            UtilitySizePreference::Missing,
+            "the failed retry also leaves persisted settings unchanged"
+        );
+        workers.join_all();
     }
 }

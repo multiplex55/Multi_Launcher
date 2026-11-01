@@ -684,11 +684,17 @@ impl SettingsSaveWorkerRegistry {
         if state.utility_sizes_worker_active {
             for (key, mutation) in std::mem::take(&mut state.utility_sizes_failed) {
                 state.utility_sizes_pending.entry(key).or_insert(mutation);
+                if state.utility_sizes_latest_revision.get(&key) == Some(&mutation.revision) {
+                    state.utility_sizes_errors.remove(&key);
+                }
             }
             return Ok(());
         }
         for (key, mutation) in std::mem::take(&mut state.utility_sizes_failed) {
             state.utility_sizes_pending.entry(key).or_insert(mutation);
+            if state.utility_sizes_latest_revision.get(&key) == Some(&mutation.revision) {
+                state.utility_sizes_errors.remove(&key);
+            }
         }
         if state.utility_sizes_pending.is_empty() {
             return Ok(());
