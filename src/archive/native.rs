@@ -160,7 +160,7 @@ impl NativeFailure {
 pub(crate) struct NativeArchiveError {
     primary: NativeFailure,
     cleanup_attempted: bool,
-    cleanup_failure: Option<NativeFailure>,
+    cleanup_failure: Option<Box<NativeFailure>>,
     cleanup_failed: bool,
 }
 
@@ -227,13 +227,13 @@ impl NativeArchiveError {
 
     fn with_cleanup(mut self, cleanup: Result<(), NativeFailure>) -> Self {
         self.cleanup_attempted = true;
-        self.cleanup_failure = cleanup.err();
+        self.cleanup_failure = cleanup.err().map(Box::new);
         self.cleanup_failed = self.cleanup_failure.is_some();
         self
     }
 
     fn after_cleanup(primary: NativeFailure, cleanup: Result<(), NativeFailure>) -> Self {
-        let cleanup_failure = cleanup.err();
+        let cleanup_failure = cleanup.err().map(Box::new);
         Self {
             primary,
             cleanup_attempted: true,
@@ -1433,7 +1433,7 @@ fn rename_open_file_relative_no_replace(
     use windows::Win32::System::IO::IO_STATUS_BLOCK;
 
     validate_single_component(leaf, "relative rename target").map_err(|error| error.primary)?;
-    let mut name: Vec<u16> = leaf.encode_wide().collect();
+    let name: Vec<u16> = leaf.encode_wide().collect();
     let file_name_length = name
         .len()
         .checked_mul(std::mem::size_of::<u16>())

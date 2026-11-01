@@ -362,10 +362,10 @@ impl UtilityDialogSizeManager {
 
     fn close_native_viewport(&self, key: UtilityToolKey) {
         let mut state = self.lock();
-        if let Some(instance) = state.native_instances.get_mut(&native_instance_id(key)) {
-            if instance.key == key {
-                instance.initial_restore_applied = false;
-            }
+        if let Some(instance) = state.native_instances.get_mut(&native_instance_id(key))
+            && instance.key == key
+        {
+            instance.initial_restore_applied = false;
         }
     }
 

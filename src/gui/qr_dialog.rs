@@ -327,13 +327,13 @@ impl QrDialogState {
                         Some(&mut open),
                         crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
                             crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                                egui::Vec2::from(available.min(egui::vec2(620.0, 700.0))),
+                                available.min(egui::vec2(620.0, 700.0)),
                             ),
                             egui::Vec2::ZERO,
                             [None, None],
                         )
-                        .with_minimum(egui::Vec2::from(available.min(egui::vec2(320.0, 420.0))))
-                        .with_maximum(egui::Vec2::from(available)),
+                        .with_minimum(available.min(egui::vec2(320.0, 420.0)))
+                        .with_maximum(available),
                         |ui| {
                             self.body(ui);
                             #[cfg(feature = "qa-framebuffer-capture")]

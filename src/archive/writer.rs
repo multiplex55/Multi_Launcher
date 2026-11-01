@@ -674,8 +674,7 @@ fn execute_pipeline(
     // The read adapter and worker share one cancellation owner. Cataloging
     // revalidates both the revision and physical central-directory ordinals
     // against the exact held source before any destination mutation.
-    if let Err(error) = source.verify_catalog_with_io(&catalog, &actual_cancellation, control.io())
-    {
+    if let Err(error) = source.verify_catalog_with_io(catalog, &actual_cancellation, control.io()) {
         let failure = if control.is_cancelled() {
             PipelineFailure::cancelled(None)
         } else if error.kind() == io::ErrorKind::InvalidData {
@@ -692,7 +691,7 @@ fn execute_pipeline(
     }
 
     control.set_phase(ArchiveWritePhase::Reading);
-    let layouts = match validate_selected_entries(&source, &catalog, &plan, control.io()) {
+    let layouts = match validate_selected_entries(&source, catalog, &plan, control.io()) {
         Ok(layouts) => layouts,
         Err(error) => {
             set_pipeline_failure(report, error);
@@ -759,13 +758,11 @@ fn execute_pipeline(
                 return;
             }
         }
-        if control.is_cancelled() {
-            if index + 1 < files.len() {
-                report.status = ArchiveWriteStatus::Partial;
-                report.cancelled_entry = files.get(index + 1).and_then(|next| next.source_entry());
-                set_unstarted_entries(report, &files, index + 2);
-                return;
-            }
+        if control.is_cancelled() && index + 1 < files.len() {
+            report.status = ArchiveWriteStatus::Partial;
+            report.cancelled_entry = files.get(index + 1).and_then(|next| next.source_entry());
+            set_unstarted_entries(report, &files, index + 2);
+            return;
         }
         if index + 1 < files.len() {
             control.reach_test_before_next_entry();

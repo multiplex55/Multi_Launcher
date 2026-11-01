@@ -836,13 +836,13 @@ impl BatchRenameDialogState {
                 egui::Id::new("Batch Renamer"),
                 Some(&mut window_open),
                 crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from(egui::vec2(1040.0, 760.0)),
-                    ),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
+                        1040.0, 760.0,
+                    )),
                     egui::Vec2::ZERO,
                     [None, None],
                 )
-                .with_minimum(egui::Vec2::from(egui::vec2(520.0, 360.0))),
+                .with_minimum(egui::vec2(520.0, 360.0)),
                 |ui| {
                     ui.add_enabled_ui(native_ui_owner, |ui| {
                         // Window sizing/invisible passes expose a disabled content

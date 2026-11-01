@@ -260,7 +260,7 @@ impl CalendarEventEditor {
                     egui::Vec2::ZERO,
                     [None, None],
                 )
-                .with_maximum(egui::Vec2::from(ctx.content_rect().size())),
+                .with_maximum(ctx.content_rect().size()),
                 |ui| {
                     #[cfg(test)]
                     {

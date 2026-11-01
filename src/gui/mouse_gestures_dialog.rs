@@ -1767,14 +1767,14 @@ impl MgGesturesDialog {
                 egui::Id::new("Mouse Gestures"),
                 Some(&mut open),
                 crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from(egui::vec2(720.0, 420.0)),
-                    ),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
+                        720.0, 420.0,
+                    )),
                     egui::Vec2::ZERO,
                     [None, None],
                 )
-                .with_minimum(egui::Vec2::from(egui::vec2(520.0, 320.0)))
-                .with_maximum(egui::Vec2::from(egui::vec2(980.0, 760.0))),
+                .with_minimum(egui::vec2(520.0, 320.0))
+                .with_maximum(egui::vec2(980.0, 760.0)),
                 |ui| {
                     ui.add_enabled_ui(parent_native, |ui| {
                     if let Some(error) = self.load_error.clone() {

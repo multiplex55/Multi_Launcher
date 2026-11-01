@@ -428,7 +428,7 @@ impl SnippetPromptDialog {
             .min_size(min_size)
             .max_size(max_size)
 
-            .show_utility(ctx, "snippet-prompt", window_id, Some(&mut opened), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from(default_size)), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from(min_size)).with_maximum(egui::Vec2::from(max_size)), |ui| {
+            .show_utility(ctx, "snippet-prompt", window_id, Some(&mut opened), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(default_size), egui::Vec2::ZERO, [None, None]).with_minimum(min_size).with_maximum(max_size), |ui| {
                 ui.add_enabled_ui(native_ui_owner, |ui| {
                     let Some(session) = self.session.as_mut() else {
                         return;

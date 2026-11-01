@@ -1786,7 +1786,7 @@ impl SearchReplaceDialogState {
             .resizable(true)
             .default_size(egui::vec2(1120.0, 820.0))
             .min_size(egui::vec2(560.0, 360.0))
-            .show_utility(ctx, "search-replace", egui::Id::new("Search and Replace"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from(egui::vec2(1120.0, 820.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from(egui::vec2(560.0, 360.0))), |ui| {
+            .show_utility(ctx, "search-replace", egui::Id::new("Search and Replace"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(1120.0, 820.0)), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(560.0, 360.0)), |ui| {
                 let native_visible_pass = native_ui_owner
                     && ui.is_enabled()
                     && ui.is_visible()

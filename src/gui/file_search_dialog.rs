@@ -1385,12 +1385,12 @@ impl FileSearchDialogState {
                 Some(&mut open),
                 crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
                     crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from(DEFAULT_WINDOW_SIZE),
+                        DEFAULT_WINDOW_SIZE,
                     ),
                     egui::Vec2::ZERO,
                     [None, None],
                 )
-                .with_minimum(egui::Vec2::from(egui::vec2(520.0, 360.0))),
+                .with_minimum(egui::vec2(520.0, 360.0)),
                 |ui| {
                     self.contents(
                         ui,

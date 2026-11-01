@@ -680,7 +680,7 @@ impl DuplicateFinderDialogState {
                     [None, None],
                 )
                 .with_minimum(egui::Vec2::from((620.0, 420.0)))
-                .with_maximum(egui::Vec2::from(ctx.content_rect().size())),
+                .with_maximum(ctx.content_rect().size()),
                 |ui| {
                     let visible_owner = owner_current && ui.is_visible() && !ui.is_sizing_pass();
                     let commit_enabled = visible_owner && first_ui_pass;

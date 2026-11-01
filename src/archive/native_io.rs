@@ -330,9 +330,9 @@ impl ArchiveIoControl {
         match completion.terminal() {
             NativeIoTerminal::Completed { transferred } => {
                 let transferred = usize::try_from(transferred).unwrap_or(usize::MAX);
-                let buffer = completion.take_read_buffer().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::Other, "native read returned no owned buffer")
-                })?;
+                let buffer = completion
+                    .take_read_buffer()
+                    .ok_or_else(|| io::Error::other("native read returned no owned buffer"))?;
                 if transferred > buffer.len() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -353,8 +353,7 @@ impl ArchiveIoControl {
                 win32_code: Some(code),
                 ..
             } => Err(io::Error::from_raw_os_error(code as i32)),
-            NativeIoTerminal::Failed { .. } => Err(io::Error::new(
-                io::ErrorKind::Other,
+            NativeIoTerminal::Failed { .. } => Err(io::Error::other(
                 "native archive read failed without a Win32 status",
             )),
         }
@@ -386,8 +385,7 @@ impl ArchiveIoControl {
                 win32_code: Some(code),
                 ..
             } => Err(io::Error::from_raw_os_error(code as i32)),
-            NativeIoTerminal::Failed { .. } => Err(io::Error::new(
-                io::ErrorKind::Other,
+            NativeIoTerminal::Failed { .. } => Err(io::Error::other(
                 "native archive write failed without a Win32 status",
             )),
         }
@@ -544,10 +542,9 @@ fn native_start_error_to_io(error: NativeIoStartError) -> io::Error {
             io::ErrorKind::InvalidInput,
             "native archive I/O requires an overlapped handle",
         ),
-        NativeIoStartError::HandleModeQueryFailed { ntstatus } => io::Error::new(
-            io::ErrorKind::Other,
-            format!("native file mode query failed with NTSTATUS {ntstatus:#x}"),
-        ),
+        NativeIoStartError::HandleModeQueryFailed { ntstatus } => io::Error::other(format!(
+            "native file mode query failed with NTSTATUS {ntstatus:#x}"
+        )),
     }
 }
 

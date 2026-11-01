@@ -3266,7 +3266,7 @@ impl NotePanel {
                     egui::Vec2::ZERO,
                     [None, None],
                 )
-                .with_minimum(egui::Vec2::from(egui::vec2(200.0, 150.0)))
+                .with_minimum(egui::vec2(200.0, 150.0))
                 .with_max_width(max_width)
                 .with_max_height(max_height),
                 |ui| {

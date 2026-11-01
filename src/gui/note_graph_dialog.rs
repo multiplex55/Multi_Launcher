@@ -236,12 +236,12 @@ impl NoteGraphDialog {
                 Some(&mut window_open),
                 crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
                     crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from(default_window_size),
+                        default_window_size,
                     ),
                     egui::Vec2::ZERO,
                     [None, None],
                 )
-                .with_maximum(egui::Vec2::from(max_window_size)),
+                .with_maximum(max_window_size),
                 |ui| {
                     persist_requested |= self.top_bar(ui, app);
                     ui.separator();

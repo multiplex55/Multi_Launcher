@@ -430,7 +430,7 @@ fn remaining_until_timestamp(
     use chrono::TimeZone;
     let timestamp = i64::try_from(timestamp).ok()?;
     let target = chrono::Utc.timestamp_opt(timestamp, 0).single()?;
-    let remaining = target.signed_duration_since(now.clone()).to_std().ok()?;
+    let remaining = target.signed_duration_since(*now).to_std().ok()?;
     (!remaining.is_zero()).then_some(remaining)
 }
 
@@ -859,7 +859,7 @@ pub fn format_ts(ts: u64) -> String {
 
 fn allocate_timer_id() -> anyhow::Result<u64> {
     NEXT_ID
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
         .map_err(|_| anyhow::anyhow!("timer id range is exhausted"))
 }
 

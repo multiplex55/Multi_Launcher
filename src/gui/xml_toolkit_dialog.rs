@@ -619,13 +619,13 @@ impl XmlToolkitDialogState {
                             Some(&mut open),
                             crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
                                 crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                                    egui::Vec2::from(available.min(egui::vec2(1120.0, 760.0))),
+                                    available.min(egui::vec2(1120.0, 760.0)),
                                 ),
                                 egui::Vec2::ZERO,
                                 [None, None],
                             )
-                            .with_minimum(egui::Vec2::from(available.min(egui::vec2(480.0, 340.0))))
-                            .with_maximum(egui::Vec2::from(available)),
+                            .with_minimum(available.min(egui::vec2(480.0, 340.0)))
+                            .with_maximum(available),
                             |ui| {
                                 ui.add_enabled_ui(root_parent_current, |ui| {
                                     self.show_body(

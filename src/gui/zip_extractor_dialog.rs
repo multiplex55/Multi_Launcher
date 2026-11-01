@@ -172,11 +172,11 @@ impl ZipExtractorDialog {
         );
         self.snapshot = Some(snapshot);
         self.last_progress_snapshot = Some(now);
-        if let Some(snapshot) = self.snapshot.as_ref() {
-            if snapshot.catalog.is_none() {
-                self.catalog = None;
-                self.visible_rows.clear();
-            }
+        if let Some(snapshot) = self.snapshot.as_ref()
+            && snapshot.catalog.is_none()
+        {
+            self.catalog = None;
+            self.visible_rows.clear();
         }
     }
 

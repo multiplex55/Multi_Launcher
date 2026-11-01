@@ -677,7 +677,7 @@ impl fmt::Display for ArchiveIoCancelled {
 impl Error for ArchiveIoCancelled {}
 
 pub(crate) fn cancelled_archive_io() -> io::Error {
-    io::Error::new(io::ErrorKind::Other, ArchiveIoCancelled)
+    io::Error::other(ArchiveIoCancelled)
 }
 
 impl fmt::Display for CatalogError {

@@ -5626,7 +5626,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .collapsible(false)
         .default_size(egui::vec2(640.0, 720.0))
         .resizable(true)
-        .show_utility(ctx, "mkmacro-action-editor", egui::Id::new("Action Editor"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from(egui::vec2(640.0, 720.0))), egui::Vec2::ZERO, [None, None]), |ui| {
+        .show_utility(ctx, "mkmacro-action-editor", egui::Id::new("Action Editor"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(640.0, 720.0)), egui::Vec2::ZERO, [None, None]), |ui| {
           let footer_height = action_editor_footer_reserved_height(ui, &["Apply", cancel_label]);
           let body_max_height = (ui.available_height() - footer_height).max(0.0);
           let mut apply_enabled = false;

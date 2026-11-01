@@ -3996,13 +3996,14 @@ impl SettingsEditor {
                     "Retry saving utility window size",
                     TargetKind::Button,
                 );
-                if retry.clicked() && authorized_action {
-                    if let Err(error) = size_access.retry_failed(ui.ctx()) {
-                        ui.colored_label(
-                            ui.visuals().error_fg_color,
-                            format!("Could not retry utility size save: {error}"),
-                        );
-                    }
+                if retry.clicked()
+                    && authorized_action
+                    && let Err(error) = size_access.retry_failed(ui.ctx())
+                {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("Could not retry utility size save: {error}"),
+                    );
                 }
             }
         }

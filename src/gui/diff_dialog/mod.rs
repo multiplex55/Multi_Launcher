@@ -1166,7 +1166,7 @@ impl DiffDialogState {
         self.show_operation_preview(ctx);
         if let Some(response) = response
             && let Some(inner_size) = response.inner
-            && let Some((size, position)) =
+            && let Some((_size, position)) =
                 runtime_window_geometry(inner_size, response.response.rect.left_top(), body_screen)
         {
             self.persistence.window_position = Some(position);

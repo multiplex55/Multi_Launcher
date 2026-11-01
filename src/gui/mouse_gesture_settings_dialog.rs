@@ -329,10 +329,10 @@ impl MouseGestureSettingsDialog {
                 (ctx.content_rect().width() - 16.0).max(360.0),
                 (ctx.content_rect().height() - 16.0).max(260.0),
             ))
-            .show_utility(ctx, "gesture-settings", egui::Id::new("Mouse Gesture Settings"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from(egui::vec2(520.0, 480.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::Vec2::from(egui::vec2(360.0, 260.0))).with_maximum(egui::Vec2::from(egui::vec2(
+            .show_utility(ctx, "gesture-settings", egui::Id::new("Mouse Gesture Settings"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(520.0, 480.0)), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(360.0, 260.0)).with_maximum(egui::vec2(
                 (ctx.content_rect().width() - 16.0).max(360.0),
                 (ctx.content_rect().height() - 16.0).max(260.0),
-            ))), |ui| {
+            )), |ui| {
                 authorized_main_pass = native_ui_owner
                     && first_ui_pass
                     && ui.is_visible()

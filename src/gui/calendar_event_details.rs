@@ -123,7 +123,7 @@ impl CalendarEventDetails {
                     egui::Vec2::ZERO,
                     [None, None],
                 )
-                .with_maximum(egui::Vec2::from(ctx.content_rect().size())),
+                .with_maximum(ctx.content_rect().size()),
                 |ui| {
                     let body_height = ui.available_height().max(0.0);
                     egui::ScrollArea::vertical()
