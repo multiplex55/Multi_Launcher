@@ -1,16 +1,19 @@
 //! Bounded ZIP metadata cataloging and pure extraction-plan construction.
 //!
-//! This module deliberately stops before reading entry payloads or touching an
-//! extraction destination. It produces identities and lexical paths for a later
-//! owner that must independently enforce source and destination safety.
+//! The portable catalog and plan remain metadata-only. On Windows, the
+//! private native writer separately validates held source and destination
+//! authority before streaming supported Stored entries.
 
 mod catalog;
+pub(crate) mod crc32;
 mod model;
 #[cfg(windows)]
 mod native;
 #[cfg(windows)]
 mod native_io;
 mod plan;
+#[cfg(windows)]
+mod writer;
 
 pub use catalog::read_catalog;
 pub use model::{

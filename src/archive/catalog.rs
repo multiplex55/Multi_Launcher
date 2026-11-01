@@ -873,7 +873,12 @@ fn read_exact_at<R: Read + Seek>(
 
 fn read_exact_checked<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<(), CatalogError> {
     reader.read_exact(buffer).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        if error
+            .get_ref()
+            .is_some_and(|inner| inner.is::<super::model::ArchiveIoCancelled>())
+        {
+            CatalogError::Cancelled
+        } else if error.kind() == std::io::ErrorKind::UnexpectedEof {
             CatalogError::Malformed(crate::archive::model::ArchiveFormatProblem::Truncated)
         } else {
             CatalogError::Io(error.kind())

@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
+use std::io;
 use std::path::Path;
 
 use crate::batch_rename::compare_paths_windows_ordinal;
@@ -51,8 +52,8 @@ impl ArchiveEntryId {
 
 /// Finite bounds used by central-directory admission and pure plan construction.
 ///
-/// These limits cover metadata and declared-size estimates only. Actual output
-/// byte/count/ratio enforcement remains a future streaming extraction duty.
+/// These limits cover metadata and declared-size estimates. The Windows
+/// writer separately applies actual byte quotas while streaming output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArchiveLimits {
     pub max_entries: usize,
@@ -102,7 +103,7 @@ impl Default for ArchiveLimits {
             max_entry_declared_output_bytes: 64 * 1024 * 1024 * 1024,
             max_total_declared_output_bytes: 1024 * 1024 * 1024 * 1024,
             max_expansion_ratio: 10_000,
-            // Captured future execution policy; M1-A does not enforce output bytes.
+            // The Windows writer enforces these caps against bytes actually written.
             max_actual_entry_output_bytes: 2 * 1024 * 1024 * 1024,
             max_actual_total_output_bytes: 8 * 1024 * 1024 * 1024,
         }
@@ -488,7 +489,7 @@ impl<'a> SafeRelativePath<'a> {
     }
 }
 
-/// Owned safe path component string reserved for future confined extraction.
+/// Owned validated relative path for later handle-relative extraction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedRelativePath {
     value: String,
@@ -659,6 +660,24 @@ pub enum CatalogError {
     LimitExceeded(CatalogLimit),
     Malformed(ArchiveFormatProblem),
     Io(std::io::ErrorKind),
+}
+
+/// Marker carried through native archive I/O. The `Read` adapter uses
+/// `ErrorKind::Other` so `read_exact` does not retry cancellation as an
+/// `Interrupted` read.
+#[derive(Debug)]
+pub(crate) struct ArchiveIoCancelled;
+
+impl fmt::Display for ArchiveIoCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("archive I/O was cancelled")
+    }
+}
+
+impl Error for ArchiveIoCancelled {}
+
+pub(crate) fn cancelled_archive_io() -> io::Error {
+    io::Error::new(io::ErrorKind::Other, ArchiveIoCancelled)
 }
 
 impl fmt::Display for CatalogError {

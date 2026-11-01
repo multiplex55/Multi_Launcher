@@ -1267,14 +1267,7 @@ fn put_u32(out: &mut Vec<u8>, value: u32) {
 }
 
 fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for byte in bytes {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
-        }
-    }
-    !crc
+    crate::archive::crc32::checksum(bytes)
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {

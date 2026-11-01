@@ -1,12 +1,12 @@
 //! Windows handle-bound source and destination primitives for archive work.
 //!
-//! This checkpoint deliberately exposes no extraction worker.  The private
-//! guards here establish identities, no-follow traversal, exclusive source
-//! access, owned staging, and same-parent no-replace publication for a later
-//! caller.
+//! The private guards establish held source/destination identities, no-follow
+//! traversal, owned staging, and same-parent no-replace publication for the
+//! bounded Stored-entry writer. No extraction UI or command is exposed here.
 
-#![allow(dead_code)] // M3-A primitives remain inactive until the writer gate is accepted.
+#![allow(dead_code)] // Native operations remain private until workflow activation.
 
+use super::native_io::{ArchiveIoControl, OverlappedArchiveReader, VerifiedOverlappedFile};
 use super::{
     ArchiveCatalog, ArchiveLimits, ArchiveRevision, ArchiveSource, CatalogError,
     ValidatedRelativePath,
@@ -16,7 +16,7 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
@@ -163,6 +163,10 @@ pub(crate) struct NativeArchiveError {
 }
 
 impl NativeArchiveError {
+    pub(crate) fn kind(&self) -> io::ErrorKind {
+        self.primary.kind
+    }
+
     fn validation(
         operation: &'static str,
         kind: io::ErrorKind,
@@ -295,6 +299,7 @@ impl HeldDirectory {
             | windows::Win32::Storage::FileSystem::SYNCHRONIZE
             | if require_add_file {
                 windows::Win32::Storage::FileSystem::FILE_ADD_FILE
+                    | windows::Win32::Storage::FileSystem::FILE_ADD_SUBDIRECTORY
             } else {
                 windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(0)
             };
@@ -350,6 +355,104 @@ impl HeldDirectory {
             name: component.to_os_string(),
         }))
     }
+
+    fn create_child(self: &Arc<Self>, component: &OsStr) -> Result<Arc<Self>, NativeArchiveError> {
+        validate_single_component(component, "relative directory component")?;
+        self.verify_identity()?;
+        let (file, information) = open_relative(
+            self,
+            component,
+            windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
+                | windows::Win32::Storage::FileSystem::FILE_TRAVERSE
+                | windows::Win32::Storage::FileSystem::FILE_ADD_FILE
+                | windows::Win32::Storage::FileSystem::FILE_ADD_SUBDIRECTORY
+                | windows::Win32::Storage::FileSystem::SYNCHRONIZE,
+            shared_directory_access(),
+            windows::Wdk::Storage::FileSystem::FILE_CREATE,
+            windows::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE
+                | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT
+                | windows::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
+            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY,
+            "NtCreateFile(FILE_CREATE output directory)",
+            || Ok(()),
+        )?;
+        if information != 2 {
+            return Err(NativeArchiveError::validation(
+                "NtCreateFile did not report FILE_CREATED for output directory",
+                io::ErrorKind::InvalidData,
+                Some(self.identity),
+            ));
+        }
+        let metadata = file.metadata().map_err(|error| {
+            NativeArchiveError::from_io(
+                "File::metadata(new output directory)",
+                error,
+                Some(self.identity),
+            )
+        })?;
+        if !metadata.is_dir()
+            || metadata.file_attributes()
+                & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+        {
+            return Err(NativeArchiveError::validation(
+                "new output directory is not an ordinary directory",
+                io::ErrorKind::InvalidData,
+                native_file_identity(&file).ok(),
+            ));
+        }
+        let identity = native_file_identity(&file).map_err(|error| {
+            NativeArchiveError::from_io(
+                "FILE_ID_INFO(new output directory)",
+                error,
+                Some(self.identity),
+            )
+        })?;
+        if identity.volume_serial_number() != self.identity.volume_serial_number() {
+            return Err(NativeArchiveError::validation(
+                "new output directory crossed the held local volume",
+                io::ErrorKind::InvalidData,
+                Some(identity),
+            ));
+        }
+        Ok(Arc::new(Self {
+            file,
+            identity,
+            parent: Some(self.clone()),
+            name: component.to_os_string(),
+        }))
+    }
+}
+
+fn ensure_child_directory(
+    parent: &Arc<HeldDirectory>,
+    component: &OsStr,
+) -> Result<(Arc<HeldDirectory>, bool), NativeArchiveError> {
+    match parent.open_child(component, true) {
+        Ok(directory) => Ok((directory, false)),
+        Err(error) if is_missing_relative_component(&error) => {
+            match parent.create_child(component) {
+                Ok(directory) => Ok((directory, true)),
+                Err(error) if is_name_collision(&error) => parent
+                    .open_child(component, true)
+                    .map(|directory| (directory, false)),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_missing_relative_component(error: &NativeArchiveError) -> bool {
+    matches!(error.primary.win32_code, Some(2 | 3))
+        || error.primary.nt_status.is_some_and(|status| {
+            status == 0xc000_0034_u32 as i32 || status == 0xc000_003a_u32 as i32
+        })
+}
+
+fn is_name_collision(error: &NativeArchiveError) -> bool {
+    matches!(error.primary.win32_code, Some(80 | 183))
+        || error.primary.nt_status == Some(0xc000_0035_u32 as i32)
 }
 
 /// A selected destination opened component-by-component without following any
@@ -406,6 +509,49 @@ impl NativeArchiveDestination {
         })?;
         validate_single_component(&leaf, "validated output leaf")?;
         Ok((NativeDirectoryHandle { directory: current }, leaf))
+    }
+
+    pub(crate) fn open_parent_for_create(
+        &self,
+        path: &ValidatedRelativePath,
+    ) -> Result<(NativeDirectoryHandle, OsString, usize), NativeArchiveError> {
+        let mut components = path.components().peekable();
+        let mut current = self.root.clone();
+        let mut created = 0_usize;
+        let mut leaf = None;
+        while let Some(component) = components.next() {
+            if components.peek().is_some() {
+                let (directory, was_created) =
+                    ensure_child_directory(&current, OsStr::new(component))?;
+                current = directory;
+                created += usize::from(was_created);
+            } else {
+                leaf = Some(OsString::from(component));
+            }
+        }
+        let leaf = leaf.ok_or_else(|| {
+            NativeArchiveError::validation(
+                "validated output path has no final component",
+                io::ErrorKind::InvalidInput,
+                Some(current.identity),
+            )
+        })?;
+        validate_single_component(&leaf, "validated output leaf")?;
+        Ok((NativeDirectoryHandle { directory: current }, leaf, created))
+    }
+
+    pub(crate) fn ensure_directory_path(
+        &self,
+        path: &ValidatedRelativePath,
+    ) -> Result<(NativeDirectoryHandle, usize), NativeArchiveError> {
+        let mut current = self.root.clone();
+        let mut created = 0_usize;
+        for component in path.components() {
+            let (directory, was_created) = ensure_child_directory(&current, OsStr::new(component))?;
+            current = directory;
+            created += usize::from(was_created);
+        }
+        Ok((NativeDirectoryHandle { directory: current }, created))
     }
 }
 
@@ -506,10 +652,10 @@ impl NativeDirectoryHandle {
     }
 }
 
-/// One opened archive source. Catalog verification seeks this same held handle;
-/// it never reopens the selected path.
+/// One opened archive source. Catalog verification reads through an
+/// explicit-offset adapter over this held handle; it never reopens the path.
 pub(crate) struct NativeArchiveSource {
-    file: File,
+    file: VerifiedOverlappedFile,
     _ancestors: Arc<HeldDirectory>,
     identity: NativeFileIdentity,
     archive_len: u64,
@@ -542,8 +688,7 @@ impl NativeArchiveSource {
             windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
             windows::Wdk::Storage::FileSystem::FILE_OPEN,
             windows::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
-                | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT
-                | windows::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
+                | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT,
             windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
             "NtCreateFile(FILE_OPEN held archive source)",
             || Ok(()),
@@ -581,6 +726,23 @@ impl NativeArchiveSource {
             ));
         }
         let archive_len = metadata.len();
+        let file = VerifiedOverlappedFile::verify(file).map_err(|error| {
+            NativeArchiveError::validation(
+                match error {
+                    super::native_io::NativeIoStartError::HandleModeQueryFailed { .. } => {
+                        "verify overlapped archive source mode"
+                    }
+                    super::native_io::NativeIoStartError::SynchronousHandle { .. } => {
+                        "archive source was opened synchronously"
+                    }
+                    super::native_io::NativeIoStartError::InvalidBufferLength => {
+                        "verify overlapped archive source mode"
+                    }
+                },
+                io::ErrorKind::InvalidData,
+                Some(identity),
+            )
+        })?;
         Ok(Self {
             file,
             _ancestors: ancestors,
@@ -604,6 +766,10 @@ impl NativeArchiveSource {
         self.archive_len
     }
 
+    pub(crate) fn verified_file(&self) -> &VerifiedOverlappedFile {
+        &self.file
+    }
+
     /// Catalog the already-held source file. Callers open the source before
     /// cataloging so a pathname replacement cannot silently rebind metadata
     /// from a prior file to a new object with matching length.
@@ -611,15 +777,24 @@ impl NativeArchiveSource {
         &mut self,
         cancellation: &ScanCancellation,
     ) -> Result<ArchiveCatalog, NativeArchiveError> {
-        let before = native_file_identity(&self.file).map_err(|error| {
+        let io = ArchiveIoControl::new(cancellation.clone());
+        self.read_catalog_with_io(cancellation, &io)
+    }
+
+    pub(crate) fn read_catalog_with_io(
+        &mut self,
+        cancellation: &ScanCancellation,
+        io_control: &ArchiveIoControl,
+    ) -> Result<ArchiveCatalog, NativeArchiveError> {
+        let file = self.file.as_file();
+        let before = native_file_identity(file).map_err(|error| {
             NativeArchiveError::from_io(
                 "FILE_ID_INFO(held archive source)",
                 error,
                 Some(self.identity),
             )
         })?;
-        let before_len = self
-            .file
+        let before_len = file
             .metadata()
             .map_err(|error| {
                 NativeArchiveError::from_io(
@@ -636,17 +811,22 @@ impl NativeArchiveSource {
                 Some(before),
             ));
         }
-        let catalog = super::read_catalog(&mut self.file, self.revision, self.limits, cancellation)
-            .map_err(|error| catalog_error(error, self.identity))?;
-        let after = native_file_identity(&self.file).map_err(|error| {
+        let catalog = super::read_catalog(
+            &mut OverlappedArchiveReader::new(&self.file, io_control, self.archive_len),
+            self.revision,
+            self.limits,
+            cancellation,
+        )
+        .map_err(|error| catalog_error(error, self.identity))?;
+        let file = self.file.as_file();
+        let after = native_file_identity(file).map_err(|error| {
             NativeArchiveError::from_io(
                 "FILE_ID_INFO(held archive source after catalog)",
                 error,
                 Some(self.identity),
             )
         })?;
-        let after_len = self
-            .file
+        let after_len = file
             .metadata()
             .map_err(|error| {
                 NativeArchiveError::from_io(
@@ -678,7 +858,25 @@ impl NativeArchiveSource {
                 Some(self.identity),
             ));
         }
-        let actual = self.read_catalog(&ScanCancellation::new())?;
+        let cancellation = ScanCancellation::new();
+        let io = ArchiveIoControl::new(cancellation.clone());
+        self.verify_catalog_with_io(expected_catalog, &cancellation, &io)
+    }
+
+    pub(crate) fn verify_catalog_with_io(
+        &mut self,
+        expected_catalog: &ArchiveCatalog,
+        cancellation: &ScanCancellation,
+        io_control: &ArchiveIoControl,
+    ) -> Result<(), NativeArchiveError> {
+        if self.catalog_source.is_none() {
+            return Err(NativeArchiveError::validation(
+                "held source must be cataloged before verification",
+                io::ErrorKind::InvalidData,
+                Some(self.identity),
+            ));
+        }
+        let actual = self.read_catalog_with_io(cancellation, io_control)?;
         if actual != *expected_catalog {
             return Err(NativeArchiveError::validation(
                 "held source no longer matches the selected archive catalog revision",
@@ -792,9 +990,9 @@ fn open_volume_root(
 ) -> Result<Arc<HeldDirectory>, NativeArchiveError> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ADD_FILE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_TRAVERSE, GetDriveTypeW, OPEN_EXISTING, SYNCHRONIZE,
+        CreateFileW, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_TRAVERSE, GetDriveTypeW, OPEN_EXISTING, SYNCHRONIZE,
     };
     use windows::core::PCWSTR;
 
@@ -814,7 +1012,7 @@ fn open_volume_root(
     }
     let mut access = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
     if require_add_file {
-        access |= FILE_ADD_FILE;
+        access |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
     }
     // SAFETY: `wide` is an absolute, local, NUL-terminated root path. The
     // handle is opened as the reparse point itself and immediately owned by a
@@ -1005,12 +1203,27 @@ fn open_relative(
             0,
         )
     };
+    let io_status_value = unsafe { io_status.Anonymous.Status };
+    let evidence_status = if status.0 == 0 {
+        io_status_value
+    } else {
+        status
+    };
     #[cfg(test)]
-    record_native_evidence(operation, status, Some(parent.identity));
-    if status.0 < 0 {
+    record_native_evidence(operation, evidence_status, Some(parent.identity));
+    // NtCreateFile returns STATUS_SUCCESS or an error for an open/create.
+    // Unlike a data ReadFile/WriteFile request, it has no pending completion
+    // object; do not accept another nonnegative NTSTATUS as completed work.
+    if status.0 != 0 || io_status_value.0 != 0 {
+        if !handle.is_invalid() {
+            // The documented NtCreateFile contract is synchronous. Close any
+            // unexpected non-success handle rather than leaking it.
+            let unexpected = unsafe { File::from_raw_handle(handle.0 as RawHandle) };
+            drop(unexpected);
+        }
         return Err(NativeArchiveError::from_ntstatus(
             operation,
-            status,
+            evidence_status,
             Some(parent.identity),
         ));
     }
@@ -1041,12 +1254,18 @@ fn query_attribute_tag(
             FileAttributeTagInformation,
         )
     };
+    let io_status_value = unsafe { io_status.Anonymous.Status };
+    let evidence_status = if status.0 == 0 {
+        io_status_value
+    } else {
+        status
+    };
     #[cfg(test)]
-    record_native_evidence(operation, status, Some(held_identity));
-    if status.0 < 0 {
+    record_native_evidence(operation, evidence_status, Some(held_identity));
+    if status.0 != 0 || io_status_value.0 != 0 {
         return Err(NativeFailure::from_ntstatus(
             operation,
-            status,
+            evidence_status,
             Some(held_identity),
         ));
     }
@@ -1084,16 +1303,22 @@ fn delete_open_file(file: &File, identity: NativeFileIdentity) -> Result<(), Nat
             FileDispositionInformation,
         )
     };
+    let io_status_value = unsafe { io_status.Anonymous.Status };
+    let evidence_status = if status.0 == 0 {
+        io_status_value
+    } else {
+        status
+    };
     #[cfg(test)]
     record_native_evidence(
         "NtSetInformationFile(FileDispositionInformation)",
-        status,
+        evidence_status,
         Some(current),
     );
-    if status.0 < 0 {
+    if status.0 != 0 || io_status_value.0 != 0 {
         return Err(NativeFailure::from_ntstatus(
             "NtSetInformationFile(FileDispositionInformation)",
-            status,
+            evidence_status,
             Some(current),
         ));
     }
@@ -1172,16 +1397,22 @@ fn rename_open_file_relative_no_replace(
             FileRenameInformation,
         )
     };
+    let io_status_value = unsafe { io_status.Anonymous.Status };
+    let evidence_status = if status.0 == 0 {
+        io_status_value
+    } else {
+        status
+    };
     #[cfg(test)]
     record_native_evidence(
         "NtSetInformationFile(FileRenameInformation, RootDirectory, no-replace)",
-        status,
+        evidence_status,
         Some(identity),
     );
-    if status.0 < 0 {
+    if status.0 != 0 || io_status_value.0 != 0 {
         return Err(NativeFailure::from_ntstatus(
             "NtSetInformationFile(FileRenameInformation, RootDirectory, no-replace)",
-            status,
+            evidence_status,
             Some(identity),
         ));
     }
@@ -1196,7 +1427,7 @@ fn extended_path_wide_with_nul(path: &Path) -> Result<Vec<u16>, NativeArchiveErr
 
 /// A create-new stage tied to its held parent and file identity.
 pub(crate) struct OwnedStage {
-    file: File,
+    file: VerifiedOverlappedFile,
     parent: Arc<HeldDirectory>,
     parent_identity: NativeFileIdentity,
     leaf: OsString,
@@ -1254,8 +1485,7 @@ impl OwnedStage {
                 windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
                 windows::Wdk::Storage::FileSystem::FILE_CREATE,
                 windows::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
-                    | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT
-                    | windows::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
+                    | windows::Wdk::Storage::FileSystem::FILE_OPEN_REPARSE_POINT,
                 windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
                 "NtCreateFile(FILE_CREATE owned stage)",
                 || match before_native_create.take() {
@@ -1354,8 +1584,39 @@ impl OwnedStage {
                     cleanup_failure: cleanup.err(),
                 });
             }
+            if let Err(error) = VerifiedOverlappedFile::verify_before_ownership(&file) {
+                let primary = match error {
+                    super::native_io::NativeIoStartError::HandleModeQueryFailed { ntstatus } => {
+                        NativeFailure::from_ntstatus(
+                            "NtQueryInformationFile(FileModeInformation, owned stage)",
+                            windows::Win32::Foundation::NTSTATUS(ntstatus),
+                            Some(identity),
+                        )
+                    }
+                    super::native_io::NativeIoStartError::SynchronousHandle { .. } => {
+                        NativeFailure::validation(
+                            "new stage was opened synchronously",
+                            io::ErrorKind::InvalidData,
+                            Some(identity),
+                        )
+                    }
+                    super::native_io::NativeIoStartError::InvalidBufferLength => {
+                        NativeFailure::validation(
+                            "verify overlapped owned stage mode",
+                            io::ErrorKind::InvalidData,
+                            Some(identity),
+                        )
+                    }
+                };
+                let cleanup = delete_open_file(&file, identity);
+                return Err(NativeArchiveError {
+                    primary,
+                    cleanup_attempted: true,
+                    cleanup_failure: cleanup.err(),
+                });
+            }
             return Ok(Self {
-                file,
+                file: VerifiedOverlappedFile::from_verified(file),
                 parent_identity: parent.identity,
                 parent,
                 leaf,
@@ -1378,8 +1639,14 @@ impl OwnedStage {
         self.identity
     }
 
-    pub(crate) fn write_all_and_sync(&mut self, bytes: &[u8]) -> Result<(), NativeArchiveError> {
-        let current = native_file_identity(&self.file).map_err(|error| {
+    pub(crate) fn write_chunk(
+        &self,
+        io_control: &ArchiveIoControl,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<usize, NativeArchiveError> {
+        let file = self.file.as_file();
+        let current = native_file_identity(file).map_err(|error| {
             NativeArchiveError::from_io(
                 "FILE_ID_INFO(stage before write)",
                 error,
@@ -1393,15 +1660,85 @@ impl OwnedStage {
                 Some(current),
             ));
         }
-        self.file.write_all(bytes).map_err(|error| {
-            NativeArchiveError::from_io("WriteFile(owned stage)", error, Some(current))
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(bytes.len()).map_err(|error| {
+            NativeArchiveError::from_io(
+                "reserve bounded owned-stage write buffer",
+                io::Error::new(io::ErrorKind::OutOfMemory, error),
+                Some(current),
+            )
         })?;
-        self.file.flush().map_err(|error| {
-            NativeArchiveError::from_io("FlushFileBuffers(owned stage)", error, Some(current))
+        owned.extend_from_slice(bytes);
+        let bytes = owned.into_boxed_slice();
+        io_control
+            .write_at(&self.file, offset, bytes)
+            .map_err(|error| {
+                NativeArchiveError::from_io(
+                    "WriteFile(overlapped owned stage)",
+                    error,
+                    Some(current),
+                )
+            })
+    }
+
+    pub(crate) fn flush_final(&self) -> Result<(), NativeArchiveError> {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::FlushFileBuffers;
+
+        let file = self.file.as_file();
+        let current = native_file_identity(file).map_err(|error| {
+            NativeArchiveError::from_io(
+                "FILE_ID_INFO(stage before final flush)",
+                error,
+                Some(self.identity),
+            )
         })?;
-        self.file.sync_all().map_err(|error| {
-            NativeArchiveError::from_io("FlushFileBuffers(sync owned stage)", error, Some(current))
+        if current != self.identity {
+            return Err(NativeArchiveError::validation(
+                "owned stage identity changed before final flush",
+                io::ErrorKind::InvalidData,
+                Some(current),
+            ));
+        }
+        unsafe { FlushFileBuffers(HANDLE(file.as_raw_handle() as _)) }.map_err(|error| {
+            NativeArchiveError::from_win32("FlushFileBuffers(owned stage)", error, Some(current))
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_all_and_sync(&mut self, bytes: &[u8]) -> Result<(), NativeArchiveError> {
+        let cancellation = ScanCancellation::new();
+        let io = ArchiveIoControl::new(cancellation);
+        let mut offset = 0_u64;
+        for chunk in bytes.chunks(64 * 1024) {
+            let mut completed = 0_usize;
+            while completed < chunk.len() {
+                let write_offset = offset.checked_add(completed as u64).ok_or_else(|| {
+                    NativeArchiveError::validation(
+                        "native stage offset overflow",
+                        io::ErrorKind::InvalidInput,
+                        Some(self.identity),
+                    )
+                })?;
+                let count = self.write_chunk(&io, write_offset, &chunk[completed..])?;
+                if count == 0 || count > chunk.len() - completed {
+                    return Err(NativeArchiveError::validation(
+                        "native stage write made invalid progress",
+                        io::ErrorKind::WriteZero,
+                        Some(self.identity),
+                    ));
+                }
+                completed += count;
+            }
+            offset = offset.checked_add(chunk.len() as u64).ok_or_else(|| {
+                NativeArchiveError::validation(
+                    "native stage offset overflow",
+                    io::ErrorKind::InvalidInput,
+                    Some(self.identity),
+                )
+            })?;
+        }
+        self.flush_final()
     }
 
     pub(crate) fn publish(
@@ -1411,7 +1748,8 @@ impl OwnedStage {
         if let Err(error) = validate_single_component(target_leaf, "relative rename target") {
             return Err(self.fail_and_cleanup(error.primary));
         }
-        let actual_identity = match native_file_identity(&self.file) {
+        let file = self.file.as_file();
+        let actual_identity = match native_file_identity(file) {
             Ok(identity) => identity,
             Err(error) => {
                 let primary = NativeFailure::from_io(
@@ -1452,7 +1790,7 @@ impl OwnedStage {
             );
             return Err(self.fail_and_cleanup(primary));
         }
-        let metadata = match self.file.metadata() {
+        let metadata = match file.metadata() {
             Ok(metadata) => metadata,
             Err(error) => {
                 let primary = NativeFailure::from_io(
@@ -1475,12 +1813,8 @@ impl OwnedStage {
             );
             return Err(self.fail_and_cleanup(primary));
         }
-        match rename_open_file_relative_no_replace(
-            &self.file,
-            &self.parent,
-            target_leaf,
-            actual_identity,
-        ) {
+        match rename_open_file_relative_no_replace(file, &self.parent, target_leaf, actual_identity)
+        {
             Ok(()) => {
                 self.finished = true;
                 Ok(actual_identity)
@@ -1490,7 +1824,7 @@ impl OwnedStage {
     }
 
     fn fail_and_cleanup(&mut self, primary: NativeFailure) -> NativeArchiveError {
-        let cleanup = delete_open_file(&self.file, self.identity);
+        let cleanup = delete_open_file(self.file.as_file(), self.identity);
         self.finished = true;
         NativeArchiveError {
             primary,
@@ -1500,7 +1834,7 @@ impl OwnedStage {
     }
 
     pub(crate) fn abort(mut self) -> Result<(), NativeArchiveError> {
-        let cleanup = delete_open_file(&self.file, self.identity);
+        let cleanup = delete_open_file(self.file.as_file(), self.identity);
         self.finished = true;
         cleanup.map_err(|failure| NativeArchiveError {
             primary: failure,
@@ -1531,8 +1865,8 @@ impl Drop for OwnedStage {
         // Fallback cleanup is handle-bound and only attempted while the file
         // identity still proves ownership. Callers use publish/abort to receive
         // any cleanup error; Drop is only a last-resort path for unwinding.
-        if native_file_identity(&self.file).ok() == Some(self.identity) {
-            let _ = delete_open_file(&self.file, self.identity);
+        if native_file_identity(self.file.as_file()).ok() == Some(self.identity) {
+            let _ = delete_open_file(self.file.as_file(), self.identity);
         }
     }
 }
@@ -1559,16 +1893,22 @@ fn delete_open_file_without_identity(file: &File) -> Result<(), NativeFailure> {
             FileDispositionInformation,
         )
     };
+    let io_status_value = unsafe { io_status.Anonymous.Status };
+    let evidence_status = if status.0 == 0 {
+        io_status_value
+    } else {
+        status
+    };
     #[cfg(test)]
     record_native_evidence(
         "NtSetInformationFile(FileDispositionInformation, create-new handle)",
-        status,
+        evidence_status,
         None,
     );
-    if status.0 < 0 {
+    if status.0 != 0 || io_status_value.0 != 0 {
         return Err(NativeFailure::from_ntstatus(
             "NtSetInformationFile(FileDispositionInformation, create-new handle)",
-            status,
+            evidence_status,
             None,
         ));
     }

@@ -6,13 +6,15 @@
 //! event, and file handle remain owned until `GetOverlappedResult` reports the
 //! operation's terminal result. Test-only worker ownership proves cancellation
 //! and joining without making per-request threads part of the production API.
-//! Current archive cataloging and `OwnedStage` flushing still use synchronous
-//! `File` operations; callers must not treat this module as having migrated
-//! those paths.
+//! The native writer uses these requests for source reads and staged writes.
+//! Namespace metadata queries, final `FlushFileBuffers`, and relative rename
+//! remain synchronous native calls on that same joined worker.
 
-#![allow(dead_code)] // Activated by the later archive writer milestone.
+#![allow(dead_code)] // Some cancellation/lifecycle inspection is test-only.
 
 use std::fs::File;
+use std::io;
+use std::io::{Read, Seek, SeekFrom};
 use std::marker::PhantomPinned;
 use std::os::windows::io::AsRawHandle;
 use std::pin::Pin;
@@ -34,7 +36,10 @@ use windows::Win32::System::IO::{
 use windows::Win32::System::Threading::CreateEventW;
 use windows::core::PCWSTR;
 
+use crate::file_operations::ScanCancellation;
+
 const MAX_IO_BUFFER_BYTES: usize = 1024 * 1024;
+const ARCHIVE_IO_CHUNK_BYTES: usize = 64 * 1024;
 static NEXT_IO_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,30 +128,426 @@ pub(super) struct VerifiedOverlappedFile {
     file: Arc<File>,
 }
 
+impl Clone for VerifiedOverlappedFile {
+    fn clone(&self) -> Self {
+        Self {
+            file: Arc::clone(&self.file),
+        }
+    }
+}
+
 impl VerifiedOverlappedFile {
     pub(super) fn verify(file: File) -> Result<Self, NativeIoStartError> {
-        let file = Arc::new(file);
-        let mut information = FILE_MODE_INFORMATION::default();
-        let mut io_status = IO_STATUS_BLOCK::default();
-        let status = unsafe {
-            NtQueryInformationFile(
-                HANDLE(file.as_raw_handle() as _),
-                &mut io_status,
-                std::ptr::from_mut(&mut information).cast(),
-                std::mem::size_of::<FILE_MODE_INFORMATION>() as u32,
-                FileModeInformation,
-            )
-        };
-        if status.0 < 0 {
-            return Err(NativeIoStartError::HandleModeQueryFailed { ntstatus: status.0 });
+        verify_overlapped_mode(&file)?;
+        Ok(Self {
+            file: Arc::new(file),
+        })
+    }
+
+    pub(super) fn verify_before_ownership(file: &File) -> Result<(), NativeIoStartError> {
+        verify_overlapped_mode(file)
+    }
+
+    pub(super) fn from_verified(file: File) -> Self {
+        Self {
+            file: Arc::new(file),
         }
-        let synchronous_modes = FILE_SYNCHRONOUS_IO_ALERT.0 | FILE_SYNCHRONOUS_IO_NONALERT.0;
-        if information.Mode & synchronous_modes != 0 {
-            return Err(NativeIoStartError::SynchronousHandle {
-                mode: information.Mode,
+    }
+
+    pub(super) fn as_file(&self) -> &File {
+        &self.file
+    }
+}
+
+fn verify_overlapped_mode(file: &File) -> Result<(), NativeIoStartError> {
+    let mut information = FILE_MODE_INFORMATION::default();
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtQueryInformationFile(
+            HANDLE(file.as_raw_handle() as _),
+            &mut io_status,
+            std::ptr::from_mut(&mut information).cast(),
+            std::mem::size_of::<FILE_MODE_INFORMATION>() as u32,
+            FileModeInformation,
+        )
+    };
+    let io_status_value = unsafe { io_status.Anonymous.Status };
+    let completed_status = if status.0 == 0 {
+        io_status_value
+    } else {
+        status
+    };
+    // NtQueryInformationFile is synchronous even for an asynchronous file
+    // object. Require its completed STATUS_SUCCESS value; never treat a
+    // different nonnegative status as a completed mode query.
+    if status.0 != 0 || io_status_value.0 != 0 {
+        return Err(NativeIoStartError::HandleModeQueryFailed {
+            ntstatus: completed_status.0,
+        });
+    }
+    let synchronous_modes = FILE_SYNCHRONOUS_IO_ALERT.0 | FILE_SYNCHRONOUS_IO_NONALERT.0;
+    if information.Mode & synchronous_modes != 0 {
+        return Err(NativeIoStartError::SynchronousHandle {
+            mode: information.Mode,
+        });
+    }
+    Ok(())
+}
+
+struct ArchiveIoControlState {
+    cancellation: ScanCancellation,
+    active: Mutex<Option<(u64, NativeIoCancelHandle)>>,
+    active_changed: Condvar,
+    #[cfg(test)]
+    override_file: Mutex<Option<VerifiedOverlappedFile>>,
+    #[cfg(test)]
+    last_request: Mutex<Option<TestRequestObservation>>,
+}
+
+#[cfg(test)]
+struct TestRequestObservation {
+    id: u64,
+    terminal: NativeIoTerminal,
+    lifecycle: Arc<ResourceLifecycle>,
+}
+
+/// Cancellation owner shared by one archive worker and its request adapter.
+/// The handle is published before submission, so cancellation cannot miss the
+/// transition between admission and an already-pending native request.
+#[derive(Clone)]
+pub(super) struct ArchiveIoControl {
+    state: Arc<ArchiveIoControlState>,
+}
+
+impl ArchiveIoControl {
+    pub(super) fn new(cancellation: ScanCancellation) -> Self {
+        Self {
+            state: Arc::new(ArchiveIoControlState {
+                cancellation,
+                active: Mutex::new(None),
+                active_changed: Condvar::new(),
+                #[cfg(test)]
+                override_file: Mutex::new(None),
+                #[cfg(test)]
+                last_request: Mutex::new(None),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_io_override(
+        cancellation: ScanCancellation,
+        file: VerifiedOverlappedFile,
+    ) -> Self {
+        let control = Self::new(cancellation);
+        *lock_active_override(&control.state.override_file) = Some(file);
+        control
+    }
+
+    #[cfg(test)]
+    pub(super) fn replace_test_io_override(&self, file: VerifiedOverlappedFile) {
+        *lock_active_override(&self.state.override_file) = Some(file);
+    }
+
+    #[cfg(test)]
+    pub(super) fn last_test_request(&self) -> Option<(u64, NativeIoTerminal, bool)> {
+        lock_test_request(&self.state.last_request)
+            .as_ref()
+            .map(|request| {
+                let lifecycle = &request.lifecycle;
+                (
+                    request.id,
+                    request.terminal,
+                    lifecycle.request_released.load(Ordering::Acquire)
+                        && lifecycle.buffer_released.load(Ordering::Acquire)
+                        && lifecycle.event_closed.load(Ordering::Acquire),
+                )
+            })
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.state.cancellation.is_cancelled()
+    }
+
+    pub(super) fn cancellation_token(&self) -> ScanCancellation {
+        self.state.cancellation.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn wait_for_active_request_pending(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut active = lock_active(&self.state.active);
+        loop {
+            if let Some((_, cancel)) = active.as_ref() {
+                let cancel = cancel.clone();
+                drop(active);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                return cancel.wait_until_pending(remaining);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let waited = self.state.active_changed.wait_timeout(active, remaining);
+            match waited {
+                Ok((next, result)) => {
+                    active = next;
+                    if result.timed_out() && active.is_none() {
+                        return false;
+                    }
+                }
+                Err(poisoned) => {
+                    let (next, _) = poisoned.into_inner();
+                    active = next;
+                }
+            }
+        }
+    }
+
+    pub(super) fn cancel(&self) {
+        self.state.cancellation.cancel();
+        let active = lock_active(&self.state.active)
+            .as_ref()
+            .map(|(_, cancel)| cancel.clone());
+        if let Some(active) = active {
+            active.cancel();
+        }
+    }
+
+    pub(super) fn read_at(
+        &self,
+        file: &VerifiedOverlappedFile,
+        offset: u64,
+        length: usize,
+    ) -> io::Result<(Box<[u8]>, usize)> {
+        if self.is_cancelled() {
+            return Err(super::model::cancelled_archive_io());
+        }
+        let selected_file = self.select_file(file);
+        let (request, cancel) = NativeIoRequest::read(&selected_file, offset, length)
+            .map_err(native_start_error_to_io)?;
+        let mut completion = self.execute(request, cancel);
+        match completion.terminal() {
+            NativeIoTerminal::Completed { transferred } => {
+                let transferred = usize::try_from(transferred).unwrap_or(usize::MAX);
+                let buffer = completion.take_read_buffer().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::Other, "native read returned no owned buffer")
+                })?;
+                if transferred > buffer.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "native read transferred beyond its owned buffer",
+                    ));
+                }
+                Ok((buffer, transferred))
+            }
+            NativeIoTerminal::CancelledBeforeSubmission => {
+                Err(super::model::cancelled_archive_io())
+            }
+            NativeIoTerminal::Failed {
+                operation: _,
+                hresult: _,
+                win32_code: Some(995),
+            } => Err(super::model::cancelled_archive_io()),
+            NativeIoTerminal::Failed {
+                win32_code: Some(code),
+                ..
+            } => Err(io::Error::from_raw_os_error(code as i32)),
+            NativeIoTerminal::Failed { .. } => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "native archive read failed without a Win32 status",
+            )),
+        }
+    }
+
+    pub(super) fn write_at(
+        &self,
+        file: &VerifiedOverlappedFile,
+        offset: u64,
+        bytes: Box<[u8]>,
+    ) -> io::Result<usize> {
+        if self.is_cancelled() {
+            return Err(super::model::cancelled_archive_io());
+        }
+        let selected_file = self.select_file(file);
+        let (request, cancel) = NativeIoRequest::write(&selected_file, offset, bytes)
+            .map_err(native_start_error_to_io)?;
+        let completion = self.execute(request, cancel);
+        match completion.terminal() {
+            NativeIoTerminal::Completed { transferred } => Ok(transferred as usize),
+            NativeIoTerminal::CancelledBeforeSubmission => {
+                Err(super::model::cancelled_archive_io())
+            }
+            NativeIoTerminal::Failed {
+                win32_code: Some(995),
+                ..
+            } => Err(super::model::cancelled_archive_io()),
+            NativeIoTerminal::Failed {
+                win32_code: Some(code),
+                ..
+            } => Err(io::Error::from_raw_os_error(code as i32)),
+            NativeIoTerminal::Failed { .. } => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "native archive write failed without a Win32 status",
+            )),
+        }
+    }
+
+    fn execute(
+        &self,
+        request: NativeIoRequest,
+        cancel: NativeIoCancelHandle,
+    ) -> NativeIoCompletion {
+        let request_id = cancel.request_id_for_owner();
+        let cancel_before_submit = {
+            let mut active = lock_active(&self.state.active);
+            if self.is_cancelled() {
+                true
+            } else {
+                *active = Some((request_id, cancel.clone()));
+                self.state.active_changed.notify_all();
+                false
+            }
+        };
+        if cancel_before_submit {
+            cancel.cancel();
+        }
+        let completion = request.execute();
+        #[cfg(test)]
+        {
+            *lock_test_request(&self.state.last_request) = Some(TestRequestObservation {
+                id: completion.request_id,
+                terminal: completion.terminal,
+                lifecycle: Arc::clone(&completion.lifecycle),
             });
         }
-        Ok(Self { file })
+        let mut active = lock_active(&self.state.active);
+        if active
+            .as_ref()
+            .is_some_and(|(active_id, _)| *active_id == request_id)
+        {
+            *active = None;
+            self.state.active_changed.notify_all();
+        }
+        completion
+    }
+
+    fn select_file(&self, file: &VerifiedOverlappedFile) -> VerifiedOverlappedFile {
+        #[cfg(test)]
+        if let Some(file) = lock_active_override(&self.state.override_file).clone() {
+            return file;
+        }
+        file.clone()
+    }
+}
+
+/// Read/seek adapter over one held overlapped source. `Seek` updates only the
+/// logical cursor; every data read names its explicit offset in a B1 request.
+pub(super) struct OverlappedArchiveReader<'a> {
+    file: &'a VerifiedOverlappedFile,
+    control: &'a ArchiveIoControl,
+    archive_len: u64,
+    position: u64,
+}
+
+impl<'a> OverlappedArchiveReader<'a> {
+    pub(super) fn new(
+        file: &'a VerifiedOverlappedFile,
+        control: &'a ArchiveIoControl,
+        archive_len: u64,
+    ) -> Self {
+        Self {
+            file,
+            control,
+            archive_len,
+            position: 0,
+        }
+    }
+}
+
+impl Read for OverlappedArchiveReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.position >= self.archive_len {
+            return Ok(0);
+        }
+        let available = usize::try_from(self.archive_len - self.position).unwrap_or(usize::MAX);
+        let length = output.len().min(ARCHIVE_IO_CHUNK_BYTES).min(available);
+        let (buffer, transferred) = self.control.read_at(self.file, self.position, length)?;
+        if transferred == 0 {
+            return Ok(0);
+        }
+        output[..transferred].copy_from_slice(&buffer[..transferred]);
+        self.position = self
+            .position
+            .checked_add(transferred as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "archive offset overflow"))?;
+        Ok(transferred)
+    }
+}
+
+impl Seek for OverlappedArchiveReader<'_> {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let next = match from {
+            SeekFrom::Start(offset) => offset,
+            SeekFrom::End(offset) => {
+                self.archive_len.checked_add_signed(offset).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "archive seek is out of range")
+                })?
+            }
+            SeekFrom::Current(offset) => {
+                self.position.checked_add_signed(offset).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "archive seek is out of range")
+                })?
+            }
+        };
+        self.position = next;
+        Ok(next)
+    }
+}
+
+fn lock_active(
+    active: &Mutex<Option<(u64, NativeIoCancelHandle)>>,
+) -> MutexGuard<'_, Option<(u64, NativeIoCancelHandle)>> {
+    active
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+fn lock_active_override(
+    active: &Mutex<Option<VerifiedOverlappedFile>>,
+) -> MutexGuard<'_, Option<VerifiedOverlappedFile>> {
+    active
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+fn lock_test_request(
+    request: &Mutex<Option<TestRequestObservation>>,
+) -> MutexGuard<'_, Option<TestRequestObservation>> {
+    request
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn native_start_error_to_io(error: NativeIoStartError) -> io::Error {
+    match error {
+        NativeIoStartError::InvalidBufferLength => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native archive I/O buffer length is invalid",
+        ),
+        NativeIoStartError::SynchronousHandle { .. } => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native archive I/O requires an overlapped handle",
+        ),
+        NativeIoStartError::HandleModeQueryFailed { ntstatus } => io::Error::new(
+            io::ErrorKind::Other,
+            format!("native file mode query failed with NTSTATUS {ntstatus:#x}"),
+        ),
     }
 }
 
@@ -294,6 +695,10 @@ impl NativeIoRequest {
 }
 
 impl NativeIoCancelHandle {
+    fn request_id_for_owner(&self) -> u64 {
+        self.shared.id
+    }
+
     pub(super) fn cancel(&self) -> CancelReceipt {
         self.cancel_with_contention_callback(|| {})
     }
@@ -723,7 +1128,7 @@ mod tests {
     static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
     const PENDING_TIMEOUT: Duration = Duration::from_secs(5);
 
-    /// Test-only owner mirroring the later extraction worker's obligation:
+    /// Test-only owner mirroring the production writer's obligation:
     /// publish cancellation before submission, and join before retiring the
     /// request owner. The production request core itself creates no thread.
     struct JoinedTestWorker {
