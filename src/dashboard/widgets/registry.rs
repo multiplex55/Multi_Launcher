@@ -319,5 +319,15 @@ mod tests {
         assert!(registry.contains("windows_overview"));
         assert_eq!(names.first().map(String::as_str), Some("browser_tabs"));
         assert_eq!(names.last().map(String::as_str), Some("windows_overview"));
+
+        let quick_tools_defaults = registry
+            .default_settings("quick_tools")
+            .expect("Quick Tools has registered defaults for editor reset");
+        assert_eq!(
+            quick_tools_defaults["preferred_columns"],
+            serde_json::json!(3)
+        );
+        assert_eq!(quick_tools_defaults["visible_rows"], serde_json::json!(2));
+        assert!(registry.settings_ui_fn("quick_tools").is_some());
     }
 }

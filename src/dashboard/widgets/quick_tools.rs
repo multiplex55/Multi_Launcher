@@ -9,6 +9,13 @@ use eframe::egui;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
+const MIN_PREFERRED_COLUMNS: usize = 1;
+const MAX_PREFERRED_COLUMNS: usize = 8;
+const DEFAULT_PREFERRED_COLUMNS: usize = 3;
+const MIN_VISIBLE_ROWS: usize = 1;
+const MAX_VISIBLE_ROWS: usize = 12;
+const DEFAULT_VISIBLE_ROWS: usize = 2;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct QuickToolEntry {
     pub query: String,
@@ -55,17 +62,77 @@ fn default_queries() -> Vec<QuickToolEntry> {
         .collect()
 }
 
+fn default_preferred_columns() -> usize {
+    DEFAULT_PREFERRED_COLUMNS
+}
+
+fn default_visible_rows() -> usize {
+    DEFAULT_VISIBLE_ROWS
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IntegerPreference {
+    Signed(i64),
+    Unsigned(u64),
+}
+
+fn clamp_layout_preference(value: IntegerPreference, min: usize, max: usize) -> usize {
+    match value {
+        IntegerPreference::Signed(value) => value.clamp(min as i64, max as i64) as usize,
+        IntegerPreference::Unsigned(value) => value.clamp(min as u64, max as u64) as usize,
+    }
+}
+
+fn deserialize_preferred_columns<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IntegerPreference::deserialize(deserializer).map(|columns| {
+        clamp_layout_preference(columns, MIN_PREFERRED_COLUMNS, MAX_PREFERRED_COLUMNS)
+    })
+}
+
+fn deserialize_visible_rows<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IntegerPreference::deserialize(deserializer)
+        .map(|rows| clamp_layout_preference(rows, MIN_VISIBLE_ROWS, MAX_VISIBLE_ROWS))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuickToolsConfig {
     #[serde(default = "default_queries")]
     pub queries: Vec<QuickToolEntry>,
+    #[serde(
+        default = "default_preferred_columns",
+        deserialize_with = "deserialize_preferred_columns"
+    )]
+    pub preferred_columns: usize,
+    #[serde(
+        default = "default_visible_rows",
+        deserialize_with = "deserialize_visible_rows"
+    )]
+    pub visible_rows: usize,
 }
 
 impl Default for QuickToolsConfig {
     fn default() -> Self {
         Self {
             queries: default_queries(),
+            preferred_columns: default_preferred_columns(),
+            visible_rows: default_visible_rows(),
         }
+    }
+}
+
+impl QuickToolsConfig {
+    fn normalize_layout(&mut self) {
+        self.preferred_columns = self
+            .preferred_columns
+            .clamp(MIN_PREFERRED_COLUMNS, MAX_PREFERRED_COLUMNS);
+        self.visible_rows = self.visible_rows.clamp(MIN_VISIBLE_ROWS, MAX_VISIBLE_ROWS);
     }
 }
 
@@ -102,6 +169,8 @@ pub struct QuickToolsWidget {
 
 impl QuickToolsWidget {
     pub fn new(cfg: QuickToolsConfig) -> Self {
+        let mut cfg = cfg;
+        cfg.normalize_layout();
         Self { cfg }
     }
 
@@ -114,6 +183,40 @@ impl QuickToolsWidget {
             let mut changed = false;
             let mut row_action = None;
             let query_count = cfg.queries.len();
+
+            ui.label("Quick Tools layout");
+            ui.small("These settings apply inside this dashboard slot.");
+            ui.horizontal(|ui| {
+                ui.label("Preferred columns");
+                let response = ui.add(
+                    egui::DragValue::new(&mut cfg.preferred_columns)
+                        .range(MIN_PREFERRED_COLUMNS..=MAX_PREFERRED_COLUMNS),
+                );
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "layout/preferred-columns",
+                    "Preferred columns inside this dashboard slot",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Visible rows");
+                let response = ui.add(
+                    egui::DragValue::new(&mut cfg.visible_rows)
+                        .range(MIN_VISIBLE_ROWS..=MAX_VISIBLE_ROWS),
+                );
+                ctx.register_jump_mode_target(
+                    ui,
+                    &response,
+                    "layout/visible-rows",
+                    "Visible rows inside this dashboard slot",
+                    crate::gui::jump_mode::TargetKind::Slider,
+                );
+                changed |= response.changed();
+            });
+
             for (idx, entry) in cfg.queries.iter_mut().enumerate() {
                 let token = ctx
                     .property_row_token("quick-tools", idx)
@@ -316,7 +419,8 @@ impl Widget for QuickToolsWidget {
     }
 
     fn on_config_updated(&mut self, settings: &serde_json::Value) {
-        if let Ok(cfg) = serde_json::from_value::<QuickToolsConfig>(settings.clone()) {
+        if let Ok(mut cfg) = serde_json::from_value::<QuickToolsConfig>(settings.clone()) {
+            cfg.normalize_layout();
             self.cfg = cfg;
         }
     }
@@ -453,6 +557,8 @@ mod tests {
                     auto_submit: true,
                 },
             ],
+            preferred_columns: 5,
+            visible_rows: 7,
         }
     }
 
@@ -527,6 +633,8 @@ mod tests {
     fn remove_row_action_removes_only_the_selected_entry() {
         let mut cfg = config_with_abc();
         assert!(apply_row_action(&mut cfg, QuickToolRowAction::Remove(1)));
+        assert_eq!(cfg.preferred_columns, 5);
+        assert_eq!(cfg.visible_rows, 7);
         assert_eq!(
             cfg.queries,
             vec![
@@ -547,13 +655,18 @@ mod tests {
         let mut cfg = config_with_abc();
         assert!(apply_row_action(&mut cfg, QuickToolRowAction::MoveDown(1)));
 
+        let serialized = serde_json::to_value(&cfg).unwrap();
         assert_eq!(
-            serde_json::to_value(&cfg).unwrap(),
+            serialized,
             json!({"queries":[
                 {"query":"A","auto_submit":true},
                 {"query":"C","auto_submit":true},
                 {"query":"B","auto_submit":false}
-            ]})
+            ], "preferred_columns":5, "visible_rows":7})
+        );
+        assert_eq!(
+            serde_json::from_value::<QuickToolsConfig>(serialized).unwrap(),
+            cfg
         );
         assert_eq!(
             cfg.queries
@@ -568,6 +681,8 @@ mod tests {
     fn deserializes_legacy_structured_mixed_and_missing_flag_entries() {
         let legacy: QuickToolsConfig =
             serde_json::from_value(json!({"queries":["fs","mm","cm"]})).unwrap();
+        assert_eq!(legacy.preferred_columns, DEFAULT_PREFERRED_COLUMNS);
+        assert_eq!(legacy.visible_rows, DEFAULT_VISIBLE_ROWS);
         assert_eq!(
             legacy
                 .queries
@@ -598,17 +713,113 @@ mod tests {
     }
 
     #[test]
+    fn persisted_negative_layout_preferences_are_clamped_without_losing_queries() {
+        let cfg: QuickToolsConfig = serde_json::from_value(json!({
+            "queries": ["legacy", {"query":"automatic", "auto_submit":true}],
+            "preferred_columns": -3,
+            "visible_rows": -1
+        }))
+        .unwrap();
+
+        assert_eq!(cfg.preferred_columns, MIN_PREFERRED_COLUMNS);
+        assert_eq!(cfg.visible_rows, MIN_VISIBLE_ROWS);
+        assert_eq!(cfg.queries.len(), 2);
+        assert_eq!(cfg.queries[0].query, "legacy");
+        assert!(!cfg.queries[0].auto_submit);
+        assert!(cfg.queries[1].auto_submit);
+    }
+
+    #[test]
+    fn persisted_large_layout_integers_clamp_to_the_supported_maximum() {
+        let cfg: QuickToolsConfig = serde_json::from_value(json!({
+            "queries": ["preserved"],
+            "preferred_columns": u64::MAX,
+            "visible_rows": u64::MAX
+        }))
+        .unwrap();
+
+        assert_eq!(cfg.preferred_columns, MAX_PREFERRED_COLUMNS);
+        assert_eq!(cfg.visible_rows, MAX_VISIBLE_ROWS);
+        assert_eq!(cfg.queries[0].query, "preserved");
+    }
+
+    #[test]
+    fn opening_settings_normalizes_negative_preferences_and_preserves_legacy_queries() {
+        let mut settings = json!({
+            "queries": ["legacy manual", {"query":"saved automatic", "auto_submit":true}],
+            "preferred_columns": -2,
+            "visible_rows": -5
+        });
+        let context = WidgetSettingsContext::empty();
+        let egui_context = egui::Context::default();
+
+        egui_context
+            .run_ui(dashboard_input(Vec::new()), |ui| {
+                let result = QuickToolsWidget::settings_ui(ui, &mut settings, &context);
+                assert!(result.changed);
+                assert!(result.error.is_none());
+            })
+            .drop_without_applying_deltas();
+
+        let migrated: QuickToolsConfig = serde_json::from_value(settings.clone()).unwrap();
+        assert_eq!(migrated.preferred_columns, MIN_PREFERRED_COLUMNS);
+        assert_eq!(migrated.visible_rows, MIN_VISIBLE_ROWS);
+        assert_eq!(migrated.queries.len(), 2);
+        assert_eq!(migrated.queries[0].query, "legacy manual");
+        assert!(!migrated.queries[0].auto_submit);
+        assert_eq!(migrated.queries[1].query, "saved automatic");
+        assert!(migrated.queries[1].auto_submit);
+    }
+
+    #[test]
+    fn direct_config_construction_is_normalized_by_widget() {
+        let widget = QuickToolsWidget::new(QuickToolsConfig {
+            queries: vec![QuickToolEntry::manual("preserved")],
+            preferred_columns: usize::MAX,
+            visible_rows: 0,
+        });
+
+        assert_eq!(widget.cfg.preferred_columns, MAX_PREFERRED_COLUMNS);
+        assert_eq!(widget.cfg.visible_rows, MIN_VISIBLE_ROWS);
+        assert_eq!(widget.cfg.queries[0].query, "preserved");
+    }
+
+    #[test]
+    fn config_updates_apply_layout_defaults_and_ignore_invalid_documents() {
+        let mut widget = QuickToolsWidget::new(QuickToolsConfig {
+            queries: vec![QuickToolEntry::manual("old")],
+            preferred_columns: 6,
+            visible_rows: 9,
+        });
+        widget.on_config_updated(&json!({"queries":["updated"]}));
+        assert_eq!(widget.cfg.preferred_columns, DEFAULT_PREFERRED_COLUMNS);
+        assert_eq!(widget.cfg.visible_rows, DEFAULT_VISIBLE_ROWS);
+        assert_eq!(widget.cfg.queries[0].query, "updated");
+
+        let before = widget.cfg.clone();
+        widget.on_config_updated(&json!({"queries":42, "preferred_columns":2}));
+        assert_eq!(widget.cfg, before);
+    }
+
+    #[test]
     fn serialization_is_always_canonical_after_legacy_input() {
         let cfg: QuickToolsConfig = serde_json::from_value(json!({"queries":["fs"]})).unwrap();
         assert_eq!(
             serde_json::to_value(cfg).unwrap(),
-            json!({"queries":[{"query":"fs","auto_submit":false}]})
+            json!({
+                "queries":[{"query":"fs","auto_submit":false}],
+                "preferred_columns":DEFAULT_PREFERRED_COLUMNS,
+                "visible_rows":DEFAULT_VISIBLE_ROWS
+            })
         );
     }
 
     #[test]
     fn defaults_and_new_entries_are_manual() {
         assert!(default_queries().iter().all(|entry| !entry.auto_submit));
+        let defaults = QuickToolsConfig::default();
+        assert_eq!(defaults.preferred_columns, DEFAULT_PREFERRED_COLUMNS);
+        assert_eq!(defaults.visible_rows, DEFAULT_VISIBLE_ROWS);
         assert_eq!(
             QuickToolEntry::manual(""),
             QuickToolEntry {
@@ -685,9 +896,11 @@ mod tests {
         ];
         let mut first = QuickToolsWidget::new(QuickToolsConfig {
             queries: entries.clone(),
+            ..QuickToolsConfig::default()
         });
         let mut second = QuickToolsWidget::new(QuickToolsConfig {
             queries: entries.clone(),
+            ..QuickToolsConfig::default()
         });
         let plugins = crate::plugin::PluginManager::new();
         let data_cache = DashboardDataCache::new();
@@ -770,6 +983,7 @@ mod tests {
         ];
         let mut widget = QuickToolsWidget::new(QuickToolsConfig {
             queries: entries.clone(),
+            ..QuickToolsConfig::default()
         });
         let plugins = crate::plugin::PluginManager::new();
         let data_cache = DashboardDataCache::new();
@@ -873,9 +1087,11 @@ mod tests {
         let mut jump = JumpModeUi::new(true);
         let mut blank_widget = QuickToolsWidget::new(QuickToolsConfig {
             queries: vec![QuickToolEntry::manual(" \t ")],
+            ..QuickToolsConfig::default()
         });
         let mut clipped_widget = QuickToolsWidget::new(QuickToolsConfig {
             queries: vec![QuickToolEntry::manual("visible query")],
+            ..QuickToolsConfig::default()
         });
 
         jump.begin_frame();
