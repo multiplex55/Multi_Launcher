@@ -17,7 +17,7 @@ Initial Git mutation failed with `.git/index.lock: Permission denied` under sand
 | C02 | feat/unicode-inspector-ui-20261101-r01 | fix/utility-sizing-20261101-r01 | 25a0b86b9d18a1eb6d878c61620126a5d4b327e8 | 8b552b24cfa2dda5b1895d4e17651dc525867edd |9aa7a0a35df8d91add8bd66e388b96127984a192; pushed clean/PARTIAL, UI withdrawn |
 | C03 | feat/zip-extraction-20261101-r01 | feat/unicode-inspector-ui-20261101-r01 |9aa7a0a35df8d91add8bd66e388b96127984a192 |e72b8d5e58fc59312f15173959848a9c690c68d7 |5b978524a35d002748ebac6436a6ea94a01332c1; pushed clean/COMPLETE source+native files; desktop C05 |
 | C04 | feat/timer-alarm-picker-20261101-r01 | feat/zip-extraction-20261101-r01 |5b978524a35d002748ebac6436a6ea94a01332c1 |257631771af7eb8f140b1eb46d2ad75d7df9deeb |6989a20c72ab397171c336105dbc57f9a9f1e8c0; pushed clean/COMPLETE source+tests; desktop C05 |
-| C05 | chore/native-acceptance-closeout-20261101-r01 | feat/timer-alarm-picker-20261101-r01 |6989a20c72ab397171c336105dbc57f9a9f1e8c0 |f87f5d63e87ff4ef53671e734207fb1a8d454319 |pending; baseline pushed clean |
+| C05 | chore/native-acceptance-closeout-20261101-r01 | feat/timer-alarm-picker-20261101-r01 |6989a20c72ab397171c336105dbc57f9a9f1e8c0 |f87f5d63e87ff4ef53671e734207fb1a8d454319 |Source checkpoint f3364722ba0c8e04be9b70fdf48eb7a2805e485e pushed clean; closing final tip captured after commit in delivery receipt/PR |
 
 M0-A direct parent verified with `git rev-parse HEAD^`; equals C01 parent above. No worktrees, auxiliary checkouts/clones, intermediate history operations or user changes created/discarded.
 
@@ -362,7 +362,7 @@ Actual cumulative diff/stale caller search checked, current app compiles, only i
 | M0-A | COMPLETE | f87f5d63e87ff4ef53671e734207fb1a8d454319 direct parent6989a20c72ab397171c336105dbc57f9a9f1e8c0 verified/pushed clean before work. |
 | M5-A | COMPLETE capability gate / NATIVE_BLOCKED | Current app/profile owned; primary capture +single supported recovery timed out; exact stop receipt/reportced81de66fb68fabe0dcc69120f884d310982c73 pushed. |
 | M5-B | NOT_RUN | Desktop controls/screenshots not accepted; no further retry authorized. Owned process cleanup/drain verified, no clipboard changes. |
-| M5-C | in_progress | Final bounded current-target Nextest, one end-only Clippy, touched formatting/ancestry/cumulative review and one draft PR remain. |
+| M5-C | COMPLETE local verification/review; post-commit publication | Source correction f3364722ba0c8e04be9b70fdf48eb7a2805e485e pushed clean;132pre-correction/72affected current cases, current app, lint,109fileformat and ancestry pass. Exact closing tip and draft PR publication are recorded after this commit in delivery receipt/final response, not preclaimed. |
 
 C04 closed at6989a20c72ab397171c336105dbc57f9a9f1e8c0, upstream equal and clean. Fresh C05 branch chore/native-acceptance-closeout-20261101-r01 created directly from that exact tip in the same checkout. Ledger-only M0-Af87f5d63e87ff4ef53671e734207fb1a8d454319 direct parent6989a20c72ab397171c336105dbc57f9a9f1e8c0 verified; upstream push succeeded and clean BEFORE C05 build/fixture/native execution/source writer. One supported native capability attempt and at most one documented recovery; one end-only first-party Clippy. No native desktop acceptance claimed.
 
@@ -392,3 +392,36 @@ Corrected current app build `c05-lint-forward-app-build_20261101T222810992Z_1099
 Same-target end-phase Clippy confirmation `c05-lint-confirmation_20261101T223013527Z_3c77d75cf352430fad1028fe84f33c61` passed32.915132s exit0, cap1664s from remaining aggregate budget; cleanup/drain true/sourceca7d8b19b2828e3c7a98822d805f57e5d14a814a4de03287a8f4eb120670cc50 unchanged. Exact locked/offline fast-dev lib/bin/timer_plugin --no-deps scope, no expanded targets/features/dependency lint campaign. Single end-only lint phase comprised initial135.459051s plus focused-correction confirmation32.915132s =168.374183s total, below1800s. NOTwarning-free:15rootwarnings plus3workspace compiler warnings remain outside task-changed lines; zero warning locations on current task added/changed lines. Classified confirmation artifact retained underignoredtarget, unrelated baseline debt intentionally untouched.
 
 Independent final source/check disposition ACCEPTED/no remaining findings. Reviewer verified boxed optional diagnostic owns no handles, typed cancellation preserved, current std integer fetch_update delegates identically to try_update, mechanical conversions/evaluation/locks unchanged. Current source is supported by72affectedpasses/currentapp/format/lint; clean132batch belongs to pre-correction2ac39source and is not relabeled as final132onca7source. Native desktop remainsblocked at its earlier exactsource and no new attempt occurred. Coherent forward correction commit/push follows, then documentation-only closing state/manual checklist and final-tip probe before one draftPR. No new category/repair campaign authorized.
+## Final closeout and delivery boundary
+
+Prepared after source checkpoint `f3364722ba0c8e04be9b70fdf48eb7a2805e485e` was committed/pushed and independently accepted. Working tree was clean, source fingerprint remained `ca7d8b19b2828e3c7a98822d805f57e5d14a814a4de03287a8f4eb120670cc50`, and current executable is121296896bytes/SHA256 `4211B37AA5F7C7743440CD0F5246211135594E6DBD88152ED70F24951BB00094`. This final change is documentation only. The exact final commit SHA cannot be embedded in its own tracked contents; parent captures it AFTER commit/push in `target/blocked-utility-recovery-20261101-r01/c05-final-delivery.json` and the final response, then creates the single cumulative draft PR. PR creation/success is not preclaimed. No further application repair, sixth category, native retry or merge is authorized.
+
+| Category | Final outcome | Accepted behavior / limitation |
+| --- | --- | --- |
+| C01 | PARTIAL | Embedded utility preferred sizes, actual two-axis restore/resize, coalesced acknowledged persistence, Reset/Retry and native restore/reset accepted. Automatic native resize capture is absent; desktop interaction remains NOT_RUN. |
+| C02 | PARTIAL / BLOCKED UI | Mandatory entire-last-row gate exhausted initial+two corrections. Full candidate preserved and safely withdrawn; pure Unicode domain unchanged. No Unicode UI/typed command is delivered. |
+| C03 | COMPLETE source/test/native-file scope | Held-source/root/parent authority, both actual reparse races, no-clobber publication, bounded Stored-only CRC/quotas, native cancellation/join/partial cleanup, explicit selective preview/confirmation UI and typed GUI route accepted. Deflate/encryption unsupported. Desktop interaction NOT_RUN. |
+| C04 | COMPLETE source/test scope | Checked duration parsing, clock-independent spec/aware strict-future local resolution inclDST, exact persisted target/deadline/reload, persistence-before-publication, textual routes and synchronized numeric pickers/preview/inline errors accepted. Desktop interaction NOT_RUN. |
+| C05 | PARTIAL overall; local closeout complete | Current app,132scoped tests before lint correction,72affected current-source tests, formatting/diff, end-only lint and independent source review accepted. Native capture/recovery both timed out, zero screenshots/input proof. Single draft PR publication follows closing commit. |
+
+### Accepted checkpoint chain
+
+| Category | Checkpoint commits (all pushed) | Category final tip |
+| --- | --- | --- |
+| C01 | M1-A81eadd2bbb56a18f59c20be3919ef6c25575a229; M1-B86d3feb946894a201fe4af4f50fa0cd0b25dd5f9; M1-C144a55e1aa138e05f80f4e193dc2ddff18d2b290; inventorye9a926cedaa440e80de677d0d271622a8cc889f5; Reset/native3c3d732c07f9fb7ec6fccd8c511c9bf189313311 |25a0b86b9d18a1eb6d878c61620126a5d4b327e8 |
+| C02 | M2-Ad293546e22b569b9a030109afb8da2ae4b431272; safe withdrawal67117fdfce9e8da20578039fbfea860f8ba71dda |9aa7a0a35df8d91add8bd66e388b96127984a192 |
+| C03 | nativea015205d2805b8fb60305064d75b28e385680546; IO764dd888bc51cb42d812aca84d9453bc835c57a6; writer5304ff75ad3ac0f2afc2c3d7f6d7e2a8fc774f3c; session0367e63ccd655e1d02d1965b7e733fcbbbbaa3c8; UIe867b404ddebd8fa0dd396128713b537095ba660 |5b978524a35d002748ebac6436a6ea94a01332c1 |
+| C04 | owner0af9bbd67e5ad3d056c9f884b3e21e46c3eeb5da; pickersc81340e1db6ee2a184a6183fdcc8410af0935063 |6989a20c72ab397171c336105dbc57f9a9f1e8c0 |
+| C05 | native stopced81de66fb68fabe0dcc69120f884d310982c73; forward lintf3364722ba0c8e04be9b70fdf48eb7a2805e485e |Documentation closing commit measured after this file is committed; exact SHA in post-commit delivery receipt/PR/final response. |
+
+Parent/baseline full SHAs are in the first table. Final probe must recheck all five direct parents, local/upstream equality, unchanged current source/executable, clean working tree/index, no operation markers, one existing checkout and current master/merge-base. Integration master remains `ae6660996ddf212817fc505ecd719956b32c7678`, common base is predecessor `25a9468450f4f91090658be23d129908c92ca501`; no mainline application changes or integration rewrite required. No local-only commit or failed push is pending at this preparation time; closing push outcome is measured afterward.
+
+### Final manual review checklist
+
+- [ ] In a fresh owned profile, check representative embedded utility resize/close/restart/Reset; keep native child windows labelled restore-only until a separately accepted capture implementation exists.
+- [ ] Check ZIP Stored selection/Preview/explicit confirmation, occupied-winner preservation, Cancel/stage cleanup and truthful partial output using disposable archives/destinations only.
+- [ ] Check typed and numeric Timer/Alarm input, date-prefix preservation, local date/offset preview, name/sound, Start once, failure retention and Cancel against an owned alarm store.
+- [ ] Check practical Jump/theme/Diff/MkMacro desktop interactions left unverified; do not treat headless/native-file tests as desktop evidence.
+- [ ] Keep Unicode UI withdrawn until separately authorized work passes the unchanged complete-final-row gate; review all partial/native limitations before deciding whether to merge the draft PR.
+
+The following Goal's new branch MUST be created from the actual final cumulative tip captured after this closing commit, not from master/main. No next Goal is started here.
