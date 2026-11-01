@@ -2100,7 +2100,17 @@ mod tests {
     #[test]
     fn acceptance_fixture_queries_reach_real_ranked_actions_and_authoring_rows() {
         let ctx = eframe::egui::Context::default();
-        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let mut settings = crate::settings::Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        let mut app = crate::gui::LauncherApp::new_isolated_for_test_at(
+            &ctx,
+            workspace.root(),
+            settings,
+            None,
+            None,
+        );
         let mut custom_actions = vec![
             action("QMarker Alpha", "qmarker-alpha"),
             action("QMarker Beta", "qmarker-beta"),
@@ -2180,7 +2190,7 @@ mod tests {
             .position(|row| std::ptr::eq(row, ranked_custom))
             .expect("selected action row should belong to the bounded catalog");
         assert_eq!(
-            ranked_custom_row, 60,
+            ranked_custom_row, 90,
             "Execute row rank was {ranked_custom_row}"
         );
         assert_eq!(
@@ -2199,7 +2209,7 @@ mod tests {
         );
         assert!(ranked_custom.assignment().is_ok());
 
-        let adjacent_edit_row = &app_catalog.rows()[61];
+        let adjacent_edit_row = &app_catalog.rows()[ranked_custom_row + 1];
         assert_eq!(adjacent_edit_row.custom_action_index, Some(32));
         assert_eq!(
             adjacent_edit_row.target_command,
@@ -2218,6 +2228,17 @@ mod tests {
             "Radial Acceptance Harmless Action 030 · Custom action · custom action 33 — Edit App"
         );
         assert!(adjacent_edit_row.assignment().is_ok());
+
+        let adjacent_repair_row = &app_catalog.rows()[ranked_custom_row + 2];
+        assert_eq!(adjacent_repair_row.custom_action_index, Some(32));
+        assert_eq!(
+            adjacent_repair_row.target_command,
+            ranked_custom.target_command
+        );
+        assert_eq!(
+            adjacent_repair_row.action_id,
+            action_ids::CUSTOM_ACTION_REPAIR_TARGET
+        );
 
         let note_query = "note search Shared Acceptance";
         app.query = note_query.into();

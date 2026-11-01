@@ -39,249 +39,260 @@ pub fn show(
     model.poll();
     shortcuts(ui, model);
     let mut action = None;
-    ui.horizontal_wrapped(|ui| {
-        if ui.button("◀ Previous (F7)").clicked() {
-            model.navigate(NavigationDirection::Previous)
-        }
-        if ui.button("Next (F8) ▶").clicked() {
-            model.navigate(NavigationDirection::Next)
-        }
-        let merge = model.comparison.is_some() && !model.external_conflict.iter().any(|x| *x);
-        if ui
-            .add_enabled(merge, egui::Button::new("Copy →"))
-            .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
-            .clicked()
-            && let Err(e) = model.copy_hunk(DiffSide::Left)
-        {
-            model.right_error = Some(e)
-        }
-        if ui
-            .add_enabled(merge, egui::Button::new("← Copy"))
-            .on_hover_text(
-                "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
-            )
-            .clicked()
-            && let Err(e) = model.copy_hunk(DiffSide::Right)
-        {
-            model.left_error = Some(e)
-        }
-        if ui.button("Find").clicked() {
-            model.find_open = true;
-        }
-        if ui
-            .add_enabled(
-                model.has_fresh_source_selection(),
-                egui::Button::new("Compare selected lines with Clipboard"),
-            )
-            .clicked()
-        {
-            action = Some(TextViewAction::CompareSelectionWithClipboard { view_id: view });
-        }
-        if ui.button("Previous bookmark").clicked()
-            && let Err(error) = model.navigate_bookmark(false)
-        {
-            model.annotation_notice = Some(error);
-        }
-        if ui.button("Next bookmark").clicked()
-            && let Err(error) = model.navigate_bookmark(true)
-        {
-            model.annotation_notice = Some(error);
-        }
-        let bookmark_label = model
-            .source_line_selection
-            .map(|selection| match selection.side {
-                DiffSide::Left => ("Left", selection.focus_line + 1),
-                DiffSide::Right => ("Right", selection.focus_line + 1),
-            });
-        if ui
-            .add_enabled(
-                model.has_fresh_source_selection(),
-                egui::Button::new("Toggle bookmark"),
-            )
-            .clicked()
-        {
-            let selected = bookmark_label;
-            match model.toggle_bookmark_at_selection() {
-                Ok(added) => {
-                    if let Some((side, line)) = selected {
-                        model.annotation_notice = Some(format!(
-                            "{} bookmark on {side} line {line}.",
-                            if added { "Added" } else { "Removed" }
-                        ));
+    // Keep the expanded toolbar reachable without pushing Find and the
+    // comparison panes out of a small viewport at large text sizes.
+    let toolbar_height = (ui.available_height() * 0.4).max(ui.spacing().interact_size.y);
+    egui::ScrollArea::vertical()
+        .id_salt((workspace, view, "diff-text-toolbar"))
+        .max_height(toolbar_height)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("◀ Previous (F7)").clicked() {
+                    model.navigate(NavigationDirection::Previous)
+                }
+                if ui.button("Next (F8) ▶").clicked() {
+                    model.navigate(NavigationDirection::Next)
+                }
+                let merge =
+                    model.comparison.is_some() && !model.external_conflict.iter().any(|x| *x);
+                if ui
+                    .add_enabled(merge, egui::Button::new("Copy →"))
+                    .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
+                    .clicked()
+                    && let Err(e) = model.copy_hunk(DiffSide::Left)
+                {
+                    model.right_error = Some(e)
+                }
+                if ui
+                    .add_enabled(merge, egui::Button::new("← Copy"))
+                    .on_hover_text(
+                        "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
+                    )
+                    .clicked()
+                    && let Err(e) = model.copy_hunk(DiffSide::Right)
+                {
+                    model.left_error = Some(e)
+                }
+                if ui.button("Find").clicked() {
+                    model.find_open = true;
+                }
+                if ui
+                    .add_enabled(
+                        model.has_fresh_source_selection(),
+                        egui::Button::new("Compare selected lines with Clipboard"),
+                    )
+                    .clicked()
+                {
+                    action = Some(TextViewAction::CompareSelectionWithClipboard { view_id: view });
+                }
+                if ui.button("Previous bookmark").clicked()
+                    && let Err(error) = model.navigate_bookmark(false)
+                {
+                    model.annotation_notice = Some(error);
+                }
+                if ui.button("Next bookmark").clicked()
+                    && let Err(error) = model.navigate_bookmark(true)
+                {
+                    model.annotation_notice = Some(error);
+                }
+                let bookmark_label =
+                    model
+                        .source_line_selection
+                        .map(|selection| match selection.side {
+                            DiffSide::Left => ("Left", selection.focus_line + 1),
+                            DiffSide::Right => ("Right", selection.focus_line + 1),
+                        });
+                if ui
+                    .add_enabled(
+                        model.has_fresh_source_selection(),
+                        egui::Button::new("Toggle bookmark"),
+                    )
+                    .clicked()
+                {
+                    let selected = bookmark_label;
+                    match model.toggle_bookmark_at_selection() {
+                        Ok(added) => {
+                            if let Some((side, line)) = selected {
+                                model.annotation_notice = Some(format!(
+                                    "{} bookmark on {side} line {line}.",
+                                    if added { "Added" } else { "Removed" }
+                                ));
+                            }
+                        }
+                        Err(error) => model.annotation_notice = Some(error),
                     }
                 }
-                Err(error) => model.annotation_notice = Some(error),
-            }
-        }
-        alignment_controls(ui, model);
-        ui.menu_button("Ignored lines", |ui| {
-            let selected = model.source_line_selection.is_some();
-            if ui
-                .add_enabled(selected, egui::Button::new("Ignore selected lines"))
-                .clicked()
-            {
-                if let Err(error) = model.ignore_selected_lines() {
-                    model.annotation_notice = Some(error);
-                }
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    selected,
-                    egui::Button::new("Restore selected ignored lines"),
-                )
-                .clicked()
-            {
-                if let Err(error) = model.restore_selected_ignored_lines() {
-                    model.annotation_notice = Some(error);
-                }
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    !model.left.ignored_line_ranges().is_empty()
-                        || !model.right.ignored_line_ranges().is_empty(),
-                    egui::Button::new("Clear ignored ranges"),
-                )
-                .clicked()
-            {
-                model.clear_ignored_ranges();
-                ui.close();
-            }
-        });
-        let mut sync = model.scroll.sync_vertical && model.scroll.sync_horizontal;
-        if ui.checkbox(&mut sync, "Sync Scroll").changed() {
-            model.scroll.set_sync(sync, sync);
-        }
-        ui.menu_button("View", |ui| {
-            if ui.checkbox(&mut model.wrap, "Wrap").changed() {
-                model.scroll.wrapped = model.wrap;
-            }
-            let mut vertical = model.scroll.sync_vertical;
-            let mut horizontal = model.scroll.sync_horizontal;
-            let changed = ui.checkbox(&mut vertical, "Sync Vertical").changed()
-                | ui.checkbox(&mut horizontal, "Sync Horizontal").changed();
-            if changed {
-                model.scroll.set_sync(vertical, horizontal);
-            }
-            ui.add_enabled(
-                model.large_file_tier.syntax_enabled(),
-                egui::Checkbox::new(&mut model.syntax, "Syntax"),
-            );
-            ui.checkbox(&mut model.visible_whitespace, "Visible Whitespace");
-            ui.add_enabled_ui(model.visible_whitespace, |ui| {
-                ui.checkbox(&mut model.visible_line_endings, "Line Endings");
-            });
-            ui.checkbox(&mut model.text_details_open, "Text Details");
-            let mut projection_mode = model.projection_mode;
-            let mut projection_context = model.projection_context;
-            let mut projection_changed = ui
-                .selectable_value(&mut projection_mode, RowProjectionMode::All, "All rows")
-                .changed()
-                | ui.selectable_value(
-                    &mut projection_mode,
-                    RowProjectionMode::DifferencesOnly,
-                    "Differences only",
-                )
-                .changed()
-                | ui.selectable_value(
-                    &mut projection_mode,
-                    RowProjectionMode::IdenticalOnly,
-                    "Identical only",
-                )
-                .changed();
-            if projection_mode == RowProjectionMode::DifferencesOnly {
-                projection_changed |= ui
-                    .add(
-                        egui::Slider::new(
-                            &mut projection_context,
-                            0..=crate::diff::text_compare::MAX_ROW_PROJECTION_CONTEXT,
+                alignment_controls(ui, model);
+                ui.menu_button("Ignored lines", |ui| {
+                    let selected = model.source_line_selection.is_some();
+                    if ui
+                        .add_enabled(selected, egui::Button::new("Ignore selected lines"))
+                        .clicked()
+                    {
+                        if let Err(error) = model.ignore_selected_lines() {
+                            model.annotation_notice = Some(error);
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            selected,
+                            egui::Button::new("Restore selected ignored lines"),
                         )
-                        .text("Context lines"),
-                    )
-                    .changed();
-            }
-            if projection_changed {
-                model.set_row_projection(projection_mode, projection_context);
-            }
-            let mut ignore = model.rules.ignore_all_whitespace;
-            if ui
-                .selectable_value(&mut ignore, false, "All differences")
-                .changed()
-                || ui
-                    .selectable_value(&mut ignore, true, "Important differences")
-                    .changed()
-            {
-                model.set_ignore_all_whitespace(ignore);
-            }
-        });
-        ui.menu_button("More", |ui| {
-            super::export::text_menu(ui, model);
-            if ui.button("Rules…").clicked() {
-                ui.ctx().data_mut(|d| {
-                    d.insert_temp(
-                        egui::Id::new(("diff-rules", view)),
-                        super::rules_dialog::RulesDialogState::new(&model.rules),
-                    )
+                        .clicked()
+                    {
+                        if let Err(error) = model.restore_selected_ignored_lines() {
+                            model.annotation_notice = Some(error);
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !model.left.ignored_line_ranges().is_empty()
+                                || !model.right.ignored_line_ranges().is_empty(),
+                            egui::Button::new("Clear ignored ranges"),
+                        )
+                        .clicked()
+                    {
+                        model.clear_ignored_ranges();
+                        ui.close();
+                    }
                 });
-                ui.close();
-            }
-            if ui.button("First").clicked() {
-                model.navigate(NavigationDirection::First);
-            }
-            if ui.button("Last").clicked() {
-                model.navigate(NavigationDirection::Last);
-            }
-            if ui.button("Previous Intraline Difference").clicked() {
-                model.navigate_intraline(NavigationDirection::Previous);
-            }
-            if ui.button("Next Intraline Difference").clicked() {
-                model.navigate_intraline(NavigationDirection::Next);
-            }
-            if ui
-                .add_enabled(
-                    model.left.can_undo() || model.right.can_undo(),
-                    egui::Button::new("Undo"),
-                )
-                .clicked()
-            {
-                model.undo();
-            }
-            if ui
-                .add_enabled(
-                    model.left.can_redo() || model.right.can_redo(),
-                    egui::Button::new("Redo"),
-                )
-                .clicked()
-            {
-                model.redo();
-            }
-            let save_left = if model.origin == TextCompareOrigin::Memory {
-                "Save Left As…"
-            } else {
-                "Save Left"
-            };
-            let save_right = if model.origin == TextCompareOrigin::Memory {
-                "Save Right As…"
-            } else {
-                "Save Right"
-            };
-            if ui.button(save_left).clicked() {
-                save_side(model, DiffSide::Left);
-            }
-            if ui.button(save_right).clicked() {
-                save_side(model, DiffSide::Right);
-            }
-            if ui.button("Save All Modified").clicked() {
-                if model.left.is_dirty() {
-                    save_side(model, DiffSide::Left);
+                let mut sync = model.scroll.sync_vertical && model.scroll.sync_horizontal;
+                if ui.checkbox(&mut sync, "Sync Scroll").changed() {
+                    model.scroll.set_sync(sync, sync);
                 }
-                if model.right.is_dirty() {
-                    save_side(model, DiffSide::Right);
-                }
-            }
+                ui.menu_button("View", |ui| {
+                    if ui.checkbox(&mut model.wrap, "Wrap").changed() {
+                        model.scroll.wrapped = model.wrap;
+                    }
+                    let mut vertical = model.scroll.sync_vertical;
+                    let mut horizontal = model.scroll.sync_horizontal;
+                    let changed = ui.checkbox(&mut vertical, "Sync Vertical").changed()
+                        | ui.checkbox(&mut horizontal, "Sync Horizontal").changed();
+                    if changed {
+                        model.scroll.set_sync(vertical, horizontal);
+                    }
+                    ui.add_enabled(
+                        model.large_file_tier.syntax_enabled(),
+                        egui::Checkbox::new(&mut model.syntax, "Syntax"),
+                    );
+                    ui.checkbox(&mut model.visible_whitespace, "Visible Whitespace");
+                    ui.add_enabled_ui(model.visible_whitespace, |ui| {
+                        ui.checkbox(&mut model.visible_line_endings, "Line Endings");
+                    });
+                    ui.checkbox(&mut model.text_details_open, "Text Details");
+                    let mut projection_mode = model.projection_mode;
+                    let mut projection_context = model.projection_context;
+                    let mut projection_changed = ui
+                        .selectable_value(&mut projection_mode, RowProjectionMode::All, "All rows")
+                        .changed()
+                        | ui.selectable_value(
+                            &mut projection_mode,
+                            RowProjectionMode::DifferencesOnly,
+                            "Differences only",
+                        )
+                        .changed()
+                        | ui.selectable_value(
+                            &mut projection_mode,
+                            RowProjectionMode::IdenticalOnly,
+                            "Identical only",
+                        )
+                        .changed();
+                    if projection_mode == RowProjectionMode::DifferencesOnly {
+                        projection_changed |= ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut projection_context,
+                                    0..=crate::diff::text_compare::MAX_ROW_PROJECTION_CONTEXT,
+                                )
+                                .text("Context lines"),
+                            )
+                            .changed();
+                    }
+                    if projection_changed {
+                        model.set_row_projection(projection_mode, projection_context);
+                    }
+                    let mut ignore = model.rules.ignore_all_whitespace;
+                    if ui
+                        .selectable_value(&mut ignore, false, "All differences")
+                        .changed()
+                        || ui
+                            .selectable_value(&mut ignore, true, "Important differences")
+                            .changed()
+                    {
+                        model.set_ignore_all_whitespace(ignore);
+                    }
+                });
+                ui.menu_button("More", |ui| {
+                    super::export::text_menu(ui, model);
+                    if ui.button("Rules…").clicked() {
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(
+                                egui::Id::new(("diff-rules", view)),
+                                super::rules_dialog::RulesDialogState::new(&model.rules),
+                            )
+                        });
+                        ui.close();
+                    }
+                    if ui.button("First").clicked() {
+                        model.navigate(NavigationDirection::First);
+                    }
+                    if ui.button("Last").clicked() {
+                        model.navigate(NavigationDirection::Last);
+                    }
+                    if ui.button("Previous Intraline Difference").clicked() {
+                        model.navigate_intraline(NavigationDirection::Previous);
+                    }
+                    if ui.button("Next Intraline Difference").clicked() {
+                        model.navigate_intraline(NavigationDirection::Next);
+                    }
+                    if ui
+                        .add_enabled(
+                            model.left.can_undo() || model.right.can_undo(),
+                            egui::Button::new("Undo"),
+                        )
+                        .clicked()
+                    {
+                        model.undo();
+                    }
+                    if ui
+                        .add_enabled(
+                            model.left.can_redo() || model.right.can_redo(),
+                            egui::Button::new("Redo"),
+                        )
+                        .clicked()
+                    {
+                        model.redo();
+                    }
+                    let save_left = if model.origin == TextCompareOrigin::Memory {
+                        "Save Left As…"
+                    } else {
+                        "Save Left"
+                    };
+                    let save_right = if model.origin == TextCompareOrigin::Memory {
+                        "Save Right As…"
+                    } else {
+                        "Save Right"
+                    };
+                    if ui.button(save_left).clicked() {
+                        save_side(model, DiffSide::Left);
+                    }
+                    if ui.button(save_right).clicked() {
+                        save_side(model, DiffSide::Right);
+                    }
+                    if ui.button("Save All Modified").clicked() {
+                        if model.left.is_dirty() {
+                            save_side(model, DiffSide::Left);
+                        }
+                        if model.right.is_dirty() {
+                            save_side(model, DiffSide::Right);
+                        }
+                    }
+                });
+            });
         });
-    });
     if model.find_open {
         ui.horizontal_wrapped(|ui| {
             ui.label("Find:");

@@ -3704,6 +3704,7 @@ mod tests {
         wait_for_text_comparison(&mut model);
         model.select_source_line(DiffSide::Left, 1, false);
         model.ignore_selected_lines().unwrap();
+        wait_for_text_comparison(&mut model);
         model
             .set_manual_alignments(vec![ManualTextAlignment {
                 left_line: 0,
@@ -3763,6 +3764,7 @@ mod tests {
                 .unwrap_err()
                 .contains("cannot be ignored")
         );
+        wait_for_text_comparison(&mut model);
         assert!(
             model
                 .add_manual_alignment(ManualTextAlignment {

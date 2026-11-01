@@ -4959,7 +4959,17 @@ mod tests {
         crate::radial::acceptance_trace::reset_action_editor_scroll_test_state();
         let context = egui::Context::default();
         context.enable_accesskit();
-        let mut app = crate::gui::actions::tests::new_app(&context);
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let mut settings = crate::settings::Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        let mut app = crate::gui::LauncherApp::new_isolated_for_test_at(
+            &context,
+            workspace.root(),
+            settings,
+            None,
+            None,
+        );
         app.test_skip_history_persistence = true;
         let history_before = serde_json::to_vec(
             &crate::history::with_history(Clone::clone).expect("history snapshot"),
@@ -5052,31 +5062,42 @@ mod tests {
             Vec::new(),
         );
         initial_output.drop_without_applying_deltas();
-        let initial_controls =
-            crate::radial::acceptance_trace::take_action_editor_control_test_events();
-        let scroll_origin = initial_controls
-            .iter()
-            .find_map(|event| match event {
-                crate::radial::acceptance_trace::Event::DesignerActionEditorControl {
-                    control: "result_target",
-                    control_index: Some(0),
-                    full_left_px,
-                    full_top_px,
-                    full_right_px,
-                    full_bottom_px,
-                    ..
-                } => Some(egui::pos2(
-                    (*full_left_px + *full_right_px) as f32 / 2.0,
-                    (*full_top_px + *full_bottom_px) as f32 / 2.0,
-                )),
-                _ => None,
-            })
-            .expect("the first live-ranked editor row is rendered");
-
+        let _ = crate::radial::acceptance_trace::take_action_editor_control_test_events();
         let mut clicked_pin_rect = None;
         let mut maximum_offset_y_milli = 0i64;
-        for (direction, steps) in [(-1.0, 18), (1.0, 36)] {
-            for _ in 0..steps {
+        // Overlap successive viewports so a fully visible row cannot be
+        // skipped as additional actions expand each target's catalog rows.
+        let (content_height, visible_viewport) =
+            crate::radial::acceptance_trace::take_action_editor_scroll_test_events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    crate::radial::acceptance_trace::Event::DesignerActionEditorScroll {
+                        content_height_milli,
+                        inner_visible_left_px,
+                        inner_visible_top_px,
+                        inner_visible_right_px,
+                        inner_visible_bottom_px,
+                        ..
+                    } => Some((
+                        content_height_milli as f32 / 1000.0,
+                        egui::Rect::from_min_max(
+                            egui::pos2(inner_visible_left_px as f32, inner_visible_top_px as f32),
+                            egui::pos2(
+                                inner_visible_right_px as f32,
+                                inner_visible_bottom_px as f32,
+                            ),
+                        ),
+                    )),
+                    _ => None,
+                })
+                .last()
+                .expect("the live editor list publishes its scroll viewport");
+        assert!(visible_viewport.is_positive());
+        let scroll_origin = visible_viewport.center();
+        let scroll_step = visible_viewport.height() / 2.0;
+        let scroll_steps = (content_height / scroll_step).ceil() as usize + 4;
+        for direction in [-1.0, 1.0] {
+            for _ in 0..scroll_steps {
                 let (output, intents) = render_editor_with_catalog(
                     &context,
                     &mut state,
@@ -5085,9 +5106,17 @@ mod tests {
                     &empty_action_catalog,
                     vec![
                         egui::Event::PointerMoved(scroll_origin),
+                        // Model one complete trackpad gesture. A Move without
+                        // Start is smoothed, and End drops its remaining delta.
                         egui::Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Point,
-                            delta: egui::vec2(0.0, direction * 700.0),
+                            delta: egui::Vec2::ZERO,
+                            phase: egui::TouchPhase::Start,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, direction * scroll_step),
                             phase: egui::TouchPhase::Move,
                             modifiers: egui::Modifiers::NONE,
                         },
@@ -5149,8 +5178,13 @@ mod tests {
             }
         }
         assert!(maximum_offset_y_milli > 0, "the live editor list scrolled");
-        let pin_rect =
-            clicked_pin_rect.expect("the beyond-50 Pin control is reachable by scrolling");
+        let pin_rect = clicked_pin_rect.unwrap_or_else(|| {
+            panic!(
+                "the beyond-50 Pin control is reachable by scrolling: row={target_row_index}, \
+                 max_offset_milli={maximum_offset_y_milli}, content_height={content_height}, \
+                 visible_viewport={visible_viewport:?}"
+            )
+        });
         let pin_position = egui::pos2(
             (pin_rect[0] + pin_rect[2]) as f32 / 2.0,
             (pin_rect[1] + pin_rect[3]) as f32 / 2.0,
