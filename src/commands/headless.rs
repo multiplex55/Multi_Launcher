@@ -425,6 +425,9 @@ fn execute_with_external(
         Command::Dialog(DialogCommand::DateTimeStudio) => {
             anyhow::bail!("Date & Time Studio requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::DiagramStudio) => {
+            anyhow::bail!("Diagram Studio requires the launcher interface")
+        }
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
@@ -1428,6 +1431,37 @@ mod date_time_studio_headless_tests {
         assert_eq!(
             error.to_string(),
             "Date & Time Studio requires the launcher interface"
+        );
+        assert_eq!(calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod diagram_studio_headless_tests {
+    use super::*;
+
+    #[test]
+    fn diagram_studio_requires_the_launcher_interface_without_external_fallback() {
+        let original = Action {
+            label: "Diagram Studio".into(),
+            desc: String::new(),
+            action: "diagram:studio".into(),
+            args: None,
+        };
+        let mut calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::DiagramStudio),
+            &original,
+            &mut |_, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Diagram Studio requires the launcher interface"
         );
         assert_eq!(calls, 0);
     }

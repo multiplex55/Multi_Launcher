@@ -4393,13 +4393,14 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 6] {
+    fn viewport_bootstrap_state(&self) -> [bool; 7] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
             self.radial_placement_viewport.needs_viewport_bootstrap(),
             self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
             self.xml_toolkit_dialog.needs_viewport_bootstrap(),
+            self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
         ]
     }
@@ -4413,7 +4414,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 6],
+        previously_pending: [bool; 7],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -4488,6 +4489,22 @@ impl LauncherApp {
             application_input_allowed,
             root_native_owner_current,
             self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+        );
+    }
+
+    fn show_diagram_studio(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        self.diagram_studio_dialog.show(
+            ctx,
+            first_ui_pass,
+            application_input_allowed,
+            root_input_allowed,
         );
     }
 
@@ -6356,6 +6373,7 @@ impl LauncherApp {
             // usable while the launcher is hidden. Its ROOT scope and ROOT
             // native-owner eligibility stay disabled in this branch.
             self.show_regex_tester(&ctx, false);
+            self.show_diagram_studio(&ctx, first_ui_pass, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -9630,6 +9648,7 @@ impl LauncherApp {
         }
         #[cfg(not(feature = "qa-framebuffer-capture"))]
         self.qr_dialog.show(&ctx);
+        self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         if let Some(super::CalculationPadDialogEffect::CopyText(text)) =
             self.calculation_pad_dialog.show(&ctx, first_ui_pass)
         {
@@ -10154,6 +10173,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_ui_frame_complete(&mut self, _ctx: &egui::Context) {
+        self.diagram_studio_dialog.on_ui_frame_complete(_ctx);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
     }
@@ -10324,6 +10344,7 @@ impl LauncherApp {
                 passes += 1;
             })
         });
+        self.diagram_studio_dialog.on_ui_frame_complete(ctx);
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();
@@ -10376,7 +10397,10 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -> R) -> R {
+pub(super) fn with_immediate_viewport_renderer<R>(
+    ctx: &egui::Context,
+    run: impl FnOnce() -> R,
+) -> R {
     struct EmbedViewportsGuard {
         ctx: egui::Context,
         previous: bool,
@@ -10456,6 +10480,34 @@ fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -
     let result = run();
     drop(guard);
     result
+}
+
+#[cfg(test)]
+pub(super) fn with_immediate_viewport_test_events<R>(
+    events: Vec<egui::Event>,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct EventsGuard(Vec<egui::Event>);
+
+    impl Drop for EventsGuard {
+        fn drop(&mut self) {
+            IMMEDIATE_VIEWPORT_TEST_EVENTS.with(|current| {
+                *current.borrow_mut() = std::mem::take(&mut self.0);
+            });
+        }
+    }
+
+    let previous = IMMEDIATE_VIEWPORT_TEST_EVENTS
+        .with(|current| std::mem::replace(&mut *current.borrow_mut(), events));
+    let guard = EventsGuard(previous);
+    let output = run();
+    drop(guard);
+    output
+}
+
+#[cfg(test)]
+pub(super) fn immediate_viewport_test_focused_id() -> Option<(egui::ViewportId, Option<egui::Id>)> {
+    IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID.with(|focused| *focused.borrow())
 }
 
 #[cfg(test)]

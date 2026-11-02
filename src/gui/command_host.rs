@@ -245,6 +245,10 @@ impl DialogCommandHost for LauncherApp {
             eframe::egui::Id::new("date-time-studio-window"),
         ));
     }
+    fn open_diagram_studio_dialog(&mut self) {
+        self.diagram_studio_dialog.open();
+        self.focus_panel(super::Panel::DiagramStudioDialog);
+    }
     fn open_help_dialog(&mut self) {
         self.help_window.open = true;
     }
@@ -1635,6 +1639,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
         Command::Dialog(crate::commands::DialogCommand::RegexTester)
             | Command::Dialog(crate::commands::DialogCommand::CalculationPad)
             | Command::Dialog(crate::commands::DialogCommand::DateTimeStudio)
+            | Command::Dialog(crate::commands::DialogCommand::DiagramStudio)
             | Command::Dialog(crate::commands::DialogCommand::Qr { .. })
             | Command::Radial(_)
             | Command::ClipboardModify(_)

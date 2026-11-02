@@ -15,6 +15,7 @@ pub mod crop;
 pub mod csv;
 pub mod data;
 pub mod date_arithmetic;
+pub mod diagram_studio;
 pub mod diff;
 pub mod dropcalc;
 pub mod duplicate_finder;

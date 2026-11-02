@@ -23,6 +23,7 @@ pub mod crop_dialog;
 mod dashboard_editor_dialog;
 mod data_recovery_dialog;
 mod date_time_studio_dialog;
+mod diagram_studio;
 mod diff_dialog;
 mod duplicate_finder_dialog;
 #[cfg(feature = "dev-smoke-binaries")]
@@ -145,6 +146,7 @@ pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
 pub(crate) use date_time_studio_dialog::{DateTimeStudioDialog, DateTimeStudioEffect};
+pub(crate) use diagram_studio::DiagramStudioDialog;
 pub(crate) use search_replace_dialog::{
     ReplacementPreviewWorker, SearchReplaceDialogState, SearchReplaceUiCommand,
 };
@@ -746,6 +748,7 @@ pub enum Panel {
     RegexTesterDialog,
     CalculationPadDialog,
     DateTimeStudioDialog,
+    DiagramStudioDialog,
     BatchRenameDialog,
     SearchReplaceDialog,
     XmlToolkitDialog,
@@ -813,6 +816,7 @@ impl Panel {
             Self::RegexTesterDialog => "Regex Tester",
             Self::CalculationPadDialog => "Calculation Pad",
             Self::DateTimeStudioDialog => "Date & Time Studio",
+            Self::DiagramStudioDialog => "Diagram Studio",
             Self::BatchRenameDialog => "Batch Renamer",
             Self::SearchReplaceDialog => "Search and Replace",
             Self::XmlToolkitDialog => "XML Toolkit",
@@ -881,6 +885,7 @@ struct PanelStates {
     regex_tester_dialog: bool,
     calculation_pad_dialog: bool,
     date_time_studio_dialog: bool,
+    diagram_studio_dialog: bool,
     batch_rename_dialog: bool,
     search_replace_dialog: bool,
     xml_toolkit_dialog: bool,
@@ -1252,6 +1257,7 @@ pub struct LauncherApp {
     pub regex_tester_dialog: RegexTesterDialogState,
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
+    pub(crate) diagram_studio_dialog: DiagramStudioDialog,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
@@ -3839,6 +3845,7 @@ impl LauncherApp {
             regex_tester_dialog,
             calculation_pad_dialog,
             date_time_studio_dialog: DateTimeStudioDialog::default(),
+            diagram_studio_dialog: DiagramStudioDialog::default(),
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
                 settings.table_utility_resources.to_policy(),
@@ -4551,7 +4558,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 62] = [
+    const TRACKED_PANELS: [Panel; 63] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4591,6 +4598,7 @@ impl LauncherApp {
         Panel::RegexTesterDialog,
         Panel::CalculationPadDialog,
         Panel::DateTimeStudioDialog,
+        Panel::DiagramStudioDialog,
         Panel::BatchRenameDialog,
         Panel::SearchReplaceDialog,
         Panel::XmlToolkitDialog,
@@ -4657,6 +4665,7 @@ impl LauncherApp {
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
+            Panel::DiagramStudioDialog => self.diagram_studio_dialog.open,
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
@@ -4934,6 +4943,10 @@ impl LauncherApp {
             Panel::DateTimeStudioDialog => {
                 self.date_time_studio_dialog.request_close();
                 self.panel_states.date_time_studio_dialog = self.date_time_studio_dialog.open;
+            }
+            Panel::DiagramStudioDialog => {
+                self.diagram_studio_dialog.request_close();
+                self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
@@ -5226,6 +5239,10 @@ impl LauncherApp {
                 self.date_time_studio_dialog.request_close();
                 self.panel_states.date_time_studio_dialog = self.date_time_studio_dialog.open;
             }
+            Panel::DiagramStudioDialog => {
+                self.diagram_studio_dialog.request_close();
+                self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
+            }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
                 self.panel_states.xml_toolkit_dialog = false;
@@ -5391,6 +5408,7 @@ impl LauncherApp {
             }
             Panel::CalculationPadDialog => self.calculation_pad_dialog.ensure_open(),
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.ensure_open(),
+            Panel::DiagramStudioDialog => self.diagram_studio_dialog.ensure_open(),
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
@@ -5435,6 +5453,8 @@ impl LauncherApp {
             self.calculation_pad_dialog.open();
         } else if panel == Panel::DateTimeStudioDialog {
             self.date_time_studio_dialog.open();
+        } else if panel == Panel::DiagramStudioDialog {
+            self.diagram_studio_dialog.open();
         } else if panel == Panel::ConvertPanel {
             self.convert_panel.open();
         } else {
@@ -5553,6 +5573,7 @@ impl LauncherApp {
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(calculation_pad_dialog, Panel::CalculationPadDialog);
         check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
+        check!(diagram_studio_dialog, Panel::DiagramStudioDialog);
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(search_replace_dialog, Panel::SearchReplaceDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
@@ -8130,6 +8151,149 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn diagram_studio_typed_opener_focuses_child_and_hidden_root_keeps_it_rendering() {
+        use crate::commands::DialogCommandHost;
+
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new_isolated_for_test_at(
+            &ctx,
+            directory.path(),
+            settings,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+        );
+        app.mark_visible_root_for_test();
+        app.focus_query = false;
+
+        DialogCommandHost::open_diagram_studio_dialog(&mut app);
+        assert!(app.diagram_studio_dialog.needs_viewport_bootstrap());
+        app.diagram_studio_dialog
+            .test_replace_source("flowchart TD\n    A[\"Alpha\"]");
+        let source = app.diagram_studio_dialog.test_session().draft().to_owned();
+        let revision = app.diagram_studio_dialog.test_session().revision();
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.diagram_studio_dialog.open);
+        assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(app.diagram_studio_dialog.test_source_editor_has_focus(&ctx));
+        let (callback_id, callback_class, body_rendered, app_input_allowed) =
+            app.diagram_studio_dialog.test_last_callback();
+        assert_eq!(callback_id, Some(diagram_studio::viewport_id()));
+        assert!(matches!(
+            callback_class,
+            Some(egui::ViewportClass::Immediate)
+        ));
+        assert!(body_rendered && app_input_allowed);
+
+        assert!(app.close_front_dialog());
+        assert!(!app.is_panel_open(Panel::DiagramStudioDialog));
+        app.focus_panel(Panel::DiagramStudioDialog);
+        assert!(app.diagram_studio_dialog.open);
+        assert!(app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        assert_eq!(
+            app.diagram_studio_dialog.test_session().revision(),
+            revision
+        );
+        assert!(app.diagram_studio_dialog.test_session().can_undo());
+
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(app.diagram_studio_dialog.test_source_editor_has_focus(&ctx));
+
+        let other_focus = egui::Id::new("diagram-studio-passive-open-focus");
+        app.diagram_studio_dialog
+            .test_move_child_focus_to(other_focus);
+        app.ensure_open(Panel::DiagramStudioDialog);
+        assert!(!app.diagram_studio_dialog.test_source_focus_pending());
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(!app.diagram_studio_dialog.test_source_editor_has_focus(&ctx));
+
+        app.focus_panel(Panel::DiagramStudioDialog);
+        assert!(app.diagram_studio_dialog.test_source_focus_pending());
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(app.diagram_studio_dialog.test_source_editor_has_focus(&ctx));
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        assert_eq!(
+            app.diagram_studio_dialog.test_session().revision(),
+            revision
+        );
+
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.focus_query = false;
+        assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(!<LauncherApp as eframe::App>::needs_root_ui_when_hidden(
+            &app
+        ));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        let (callback_id, callback_class, body_rendered, app_input_allowed) =
+            app.diagram_studio_dialog.test_last_callback();
+        assert_eq!(callback_id, Some(diagram_studio::viewport_id()));
+        assert!(matches!(
+            callback_class,
+            Some(egui::ViewportClass::Immediate)
+        ));
+        assert!(body_rendered && app_input_allowed);
     }
 
     #[test]

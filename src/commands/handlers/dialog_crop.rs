@@ -15,6 +15,7 @@ where
         Command::Dialog(DialogCommand::RegexTester) => host.open_regex_tester_dialog(),
         Command::Dialog(DialogCommand::CalculationPad) => host.open_calculation_pad_dialog(),
         Command::Dialog(DialogCommand::DateTimeStudio) => host.open_date_time_studio_dialog(),
+        Command::Dialog(DialogCommand::DiagramStudio) => host.open_diagram_studio_dialog(),
         Command::Dialog(DialogCommand::Help) => host.open_help_dialog(),
         Command::Dialog(DialogCommand::Convert) => host.open_convert_dialog(),
         Command::Dialog(DialogCommand::Settings) => host.open_settings_dialog(),
@@ -95,6 +96,9 @@ mod tests {
         }
         fn open_date_time_studio_dialog(&mut self) {
             self.mark("date_time_studio");
+        }
+        fn open_diagram_studio_dialog(&mut self) {
+            self.mark("diagram_studio");
         }
         fn open_help_dialog(&mut self) {
             self.mark("help");
@@ -209,6 +213,10 @@ mod tests {
             (
                 Command::Dialog(DialogCommand::DateTimeStudio),
                 "date_time_studio",
+            ),
+            (
+                Command::Dialog(DialogCommand::DiagramStudio),
+                "diagram_studio",
             ),
             (Command::Dialog(DialogCommand::Help), "help"),
             (Command::Timer(TimerCommand::TimerDialog), "timer"),
