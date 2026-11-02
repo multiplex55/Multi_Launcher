@@ -11,6 +11,8 @@ const DEFAULT_VIEWPORT_SIZE: [f32; 2] = [1180.0, 760.0];
 const MIN_VIEWPORT_SIZE: [f32; 2] = [480.0, 360.0];
 const CAMERA_MIN_ZOOM: f32 = 0.025;
 const CAMERA_MAX_ZOOM: f32 = 8.0;
+const CAMERA_KEYBOARD_PAN_SCREEN_POINTS: f64 = 64.0;
+const CAMERA_KEYBOARD_ZOOM_FACTOR: f32 = 1.2;
 const GRID_SPACING: f32 = 10.0;
 const DRAG_NODE_SEPARATION: f64 = 120.0;
 const VISUAL_TWO_COLUMN_MIN_WIDTH: f32 = 460.0;
@@ -1241,7 +1243,8 @@ fn source_editor(
             .id(editor_id)
             .desired_width(f32::INFINITY)
             .desired_rows(14)
-            .code_editor(),
+            .code_editor()
+            .lock_focus(false),
     );
     #[cfg(test)]
     {
@@ -1330,7 +1333,7 @@ fn visual_workspace(
             pending,
         );
         ui.separator();
-        let canvas_rect = ui
+        let _canvas_rect = ui
             .scope_builder(canvas_scope_builder(), |ui| {
                 draw_canvas(
                     ui,
@@ -1353,7 +1356,7 @@ fn visual_workspace(
             .inner;
         #[cfg(test)]
         {
-            *test_canvas_rect = Some(canvas_rect);
+            *test_canvas_rect = Some(_canvas_rect);
         }
     } else {
         ui.columns(2, |columns| {
@@ -1368,7 +1371,7 @@ fn visual_workspace(
                 actions_allowed,
                 pending,
             );
-            let canvas_rect = columns[1]
+            let _canvas_rect = columns[1]
                 .scope_builder(canvas_scope_builder(), |ui| {
                     draw_canvas(
                         ui,
@@ -1391,7 +1394,7 @@ fn visual_workspace(
                 .inner;
             #[cfg(test)]
             {
-                *test_canvas_rect = Some(canvas_rect);
+                *test_canvas_rect = Some(_canvas_rect);
             }
         });
     }
@@ -2145,6 +2148,7 @@ fn draw_canvas(
         canvas_shortcuts(
             ui,
             canvas_id,
+            camera,
             graph,
             revision,
             selection,
@@ -2332,6 +2336,7 @@ fn take_history_shortcut(ui: &mut egui::Ui) -> Option<PendingMutation> {
 fn canvas_shortcuts(
     ui: &mut egui::Ui,
     canvas_id: egui::Id,
+    camera: &mut Camera,
     graph: Option<&DiagramDocument>,
     revision: u64,
     selection: &mut Option<DiagramElement>,
@@ -2347,6 +2352,9 @@ fn canvas_shortcuts(
         SelectAll,
         Remove,
         Move(i32, i32),
+        Pan(f64, f64),
+        ZoomIn,
+        ZoomOut,
     }
     let action = ui.input_mut(|input| {
         if input.consume_key(egui::Modifiers::COMMAND, egui::Key::A) {
@@ -2356,6 +2364,26 @@ fn canvas_shortcuts(
             || input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
         {
             return Some(Action::Remove);
+        }
+        if input.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowLeft) {
+            return Some(Action::Pan(-1.0, 0.0));
+        }
+        if input.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowRight) {
+            return Some(Action::Pan(1.0, 0.0));
+        }
+        if input.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowUp) {
+            return Some(Action::Pan(0.0, -1.0));
+        }
+        if input.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowDown) {
+            return Some(Action::Pan(0.0, 1.0));
+        }
+        if input.consume_key(egui::Modifiers::COMMAND, egui::Key::Plus)
+            || input.consume_key(egui::Modifiers::COMMAND, egui::Key::Equals)
+        {
+            return Some(Action::ZoomIn);
+        }
+        if input.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus) {
+            return Some(Action::ZoomOut);
         }
         let modifiers = input.modifiers;
         let distance = if modifiers.shift { 40 } else { 10 };
@@ -2424,6 +2452,20 @@ fn canvas_shortcuts(
                 }
             }
         }
+        Some(Action::Pan(dx, dy)) if pending.is_none() => {
+            let world_step = CAMERA_KEYBOARD_PAN_SCREEN_POINTS / f64::from(camera.zoom);
+            let limit = f64::from(crate::diagram::MAX_POSITION_ABS);
+            camera.center.x = (camera.center.x + dx * world_step).clamp(-limit, limit);
+            camera.center.y = (camera.center.y + dy * world_step).clamp(-limit, limit);
+        }
+        Some(Action::ZoomIn) if pending.is_none() => {
+            camera.zoom =
+                (camera.zoom * CAMERA_KEYBOARD_ZOOM_FACTOR).clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+        }
+        Some(Action::ZoomOut) if pending.is_none() => {
+            camera.zoom =
+                (camera.zoom / CAMERA_KEYBOARD_ZOOM_FACTOR).clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+        }
         _ => {}
     }
 }
@@ -2460,6 +2502,30 @@ mod tests {
         events: Vec<egui::Event>,
     ) {
         super::super::render::with_immediate_viewport_test_events(events, || frame(dialog, ctx));
+    }
+
+    fn send_child_key(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) {
+        for pressed in [true, false] {
+            // The Immediate renderer seam starts each child RawInput with no
+            // modifiers, so model the native modifier transitions explicitly.
+            let mut events = vec![egui::Event::ModifiersChanged(modifiers)];
+            events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            });
+            if !pressed {
+                events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            }
+            frame_with_child_events(dialog, ctx, events);
+        }
     }
 
     fn embedded_frame_with_events(
@@ -2522,6 +2588,20 @@ mod tests {
             .expect("test source remains valid")
             .nodes
             .len()
+    }
+
+    fn current_node_positions(dialog: &DiagramStudioDialog) -> Vec<NodePosition> {
+        dialog
+            .test_session()
+            .current_graph()
+            .expect("test source remains valid")
+            .nodes
+            .iter()
+            .map(|node| NodePosition {
+                id: node.id.clone(),
+                position: node.position,
+            })
+            .collect()
     }
 
     fn action_center(dialog: &DiagramStudioDialog, name: &str) -> egui::Pos2 {
@@ -2607,6 +2687,104 @@ mod tests {
         assert!(dialog.deferred_source_focus.is_some());
         frame(&mut dialog, &ctx);
         assert!(dialog.test_source_editor_has_focus(&ctx));
+    }
+
+    #[test]
+    fn diagram_studio_source_tab_navigation_preserves_draft_and_allows_newlines() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        assert!(matches!(
+            dialog.test_last_callback().1,
+            Some(egui::ViewportClass::Immediate)
+        ));
+        assert!(dialog.test_source_editor_has_focus(&ctx));
+
+        let source = dialog.test_session().draft().to_owned();
+        let revision = dialog.test_session().revision();
+        let undo_depth = dialog.test_session().undo_depth();
+        let editor_id = dialog
+            .test_source_editor_id
+            .expect("source editor was rendered");
+        let key_event = |key, modifiers, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Tab, egui::Modifiers::NONE, true)],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Tab, egui::Modifiers::NONE, false)],
+        );
+        assert!(!dialog.test_source_editor_has_focus(&ctx));
+        let following_widget = crate::gui::render::immediate_viewport_test_focused_id()
+            .and_then(|(viewport, focused)| {
+                (viewport == viewport_id()).then_some(focused).flatten()
+            })
+            .expect("Tab moves focus to a following live control in the child");
+        assert_ne!(following_widget, editor_id);
+
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Tab, egui::Modifiers::SHIFT, true)],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Tab, egui::Modifiers::SHIFT, false)],
+        );
+        assert!(dialog.test_source_editor_has_focus(&ctx));
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::A, egui::Modifiers::COMMAND, true)],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::A, egui::Modifiers::COMMAND, false)],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::Text("flowchart TD".into())],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::NONE, true)],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::NONE, false)],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::Text("    A[\"Typed\"]".into())],
+        );
+        assert_eq!(
+            dialog.test_session().draft(),
+            "flowchart TD\n    A[\"Typed\"]"
+        );
+        assert_eq!(dialog.test_session().revision(), revision + 3);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth + 3);
     }
 
     #[test]
@@ -2916,6 +3094,409 @@ mod tests {
         );
         assert_eq!(dialog.test_session().revision(), revision + 1);
         assert_eq!(current_node_count(&dialog), 0);
+    }
+
+    #[test]
+    fn diagram_studio_canvas_keyboard_pan_zoom_and_arrow_nudges_are_scoped() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let (node_bounds, canvas, camera) = {
+            let scene = dialog
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.scene.as_ref())
+                .expect("valid source produces a canvas scene");
+            (
+                scene.nodes.first().expect("fixture contains a node").bounds,
+                dialog.test_canvas_rect.expect("canvas was rendered"),
+                dialog.camera,
+            )
+        };
+        let click = world_rect_to_screen(node_bounds, canvas, camera).center();
+        for pressed in [true, false] {
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(click),
+                    egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        frame(&mut dialog, &ctx);
+        assert!(dialog.test_canvas_has_focus());
+        assert_eq!(dialog.selected_nodes.len(), 1);
+
+        let source = dialog.test_session().draft().to_owned();
+        let positions_before_camera_keys = current_node_positions(&dialog);
+        let revision_before_camera_keys = dialog.test_session().revision();
+        let undo_before_camera_keys = dialog.test_session().undo_depth();
+        let redo_before_camera_keys = dialog.test_session().redo_depth();
+        let camera_before_keys = dialog.camera;
+
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::ArrowRight,
+            egui::Modifiers::COMMAND,
+        );
+        let expected_pan = CAMERA_KEYBOARD_PAN_SCREEN_POINTS / f64::from(camera_before_keys.zoom);
+        assert_eq!(
+            dialog.camera.center.x,
+            camera_before_keys.center.x + expected_pan
+        );
+        assert_eq!(dialog.camera.center.y, camera_before_keys.center.y);
+        assert_eq!(dialog.camera.zoom, camera_before_keys.zoom);
+
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::Equals,
+            egui::Modifiers::COMMAND,
+        );
+        let zoomed_in = dialog.camera.zoom;
+        assert!(zoomed_in > camera_before_keys.zoom);
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::Minus,
+            egui::Modifiers::COMMAND,
+        );
+        assert!((dialog.camera.zoom - camera_before_keys.zoom).abs() < 1e-5);
+        assert_eq!(
+            dialog.camera.center,
+            ScenePoint {
+                x: camera_before_keys.center.x + expected_pan,
+                y: camera_before_keys.center.y,
+            }
+        );
+        assert_eq!(
+            current_node_positions(&dialog),
+            positions_before_camera_keys
+        );
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(
+            dialog.test_session().revision(),
+            revision_before_camera_keys
+        );
+        assert_eq!(dialog.test_session().undo_depth(), undo_before_camera_keys);
+        assert_eq!(dialog.test_session().redo_depth(), redo_before_camera_keys);
+
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::ArrowRight,
+            egui::Modifiers::NONE,
+        );
+        let after_small_nudge = current_node_positions(&dialog);
+        assert_eq!(
+            after_small_nudge[0].position.x,
+            positions_before_camera_keys[0].position.x + 10.0
+        );
+        assert_eq!(
+            dialog.test_session().revision(),
+            revision_before_camera_keys + 1
+        );
+        assert_eq!(
+            dialog.test_session().undo_depth(),
+            undo_before_camera_keys + 1
+        );
+
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::ArrowRight,
+            egui::Modifiers::SHIFT,
+        );
+        let after_large_nudge = current_node_positions(&dialog);
+        assert_eq!(
+            after_large_nudge[0].position.x,
+            positions_before_camera_keys[0].position.x + 50.0
+        );
+        assert_eq!(
+            dialog.test_session().revision(),
+            revision_before_camera_keys + 2
+        );
+        assert_eq!(
+            dialog.test_session().undo_depth(),
+            undo_before_camera_keys + 2
+        );
+        assert_eq!(dialog.test_session().redo_depth(), redo_before_camera_keys);
+        assert_eq!(
+            dialog.camera.center,
+            ScenePoint {
+                x: camera_before_keys.center.x + expected_pan,
+                y: camera_before_keys.center.y,
+            }
+        );
+        assert!((dialog.camera.zoom - camera_before_keys.zoom).abs() < 1e-5);
+    }
+
+    #[test]
+    fn diagram_studio_source_focus_does_not_pan_or_zoom_canvas() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        assert!(dialog.test_source_editor_has_focus(&ctx));
+        let source = dialog.test_session().draft().to_owned();
+        let positions = current_node_positions(&dialog);
+        let revision = dialog.test_session().revision();
+        let undo_depth = dialog.test_session().undo_depth();
+        let camera = dialog.camera;
+
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::ArrowRight,
+            egui::Modifiers::COMMAND,
+        );
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::Equals,
+            egui::Modifiers::COMMAND,
+        );
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::Minus,
+            egui::Modifiers::COMMAND,
+        );
+
+        assert!(dialog.test_source_editor_has_focus(&ctx));
+        assert_eq!(dialog.camera.center, camera.center);
+        assert_eq!(dialog.camera.zoom, camera.zoom);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(current_node_positions(&dialog), positions);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+    }
+
+    #[test]
+    fn diagram_studio_pointer_drag_moves_selection_once_and_supports_undo_redo() {
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.test_replace_source("flowchart LR\n    A[\"Alpha\"]\n    B[\"Beta\"]");
+        dialog.open();
+        let initial_positions = vec![
+            NodePosition {
+                id: NodeId::new("A").unwrap(),
+                position: Position::new(13.0, 21.0).unwrap(),
+            },
+            NodePosition {
+                id: NodeId::new("B").unwrap(),
+                position: Position::new(190.0, 41.0).unwrap(),
+            },
+        ];
+        dialog
+            .session
+            .apply_transaction(&[GraphOperation::MoveNodes {
+                positions: initial_positions.clone(),
+            }])
+            .unwrap();
+        dialog.refresh_cache();
+
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let (node_a_bounds, canvas, camera) = {
+            let scene = dialog
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.scene.as_ref())
+                .expect("valid source produces a canvas scene");
+            let node_a = scene
+                .nodes
+                .iter()
+                .find(|node| node.id.as_str() == "A")
+                .expect("fixture contains node A");
+            (
+                node_a.bounds,
+                dialog.test_canvas_rect.expect("canvas was rendered"),
+                dialog.camera,
+            )
+        };
+        let press = world_rect_to_screen(node_a_bounds, canvas, camera).center();
+        let pointer_button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(press),
+                pointer_button(press, true),
+            ],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(press),
+                pointer_button(press, false),
+            ],
+        );
+        frame(&mut dialog, &ctx);
+        assert!(matches!(
+            dialog.selection,
+            Some(DiagramElement::Node(ref id)) if id.as_str() == "A"
+        ));
+        assert!(dialog.test_canvas_has_focus());
+
+        let key_event = |key, modifiers, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::A, egui::Modifiers::COMMAND, true)],
+        );
+        assert_eq!(dialog.selected_nodes.len(), 2);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::A, egui::Modifiers::COMMAND, false)],
+        );
+
+        let positions_before_drag = current_node_positions(&dialog);
+        assert_eq!(positions_before_drag, initial_positions);
+        let revision_before_drag = dialog.test_session().revision();
+        let undo_before_drag = dialog.test_session().undo_depth();
+        let redo_before_drag = dialog.test_session().redo_depth();
+
+        let drag_start = press + egui::vec2(9.0, 3.0);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(press),
+                pointer_button(press, true),
+            ],
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(drag_start)],
+        );
+        assert!(dialog.drag.is_some(), "pointer movement starts a drag");
+        let drag_origin = dialog.drag.as_ref().unwrap().pointer_origin;
+        assert_eq!(dialog.drag.as_ref().unwrap().active_node.as_str(), "A");
+        let drag_zoom = dialog.camera.zoom;
+        assert_eq!(current_node_positions(&dialog), positions_before_drag);
+        assert_eq!(dialog.test_session().revision(), revision_before_drag);
+        assert_eq!(dialog.test_session().undo_depth(), undo_before_drag);
+        assert_eq!(dialog.test_session().redo_depth(), redo_before_drag);
+        frame(&mut dialog, &ctx);
+        assert!(dialog.drag.is_some());
+        assert_eq!(current_node_positions(&dialog), positions_before_drag);
+        assert!(dialog.test_canvas_has_focus());
+
+        let drag_end = drag_start + egui::vec2(27.0, 18.0);
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(drag_end)]);
+        assert!(dialog.drag.is_some());
+        assert_eq!(current_node_positions(&dialog), positions_before_drag);
+        assert_eq!(dialog.test_session().revision(), revision_before_drag);
+        assert_eq!(dialog.test_session().undo_depth(), undo_before_drag);
+        assert_eq!(dialog.test_session().redo_depth(), redo_before_drag);
+
+        let snapped_dx = ((f64::from(drag_end.x - drag_origin.x)
+            / f64::from(drag_zoom)
+            / f64::from(GRID_SPACING))
+        .round()
+            * f64::from(GRID_SPACING)) as f32;
+        let snapped_dy = ((f64::from(drag_end.y - drag_origin.y)
+            / f64::from(drag_zoom)
+            / f64::from(GRID_SPACING))
+        .round()
+            * f64::from(GRID_SPACING)) as f32;
+        assert_ne!((snapped_dx, snapped_dy), (0.0, 0.0));
+        let positions_after_drag = positions_before_drag
+            .iter()
+            .map(|node| NodePosition {
+                id: node.id.clone(),
+                position: Position::new(node.position.x + snapped_dx, node.position.y + snapped_dy)
+                    .unwrap(),
+            })
+            .collect::<Vec<_>>();
+
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(drag_end),
+                pointer_button(drag_end, false),
+            ],
+        );
+        assert!(dialog.drag.is_none());
+        assert_eq!(current_node_positions(&dialog), positions_after_drag);
+        assert_eq!(dialog.test_session().revision(), revision_before_drag + 1);
+        assert_eq!(dialog.test_session().undo_depth(), undo_before_drag + 1);
+        assert_eq!(dialog.test_session().redo_depth(), redo_before_drag);
+        assert_eq!(
+            positions_after_drag[1].position.x - positions_after_drag[0].position.x,
+            positions_before_drag[1].position.x - positions_before_drag[0].position.x
+        );
+        assert_eq!(
+            positions_after_drag[1].position.y - positions_after_drag[0].position.y,
+            positions_before_drag[1].position.y - positions_before_drag[0].position.y
+        );
+
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_session().revision(), revision_before_drag + 1);
+        assert_eq!(dialog.test_session().undo_depth(), undo_before_drag + 1);
+        assert_eq!(dialog.test_session().redo_depth(), redo_before_drag);
+        assert!(dialog.test_canvas_has_focus());
+
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Z, egui::Modifiers::COMMAND, true)],
+        );
+        assert_eq!(current_node_positions(&dialog), positions_before_drag);
+        assert_eq!(dialog.test_session().revision(), revision_before_drag + 2);
+        assert_eq!(dialog.test_session().undo_depth(), undo_before_drag);
+        assert_eq!(dialog.test_session().redo_depth(), redo_before_drag + 1);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Z, egui::Modifiers::COMMAND, false)],
+        );
+        assert_eq!(dialog.test_session().revision(), revision_before_drag + 2);
+
+        let command_shift = egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Z, command_shift, true)],
+        );
+        assert_eq!(current_node_positions(&dialog), positions_after_drag);
+        assert_eq!(dialog.test_session().revision(), revision_before_drag + 3);
+        assert_eq!(dialog.test_session().undo_depth(), undo_before_drag + 1);
+        assert_eq!(dialog.test_session().redo_depth(), redo_before_drag);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![key_event(egui::Key::Z, command_shift, false)],
+        );
+        assert_eq!(dialog.test_session().revision(), revision_before_drag + 3);
     }
 
     #[test]

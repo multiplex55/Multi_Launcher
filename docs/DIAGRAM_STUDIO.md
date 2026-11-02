@@ -13,9 +13,14 @@ until the source is valid again.
 The visual inspector lists nodes, edges, and groups. Select an item there or on
 the canvas to edit its properties. Shift-click or Ctrl-click nodes to build a
 multi-selection. Drag selected nodes together, or use the arrow keys to move
-them; Shift-arrow uses a larger move. Delete or Backspace removes the selected
-items. Ctrl-A selects every node while the canvas has focus. Ctrl-Z and Ctrl-Y
-undo and redo through the diagram session, including source edits.
+them; Shift-arrow uses a larger move. With the canvas focused, Ctrl+Arrow pans
+by 64 screen points and Ctrl+=/Ctrl+- zoom in and out by 20%. Delete or
+Backspace removes the selected items. Ctrl-A selects every node while the
+canvas has focus. Ctrl-Z and Ctrl-Y undo and redo through the diagram session,
+including source edits.
+
+Tab and Shift-Tab move between the source editor and other controls. Enter still
+inserts a newline while the source editor has focus.
 
 Drag the middle mouse button to pan, use the wheel to zoom, and choose **Fit**
 to frame the current graph or **Reset view** to return to the default camera.

@@ -4500,6 +4500,22 @@ impl LauncherApp {
     ) {
         let application_input_allowed = self.native_ui_application_input_allowed(ctx);
         let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if self.qa_framebuffer_needs_diagram_observation() {
+            let observation = self.diagram_studio_dialog.show_with_observation(
+                ctx,
+                first_ui_pass,
+                application_input_allowed,
+                root_input_allowed,
+            );
+            self.qa_framebuffer_after_diagram_show(
+                ctx,
+                root_visible,
+                self.diagram_studio_dialog.open,
+                observation,
+            );
+            return;
+        }
         self.diagram_studio_dialog.show(
             ctx,
             first_ui_pass,

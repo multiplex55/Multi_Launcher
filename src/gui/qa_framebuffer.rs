@@ -1,4 +1,5 @@
 use super::LauncherApp;
+use super::diagram_studio::DiagramViewportObservation;
 use super::jump_mode::ui::visible_top_middle_layer;
 #[cfg(feature = "qa-framebuffer-capture")]
 use super::qr_dialog::QrViewportObservation;
@@ -33,7 +34,7 @@ pub(crate) fn qa_clipped_response_rect(response: egui::Rect, clip: egui::Rect) -
 
 fn selected_reply_timeout(target: CaptureTarget) -> Duration {
     match target {
-        CaptureTarget::Root => SCREENSHOT_REPLY_TIMEOUT,
+        CaptureTarget::Root | CaptureTarget::Diagram => SCREENSHOT_REPLY_TIMEOUT,
         CaptureTarget::Qr => QR_STARTUP_CAPTURE_TIMEOUT,
     }
 }
@@ -55,6 +56,8 @@ enum CaptureTarget {
     Root,
     #[serde(rename = "QR")]
     Qr,
+    #[serde(rename = "DIAGRAM")]
+    Diagram,
 }
 
 impl CaptureTarget {
@@ -62,6 +65,7 @@ impl CaptureTarget {
         match self {
             Self::Root => ViewportId::ROOT,
             Self::Qr => super::qr_dialog::viewport_id(),
+            Self::Diagram => super::diagram_studio::viewport_id(),
         }
     }
 
@@ -69,6 +73,7 @@ impl CaptureTarget {
         match self {
             Self::Root => "ROOT",
             Self::Qr => "QR",
+            Self::Diagram => "DIAGRAM",
         }
     }
 
@@ -77,6 +82,9 @@ impl CaptureTarget {
             Self::Root => "ROOT framebuffer pixels; CPU UI completion before GPU presentation",
             Self::Qr => {
                 "QR native immediate-child framebuffer pixels; child paint and swap precede callback return; CPU observation is not GPU completion"
+            }
+            Self::Diagram => {
+                "Diagram native immediate-child framebuffer pixels; actual child render advancement and matching screenshot reply; ROOT may be hidden"
             }
         }
     }
@@ -650,13 +658,19 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
     if manifest.target == CaptureTarget::Qr && manifest.trigger == CaptureTrigger::F11 {
         return Err("QR framebuffer capture supports the Startup trigger only".into());
     }
+    if manifest.target == CaptureTarget::Diagram && manifest.trigger != CaptureTrigger::F11 {
+        return Err("DIAGRAM framebuffer capture requires the F11 trigger".into());
+    }
     if !(1..=MAX_CAPTURE_COUNT).contains(&manifest.capture_count) {
         return Err(format!(
             "manifest capture_count must be between 1 and {MAX_CAPTURE_COUNT}"
         ));
     }
     if manifest.capture_count > 1
-        && (manifest.target != CaptureTarget::Root || manifest.trigger != CaptureTrigger::F11)
+        && (!matches!(
+            manifest.target,
+            CaptureTarget::Root | CaptureTarget::Diagram
+        ) || manifest.trigger != CaptureTrigger::F11)
     {
         return Err("multiple captures require the ROOT/F11 trigger".into());
     }
@@ -1052,6 +1066,102 @@ struct QrRenderEvidence {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct DiagramRenderEvidence {
+    child_viewport_id: String,
+    callback_class: &'static str,
+    callback_frame_nr: u64,
+    callback_pass_nr: u64,
+    callback_pass_index: usize,
+    completed_frame_nr: Option<u64>,
+    completed_pass_nr: Option<u64>,
+    visible: Option<bool>,
+    minimized: Option<bool>,
+    occluded: Option<bool>,
+    focused: Option<bool>,
+    body_rendered: bool,
+    still_open: bool,
+    application_input_allowed: bool,
+    child_modal_open: bool,
+    session_revision: u64,
+    rendered_scene_revision: Option<u64>,
+    preview: &'static str,
+    eligible: bool,
+    callback_observed_at_unix_ms: u64,
+    renderer_returned_at_unix_ms: Option<u64>,
+}
+
+fn diagram_render_evidence(observation: &DiagramViewportObservation) -> DiagramRenderEvidence {
+    let eligible = observation.child_viewport_id == CaptureTarget::Diagram.viewport_id()
+        && observation.callback_class == egui::ViewportClass::Immediate
+        && observation.body_rendered
+        && observation.still_open
+        && observation.visible != Some(false)
+        && observation.minimized != Some(true)
+        && observation.occluded != Some(true)
+        && observation.application_input_allowed
+        && !observation.child_modal_open
+        && observation.completed_frame_nr.is_some()
+        && observation.completed_pass_nr.is_some()
+        && observation.renderer_returned_at_unix_ms.is_some();
+    DiagramRenderEvidence {
+        child_viewport_id: format!("{:?}", observation.child_viewport_id),
+        callback_class: if observation.callback_class == egui::ViewportClass::Immediate {
+            "Immediate"
+        } else if observation.callback_class == egui::ViewportClass::EmbeddedWindow {
+            "EmbeddedWindow"
+        } else {
+            "other"
+        },
+        callback_frame_nr: observation.callback_frame_nr,
+        callback_pass_nr: observation.callback_pass_nr,
+        callback_pass_index: observation.callback_pass_index,
+        completed_frame_nr: observation.completed_frame_nr,
+        completed_pass_nr: observation.completed_pass_nr,
+        visible: observation.visible,
+        minimized: observation.minimized,
+        occluded: observation.occluded,
+        focused: observation.focused,
+        body_rendered: observation.body_rendered,
+        still_open: observation.still_open,
+        application_input_allowed: observation.application_input_allowed,
+        child_modal_open: observation.child_modal_open,
+        session_revision: observation.session_revision,
+        rendered_scene_revision: observation.rendered_scene_revision,
+        preview: match observation.status.preview {
+            crate::diagram::PreviewState::Current => "current",
+            crate::diagram::PreviewState::Stale => "stale",
+            crate::diagram::PreviewState::NoPreview => "no_preview",
+        },
+        eligible,
+        callback_observed_at_unix_ms: observation.callback_observed_at_unix_ms,
+        renderer_returned_at_unix_ms: observation.renderer_returned_at_unix_ms,
+    }
+}
+
+fn diagram_child_advanced(
+    baseline: &DiagramRenderEvidence,
+    current: &DiagramRenderEvidence,
+) -> bool {
+    baseline
+        .completed_frame_nr
+        .zip(current.completed_frame_nr)
+        .is_some_and(|(before, after)| after > before)
+        && baseline
+            .completed_pass_nr
+            .zip(current.completed_pass_nr)
+            .is_some_and(|(before, after)| after > before)
+}
+
+fn same_diagram_revision(
+    baseline: &DiagramRenderEvidence,
+    current: &DiagramRenderEvidence,
+) -> bool {
+    baseline.session_revision == current.session_revision
+        && baseline.rendered_scene_revision == current.rendered_scene_revision
+        && baseline.preview == current.preview
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct FrameEvidence {
     viewport_id: &'static str,
     logic_frame_id: u64,
@@ -1076,6 +1186,8 @@ struct FrameEvidence {
     jump_mode_observation: Option<JumpModeObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     qr_observation: Option<QrRenderEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagram_observation: Option<DiagramRenderEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1087,6 +1199,8 @@ struct ScreenshotReplyEvidence {
     height: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     qr_observation: Option<QrRenderEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagram_observation: Option<DiagramRenderEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1377,6 +1491,7 @@ impl FramebufferProbe {
                 width: u64::try_from(width).unwrap_or(u64::MAX),
                 height: u64::try_from(height).unwrap_or(u64::MAX),
                 qr_observation: None,
+                diagram_observation: None,
             };
             self.receipt.screenshot_received = Some(evidence.clone());
             self.pending_reply = Some(PendingScreenshotReply { image, evidence });
@@ -1410,12 +1525,18 @@ impl FramebufferProbe {
     }
 
     fn revalidate_root_logic(&mut self, eligibility: SurfaceEligibility) {
+        if self.target == CaptureTarget::Diagram {
+            return;
+        }
         if self.phase_requires_eligibility() && !eligibility.eligible() {
             self.fail(eligibility.failure_reason());
         }
     }
 
     fn run_hidden_logic_tick(&mut self) {
+        if self.target == CaptureTarget::Diagram {
+            return;
+        }
         if self.phase == ProbePhase::Saving || self.target == CaptureTarget::Qr {
             self.poll_writer_outcome();
         }
@@ -1582,6 +1703,161 @@ impl FramebufferProbe {
         ctx.request_repaint_of(ViewportId::ROOT);
     }
 
+    /// Diagram capture is driven by the real child, independently of ROOT eligibility.
+    fn after_diagram_show(
+        &mut self,
+        ctx: &egui::Context,
+        open: bool,
+        observation: Option<DiagramViewportObservation>,
+        mut evidence: FrameEvidence,
+    ) {
+        if self.target != CaptureTarget::Diagram {
+            return;
+        }
+        let was_armed = self.phase == ProbePhase::Armed;
+        let pressed = take_unmodified_f11_for(ctx, self.target.viewport_id());
+        self.poll_writer_outcome();
+        if matches!(self.phase, ProbePhase::Complete | ProbePhase::Failed) {
+            return;
+        }
+        self.logic_frame_id = evidence.logic_frame_id;
+        self.ui_pass_id = evidence.ui_pass_id;
+        let Some(observation) = observation else {
+            if self.phase_is_active() && !open {
+                self.fail("Diagram closed before child capture completed");
+            }
+            return;
+        };
+        let child = diagram_render_evidence(&observation);
+        if self.phase == ProbePhase::Armed {
+            if !was_armed || !pressed || observation.focused != Some(true) || !child.eligible {
+                return;
+            }
+        } else if self.phase_is_active() && (!open || !child.eligible) {
+            self.fail("Diagram child lost capture eligibility");
+            return;
+        }
+        if self.phase == ProbePhase::Saving {
+            return;
+        }
+
+        evidence.viewport_id = self.target.label();
+        evidence.viewport_focused = observation.focused.unwrap_or(false);
+        evidence.pixels_per_point = Some(observation.pixels_per_point);
+        evidence.native_pixels_per_point = observation.native_pixels_per_point;
+        evidence.zoom_factor = observation.zoom_factor;
+        // Keep actual ROOT visibility/owners as context; eligibility belongs to the child.
+        evidence.eligible = child.eligible;
+        evidence.diagram_observation = Some(child.clone());
+
+        if self.phase == ProbePhase::Armed {
+            evidence.evidence_stage = "diagram_screenshot_issued_after_child_callback";
+            self.receipt.issued = Some(evidence);
+            self.phase = ProbePhase::Issued;
+            if let Err(error) = self.arm_reply_wait() {
+                self.fail(format!("failed to arm Diagram screenshot wait: {error}"));
+                return;
+            }
+            ctx.send_viewport_cmd_to(
+                self.target.viewport_id(),
+                ViewportCommand::Screenshot(self.token.clone()),
+            );
+            ctx.request_repaint_of(self.target.viewport_id());
+            ctx.request_repaint_of(ViewportId::ROOT);
+            return;
+        }
+
+        let Some(baseline) = self
+            .receipt
+            .issued
+            .as_ref()
+            .and_then(|frame| frame.diagram_observation.as_ref())
+        else {
+            self.fail("Diagram dispatch observation was missing");
+            return;
+        };
+        if !same_diagram_revision(baseline, &child) {
+            self.fail("Diagram source or scene changed during capture");
+            return;
+        }
+        if self.pending_reply.is_none()
+            && let Some(image) =
+                take_matching_screenshot_event(ctx, self.target.viewport_id(), &self.token)
+        {
+            let reply = ScreenshotReplyEvidence {
+                viewport_id: self.target.label(),
+                logic_frame_id: self.logic_frame_id,
+                received_at_unix_ms: unix_millis(),
+                width: image.size[0] as u64,
+                height: image.size[1] as u64,
+                qr_observation: None,
+                diagram_observation: Some(child.clone()),
+            };
+            self.pending_reply = Some(PendingScreenshotReply {
+                image,
+                evidence: reply,
+            });
+        }
+        match self.phase {
+            ProbePhase::Issued => {
+                if !diagram_child_advanced(baseline, &child) {
+                    return;
+                }
+                evidence.evidence_stage = "diagram_expected_capture_child_render_after_dispatch";
+                self.receipt.captured = Some(evidence);
+                self.phase = ProbePhase::AwaitingReply;
+                ctx.request_repaint_of(self.target.viewport_id());
+                ctx.request_repaint_of(ViewportId::ROOT);
+            }
+            ProbePhase::AwaitingReply => {
+                let Some(captured) = self
+                    .receipt
+                    .captured
+                    .as_ref()
+                    .and_then(|frame| frame.diagram_observation.as_ref())
+                else {
+                    self.fail("Diagram capture observation was missing");
+                    return;
+                };
+                if !diagram_child_advanced(captured, &child) {
+                    return;
+                }
+                let Some(reply) = self.pending_reply.take() else {
+                    return;
+                };
+                let valid_reply =
+                    reply
+                        .evidence
+                        .diagram_observation
+                        .as_ref()
+                        .is_some_and(|received| {
+                            same_diagram_revision(captured, received)
+                                && captured
+                                    .completed_frame_nr
+                                    .zip(received.completed_frame_nr)
+                                    .is_some_and(|(capture, received)| received >= capture)
+                                && captured
+                                    .completed_pass_nr
+                                    .zip(received.completed_pass_nr)
+                                    .is_some_and(|(capture, received)| received >= capture)
+                        });
+                if !valid_reply {
+                    self.fail("Diagram reply preceded the required child render boundary");
+                    return;
+                }
+                self.receipt.screenshot_received = Some(reply.evidence);
+                match self.writer_tx.try_send(WriterJob::Save {
+                    receipt: self.receipt.clone(),
+                    image: reply.image,
+                }) {
+                    Ok(()) => self.phase = ProbePhase::Saving,
+                    Err(error) => self.fail(format!("failed to queue Diagram screenshot: {error}")),
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn after_qr_show(
         &mut self,
         ctx: &egui::Context,
@@ -1686,6 +1962,7 @@ impl FramebufferProbe {
                         width: u64::try_from(width).unwrap_or(u64::MAX),
                         height: u64::try_from(height).unwrap_or(u64::MAX),
                         qr_observation: Some(qr_evidence),
+                        diagram_observation: None,
                     };
                     self.receipt.screenshot_received = Some(evidence.clone());
                     self.pending_reply = Some(PendingScreenshotReply { image, evidence });
@@ -1827,6 +2104,7 @@ impl FramebufferProbe {
                 }
 
                 let reply_is_ready = match self.target {
+                    CaptureTarget::Diagram => false, // Driven by its actual child callback.
                     CaptureTarget::Root => self
                         .expected_reply_logic_frame_id
                         .zip(
@@ -1888,14 +2166,15 @@ impl FramebufferProbe {
     }
 
     fn needs_retained_marker(&self) -> bool {
-        self.jump_mode_observation_enabled
-            || matches!(
-                self.phase,
-                ProbePhase::Armed
-                    | ProbePhase::Ready
-                    | ProbePhase::Issued
-                    | ProbePhase::AwaitingReply
-            )
+        self.target != CaptureTarget::Diagram
+            && (self.jump_mode_observation_enabled
+                || matches!(
+                    self.phase,
+                    ProbePhase::Armed
+                        | ProbePhase::Ready
+                        | ProbePhase::Issued
+                        | ProbePhase::AwaitingReply
+                ))
     }
 
     fn needs_input_eligibility(&self) -> bool {
@@ -1903,9 +2182,10 @@ impl FramebufferProbe {
     }
 
     fn needs_root_logic(&self) -> bool {
-        self.needs_input_eligibility()
-            || self.phase == ProbePhase::Saving
-            || self.jump_mode_observation_enabled
+        self.target != CaptureTarget::Diagram
+            && (self.needs_input_eligibility()
+                || self.phase == ProbePhase::Saving
+                || self.jump_mode_observation_enabled)
     }
 
     fn record_activation(
@@ -2518,6 +2798,49 @@ impl LauncherApp {
     pub(super) fn qa_framebuffer_start_ui_pass(&mut self, pass_index: u32) {
         if let Some(probe) = self.qa_framebuffer.as_mut() {
             probe.start_ui_pass(pass_index);
+        }
+    }
+
+    pub(super) fn qa_framebuffer_needs_diagram_observation(&self) -> bool {
+        self.qa_framebuffer.as_ref().is_some_and(|probe| {
+            probe.target == CaptureTarget::Diagram
+                && !matches!(probe.phase, ProbePhase::Complete | ProbePhase::Failed)
+        })
+    }
+
+    pub(super) fn qa_framebuffer_after_diagram_show(
+        &mut self,
+        ctx: &egui::Context,
+        logical_root_visible: bool,
+        open: bool,
+        observation: Option<DiagramViewportObservation>,
+    ) {
+        let Some((logic_frame_id, ui_pass_id)) = self
+            .qa_framebuffer
+            .as_ref()
+            .filter(|probe| probe.target == CaptureTarget::Diagram)
+            .map(|probe| {
+                (
+                    probe.logic_frame_id.saturating_add(1),
+                    probe.ui_pass_id.saturating_add(1),
+                )
+            })
+        else {
+            return;
+        };
+        let actual_root = surface_eligibility(self, ctx, logical_root_visible);
+        let evidence = frame_evidence(
+            self,
+            ctx,
+            logic_frame_id,
+            ui_pass_id,
+            ctx.current_pass_index().min(u32::MAX as usize) as u32,
+            "diagram_child_callback_observed",
+            logical_root_visible,
+            actual_root,
+        );
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.after_diagram_show(ctx, open, observation, evidence);
         }
     }
 
@@ -3320,6 +3643,7 @@ fn frame_evidence(
         eligible: eligibility.eligible(),
         jump_mode_observation: None,
         qr_observation: None,
+        diagram_observation: None,
     }
 }
 
@@ -4101,26 +4425,32 @@ fn take_matching_screenshot_event(
 }
 
 fn take_unmodified_f11(ctx: &egui::Context) -> bool {
-    ctx.input_mut(|input| {
-        let mut pressed = false;
-        input.events.retain(|event| {
-            if let Event::Key {
-                key: Key::F11,
-                pressed: true,
-                repeat: false,
-                modifiers,
-                ..
-            } = event
-                && *modifiers == Modifiers::NONE
-            {
-                pressed = true;
-                false
-            } else {
-                true
-            }
-        });
-        pressed
-    })
+    ctx.input_mut(consume_unmodified_f11)
+}
+
+fn take_unmodified_f11_for(ctx: &egui::Context, viewport_id: ViewportId) -> bool {
+    ctx.input_mut_for(viewport_id, consume_unmodified_f11)
+}
+
+fn consume_unmodified_f11(input: &mut egui::InputState) -> bool {
+    let mut pressed = false;
+    input.events.retain(|event| {
+        if let Event::Key {
+            key: Key::F11,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } = event
+            && *modifiers == Modifiers::NONE
+        {
+            pressed = true;
+            false
+        } else {
+            true
+        }
+    });
+    pressed
 }
 
 enum WriterJob {
@@ -4177,6 +4507,7 @@ fn spawn_writer(
                                     CaptureTarget::Qr => format!(
                                         "selected QR capture did not complete within {deadline}"
                                     ),
+                                    CaptureTarget::Diagram => format!("selected Diagram capture did not complete within {deadline}"),
                                 });
                                 WriterJob::Failure(receipt)
                             }
@@ -4190,6 +4521,7 @@ fn spawn_writer(
                                         "capture owner exited before the selected QR child reply arrived"
                                             .into()
                                     }
+                                    CaptureTarget::Diagram => "capture owner exited before the selected Diagram child reply arrived".into(),
                                 });
                                 WriterJob::Failure(receipt)
                             }
@@ -5216,6 +5548,264 @@ mod tests {
             eligible: true,
             jump_mode_observation: None,
             qr_observation: None,
+            diagram_observation: None,
+        }
+    }
+
+    fn diagram_observation(frame: u64) -> DiagramViewportObservation {
+        DiagramViewportObservation {
+            child_viewport_id: CaptureTarget::Diagram.viewport_id(),
+            callback_class: egui::ViewportClass::Immediate,
+            callback_frame_nr: frame,
+            callback_pass_nr: frame,
+            callback_pass_index: 0,
+            completed_frame_nr: Some(frame + 1),
+            completed_pass_nr: Some(frame + 1),
+            visible: Some(true),
+            minimized: Some(false),
+            occluded: Some(false),
+            focused: Some(true),
+            body_rendered: true,
+            still_open: true,
+            application_input_allowed: true,
+            child_modal_open: false,
+            pixels_per_point: 1.5,
+            native_pixels_per_point: Some(1.5),
+            zoom_factor: 1.0,
+            session_revision: 7,
+            rendered_scene_revision: Some(7),
+            status: crate::diagram::SessionStatus {
+                preview: crate::diagram::PreviewState::Current,
+                diagnostic: None,
+            },
+            callback_observed_at_unix_ms: frame,
+            renderer_returned_at_unix_ms: Some(frame + 1),
+        }
+    }
+
+    fn diagram_tick(
+        probe: &mut FramebufferProbe,
+        ctx: &egui::Context,
+        observation: DiagramViewportObservation,
+    ) {
+        let mut evidence = test_evidence(probe.logic_frame_id + 1, probe.ui_pass_id + 1, 0);
+        evidence.logical_root_visible = false;
+        evidence.root_visibility_reported = Some(false);
+        evidence.root_visible = false;
+        evidence.eligible = false;
+        probe.after_diagram_show(ctx, observation.still_open, Some(observation), evidence);
+    }
+
+    fn push_diagram_f11(ctx: &egui::Context, viewport: ViewportId) {
+        ctx.input_mut_for(viewport, |input| {
+            input.events.push(Event::Key {
+                key: Key::F11,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            })
+        });
+    }
+
+    #[test]
+    fn diagram_capture_manifest_preserves_root_and_qr_restrictions() {
+        let mut request = test_request_for_target(
+            CaptureTarget::Diagram,
+            CaptureTrigger::F11,
+            PathBuf::from("unused"),
+        );
+        request.manifest.capture_count = 16;
+        validate_manifest(&request.manifest).unwrap();
+        request.manifest.trigger = CaptureTrigger::Startup;
+        assert!(
+            validate_manifest(&request.manifest)
+                .unwrap_err()
+                .contains("requires the F11")
+        );
+        request.manifest.trigger = CaptureTrigger::F11;
+        request.manifest.diagnostics = true;
+        assert!(
+            validate_manifest(&request.manifest)
+                .unwrap_err()
+                .contains("ROOT")
+        );
+        request.manifest.target = CaptureTarget::Qr;
+        request.manifest.diagnostics = false;
+        assert!(
+            validate_manifest(&request.manifest)
+                .unwrap_err()
+                .contains("Startup")
+        );
+    }
+
+    #[test]
+    fn diagram_capture_requires_actual_child_and_child_f11_ownership() {
+        let good = diagram_observation(10);
+        assert!(diagram_render_evidence(&good).eligible);
+        for invalid in 0..6 {
+            let mut observation = good.clone();
+            match invalid {
+                0 => observation.child_viewport_id = ViewportId::ROOT,
+                1 => observation.callback_class = egui::ViewportClass::EmbeddedWindow,
+                2 => observation.visible = Some(false),
+                3 => observation.minimized = Some(true),
+                4 => observation.still_open = false,
+                _ => observation.child_modal_open = true,
+            }
+            assert!(!diagram_render_evidence(&observation).eligible);
+        }
+        let ctx = egui::Context::default();
+        let (mut probe, _jobs, _outcomes) =
+            test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Diagram);
+        push_diagram_f11(&ctx, ViewportId::ROOT);
+        diagram_tick(&mut probe, &ctx, good.clone());
+        assert_eq!(probe.phase, ProbePhase::Armed);
+        assert!(ctx.input_for(ViewportId::ROOT, |input| !input.events.is_empty()));
+        push_diagram_f11(&ctx, CaptureTarget::Diagram.viewport_id());
+        let mut unfocused = good;
+        unfocused.focused = Some(false);
+        diagram_tick(&mut probe, &ctx, unfocused);
+        assert_eq!(probe.phase, ProbePhase::Armed);
+    }
+
+    #[test]
+    fn diagram_capture_hidden_root_child_advancement_writer_and_rearm() {
+        let ctx = egui::Context::default();
+        let (mut probe, jobs, outcomes) =
+            test_probe_with_capture_count(CaptureTrigger::F11, CaptureTarget::Diagram, 2);
+        let child_id = CaptureTarget::Diagram.viewport_id();
+        push_diagram_f11(&ctx, child_id);
+        diagram_tick(&mut probe, &ctx, diagram_observation(10));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert!(!probe.needs_root_logic() && !probe.needs_retained_marker());
+        assert!(matches!(jobs.try_recv(), Ok(WriterJob::AwaitReply(_))));
+        probe.revalidate_root_logic(SurfaceEligibility::default());
+        probe.run_hidden_logic_tick();
+        diagram_tick(&mut probe, &ctx, diagram_observation(10));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert!(jobs.try_recv().is_err());
+        let first_token = probe.token.clone();
+        ctx.input_mut_for(child_id, |input| {
+            input.events.extend([
+                Event::Screenshot {
+                    viewport_id: ViewportId::ROOT,
+                    user_data: first_token.clone(),
+                    image: test_image(egui::Color32::RED),
+                },
+                Event::Screenshot {
+                    viewport_id: child_id,
+                    user_data: UserData::new(ScreenshotToken(99)),
+                    image: test_image(egui::Color32::RED),
+                },
+                Event::Screenshot {
+                    viewport_id: child_id,
+                    user_data: first_token.clone(),
+                    image: test_image(egui::Color32::GREEN),
+                },
+            ])
+        });
+        diagram_tick(&mut probe, &ctx, diagram_observation(11));
+        assert_eq!(probe.phase, ProbePhase::AwaitingReply);
+        assert!(jobs.try_recv().is_err());
+        assert_eq!(ctx.input_for(child_id, |input| input.events.len()), 2);
+        diagram_tick(&mut probe, &ctx, diagram_observation(12));
+        assert_eq!(probe.phase, ProbePhase::Saving);
+        let job = jobs.try_recv().unwrap();
+        let WriterJob::Save { ref receipt, .. } = job else {
+            panic!("expected shared writer save")
+        };
+        let captured = receipt.captured.as_ref().unwrap();
+        assert!(!captured.logical_root_visible && !captured.root_visible && captured.eligible);
+        assert_eq!(captured.pixels_per_point, Some(1.5));
+        assert_eq!(
+            captured
+                .diagram_observation
+                .as_ref()
+                .unwrap()
+                .callback_class,
+            "Immediate"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let written = write_job(directory.path(), job);
+        assert!(written.receipt_written && written.status == ReceiptStatus::Saved);
+        let (png_name, receipt_name) = capture_artifact_names(1, 2);
+        let png = image::open(directory.path().join(png_name))
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(png.dimensions(), (1, 1));
+        assert_eq!(png.get_pixel(0, 0).0, [0, 255, 0, 255]);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join(receipt_name)).unwrap())
+                .unwrap();
+        assert_eq!(saved["target"], "DIAGRAM");
+        assert_eq!(saved["captured"]["logical_root_visible"], false);
+        push_diagram_f11(&ctx, child_id); // Saving-time keys must not arm the next capture.
+        outcomes.send(written).unwrap();
+        diagram_tick(&mut probe, &ctx, diagram_observation(13));
+        assert_eq!(probe.phase, ProbePhase::Armed);
+        assert_ne!(probe.token, first_token);
+        assert!(jobs.try_recv().is_err());
+        push_diagram_f11(&ctx, child_id);
+        diagram_tick(&mut probe, &ctx, diagram_observation(14));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert_eq!(probe.receipt.capture_index, 2);
+    }
+
+    #[test]
+    fn diagram_capture_fails_on_close_or_revision_change() {
+        for close in [true, false] {
+            let ctx = egui::Context::default();
+            let (mut probe, jobs, _outcomes) =
+                test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Diagram);
+            push_diagram_f11(&ctx, CaptureTarget::Diagram.viewport_id());
+            diagram_tick(&mut probe, &ctx, diagram_observation(10));
+            assert!(matches!(jobs.try_recv(), Ok(WriterJob::AwaitReply(_))));
+            let mut changed = diagram_observation(11);
+            if close {
+                changed.still_open = false;
+            } else {
+                changed.session_revision += 1;
+            }
+            diagram_tick(&mut probe, &ctx, changed);
+            assert_eq!(probe.phase, ProbePhase::Failed);
+            assert!(matches!(jobs.try_recv(), Ok(WriterJob::Failure(_))));
+        }
+    }
+
+    #[test]
+    fn diagram_capture_timeout_and_disconnect_write_failure_receipts() {
+        for disconnect in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let request = test_request_for_target(
+                CaptureTarget::Diagram,
+                CaptureTrigger::F11,
+                directory.path().to_owned(),
+            );
+            let receipt = CompletionReceipt::new(&request, Duration::from_millis(5));
+            let (sender, receiver) = spawn_writer(
+                directory.path().to_owned(),
+                egui::Context::default(),
+                Duration::from_millis(5),
+            )
+            .unwrap();
+            sender.send(WriterJob::AwaitReply(receipt)).unwrap();
+            if disconnect {
+                drop(sender);
+            }
+            let outcome = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(outcome.receipt_written && outcome.status == ReceiptStatus::Failed);
+            let receipt: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(directory.path().join(RECEIPT_FILE_NAME)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt["target"], "DIAGRAM");
+            assert!(
+                receipt["failure"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if disconnect { "exited" } else { "within" })
+            );
         }
     }
 
@@ -5363,6 +5953,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 qr_observation: None,
+                diagram_observation: None,
             },
         });
         probe.retained_pass = Some(RetainedPassMarker {
