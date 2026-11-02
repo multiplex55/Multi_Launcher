@@ -434,6 +434,7 @@ kinds!(QueryCommand, Self::Set { .. } => "set", Self::ExecuteFirst { .. } => "ex
 pub enum DialogCommand {
     Qr { initial_text: Option<String> },
     RegexTester,
+    CalculationPad,
     Help,
     Convert,
     Settings,
@@ -444,7 +445,7 @@ pub enum DialogCommand {
     DuplicateFinder,
     Activity,
 }
-kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder", Self::Activity => "activity");
+kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::CalculationPad => "calculation_pad", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder", Self::Activity => "activity");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalendarCommand {
     Open { view: String },

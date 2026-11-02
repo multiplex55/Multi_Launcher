@@ -59,6 +59,7 @@ pub trait DialogCommandHost {
     }
     fn open_qr_dialog(&mut self, initial_text: Option<&str>);
     fn open_regex_tester_dialog(&mut self);
+    fn open_calculation_pad_dialog(&mut self) {}
     fn open_help_dialog(&mut self);
     fn open_timer_dialog(&mut self);
     fn open_alarm_dialog(&mut self);

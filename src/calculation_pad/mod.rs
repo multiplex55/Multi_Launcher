@@ -1,4 +1,4 @@
-//! Pure, bounded evaluation plus editing sessions and explicit document storage.
+//! Pure bounded evaluation with explicit app-owned editing sessions and document storage.
 //!
 //! The expression grammar and evaluation limits are documented in this module's
 //! `README.md`.

@@ -585,6 +585,9 @@ impl CalculationPadSession {
             .current
             .as_ref()
             .ok_or(SessionError::NoActiveDocument)?;
+        if current.name.is_none() {
+            return Err(SessionError::SaveAsRequired);
+        }
         if !current.is_dirty() {
             return Ok(());
         }
@@ -779,6 +782,23 @@ fn remap_line_ids(
 
     let old_count = old_lines.len();
     let new_count = new_lines.len();
+    if old_count == new_count {
+        // A whole-editor snapshot with at most one changed physical row is a
+        // single-line edit. Keep IDs by position so duplicate text cannot
+        // make the LCS matcher assign a neighboring row's identity instead.
+        let mut changed_lines = 0;
+        for (old_line, new_line) in old_lines.iter().zip(&new_lines) {
+            if old_line != new_line {
+                changed_lines += 1;
+                if changed_lines > 1 {
+                    break;
+                }
+            }
+        }
+        if changed_lines <= 1 {
+            return Ok((old_ids.to_vec(), next_line_id));
+        }
+    }
     let width = new_count + 1;
     let mut lcs = vec![0usize; (old_count + 1) * width];
     for old_index in (0..old_count).rev() {
@@ -941,6 +961,18 @@ mod tests {
     }
 
     #[test]
+    fn whole_source_single_line_edit_keeps_identity_when_it_duplicates_a_neighbor() {
+        let (_directory, _root, mut session) = fixture();
+        session.replace_source("A\nB").unwrap();
+        let original_ids = session.line_ids().unwrap().to_vec();
+
+        session.replace_source("B\nB").unwrap();
+
+        assert_eq!(session.source(), Some("B\nB"));
+        assert_eq!(session.line_ids(), Some(original_ids.as_slice()));
+    }
+
+    #[test]
     fn targeted_line_edits_keep_identity_when_contents_duplicate() {
         let (_directory, _root, mut session) = fixture();
         session.replace_source("A\nB").unwrap();
@@ -1061,6 +1093,16 @@ mod tests {
         assert_eq!(reopened.source(), Some(source));
         assert_eq!(reopened.line_ids().unwrap().to_vec(), ids);
         assert_eq!(reopened.current_name(), Some("計算 draft"));
+    }
+
+    #[test]
+    fn saving_an_untitled_blank_document_requires_save_as() {
+        let (_directory, _root, mut session) = fixture();
+        assert_eq!(session.source(), Some(""));
+        assert_eq!(session.current_name(), None);
+
+        assert!(matches!(session.save(), Err(SessionError::SaveAsRequired)));
+        assert!(session.list_saved_documents().unwrap().is_empty());
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod alias_dialog;
 mod batch_rename_dialog;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
+mod calculation_pad_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
@@ -137,6 +138,7 @@ pub use alias_dialog::AliasDialog;
 pub(crate) use batch_rename_dialog::{BatchRenameDialogState, BatchRenameUiCommand};
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
+pub(crate) use calculation_pad_dialog::{CalculationPadDialog, CalculationPadDialogEffect};
 pub use calendar_event_details::CalendarEventDetails;
 pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
@@ -739,6 +741,7 @@ pub enum Panel {
     JsonUtilityDialog,
     ZipExtractorDialog,
     RegexTesterDialog,
+    CalculationPadDialog,
     BatchRenameDialog,
     SearchReplaceDialog,
     XmlToolkitDialog,
@@ -804,6 +807,7 @@ impl Panel {
             Self::JsonUtilityDialog => "JSON Utility",
             Self::ZipExtractorDialog => "ZIP Extractor",
             Self::RegexTesterDialog => "Regex Tester",
+            Self::CalculationPadDialog => "Calculation Pad",
             Self::BatchRenameDialog => "Batch Renamer",
             Self::SearchReplaceDialog => "Search and Replace",
             Self::XmlToolkitDialog => "XML Toolkit",
@@ -870,6 +874,7 @@ struct PanelStates {
     json_utility_dialog: bool,
     zip_extractor_dialog: bool,
     regex_tester_dialog: bool,
+    calculation_pad_dialog: bool,
     batch_rename_dialog: bool,
     search_replace_dialog: bool,
     xml_toolkit_dialog: bool,
@@ -1239,6 +1244,7 @@ pub struct LauncherApp {
     #[cfg(windows)]
     pub(crate) archive_session: crate::archive::ArchiveSession,
     pub regex_tester_dialog: RegexTesterDialogState,
+    pub(crate) calculation_pad_dialog: CalculationPadDialog,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
@@ -3143,6 +3149,7 @@ impl LauncherApp {
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
+        let calculation_pad_dialog = CalculationPadDialog::new(&data_root);
         let data_recovery_dialog = DataRecoveryDialog::new(data_root.clone(), settings.clone(), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -3822,6 +3829,7 @@ impl LauncherApp {
             #[cfg(windows)]
             archive_session,
             regex_tester_dialog,
+            calculation_pad_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
                 settings.table_utility_resources.to_policy(),
@@ -4534,7 +4542,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 60] = [
+    const TRACKED_PANELS: [Panel; 61] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4572,6 +4580,7 @@ impl LauncherApp {
         Panel::JsonUtilityDialog,
         Panel::ZipExtractorDialog,
         Panel::RegexTesterDialog,
+        Panel::CalculationPadDialog,
         Panel::BatchRenameDialog,
         Panel::SearchReplaceDialog,
         Panel::XmlToolkitDialog,
@@ -4636,6 +4645,7 @@ impl LauncherApp {
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
+            Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
@@ -4730,6 +4740,14 @@ impl LauncherApp {
         if self.pinned_panels.contains(&panel) {
             self.panel_stack.push(panel);
             return false;
+        }
+        if panel == Panel::CalculationPadDialog {
+            self.calculation_pad_dialog.request_close();
+            self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
+            if self.calculation_pad_dialog.open {
+                self.panel_stack.push(panel);
+            }
+            return true;
         }
         self.retire_settings_navigation_for_panel(panel);
         match panel {
@@ -4894,6 +4912,13 @@ impl LauncherApp {
             Panel::RegexTesterDialog => {
                 self.regex_tester_dialog.open = false;
                 self.panel_states.regex_tester_dialog = false;
+            }
+            Panel::CalculationPadDialog => {
+                self.calculation_pad_dialog.request_close();
+                self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
+                if self.calculation_pad_dialog.open {
+                    self.panel_stack.push(panel);
+                }
             }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
@@ -5178,6 +5203,10 @@ impl LauncherApp {
                 self.regex_tester_dialog.open = false;
                 self.panel_states.regex_tester_dialog = false;
             }
+            Panel::CalculationPadDialog => {
+                self.calculation_pad_dialog.request_close();
+                self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
+            }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
                 self.panel_states.xml_toolkit_dialog = false;
@@ -5270,7 +5299,13 @@ impl LauncherApp {
                 self.panel_states.radial_editor = false;
             }
         }
-        self.panel_stack.retain(|p| *p != panel);
+        if panel == Panel::CalculationPadDialog && self.calculation_pad_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+        } else {
+            self.panel_stack.retain(|p| *p != panel);
+        }
     }
 
     fn ensure_open(&mut self, panel: Panel) {
@@ -5335,6 +5370,7 @@ impl LauncherApp {
                     self.regex_tester_dialog.open();
                 }
             }
+            Panel::CalculationPadDialog => self.calculation_pad_dialog.ensure_open(),
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
@@ -5375,7 +5411,11 @@ impl LauncherApp {
     pub(crate) fn focus_panel(&mut self, panel: Panel) {
         self.panel_stack.retain(|p| *p != panel);
         self.panel_stack.push(panel);
-        self.ensure_open(panel);
+        if panel == Panel::CalculationPadDialog {
+            self.calculation_pad_dialog.open();
+        } else {
+            self.ensure_open(panel);
+        }
     }
 
     fn enforce_pinned(&mut self) {
@@ -5487,6 +5527,7 @@ impl LauncherApp {
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
         check!(zip_extractor_dialog, Panel::ZipExtractorDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
+        check!(calculation_pad_dialog, Panel::CalculationPadDialog);
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(search_replace_dialog, Panel::SearchReplaceDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
@@ -6173,6 +6214,7 @@ mod tests {
             (Panel::MkMacroDialog, "MKMacro"),
             (Panel::DataRecoveryDialog, "Data & Recovery"),
             (Panel::CpuListDialog, "CPU Usage"),
+            (Panel::CalculationPadDialog, "Calculation Pad"),
         ] {
             assert_eq!(panel.display_label(), expected);
         }
@@ -7835,6 +7877,112 @@ mod tests {
         assert!(!app.regex_tester_dialog.open);
         assert!(!app.panel_stack.contains(&Panel::RegexTesterDialog));
         assert_eq!(app.regex_tester_dialog.session.draft, draft);
+    }
+
+    #[test]
+    fn calculation_pad_panel_reopen_preserves_draft_and_dirty_close_uses_one_prompt() {
+        use crate::commands::DialogCommandHost;
+
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new_isolated_for_test_at(
+            &ctx,
+            directory.path(),
+            settings,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+        );
+        app.mark_visible_root_for_test();
+        app.focus_query = false;
+
+        DialogCommandHost::open_calculation_pad_dialog(&mut app);
+        app.calculation_pad_dialog
+            .test_replace_source("estimate = 12\nr1 * 3");
+
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.calculation_pad_dialog.test_editor_has_focus(&ctx));
+
+        let other_focus = egui::Id::new("calculation-pad-reopen-focus-regression");
+        ctx.memory_mut(|memory| memory.request_focus(other_focus));
+        assert!(ctx.memory(|memory| memory.has_focus(other_focus)));
+        app.ensure_open(Panel::CalculationPadDialog);
+        assert!(
+            !app.calculation_pad_dialog.test_focus_source_pending(),
+            "passive panel enforcement must not steal focus"
+        );
+        app.focus_panel(Panel::CalculationPadDialog);
+        assert!(app.calculation_pad_dialog.test_focus_source_pending());
+
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("estimate = 12\nr1 * 3")
+        );
+        assert!(app.calculation_pad_dialog.test_can_undo());
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::CalculationPadDialog)
+                .count(),
+            1,
+            "repeated open focuses the existing Pad panel"
+        );
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.calculation_pad_dialog.test_was_rendered());
+        assert!(app.calculation_pad_dialog.test_editor_has_focus(&ctx));
+
+        assert!(app.close_front_dialog());
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(
+            app.calculation_pad_dialog.test_pending_transition(),
+            Some(crate::calculation_pad::PendingTransition::Close)
+        );
+        assert!(app.panel_stack.contains(&Panel::CalculationPadDialog));
+
+        app.calculation_pad_dialog
+            .test_resolve_pending(crate::calculation_pad::TransitionDecision::Discard);
+        app.update_panel_stack();
+        assert!(!app.is_panel_open(Panel::CalculationPadDialog));
+        assert!(!app.panel_stack.contains(&Panel::CalculationPadDialog));
+
+        app.focus_panel(Panel::CalculationPadDialog);
+        app.update_panel_stack();
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(""));
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::CalculationPadDialog)
+                .count(),
+            1
+        );
     }
 
     #[test]

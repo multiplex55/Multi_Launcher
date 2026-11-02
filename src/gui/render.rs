@@ -9630,6 +9630,13 @@ impl LauncherApp {
         }
         #[cfg(not(feature = "qa-framebuffer-capture"))]
         self.qr_dialog.show(&ctx);
+        if let Some(super::CalculationPadDialogEffect::CopyText(text)) =
+            self.calculation_pad_dialog.show(&ctx, first_ui_pass)
+        {
+            let result =
+                crate::actions::clipboard::set_text(&text).map_err(|error| error.to_string());
+            self.calculation_pad_dialog.copy_completed(result);
+        }
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
         conv_panel.ui(&ctx, self);
         self.convert_panel = conv_panel;

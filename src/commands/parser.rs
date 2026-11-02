@@ -552,6 +552,7 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
             argument: json_string_field(action.args.as_deref(), "query"),
         }),
         "regex:open" => Command::Dialog(DialogCommand::RegexTester),
+        "calc:pad" => Command::Dialog(DialogCommand::CalculationPad),
         "help:show" => Command::Dialog(DialogCommand::Help),
         "timer:dialog:timer" => Command::Timer(TimerCommand::TimerDialog),
         "timer:dialog:alarm" => Command::Timer(TimerCommand::AlarmDialog),
@@ -2719,6 +2720,37 @@ mod regex_tester_parser_tests {
                 Ok(Command::Dialog(DialogCommand::RegexTester))
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod calculation_pad_parser_tests {
+    use super::*;
+
+    fn action(raw: &str) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn calculation_pad_opener_has_one_exact_typed_route() {
+        let parsed = parse_action(&action("calc:pad")).unwrap();
+        assert_eq!(parsed, Command::Dialog(DialogCommand::CalculationPad));
+        assert_eq!(parsed.domain(), "dialog");
+        assert_eq!(parsed.kind_name(), "calculation_pad");
+
+        // Non-opener calc payloads retain the existing result-copy protocol.
+        assert_eq!(
+            parse_action(&action("calc:pad:extra")).unwrap(),
+            Command::Calculator(CalculatorCommand::CopyResult {
+                result: "pad:extra".into(),
+                expression: None,
+            })
+        );
     }
 }
 

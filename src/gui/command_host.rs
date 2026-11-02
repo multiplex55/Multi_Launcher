@@ -229,6 +229,14 @@ impl DialogCommandHost for LauncherApp {
         self.regex_tester_dialog.open();
         self.focus_panel(super::Panel::RegexTesterDialog);
     }
+    fn open_calculation_pad_dialog(&mut self) {
+        self.calculation_pad_dialog.open();
+        self.focus_panel(super::Panel::CalculationPadDialog);
+        self.egui_ctx.move_to_top(eframe::egui::LayerId::new(
+            eframe::egui::Order::Middle,
+            eframe::egui::Id::new("calculation-pad-window"),
+        ));
+    }
     fn open_help_dialog(&mut self) {
         self.help_window.open = true;
     }
@@ -1617,6 +1625,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
     !matches!(
         command,
         Command::Dialog(crate::commands::DialogCommand::RegexTester)
+            | Command::Dialog(crate::commands::DialogCommand::CalculationPad)
             | Command::Dialog(crate::commands::DialogCommand::Qr { .. })
             | Command::Radial(_)
             | Command::ClipboardModify(_)
