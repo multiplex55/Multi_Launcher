@@ -9638,7 +9638,20 @@ impl LauncherApp {
             self.calculation_pad_dialog.copy_completed(result);
         }
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
-        conv_panel.ui(&ctx, self);
+        let converter_effect = conv_panel.ui(&ctx, first_ui_pass);
+        if first_ui_pass && !ctx.will_discard() {
+            match converter_effect {
+                Some(super::ConvertPanelEffect::CopyText(text)) => {
+                    let result = crate::actions::clipboard::set_text(&text)
+                        .map_err(|error| error.to_string());
+                    conv_panel.copy_completed(result);
+                }
+                Some(super::ConvertPanelEffect::SavePreferences) => {
+                    conv_panel.save_preferences();
+                }
+                None => {}
+            }
+        }
         self.convert_panel = conv_panel;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(&ctx, self);

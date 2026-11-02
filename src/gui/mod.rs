@@ -149,6 +149,7 @@ pub(crate) use search_replace_dialog::{
 
 pub use clipboard_modify_dialog::{ClipboardModifyDialogSection, ClipboardModifyDialogState};
 pub use convert_panel::ConvertPanel;
+pub(crate) use convert_panel::ConvertPanelEffect;
 pub use cpu_list_dialog::CpuListDialog;
 pub(crate) use data_recovery_dialog::{
     DataRecoveryDialog, DataRecoveryUiAction, PendingRecoveryIntent, SafeStartupDiagnostic,
@@ -3150,6 +3151,7 @@ impl LauncherApp {
             .expect("LauncherApp settings path must resolve an application data root");
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
         let calculation_pad_dialog = CalculationPadDialog::new(&data_root);
+        let convert_panel = ConvertPanel::with_data_root(&data_root);
         let data_recovery_dialog = DataRecoveryDialog::new(data_root.clone(), settings.clone(), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -3845,7 +3847,7 @@ impl LauncherApp {
                 .hide_launcher_after_apply,
             clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),
             clipboard_modify_events: Vec::new(),
-            convert_panel: ConvertPanel::default(),
+            convert_panel,
             volume_dialog: VolumeDialog::default(),
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
@@ -5413,6 +5415,8 @@ impl LauncherApp {
         self.panel_stack.push(panel);
         if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.open();
+        } else if panel == Panel::ConvertPanel {
+            self.convert_panel.open();
         } else {
             self.ensure_open(panel);
         }
