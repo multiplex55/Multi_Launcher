@@ -17,7 +17,7 @@ Binding scope: [Goal](../CODEX_GOAL_VISUAL_PRODUCTIVITY_STUDIOS.md) and [Kicksta
 | Category | State | Accepted / remaining |
 | --- | --- | --- |
 | C01 Quick Tools | PARTIAL | M0-A and M1-A complete; M1-B source/tests/build verified, native gate BLOCKED |
-| C02 Calculation Pad / Converter | pending | All checkpoints pending |
+| C02 Calculation Pad / Converter | in_progress | M0-A bootstrap; domain/UI/converter pending |
 | C03 Date & Time | pending | All checkpoints pending |
 | C04 Diagram / Mermaid | pending | All checkpoints pending |
 | C05 Regex | pending | All checkpoints pending |
@@ -58,3 +58,16 @@ Application build succeeded, exit 0, Cargo 2m00s / command 120.971s. Build uses 
 Native **BLOCKED**, not PASS: initial Hidden launch in isolated CWD produced live owned PID18056/title `Multi Lnchr`, absent from `sky.list_windows`. One cause-specific Normal interactive relaunch produced PID17264, responsive, exact expected executable, MainWindowHandle46273734/session1/title `Multi Lnchr`; both `sky.list_apps` and `sky.list_windows` still lacked a targetable launcher window. The Explorer folder titled Multi_Launcher is not the app and was never selected. No native input or screenshot was executed. Both owned processes retired, confirmed absent. Profile persisted next/cancel shortcuts as null. Receipt `target/visual-studios/c01-native-result.json`; underlying observation failure cause remains unknown. Required native editor/dashboard narrow/expanded, default animation, scroll and Jump proof NOT_RUN. No further native retries at this boundary.
 
 Independent final source review: no known unsafe behavior/unresolved source defect, safe to retain tested partial work. **M1-B full acceptance and C01 completion withheld**. This is a safe partial source checkpoint, not a completed native feature. Diff inspected, only Quick Tools implementation/tests, dashboard test helpers/case and ledger intentional; no shared dashboard production change. Normal push attempted after commit, actual SHA/result recorded next.
+
+### C01 handoff
+
+M1-B safe partial source commit `00395c036183724393b168ab53f9e4e9beb44fef` pushed. Documentation-only native stop `54160cf65f137943240d03e43b688fdb74d1ed00` pushed; this is C01 `final_tip_sha`, **PARTIAL**, with [report](standalone/visual-productivity-studios/stalls/20261102T000436Z.md). Local/upstream equal, clean, all owned jobs retired before transition. No source discarded and no native pass claimed.
+
+## C02/M0-A bootstrap
+
+- Revalidated unchanged AGENTS/Goal/Kickstart authority and predecessor report, clean Git/index and origin/upstream identity before branch creation. No C02 source/build/test work yet.
+- `parent_branch`: `feat/visual-studios-01-quick-tools`.
+- `parent_tip_sha`: `54160cf65f137943240d03e43b688fdb74d1ed00` (verified predecessor local/upstream equal).
+- Category branch: `feat/visual-studios-02-calculation-pad`, created directly at that SHA; initial HEAD verified equal.
+- This ledger-only commit is C02's distinct M0-A baseline; SHA/direct-parent proof and single initial push result recorded after commit.
+- Same checkout, no worktrees, auxiliary clones, intermediate merge/rebase/cherry-pick, dirty carry or competing source writer. C02 is independent of C01 native acceptance; native limitations remain explicit.
