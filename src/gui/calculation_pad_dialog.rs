@@ -26,6 +26,8 @@ pub(crate) struct CalculationPadDialog {
     test_line_copy_rects: Vec<(usize, egui::Rect)>,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_discard_rect: Option<egui::Rect>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -70,6 +72,8 @@ impl CalculationPadDialog {
             test_line_copy_rects: Vec::new(),
             #[cfg(test)]
             test_window_rect: None,
+            #[cfg(test)]
+            test_discard_rect: None,
         }
     }
 
@@ -139,6 +143,11 @@ impl CalculationPadDialog {
         ctx: &egui::Context,
         first_ui_pass: bool,
     ) -> Option<CalculationPadDialogEffect> {
+        #[cfg(test)]
+        {
+            self.test_window_rect = None;
+            self.test_discard_rect = None;
+        }
         if !self.open {
             return None;
         }
@@ -198,6 +207,8 @@ impl CalculationPadDialog {
         {
             self.test_window_rect = output.as_ref().map(|output| output.response.rect);
         }
+        #[cfg(not(test))]
+        let _ = output;
 
         let effects_authorized = authorized_pass && !ctx.will_discard();
         if effects_authorized {
@@ -235,8 +246,6 @@ impl CalculationPadDialog {
 
             if !window_open && self.open {
                 self.request_close();
-            } else if window_open {
-                self.open = true;
             }
         }
 
@@ -553,7 +562,12 @@ impl CalculationPadDialog {
                 if ui.button("Save").clicked() {
                     *intent = Some(DialogIntent::Decision(TransitionDecision::Save));
                 }
-                if ui.button("Discard").clicked() {
+                let discard = ui.button("Discard");
+                #[cfg(test)]
+                {
+                    self.test_discard_rect = Some(discard.rect);
+                }
+                if discard.clicked() {
                     *intent = Some(DialogIntent::Decision(TransitionDecision::Discard));
                 }
                 if ui.button("Keep Editing").clicked() {
@@ -1125,6 +1139,42 @@ mod tests {
         assert_eq!(dialog.test_pending_transition(), None);
         assert!(dialog.open);
         assert_eq!(dialog.test_source(), Some("amount = 9\namount * 2"));
+    }
+
+    #[test]
+    fn clicking_discard_in_pending_close_closes_the_rendered_dialog() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        dialog.test_replace_source("draft = 7");
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+
+        dialog.request_close();
+        assert!(dialog.open);
+        assert_eq!(
+            dialog.test_pending_transition(),
+            Some(PendingTransition::Close)
+        );
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let discard = dialog
+            .test_discard_rect
+            .expect("pending close renders an actual Discard button");
+
+        assert_eq!(click(&mut dialog, &ctx, size, discard.center()), None);
+        assert!(!dialog.open, "Discard applies the pending Close transition");
+        assert_eq!(dialog.test_source(), None);
+        assert_eq!(dialog.test_pending_transition(), None);
+
+        assert_eq!(frame(&mut dialog, &ctx, size, Vec::new()), None);
+        assert!(
+            !dialog.test_was_rendered(),
+            "the next UI frame does not resurrect the closed Calculation Pad"
+        );
     }
 
     #[test]
