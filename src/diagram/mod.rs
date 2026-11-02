@@ -1,8 +1,9 @@
-//! Pure graph model, Mermaid synchronization, and bounded session codec.
+//! Pure graph model, Mermaid synchronization, bounded scene geometry, and session codec.
 
 mod codec;
 mod mermaid;
 mod model;
+mod scene;
 mod session;
 
 pub use codec::{
@@ -19,6 +20,11 @@ pub use model::{
     GraphValidationError, GroupId, MAX_DIAGRAM_EDGES, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES,
     MAX_GROUP_ID_BYTES, MAX_LABEL_BYTES, MAX_NODE_ID_BYTES, MAX_POSITION_ABS, NodeId, NodeShape,
     Position,
+};
+pub use scene::{
+    ArrowHead, CubicBezier, DiagramScene, MAX_SCENE_COORDINATE_ABS, PreparedText, PreparedTextLine,
+    SceneEdge, SceneError, SceneGroup, SceneMetrics, SceneNode, ScenePoint, SceneRect,
+    SceneTextMetrics, TextHorizontalAlignment, build_scene,
 };
 pub use session::{
     DiagramSession, DiagramSessionError, GraphOperation, MAX_DIAGRAM_HISTORY_BYTES,
