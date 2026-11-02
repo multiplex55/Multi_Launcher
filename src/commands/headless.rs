@@ -422,6 +422,9 @@ fn execute_with_external(
         Command::Dialog(DialogCommand::CalculationPad) => {
             anyhow::bail!("Calculation Pad requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::DateTimeStudio) => {
+            anyhow::bail!("Date & Time Studio requires the launcher interface")
+        }
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
@@ -1394,6 +1397,37 @@ mod calculation_pad_headless_tests {
         assert_eq!(
             error.to_string(),
             "Calculation Pad requires the launcher interface"
+        );
+        assert_eq!(calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod date_time_studio_headless_tests {
+    use super::*;
+
+    #[test]
+    fn date_time_studio_requires_the_launcher_interface_without_external_fallback() {
+        let original = Action {
+            label: "Date & Time Studio".into(),
+            desc: String::new(),
+            action: "date:studio".into(),
+            args: None,
+        };
+        let mut calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::DateTimeStudio),
+            &original,
+            &mut |_, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Date & Time Studio requires the launcher interface"
         );
         assert_eq!(calls, 0);
     }

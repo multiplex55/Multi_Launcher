@@ -8,6 +8,14 @@ pub struct DateArithmeticPlugin;
 impl DateArithmeticPlugin {
     /// Search with an explicit local reference for deterministic callers and tests.
     pub fn search_with_reference(&self, query: &str, reference_now: NaiveDateTime) -> Vec<Action> {
+        if query.trim().eq_ignore_ascii_case("date studio") {
+            return vec![Action {
+                label: "Open Date & Time Studio".into(),
+                desc: "Between, offset, time zones, and schedule preview".into(),
+                action: "date:studio".into(),
+                args: None,
+            }];
+        }
         let Some(expression) = date_expression(query) else {
             return Vec::new();
         };
@@ -82,6 +90,12 @@ impl Plugin for DateArithmeticPlugin {
     fn commands(&self) -> Vec<Action> {
         vec![
             Action {
+                label: "date studio".into(),
+                desc: "Open the structured Date & Time Studio".into(),
+                action: "date:studio".into(),
+                args: None,
+            },
+            Action {
                 label: "date <expression>".into(),
                 desc: "Calculate a date or date-time".into(),
                 action: "query:date ".into(),
@@ -105,7 +119,16 @@ impl Plugin for DateArithmeticPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::date_expression;
+    use super::{DateArithmeticPlugin, date_expression};
+    use crate::plugin::Plugin;
+    use chrono::NaiveDate;
+
+    fn reference() -> chrono::NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, 2)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap()
+    }
 
     #[test]
     fn recognizes_whole_prefix_tokens_without_unicode_slicing() {
@@ -119,5 +142,19 @@ mod tests {
         assert_eq!(date_expression("datefoo 2026-10-05"), None);
         assert_eq!(date_expression("dateé 2026-10-05"), None);
         assert_eq!(date_expression("🗓️date 2026-10-05"), None);
+    }
+
+    #[test]
+    fn date_time_studio_opener_precedes_legacy_expression_parsing_and_is_discoverable() {
+        let plugin = DateArithmeticPlugin;
+        let actions = plugin.search_with_reference("  DATE STUDIO  ", reference());
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "date:studio");
+        assert_eq!(plugin.commands()[0].action, "date:studio");
+        assert!(
+            plugin.search_with_reference("date studio + 1 day", reference())[0]
+                .action
+                .starts_with("noop:")
+        );
     }
 }

@@ -237,6 +237,14 @@ impl DialogCommandHost for LauncherApp {
             eframe::egui::Id::new("calculation-pad-window"),
         ));
     }
+    fn open_date_time_studio_dialog(&mut self) {
+        self.date_time_studio_dialog.open();
+        self.focus_panel(super::Panel::DateTimeStudioDialog);
+        self.egui_ctx.move_to_top(eframe::egui::LayerId::new(
+            eframe::egui::Order::Middle,
+            eframe::egui::Id::new("date-time-studio-window"),
+        ));
+    }
     fn open_help_dialog(&mut self) {
         self.help_window.open = true;
     }
@@ -1626,6 +1634,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
         command,
         Command::Dialog(crate::commands::DialogCommand::RegexTester)
             | Command::Dialog(crate::commands::DialogCommand::CalculationPad)
+            | Command::Dialog(crate::commands::DialogCommand::DateTimeStudio)
             | Command::Dialog(crate::commands::DialogCommand::Qr { .. })
             | Command::Radial(_)
             | Command::ClipboardModify(_)

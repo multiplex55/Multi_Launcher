@@ -9637,6 +9637,25 @@ impl LauncherApp {
                 crate::actions::clipboard::set_text(&text).map_err(|error| error.to_string());
             self.calculation_pad_dialog.copy_completed(result);
         }
+        let calendar_editor_open = self.calendar_editor_open;
+        let date_time_studio_effect =
+            self.date_time_studio_dialog
+                .show(&ctx, first_ui_pass, calendar_editor_open);
+        if first_ui_pass && !ctx.will_discard() {
+            match date_time_studio_effect {
+                Some(super::DateTimeStudioEffect::CopyText(text)) => {
+                    let result = crate::actions::clipboard::set_text(&text)
+                        .map_err(|error| error.to_string());
+                    self.date_time_studio_dialog.copy_completed(result);
+                }
+                Some(super::DateTimeStudioEffect::PrepareCalendar { instant_utc }) => {
+                    let result = self.prepare_calendar_event_at(instant_utc);
+                    self.date_time_studio_dialog
+                        .calendar_prepare_completed(result);
+                }
+                None => {}
+            }
+        }
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
         let converter_effect = conv_panel.ui(&ctx, first_ui_pass);
         if first_ui_pass && !ctx.will_discard() {

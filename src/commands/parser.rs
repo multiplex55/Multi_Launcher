@@ -553,6 +553,7 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         }),
         "regex:open" => Command::Dialog(DialogCommand::RegexTester),
         "calc:pad" => Command::Dialog(DialogCommand::CalculationPad),
+        "date:studio" => Command::Dialog(DialogCommand::DateTimeStudio),
         "help:show" => Command::Dialog(DialogCommand::Help),
         "timer:dialog:timer" => Command::Timer(TimerCommand::TimerDialog),
         "timer:dialog:alarm" => Command::Timer(TimerCommand::AlarmDialog),
@@ -2751,6 +2752,24 @@ mod calculation_pad_parser_tests {
                 expression: None,
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod date_time_studio_parser_tests {
+    use super::*;
+
+    #[test]
+    fn date_time_studio_has_one_exact_typed_route() {
+        let action = Action {
+            label: "Date & Time Studio".into(),
+            desc: String::new(),
+            action: "date:studio".into(),
+            args: None,
+        };
+        let parsed = parse_action(&action).unwrap();
+        assert_eq!(parsed, Command::Dialog(DialogCommand::DateTimeStudio));
+        assert_eq!(parsed.kind_name(), "date_time_studio");
     }
 }
 

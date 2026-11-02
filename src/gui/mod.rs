@@ -22,6 +22,7 @@ mod cpu_list_dialog;
 pub mod crop_dialog;
 mod dashboard_editor_dialog;
 mod data_recovery_dialog;
+mod date_time_studio_dialog;
 mod diff_dialog;
 mod duplicate_finder_dialog;
 #[cfg(feature = "dev-smoke-binaries")]
@@ -143,6 +144,7 @@ pub use calendar_event_details::CalendarEventDetails;
 pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
+pub(crate) use date_time_studio_dialog::{DateTimeStudioDialog, DateTimeStudioEffect};
 pub(crate) use search_replace_dialog::{
     ReplacementPreviewWorker, SearchReplaceDialogState, SearchReplaceUiCommand,
 };
@@ -257,7 +259,7 @@ use crate::visibility::{
     VisiblePlacementPolicy, apply_visibility, apply_visibility_with_focus_intent,
 };
 use action_sheet::ActionSheetState;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Timelike};
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
@@ -743,6 +745,7 @@ pub enum Panel {
     ZipExtractorDialog,
     RegexTesterDialog,
     CalculationPadDialog,
+    DateTimeStudioDialog,
     BatchRenameDialog,
     SearchReplaceDialog,
     XmlToolkitDialog,
@@ -809,6 +812,7 @@ impl Panel {
             Self::ZipExtractorDialog => "ZIP Extractor",
             Self::RegexTesterDialog => "Regex Tester",
             Self::CalculationPadDialog => "Calculation Pad",
+            Self::DateTimeStudioDialog => "Date & Time Studio",
             Self::BatchRenameDialog => "Batch Renamer",
             Self::SearchReplaceDialog => "Search and Replace",
             Self::XmlToolkitDialog => "XML Toolkit",
@@ -876,6 +880,7 @@ struct PanelStates {
     zip_extractor_dialog: bool,
     regex_tester_dialog: bool,
     calculation_pad_dialog: bool,
+    date_time_studio_dialog: bool,
     batch_rename_dialog: bool,
     search_replace_dialog: bool,
     xml_toolkit_dialog: bool,
@@ -1246,6 +1251,7 @@ pub struct LauncherApp {
     pub(crate) archive_session: crate::archive::ArchiveSession,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
+    pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
@@ -3832,6 +3838,7 @@ impl LauncherApp {
             archive_session,
             regex_tester_dialog,
             calculation_pad_dialog,
+            date_time_studio_dialog: DateTimeStudioDialog::default(),
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
                 settings.table_utility_resources.to_policy(),
@@ -4544,7 +4551,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 61] = [
+    const TRACKED_PANELS: [Panel; 62] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4583,6 +4590,7 @@ impl LauncherApp {
         Panel::ZipExtractorDialog,
         Panel::RegexTesterDialog,
         Panel::CalculationPadDialog,
+        Panel::DateTimeStudioDialog,
         Panel::BatchRenameDialog,
         Panel::SearchReplaceDialog,
         Panel::XmlToolkitDialog,
@@ -4648,6 +4656,7 @@ impl LauncherApp {
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
+            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
@@ -4921,6 +4930,10 @@ impl LauncherApp {
                 if self.calculation_pad_dialog.open {
                     self.panel_stack.push(panel);
                 }
+            }
+            Panel::DateTimeStudioDialog => {
+                self.date_time_studio_dialog.request_close();
+                self.panel_states.date_time_studio_dialog = self.date_time_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
@@ -5209,6 +5222,10 @@ impl LauncherApp {
                 self.calculation_pad_dialog.request_close();
                 self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
             }
+            Panel::DateTimeStudioDialog => {
+                self.date_time_studio_dialog.request_close();
+                self.panel_states.date_time_studio_dialog = self.date_time_studio_dialog.open;
+            }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
                 self.panel_states.xml_toolkit_dialog = false;
@@ -5373,6 +5390,7 @@ impl LauncherApp {
                 }
             }
             Panel::CalculationPadDialog => self.calculation_pad_dialog.ensure_open(),
+            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.ensure_open(),
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
@@ -5415,6 +5433,8 @@ impl LauncherApp {
         self.panel_stack.push(panel);
         if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.open();
+        } else if panel == Panel::DateTimeStudioDialog {
+            self.date_time_studio_dialog.open();
         } else if panel == Panel::ConvertPanel {
             self.convert_panel.open();
         } else {
@@ -5532,6 +5552,7 @@ impl LauncherApp {
         check!(zip_extractor_dialog, Panel::ZipExtractorDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(calculation_pad_dialog, Panel::CalculationPadDialog);
+        check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(search_replace_dialog, Panel::SearchReplaceDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
@@ -5769,6 +5790,29 @@ impl LauncherApp {
             self.calendar_event_editor.open_new(date);
         }
         self.calendar_editor_open = true;
+    }
+
+    pub(crate) fn prepare_calendar_event_at(
+        &mut self,
+        instant_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<String, String> {
+        if self.calendar_editor_open {
+            return Err("The Calendar Event editor is already open.".into());
+        }
+        let local = date_time_studio_dialog::machine_local_datetime(instant_utc)?;
+        if local.time().second() != 0 || local.time().nanosecond() != 0 {
+            return Err(
+                "Calendar Event times must be aligned to whole minutes; the preview was not changed."
+                    .into(),
+            );
+        }
+        self.calendar_event_editor.open_new_at(local)?;
+        self.calendar_selected_date = Some(local.date());
+        self.focus_panel(Panel::CalendarEventEditor);
+        Ok(format!(
+            "Prepared an unsaved Calendar Event for {} in this computer's local time.",
+            local.format("%Y-%m-%d %H:%M")
+        ))
     }
 
     /// Filter the note list to only show notes containing the given tag.
@@ -6219,6 +6263,7 @@ mod tests {
             (Panel::DataRecoveryDialog, "Data & Recovery"),
             (Panel::CpuListDialog, "CPU Usage"),
             (Panel::CalculationPadDialog, "Calculation Pad"),
+            (Panel::DateTimeStudioDialog, "Date & Time Studio"),
         ] {
             assert_eq!(panel.display_label(), expected);
         }
@@ -7984,6 +8029,104 @@ mod tests {
             app.panel_stack
                 .iter()
                 .filter(|panel| **panel == Panel::CalculationPadDialog)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn date_time_studio_typed_opener_preserves_reference_and_focuses_existing_panel() {
+        use crate::commands::DialogCommandHost;
+
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new_isolated_for_test_at(
+            &ctx,
+            directory.path(),
+            settings,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+        );
+        app.mark_visible_root_for_test();
+        app.focus_query = false;
+        let reference = chrono::NaiveDate::from_ymd_opt(2026, 10, 25)
+            .unwrap()
+            .and_hms_opt(9, 15, 0)
+            .unwrap();
+
+        DialogCommandHost::open_date_time_studio_dialog(&mut app);
+        app.date_time_studio_dialog
+            .test_set_anchor_and_reference("now".into(), reference);
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.date_time_studio_dialog.test_was_rendered());
+        assert!(
+            app.date_time_studio_dialog
+                .test_primary_input_has_focus(&ctx)
+        );
+
+        let other_focus = egui::Id::new("date-time-studio-other-focus");
+        ctx.memory_mut(|memory| memory.request_focus(other_focus));
+        app.ensure_open(Panel::DateTimeStudioDialog);
+        assert!(!app.date_time_studio_dialog.test_focus_pending());
+        app.focus_panel(Panel::DateTimeStudioDialog);
+        assert!(app.date_time_studio_dialog.test_focus_pending());
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::DateTimeStudioDialog)
+                .count(),
+            1
+        );
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(
+            app.date_time_studio_dialog
+                .test_primary_input_has_focus(&ctx)
+        );
+        assert_eq!(
+            app.date_time_studio_dialog.test_anchor_and_reference(),
+            ("now", Some(reference))
+        );
+
+        assert!(app.close_front_dialog());
+        assert!(!app.is_panel_open(Panel::DateTimeStudioDialog));
+        app.focus_panel(Panel::DateTimeStudioDialog);
+        assert!(app.date_time_studio_dialog.open);
+        assert_eq!(
+            app.date_time_studio_dialog.test_anchor_and_reference(),
+            ("now", Some(reference))
+        );
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::DateTimeStudioDialog)
                 .count(),
             1
         );
