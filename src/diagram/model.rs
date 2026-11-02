@@ -1,6 +1,7 @@
 //! Canonical bounded flowchart graph data.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Error as _, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -41,7 +42,7 @@ pub enum NodeShape {
 }
 
 /// Stable Mermaid node identifier.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct NodeId(String);
 
@@ -57,6 +58,16 @@ impl NodeId {
     }
 }
 
+impl<'de> Deserialize<'de> for NodeId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = deserialize_bounded_string::<D, MAX_NODE_ID_BYTES>(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
+
 impl fmt::Display for NodeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -64,7 +75,7 @@ impl fmt::Display for NodeId {
 }
 
 /// Stable explicit ID for a flat subgraph.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct GroupId(String);
 
@@ -77,6 +88,16 @@ impl GroupId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for GroupId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = deserialize_bounded_string::<D, MAX_GROUP_ID_BYTES>(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
     }
 }
 
@@ -116,6 +137,7 @@ impl Position {
 #[serde(deny_unknown_fields)]
 pub struct DiagramGroup {
     pub id: GroupId,
+    #[serde(deserialize_with = "deserialize_bounded_label")]
     pub label: String,
 }
 
@@ -123,6 +145,7 @@ pub struct DiagramGroup {
 #[serde(deny_unknown_fields)]
 pub struct DiagramNode {
     pub id: NodeId,
+    #[serde(deserialize_with = "deserialize_bounded_label")]
     pub label: String,
     pub shape: NodeShape,
     pub position: Position,
@@ -135,6 +158,7 @@ pub struct DiagramEdge {
     pub id: EdgeId,
     pub from: NodeId,
     pub to: NodeId,
+    #[serde(deserialize_with = "deserialize_optional_bounded_label")]
     pub label: Option<String>,
 }
 
@@ -143,11 +167,176 @@ pub struct DiagramEdge {
 #[serde(deny_unknown_fields)]
 pub struct DiagramDocument {
     pub direction: FlowDirection,
+    #[serde(deserialize_with = "deserialize_nodes")]
     pub nodes: Vec<DiagramNode>,
+    #[serde(deserialize_with = "deserialize_edges")]
     pub edges: Vec<DiagramEdge>,
+    #[serde(deserialize_with = "deserialize_groups")]
     pub groups: Vec<DiagramGroup>,
     /// The next edge ID to allocate. Deleting an edge never lowers this value.
     pub next_edge_id: u64,
+}
+
+fn deserialize_bounded_string<'de, D, const MAX_BYTES: usize>(
+    deserializer: D,
+) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BoundedStringVisitor<const MAX_BYTES: usize>;
+
+    impl<'de, const MAX_BYTES: usize> Visitor<'de> for BoundedStringVisitor<MAX_BYTES> {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "a UTF-8 string of at most {MAX_BYTES} bytes")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value.len() > MAX_BYTES {
+                return Err(E::custom(format!(
+                    "string exceeds the {MAX_BYTES}-byte limit"
+                )));
+            }
+            Ok(value.to_owned())
+        }
+
+        fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(value)
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value.len() > MAX_BYTES {
+                return Err(E::custom(format!(
+                    "string exceeds the {MAX_BYTES}-byte limit"
+                )));
+            }
+            Ok(value)
+        }
+    }
+
+    deserializer.deserialize_str(BoundedStringVisitor::<MAX_BYTES>)
+}
+
+fn deserialize_bounded_label<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_string::<D, MAX_LABEL_BYTES>(deserializer)
+}
+
+fn deserialize_optional_bounded_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct OptionalLabelVisitor;
+
+    impl<'de> Visitor<'de> for OptionalLabelVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an optional bounded UTF-8 label")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserialize_bounded_label(deserializer).map(Some)
+        }
+    }
+
+    deserializer.deserialize_option(OptionalLabelVisitor)
+}
+
+fn deserialize_bounded_vec<'de, D, T, const MAX_ITEMS: usize>(
+    deserializer: D,
+) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct BoundedVecVisitor<T, const MAX_ITEMS: usize>(std::marker::PhantomData<T>);
+
+    impl<'de, T, const MAX_ITEMS: usize> Visitor<'de> for BoundedVecVisitor<T, MAX_ITEMS>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "a sequence with at most {MAX_ITEMS} items")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let size_hint = sequence.size_hint();
+            if size_hint.is_some_and(|size| size > MAX_ITEMS) {
+                return Err(A::Error::custom(format!(
+                    "sequence exceeds the {MAX_ITEMS}-item limit"
+                )));
+            }
+            let capacity = size_hint.unwrap_or(0).min(MAX_ITEMS);
+            let mut values = Vec::with_capacity(capacity);
+            while let Some(value) = sequence.next_element()? {
+                if values.len() == MAX_ITEMS {
+                    return Err(A::Error::custom(format!(
+                        "sequence exceeds the {MAX_ITEMS}-item limit"
+                    )));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedVecVisitor::<T, MAX_ITEMS>(std::marker::PhantomData))
+}
+
+fn deserialize_nodes<'de, D>(deserializer: D) -> Result<Vec<DiagramNode>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, DiagramNode, MAX_DIAGRAM_NODES>(deserializer)
+}
+
+fn deserialize_edges<'de, D>(deserializer: D) -> Result<Vec<DiagramEdge>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, DiagramEdge, MAX_DIAGRAM_EDGES>(deserializer)
+}
+
+fn deserialize_groups<'de, D>(deserializer: D) -> Result<Vec<DiagramGroup>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, DiagramGroup, MAX_DIAGRAM_GROUPS>(deserializer)
 }
 
 impl Default for DiagramDocument {
