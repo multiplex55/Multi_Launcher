@@ -18,8 +18,8 @@ Binding scope: [Goal](../CODEX_GOAL_VISUAL_PRODUCTIVITY_STUDIOS.md) and [Kicksta
 | --- | --- | --- |
 | C01 Quick Tools | COMPLETE | Typed settings, responsive contained grid, focused tests and later source-bound native evidence accepted; historical handoff unchanged |
 | C02 Calculation Pad / Converter | COMPLETE | All checkpoints, scoped checks and native workflows accepted; final tip833fd58e pushed |
-| C03 Date & Time | COMPLETE | Domain, Studio UI, focused checks and source-bound native acceptance complete; M3-B final commit follows |
-| C04 Diagram / Mermaid | pending | All checkpoints pending |
+| C03 Date & Time | COMPLETE | Domain, Studio UI, focused checks and native acceptance complete; final tip 8e0c0c5d pushed |
+| C04 Diagram / Mermaid | in_progress | M0-A bootstrap; M4-A / M4-B / M4-C pending |
 | C05 Regex | pending | All checkpoints pending |
 | C06 Markdown / Notes | pending | All checkpoints pending; Mermaid depends on accepted C04 |
 
@@ -291,3 +291,15 @@ All 12 final receipt statuses, PNG hashes, PID, executable SHA, fixture and unch
 The final diff was inspected: one Studio dialog uses the accepted pure domain APIs, with an exact typed opener, Panel lifecycle, and guarded clipboard/handoff effects. Legacy date paths remain; there is no duplicate arithmetic or alternate Studio route. Timer/alarm behavior is unchanged. The calendar change only factors existing new-form reset and adds minute-safe unsaved prefill. No debug placeholders/logging remain. All 39 scoped M3-B behaviors have passing evidence across recorded batches, not one aggregate run: initial 37, the added notice/normal-layout regression, and the extended existing Panel label/serde test. That exact label/serde case passed 1/1 in 0.032 seconds (1.00-second Cargo preparation, unchanged source). M3-A's 43/43 acceptance is separate. No full suite or per-milestone Clippy was run; program lint remains end-only.
 
 C03 acceptance is COMPLETE. M3-B commit/push and actual `final_tip_sha` are recorded after commit and at C04/M0-A before any C04 source/build/test. The next category must branch directly from that exact committed tip in this single checkout.
+
+## C03 final handoff / C04 M0-A bootstrap
+
+C03's actual `final_tip_sha` is `8e0c0c5d967c810b89043fc13f0f53887b2d6ab1`, the accepted M3-B commit, pushed successfully. On `feat/visual-studios-03-date-time-studio`, baseline `4765211293c087619734db0d66ff2059e1f0459b` directly descends from C02 final tip `833fd58e891099975844e4b799a04e22c64ef00a`. M3-A is `100fa07b70e12f9d5c63324417c0401492732167`; M3-B is the final tip above. Initial and both checkpoint pushes succeeded. Local/upstream matched and the tree/index were clean before transition. All owned jobs were retired. External handoff receipt: `target/visual-studios/c03-final-result.json`.
+
+Before C04 application work, re-read the full root AGENTS, Goal and Kickstart plus the final execution record. The first combined output truncated part of the Goal/Kickstart, so the missing documents were read separately in full. Read-only Git checks confirmed exact predecessor local/upstream identity, intended origin, no dirty/untracked files or active merge/rebase, and an unused branch name locally and on origin. Only the root AGENTS applies. No C04 source, build, test or implementation checkpoint preceded this bootstrap.
+
+- `parent_branch`: `feat/visual-studios-03-date-time-studio`.
+- `parent_tip_sha`: `8e0c0c5d967c810b89043fc13f0f53887b2d6ab1`.
+- Category branch: `feat/visual-studios-04-diagram-mermaid`, created directly from that exact SHA; initial HEAD verified equal.
+- This ledger-only C04/M0-A baseline is a distinct new commit. Its actual SHA, verified direct parent and single initial push result are recorded immediately after commit, before application work.
+- Same existing checkout, with no worktree, clone, agent branch, intermediate merge, rebase, cherry-pick, dirty carry or competing source writer. M4-A / M4-B / M4-C remain pending.
