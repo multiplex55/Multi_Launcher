@@ -1,14 +1,20 @@
-//! Pure graph model, Mermaid synchronization, bounded scene geometry, and session codec.
+//! Bounded Diagram Studio model, native document state, and scene geometry.
 
 mod codec;
+mod document;
 mod mermaid;
 mod model;
+mod persistence;
 mod scene;
 mod session;
 
 pub use codec::{
     DIAGRAM_SESSION_FORMAT_VERSION, DiagramCodecError, MAX_DIAGRAM_SESSION_BYTES, decode_session,
     encode_session,
+};
+pub use document::{
+    DiagramDocumentController, DiagramDocumentError, PendingDiagramTransition, TransitionDecision,
+    TransitionOutcome,
 };
 
 pub use mermaid::{
@@ -21,6 +27,7 @@ pub use model::{
     MAX_GROUP_ID_BYTES, MAX_LABEL_BYTES, MAX_NODE_ID_BYTES, MAX_POSITION_ABS, NodeId, NodeShape,
     Position,
 };
+pub use persistence::{DiagramPersistenceError, DiskConflictKind, MAX_DIAGRAM_DOCUMENT_BYTES};
 pub use scene::{
     ArrowHead, CubicBezier, DiagramScene, MAX_SCENE_COORDINATE_ABS, PreparedText, PreparedTextLine,
     SceneEdge, SceneError, SceneGroup, SceneMetrics, SceneNode, ScenePoint, SceneRect,
