@@ -18,7 +18,7 @@ Binding scope: [Goal](../CODEX_GOAL_VISUAL_PRODUCTIVITY_STUDIOS.md) and [Kicksta
 | --- | --- | --- |
 | C01 Quick Tools | COMPLETE | Typed settings, responsive contained grid, focused tests and later source-bound native evidence accepted; historical handoff unchanged |
 | C02 Calculation Pad / Converter | COMPLETE | All checkpoints, scoped checks and native workflows accepted; final tip833fd58e pushed |
-| C03 Date & Time | in_progress | M0-A bootstrap; M3-A domain and M3-B UI pending |
+| C03 Date & Time | in_progress | M0-A and M3-A domain complete; M3-B UI pending |
 | C04 Diagram / Mermaid | pending | All checkpoints pending |
 | C05 Regex | pending | All checkpoints pending |
 | C06 Markdown / Notes | pending | All checkpoints pending; Mermaid depends on accepted C04 |
@@ -211,3 +211,31 @@ C03 authority re-read: AGENTS, full Goal and Kickstart, current ledger/acceptanc
 - Category branch: `feat/visual-studios-03-date-time-studio`, created directly at the exact parent SHA; initial HEAD verified equal.
 - This ledger-only C03/M0-A baseline is a distinct new commit; its direct-parent proof, SHA and single initial push result are recorded immediately after commit and in the next checkpoint entry.
 - Same existing checkout; no worktree, clone, side agent branch, merge, rebase, cherry-pick, dirty carry or competing source writer. C03 source planning begins only after the baseline/push step.
+
+C03/M0-A baseline `4765211293c087619734db0d66ff2059e1f0459b` has direct parent `833fd58e891099975844e4b799a04e22c64ef00a`; proof verified. Single initial `git push -u origin HEAD` succeeded and established upstream. Clean before read-only planner assignment. Receipt `target/visual-studios/c03-baseline-result.json`. M3-A and M3-B implementation remain pending; no category-specific compile/test/native work yet.
+
+## C03 bounded implementation plan
+
+**M3-A in progress:** Extend the existing pure/injected `date_arithmetic` owner with narrow typed offset requests over its existing checked arithmetic, signed Between/calendar-span semantics, offline named-zone resolution/comparison, and bounded Daily/Weekly previews that retain each fold/gap. Child domain modules/docs are appropriate; no GUI, routes, clocks, scheduling or calendar writes. Legacy grammar/output and timer/alarm behavior remain unchanged. Sole implementer owns date domain and the dependency declaration; parent owns lock/fetch, verification and Git.
+
+Named-zone dependency admission: no suitable named rules database was present. Parent ran `cargo info chrono-tz@0.10.4 --verbose` successfully and inspected the fetched exact release manifest/source. License MIT OR Apache-2.0, MSRV1.65, only needed `std` feature; bundled authoritative IANA2025b identity is explicit, not a claim of latest rules. Prebuilt pure data avoids Windows system-zone assumptions and runtime network. Cache/source and metadata recorded in `target/visual-studios/c03-timezone-dependency-{info.log,admission.json}`. Transitive fetch/lock remains pending until source release; no repository dependency edit was made by the metadata command.
+
+M3-A acceptance: typed calls and legacy expressions share arithmetic; month-end/leap/overflow/kind/fractional semantics protected; same resolved UTC instant across zones; explicit chronological fold choices and rejected gap source; preview count/horizon/search bounds checked before allocation; deterministic injected reference; no effects. Focused actual targets `--lib --test plugin_queries`, filter `test(date_arithmetic::) | test(date_arithmetic_plugin::)`, fast-dev and existing100s/test configuration. Compile preparation and execution reported separately. No native gate for this pure checkpoint.
+
+**M3-B pending, depends on accepted M3-A:** Ordinary resizable four-mode Studio and exact `date studio` opener before free-form parsing, typed host/Panel lifecycle, source-preserving drafts/errors, frozen reference, explicit Copy and optional unsaved calendar prefill. Existing calendar month-grid and H/M presentation patterns may be reused without global calendar-selection ownership; no extra picker dependency or timer recovery. Reject silent overwrite of an open calendar editor; no automatic scheduling. Actual picker/route/focus/responsive/DST tests plus one integrated build and native evidence are required. Implementation packet will be refreshed after M3-A commits.
+
+### C03/M3-A first preparation and review
+
+Source released with typed requests, Between/calendar span, named-zone outcomes and bounded previews. Parent dependency metadata resolution succeeded in2.994s, adding only chrono-tz0.10.4, phf0.12.1 and phf_shared0.12.1 to the lock; no existing package upgrade. Primary fetched manifest/source confirms the admission facts above.
+
+Initial locked/offline fast-dev inventory preparation (`--lib --test plugin_queries`, date-domain/plugin filter) retired exit101 in157.994s; no test inventory/execution accepted. First root E0583: studio declares a nested zones module, but file is a sibling; missing zone types/functions are cascading. Source manifest `B402050B2185CB6E1D258CD150D5E46C4738AADCA4B7C4DA4474FE404FFDF3F9`, HEAD47652112 plus recorded source/manifest/lock hashes. Logs/result `target/visual-studios/c03-m3a-prepare*`.
+
+Independent bounded review also found unchecked `naive_local()` target projection near chrono MIN/MAX can panic and local range failure can be mislabeled as a DST gap; new millisecond/microsecond offsets unnecessarily narrow valid durations by multiplying into i64 nanoseconds. One consolidated source correction assigned after process retirement: fix Rust module hierarchy, checked offset projection/recoverable range outcomes and MIN/MAX tests, natural Chrono duration constructors with valid long-offset/terminal-range tests. Legacy grammar/output and pure ownership stay unchanged. No other substantive finding; no source writes during compilation, broad tests or native work.
+
+### C03/M3-A accepted domain checkpoint
+
+Corrected inventory preparation passed: Cargo4m56s / command298.942s, 42 selected cases before the final leap-second regression. Consolidated review findings were corrected at their owners: sibling module wiring, checked zone projection and explicit range failures, and natural millisecond/microsecond durations without artificial nanosecond narrowing. Follow-up review caught signed-duration projection normalizing leap seconds; final projection uses checked_add_offset and a dedicated leap-second conversion regression. No unresolved review finding remains.
+
+Final locked/offline fast-dev run passed **43/43** across library (33) and plugin_queries (10). Compilation1m54s, Nextest execution0.336s, command117.934s; every test below100s. Source manifest SHA256 `3F4EA80C77D7052B4F467C66A32FF6DE87B3A6373D229B73D6D52AD2A54421CB`; receipts/log `target/visual-studios/c03-m3a-{final-source.json,test-result.json,tests.log}`. Subsequent source change only corrects the parent module Rustdoc to describe its new offline zone operations. Existing unrelated warnings retained. No broad suite, redundant check, Clippy or native claim for this pure checkpoint.
+
+Diff inspected, including new studio/zones files and lock: one arithmetic owner, legacy grammar unchanged, no clock/IO/scheduler effects; only the admitted three new lock packages. Public types document clipped calendar spans, explicit fold/gap outcomes, same-instant conversion and bounded previews. M3-A is COMPLETE; commit/push SHA recorded in the next checkpoint entry. M3-B remains pending and requires real UI/native acceptance. Planner refreshing its bounded handoff read-only before the sole source writer resumes.
