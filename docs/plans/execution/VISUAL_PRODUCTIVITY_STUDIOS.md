@@ -16,9 +16,9 @@ Binding scope: [Goal](../CODEX_GOAL_VISUAL_PRODUCTIVITY_STUDIOS.md) and [Kicksta
 
 | Category | State | Accepted / remaining |
 | --- | --- | --- |
-| C01 Quick Tools | PARTIAL | Source/tests/build and native Tab/Enter verified; remaining native editor/resize/auto-submit/Jump/images pending |
-| C02 Calculation Pad / Converter | in_progress | M0-A/M2-A complete; Pad UI/persistence and converter pending |
-| C03 Date & Time | pending | All checkpoints pending |
+| C01 Quick Tools | COMPLETE | Typed settings, responsive contained grid, focused tests and later source-bound native evidence accepted; historical handoff unchanged |
+| C02 Calculation Pad / Converter | COMPLETE | All checkpoints, scoped checks and native workflows accepted; final tip833fd58e pushed |
+| C03 Date & Time | in_progress | M0-A bootstrap; M3-A domain and M3-B UI pending |
 | C04 Diagram / Mermaid | pending | All checkpoints pending |
 | C05 Regex | pending | All checkpoints pending |
 | C06 Markdown / Notes | pending | All checkpoints pending; Mermaid depends on accepted C04 |
@@ -199,3 +199,15 @@ Final diff inspected: only Converter panel/preferences, GUI constructor/focus/ef
 - M2-B: Pad-owned document/session/store owns versioned source/IDs, bounded undo and dirty transition state. `common::persistence` supplies atomic JSON IO, **not** guarded compare-and-swap; store must check saved byte baseline/deletion/occupied Save As, publish memory only after successful durable write, and not claim race-free external CAS. Bounded app-owned document chooser is sufficient. New normal `gui/calculation_pad_dialog.rs` projects current engine/results with explicit Copy, New/Open/Save/Save As, Save/Discard/Cancel across all close paths. Exact `calc pad` → `calc:pad` → typed `DialogCommand::CalculationPad` through `commands/{model,parser,host}.rs`, `handlers/dialog_crop.rs`, `gui/command_host.rs`; add necessary `Panel`/states/field/init/tracked/open/close/force/ensure/stack wiring in `gui/mod.rs`, rendering adjacent Convert in `gui/render.rs`. Independent native viewport not required. Test schema/conflict/write failure/IDs/undo/transitions plus actual UI/typed routes and legacy calculator parity. No Notes or Converter changes.
 - M2-C: `gui/convert_panel.rs` owns structured result/error/approximation, From/To search/favorites, Swap, capped multiple-target rows, explicit Copy and bounded smart/fixed/scientific display preferences. Resizable wrapping controls and bounded results. Narrow typed app-owned preference file with explicit Save only, version/limits/error retention; `gui/mod.rs` supplies data root. Reuse catalog symbols/aliases and existing conversion engine. **Negative base compatibility:** current signed i64 panel formats negative binary/hex/octal as 64-bit two's complement (existing test); retain narrow negative adapter, use shared unsigned kernel only for nonnegative values within existing magnitude bound. Do not silently change to sign-magnitude or expand range. Retain existing seven panel category/filter/parity/base tests and add swap/multiple/error/precision/preferences/actual constrained controls/copy coverage. No CLI behavior or generic settings/size framework change.
 - Both GUI checkpoints require focused Nextest + one app build and real native evidence; current observation blocker must remain explicit if unchanged. New app fixtures disable Paste next/cancel before construction. See Goal F/H for full acceptance; no native pass is inferred from headless tests.
+
+## C02 final handoff / C03 M0-A bootstrap
+
+C02 `final_tip_sha` is `833fd58e891099975844e4b799a04e22c64ef00a`, the accepted M2-C commit, pushed successfully. Parent branch was `feat/visual-studios-01-quick-tools`, parent tip `54160cf65f137943240d03e43b688fdb74d1ed00`; C02 baseline `a43e652083ec2222b0b595ed758b74583919bd17` has that exact direct parent. Checkpoints on `feat/visual-studios-02-calculation-pad`: M2-A `19084a29c4cf21332a4aa224266967c919e21e47`, M2-B store `eb6485d6b5a55032e3e3a4f2dbb513b2f945d3aa`, GUI `8037ad082ba49b7ce46705f37784f92ee129ebc5`, native close correction `16cd041aa48116d55a4248a8b872047b2dee99b8`, and M2-C final tip above. Initial and every checkpoint push succeeded. Local/upstream matched and tree/index were clean before transition; all owned jobs retired. External final receipt: `target/visual-studios/c02-final-result.json`.
+
+C03 authority re-read: AGENTS, full Goal and Kickstart, current ledger/acceptance index and C02 final receipt. Read-only Git checks confirmed intended origin, exact predecessor local/upstream identity, no dirty/untracked files or active merge/rewrite operation, and unused C03 branch name. No C03 application code, build or tests yet.
+
+- `parent_branch`: `feat/visual-studios-02-calculation-pad`.
+- `parent_tip_sha`: `833fd58e891099975844e4b799a04e22c64ef00a`.
+- Category branch: `feat/visual-studios-03-date-time-studio`, created directly at the exact parent SHA; initial HEAD verified equal.
+- This ledger-only C03/M0-A baseline is a distinct new commit; its direct-parent proof, SHA and single initial push result are recorded immediately after commit and in the next checkpoint entry.
+- Same existing checkout; no worktree, clone, side agent branch, merge, rebase, cherry-pick, dirty carry or competing source writer. C03 source planning begins only after the baseline/push step.
