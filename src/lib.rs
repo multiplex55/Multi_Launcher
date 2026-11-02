@@ -26,6 +26,7 @@ pub mod batch_rename;
 pub(crate) mod batch_rename_transaction;
 pub mod brightness_service;
 
+pub mod calculation_pad;
 pub mod clipboard_modify;
 pub mod color;
 pub mod color_pick;
