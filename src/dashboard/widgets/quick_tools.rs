@@ -15,6 +15,7 @@ const DEFAULT_PREFERRED_COLUMNS: usize = 3;
 const MIN_VISIBLE_ROWS: usize = 1;
 const MAX_VISIBLE_ROWS: usize = 12;
 const DEFAULT_VISIBLE_ROWS: usize = 2;
+const MIN_QUICK_TOOL_CELL_WIDTH: f32 = 96.0;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct QuickToolEntry {
@@ -161,6 +162,68 @@ fn apply_row_action(cfg: &mut QuickToolsConfig, action: QuickToolRowAction) -> b
         }
         _ => false,
     }
+}
+
+fn effective_columns(preferred: usize, available_width: f32, spacing: f32) -> usize {
+    let columns_that_fit = ((available_width + spacing) / (MIN_QUICK_TOOL_CELL_WIDTH + spacing))
+        .floor()
+        .max(1.0) as usize;
+    preferred
+        .clamp(MIN_PREFERRED_COLUMNS, MAX_PREFERRED_COLUMNS)
+        .min(columns_that_fit)
+}
+
+fn render_action_button(
+    row_ui: &mut egui::Ui,
+    row_id: egui::Id,
+    ctx: &DashboardContext<'_>,
+    entry: &QuickToolEntry,
+    action: WidgetAction,
+    duplicate_occurrence: usize,
+    visual_order: u64,
+    button_size: egui::Vec2,
+) -> Option<WidgetAction> {
+    let source_query = action.query_override.as_deref();
+    let execution_query = Some(action.action.label.as_str());
+    let full_label = if entry.auto_submit {
+        format!("{} ↵\nAuto submit enabled", action.action.label)
+    } else {
+        action.action.label.clone()
+    };
+    let button = egui::Button::new(action.action.label.clone()).truncate();
+    let button = if entry.auto_submit {
+        button.right_text("↵")
+    } else {
+        button
+    };
+    let response = row_ui
+        .scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
+            ui.add_sized(button_size, button)
+        })
+        .inner
+        .on_hover_text(full_label);
+    if response.gained_focus() {
+        response.scroll_to_me(Some(egui::Align::Center));
+    }
+
+    let activated = jump_response_clicked(
+        row_ui,
+        ctx,
+        &response,
+        || {
+            let identity = jump_action_identity(
+                &action.action,
+                source_query,
+                execution_query,
+                None,
+                duplicate_occurrence,
+            );
+            format!("{}/run", opaque_dashboard_action_identity(&identity))
+        },
+        || "Quick tool".to_owned(),
+        visual_order,
+    );
+    activated.then_some(action)
 }
 
 pub struct QuickToolsWidget {
@@ -358,63 +421,132 @@ impl Widget for QuickToolsWidget {
             return None;
         }
 
+        let content_rect = ui.clip_rect().intersect(ui.available_rect_before_wrap());
+        let available_width = content_rect.width().max(0.0);
+        let available_height = content_rect.height().max(0.0);
+        if available_width <= f32::EPSILON || available_height <= f32::EPSILON {
+            return None;
+        }
+
+        let spacing = ui.spacing();
+        let row_height = (ui.text_style_height(&egui::TextStyle::Button)
+            + spacing.button_padding.y * 2.0)
+            .max(spacing.interact_size.y);
+        let item_spacing_x = spacing.item_spacing.x;
+        let item_spacing_y = spacing.item_spacing.y;
+        let visible_rows = self
+            .cfg
+            .visible_rows
+            .clamp(MIN_VISIBLE_ROWS, MAX_VISIBLE_ROWS);
+        let preferred_height = row_height * visible_rows as f32
+            + item_spacing_y * visible_rows.saturating_sub(1) as f32;
+        let scroll_height = available_height.min(preferred_height);
+
+        let valid_actions = self
+            .cfg
+            .queries
+            .iter()
+            .filter(|entry| !entry.query.trim().is_empty())
+            .count();
+        if valid_actions == 0 {
+            ui.label("Add tools in the widget settings.");
+            return None;
+        }
+
         let mut clicked = None;
-        let mut duplicate_occurrences = HashMap::new();
-        let mut visual_order = 0_u64;
-        ui.horizontal_wrapped(|ui| {
-            for entry in &self.cfg.queries {
-                let Some(action) = Self::action_for(entry) else {
-                    continue;
-                };
-                let source_query = action.query_override.as_deref();
-                let execution_query = Some(action.action.label.as_str());
-                let identity =
-                    jump_action_identity(&action.action, source_query, execution_query, None, 0);
-                let duplicate_occurrence =
-                    next_jump_duplicate_occurrence(&mut duplicate_occurrences, identity);
-                let row_id = dashboard_action_row_egui_id(
-                    ui,
-                    &action.action,
-                    source_query,
-                    execution_query,
-                    None,
-                    duplicate_occurrence,
-                );
-                let label = if entry.auto_submit {
-                    format!("{} ↵", action.action.label)
-                } else {
-                    action.action.label.clone()
-                };
-                let response = ui
-                    .scope_builder(egui::UiBuilder::new().id(row_id), |ui| ui.button(label))
-                    .inner;
-                let response = if entry.auto_submit {
-                    response.on_hover_text("Auto submit enabled")
-                } else {
-                    response
-                };
-                if jump_response_clicked(
-                    ui,
-                    ctx,
-                    &response,
-                    || {
-                        let identity = jump_action_identity(
-                            &action.action,
-                            source_query,
-                            execution_query,
-                            None,
-                            duplicate_occurrence,
-                        );
-                        format!("{}/run", opaque_dashboard_action_identity(&identity))
-                    },
-                    || "Quick tool".to_owned(),
-                    visual_order,
-                ) {
-                    clicked = Some(action);
+        egui::ScrollArea::vertical()
+            .id_salt(ui.id().with("quick-tools-actions-scroll"))
+            .max_width(available_width)
+            .max_height(scroll_height)
+            .min_scrolled_height(scroll_height.min(row_height))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show_viewport(ui, |scroll_ui, viewport| {
+                let viewport_width = viewport.width().min(available_width).max(0.0);
+                if viewport_width <= f32::EPSILON {
+                    return;
                 }
-                visual_order = visual_order.saturating_add(1);
-            }
-        });
+                let columns =
+                    effective_columns(self.cfg.preferred_columns, viewport_width, item_spacing_x)
+                        .min(valid_actions);
+                let gap_width = item_spacing_x * columns.saturating_sub(1) as f32;
+                let cell_width = ((viewport_width - gap_width) / columns as f32).max(0.0);
+                let button_size = egui::vec2(cell_width, row_height);
+                let mut tools = self
+                    .cfg
+                    .queries
+                    .iter()
+                    .filter_map(|entry| Self::action_for(entry).map(|action| (entry, action)));
+                let mut duplicate_occurrences = HashMap::new();
+                let mut visual_order = 0_u64;
+
+                // Keep the identity parent independent of row/column layout so
+                // resizing does not move Jump focus to a different action.
+                scroll_ui.push_id("quick-tools-action-identities", |identity_ui| {
+                    loop {
+                        let mut row_actions = Vec::with_capacity(columns);
+                        for _ in 0..columns {
+                            let Some((entry, action)) = tools.next() else {
+                                break;
+                            };
+                            let source_query = action.query_override.as_deref();
+                            let execution_query = Some(action.action.label.as_str());
+                            let base_identity = jump_action_identity(
+                                &action.action,
+                                source_query,
+                                execution_query,
+                                None,
+                                0,
+                            );
+                            let duplicate_occurrence = next_jump_duplicate_occurrence(
+                                &mut duplicate_occurrences,
+                                base_identity,
+                            );
+                            let row_id = dashboard_action_row_egui_id(
+                                identity_ui,
+                                &action.action,
+                                source_query,
+                                execution_query,
+                                None,
+                                duplicate_occurrence,
+                            );
+                            row_actions.push((
+                                entry,
+                                action,
+                                row_id,
+                                duplicate_occurrence,
+                                visual_order,
+                            ));
+                            visual_order = visual_order.saturating_add(1);
+                        }
+                        if row_actions.is_empty() {
+                            break;
+                        }
+                        identity_ui.horizontal(|row_ui| {
+                            row_ui.spacing_mut().item_spacing.x = 0.0;
+                            for (column, (entry, action, row_id, duplicate, order)) in
+                                row_actions.into_iter().enumerate()
+                            {
+                                if column > 0 {
+                                    row_ui.add_space(item_spacing_x);
+                                }
+                                let activated = render_action_button(
+                                    row_ui,
+                                    row_id,
+                                    ctx,
+                                    entry,
+                                    action,
+                                    duplicate,
+                                    order,
+                                    button_size,
+                                );
+                                if activated.is_some() {
+                                    clicked = activated;
+                                }
+                            }
+                        });
+                    }
+                });
+            });
         clicked
     }
 
@@ -438,11 +570,12 @@ mod tests {
     use std::collections::HashMap;
 
     fn dashboard_input(events: Vec<egui::Event>) -> egui::RawInput {
+        dashboard_input_with_size(egui::vec2(900.0, 650.0), events)
+    }
+
+    fn dashboard_input_with_size(size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 650.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             focused: true,
             events,
             ..Default::default()
@@ -509,6 +642,16 @@ mod tests {
         }
     }
 
+    fn tab_event() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: Some(egui::Key::Tab),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
     fn target_id(
         scope: &crate::gui::JumpModeScope,
         entry: &QuickToolEntry,
@@ -539,6 +682,30 @@ mod tests {
                 .inner
         })
         .inner
+    }
+
+    fn render_responsive_frame(
+        egui_ctx: &egui::Context,
+        jump: &mut JumpModeUi,
+        widget: &mut QuickToolsWidget,
+        plugins: &crate::plugin::PluginManager,
+        data_cache: &DashboardDataCache,
+        size: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> (Option<WidgetAction>, crate::gui::JumpModeScope) {
+        jump.begin_frame();
+        jump.begin_ui_pass();
+        let scope = body_scope(jump, "responsive");
+        let context = dashboard_context(plugins, data_cache, scope.clone(), true);
+        let mut activated = None;
+        egui_ctx
+            .run_ui(dashboard_input_with_size(size, events), |ui| {
+                activated = render_in_slot(ui, widget, &context, "responsive");
+            })
+            .drop_without_applying_deltas();
+        jump.finish_ui_pass();
+        jump.complete_frame(egui_ctx, true, true);
+        (activated, scope)
     }
 
     fn config_with_abc() -> QuickToolsConfig {
@@ -920,9 +1087,14 @@ mod tests {
 
         egui_ctx
             .run_ui(dashboard_input(Vec::new()), |ui| {
-                ui.horizontal(|ui| {
+                let first_rect =
+                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(340.0, 120.0));
+                let second_rect =
+                    egui::Rect::from_min_size(egui::pos2(360.0, 0.0), egui::vec2(340.0, 120.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(first_rect), |ui| {
                     assert!(render_in_slot(ui, &mut first, &first_context, "first").is_none());
-                    ui.separator();
+                });
+                ui.scope_builder(egui::UiBuilder::new().max_rect(second_rect), |ui| {
                     assert!(render_in_slot(ui, &mut second, &second_context, "second").is_none());
                 });
             })
@@ -970,6 +1142,238 @@ mod tests {
                 if value.contains("dashboard-action:") && !value.contains("same query")
         )));
         jump.complete_frame(&egui_ctx, true, true);
+    }
+
+    #[test]
+    fn responsive_grid_bounds_buttons_and_keeps_duplicate_ids_when_resized_and_scaled() {
+        let entries = vec![
+            QuickToolEntry::manual("sys"),
+            QuickToolEntry::manual("sys"),
+            QuickToolEntry {
+                query: "sys".into(),
+                auto_submit: true,
+            },
+            QuickToolEntry::manual("日本語🌿かなり長いツール名を表示します"),
+            QuickToolEntry::manual("five"),
+            QuickToolEntry::manual("six"),
+            QuickToolEntry::manual("seven"),
+            QuickToolEntry::manual("eight"),
+            QuickToolEntry::manual("last"),
+        ];
+        let mut widget = QuickToolsWidget::new(QuickToolsConfig {
+            queries: entries.clone(),
+            preferred_columns: 3,
+            visible_rows: 2,
+        });
+        let plugins = crate::plugin::PluginManager::new_inert_for_test();
+        let data_cache = DashboardDataCache::new();
+        let egui_ctx = egui::Context::default();
+        let mut jump = JumpModeUi::new(true);
+
+        let (_, scope) = render_responsive_frame(
+            &egui_ctx,
+            &mut jump,
+            &mut widget,
+            &plugins,
+            &data_cache,
+            egui::vec2(540.0, 160.0),
+            Vec::new(),
+        );
+        let first_duplicate = target_id(&scope, &entries[0], 0);
+        let second_duplicate = target_id(&scope, &entries[1], 1);
+        let wide_targets = jump.retained_registry().targets();
+        let wide_first = wide_targets
+            .iter()
+            .find(|target| target.id() == &first_duplicate)
+            .expect("the first duplicate is initially visible");
+        let wide_second = wide_targets
+            .iter()
+            .find(|target| target.id() == &second_duplicate)
+            .expect("the second duplicate is initially visible");
+        let wide_first_response = wide_first.response_id();
+        let wide_second_response = wide_second.response_id();
+        assert_ne!(wide_first_response, wide_second_response);
+        let wide_first_rect = wide_first.rect();
+        let wide_second_rect = wide_second.rect();
+        let wide_third_id = target_id(&scope, &entries[2], 0);
+        let wide_third = wide_targets
+            .iter()
+            .find(|target| target.id() == &wide_third_id)
+            .expect("the third preferred column is used when there is room");
+        assert_eq!(wide_first_rect.center().y, wide_second_rect.center().y);
+        assert_eq!(wide_first_rect.center().y, wide_third.rect().center().y);
+        assert!(wide_first_rect.center().x < wide_second_rect.center().x);
+        assert!(wide_second_rect.center().x < wide_third.rect().center().x);
+
+        let _ = render_responsive_frame(
+            &egui_ctx,
+            &mut jump,
+            &mut widget,
+            &plugins,
+            &data_cache,
+            egui::vec2(250.0, 160.0),
+            Vec::new(),
+        );
+        let small_targets = jump.retained_registry().targets();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(250.0, 160.0));
+        assert!(small_targets.iter().all(|target| {
+            target.rect().min.x >= viewport.min.x
+                && target.rect().max.x <= viewport.max.x
+                && target.clipped_rect().is_positive()
+                && target.clipped_rect().min.x >= viewport.min.x
+                && target.clipped_rect().max.x <= viewport.max.x
+        }));
+        let first_small = small_targets
+            .iter()
+            .find(|target| target.id() == &first_duplicate)
+            .expect("the first duplicate remains visible after resize");
+        let second_small = small_targets
+            .iter()
+            .find(|target| target.id() == &second_duplicate)
+            .expect("the second duplicate remains visible after resize");
+        let third_small = small_targets
+            .iter()
+            .find(|target| target.id() == &wide_third_id)
+            .expect("the third action wraps into the next row at the narrower width");
+        assert_eq!(first_small.response_id(), wide_first_response);
+        assert_eq!(second_small.response_id(), wide_second_response);
+        assert_eq!(
+            first_small.rect().center().y,
+            second_small.rect().center().y
+        );
+        assert!(third_small.rect().center().y > first_small.rect().center().y);
+        assert!(first_small.rect().width() < wide_first_rect.width());
+
+        egui_ctx.set_pixels_per_point(1.5);
+        let theme = egui_ctx.theme();
+        let mut style = egui_ctx.style_of(theme).as_ref().clone();
+        for font in style.text_styles.values_mut() {
+            font.size *= 1.35;
+        }
+        egui_ctx.set_style_of(theme, style);
+        let _ = render_responsive_frame(
+            &egui_ctx,
+            &mut jump,
+            &mut widget,
+            &plugins,
+            &data_cache,
+            egui::vec2(250.0, 160.0),
+            Vec::new(),
+        );
+        let scaled_targets = jump.retained_registry().targets();
+        assert!(scaled_targets.iter().all(|target| {
+            target.rect().min.x >= viewport.min.x
+                && target.rect().max.x <= viewport.max.x
+                && target.clipped_rect().is_positive()
+                && target.clipped_rect().min.x >= viewport.min.x
+                && target.clipped_rect().max.x <= viewport.max.x
+                && target.clipped_rect().min.y >= viewport.min.y
+                && target.clipped_rect().max.y <= viewport.max.y
+        }));
+        assert!(
+            scaled_targets
+                .iter()
+                .any(|target| target.id() == &first_duplicate)
+        );
+    }
+
+    #[test]
+    fn tab_focus_scrolls_offscreen_quick_tool_into_view() {
+        let entries = (1..=7)
+            .map(|number| QuickToolEntry::manual(format!("tool {number}")))
+            .collect::<Vec<_>>();
+        let mut widget = QuickToolsWidget::new(QuickToolsConfig {
+            queries: entries.clone(),
+            preferred_columns: 1,
+            visible_rows: 1,
+        });
+        let plugins = crate::plugin::PluginManager::new_inert_for_test();
+        let data_cache = DashboardDataCache::new();
+        let egui_ctx = egui::Context::default();
+        egui_ctx.global_style_mut(|style| {
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let mut jump = JumpModeUi::new(true);
+        let size = egui::vec2(320.0, 90.0);
+
+        let (_, final_scope) = render_responsive_frame(
+            &egui_ctx,
+            &mut jump,
+            &mut widget,
+            &plugins,
+            &data_cache,
+            size,
+            Vec::new(),
+        );
+        let final_target = target_id(
+            &final_scope,
+            entries.last().expect("the fixture contains a final tool"),
+            0,
+        );
+        assert!(
+            !jump.retained_registry().targets().iter().any(|target| {
+                target.id() == &final_target && target.clipped_rect().is_positive()
+            }),
+            "the final tool starts outside the one-row viewport"
+        );
+
+        let mut final_target_focused_and_visible = false;
+        for _ in 0..entries.len() * 2 {
+            let _ = render_responsive_frame(
+                &egui_ctx,
+                &mut jump,
+                &mut widget,
+                &plugins,
+                &data_cache,
+                size,
+                vec![tab_event()],
+            );
+            let _ = render_responsive_frame(
+                &egui_ctx,
+                &mut jump,
+                &mut widget,
+                &plugins,
+                &data_cache,
+                size,
+                Vec::new(),
+            );
+            let _ = render_responsive_frame(
+                &egui_ctx,
+                &mut jump,
+                &mut widget,
+                &plugins,
+                &data_cache,
+                size,
+                Vec::new(),
+            );
+            final_target_focused_and_visible = jump
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|target| target.id() == &final_target)
+                .is_some_and(|target| {
+                    target.clipped_rect().contains_rect(target.rect())
+                        && egui_ctx.memory(|memory| memory.focused()) == Some(target.response_id())
+                });
+            if final_target_focused_and_visible {
+                break;
+            }
+        }
+        assert!(
+            final_target_focused_and_visible,
+            "Tab reaches the final tool, focuses it, and scrolls it fully into view"
+        );
+        let focused_target = jump
+            .retained_registry()
+            .targets()
+            .into_iter()
+            .find(|target| target.id() == &final_target)
+            .expect("the final tool registers after it scrolls into view");
+        assert_eq!(
+            egui_ctx.memory(|memory| memory.focused()),
+            Some(focused_target.response_id()),
+            "the revealed final tool is the native keyboard focus target"
+        );
     }
 
     #[test]

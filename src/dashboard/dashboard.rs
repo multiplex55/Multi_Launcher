@@ -950,6 +950,15 @@ mod tests {
             events: Vec<egui::Event>,
             activation: WidgetActivation,
         ) -> Option<WidgetAction> {
+            self.frame_with_scope(screen_size, events, activation).0
+        }
+
+        fn frame_with_scope(
+            &mut self,
+            screen_size: egui::Vec2,
+            events: Vec<egui::Event>,
+            activation: WidgetActivation,
+        ) -> (Option<WidgetAction>, Option<crate::gui::JumpModeScope>) {
             use crate::gui::jump_mode::ui::{
                 NavigationOwner, NavigationWindows, resolve_layer_navigation_owner,
             };
@@ -965,6 +974,7 @@ mod tests {
                 ..Default::default()
             };
             let mut activated = None;
+            let mut frame_jump_scope = None;
             self.egui_ctx
                 .run_ui(input, |root| {
                     let ctx = root.ctx().clone();
@@ -985,10 +995,11 @@ mod tests {
                     dashboard_ctx.dashboard_visible = true;
                     dashboard_ctx.dashboard_focused = root_targets_allowed;
                     dashboard_ctx.jump_mode_activation_allowed = first_ui_pass;
-                    dashboard_ctx.jump_mode_scope =
-                        (self.jump.is_enabled() && root_targets_allowed).then(|| {
-                            dashboard_jump_scope(&self.jump, self.dashboard.target_generation())
-                        });
+                    let scope = (self.jump.is_enabled() && root_targets_allowed).then(|| {
+                        dashboard_jump_scope(&self.jump, self.dashboard.target_generation())
+                    });
+                    frame_jump_scope = scope.clone();
+                    dashboard_ctx.jump_mode_scope = scope;
 
                     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size);
                     let pass_activation = root
@@ -1024,7 +1035,7 @@ mod tests {
                 final_root_allowed,
                 true,
             );
-            activated
+            (activated, frame_jump_scope)
         }
     }
 
@@ -1646,6 +1657,146 @@ mod tests {
         let expected_clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
         assert_eq!(record.clip, expected_clip);
         assert!(take_scroll_visibilities().is_empty());
+    }
+
+    #[test]
+    fn quick_tools_clip_slot_keeps_later_actions_scrollable_and_jump_actionable() {
+        use crate::dashboard::config::OverflowMode;
+        use crate::dashboard::widgets::{jump_action_identity, opaque_dashboard_action_identity};
+        use crate::performance::workloads::IsolatedWorkspace;
+
+        let workspace = IsolatedWorkspace::new();
+        let config = DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 1, cols: 1 },
+            slots: vec![SlotConfig {
+                id: Some("quick-tools-clip".to_owned()),
+                widget: "quick_tools".to_owned(),
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                settings: json!({
+                    "queries": [
+                        "sys",
+                        "sys",
+                        { "query": "sys", "auto_submit": true },
+                        "日本語🌿かなり長いツール名を表示します",
+                        "tool five",
+                        "tool six",
+                        "tool seven",
+                        "tool eight",
+                        "tool nine"
+                    ],
+                    "preferred_columns": 3,
+                    "visible_rows": 2
+                }),
+                overflow: OverflowMode::Clip,
+            }],
+        };
+        let dashboard_path = workspace.root().join("dashboard.json");
+        config.save(&dashboard_path).unwrap();
+        let dashboard = Dashboard::new(&dashboard_path, WidgetRegistry::with_defaults(), None);
+        let mut fixture = DashboardCompositionHarness {
+            egui_ctx: egui::Context::default(),
+            dashboard,
+            jump: crate::gui::jump_mode::ui::JumpModeUi::new(true),
+            plugins: PluginManager::new_inert_for_test(),
+            data_cache: DashboardDataCache::new(),
+            actions: Vec::new(),
+            actions_by_id: ActionIdLookup::default(),
+        };
+        let screen_size = egui::vec2(520.0, 220.0);
+        let final_action = Action {
+            label: "tool nine".to_owned(),
+            desc: "Tool".to_owned(),
+            action: "query:tool nine".to_owned(),
+            args: None,
+        };
+        let final_identity =
+            jump_action_identity(&final_action, Some("tool nine"), Some("tool nine"), None, 0);
+        let (_, root_scope) =
+            fixture.frame_with_scope(screen_size, Vec::new(), WidgetActivation::Click);
+        let tools_scope = root_scope
+            .expect("the active dashboard frame captures its Jump scope")
+            .child_namespace("slot-id:quick-tools-clip")
+            .child_namespace("body");
+        let final_target = tools_scope.target_id(format!(
+            "{}/run",
+            opaque_dashboard_action_identity(&final_identity)
+        ));
+
+        let initially_visible = fixture.jump.retained_registry().targets();
+        assert!(
+            !initially_visible
+                .iter()
+                .any(|target| target.id() == &final_target),
+            "the last tool is below the configured two-row viewport"
+        );
+        let first = initially_visible
+            .iter()
+            .filter(|target| target.metadata().label() == "Quick tool")
+            .collect::<Vec<_>>();
+        assert!(
+            first.len() >= 5,
+            "visible tools register usable Jump targets"
+        );
+        assert!(
+            first.iter().all(|target| {
+                target.rect().min.x >= 0.0 && target.rect().max.x <= screen_size.x
+            })
+        );
+
+        let wheel_position = first
+            .first()
+            .expect("the visible tools provide a scroll position")
+            .clipped_rect()
+            .center();
+        fixture.frame(
+            screen_size,
+            vec![
+                egui::Event::PointerMoved(wheel_position),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -600.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            WidgetActivation::Click,
+        );
+        let mut final_tool_rect = None;
+        for _ in 0..3 {
+            fixture.frame(screen_size, Vec::new(), WidgetActivation::Click);
+            let targets = fixture.jump.retained_registry().targets();
+            if let Some(target) = targets
+                .iter()
+                .find(|target| target.id() == &final_target && target.clipped_rect().is_positive())
+            {
+                final_tool_rect = Some((target.rect(), target.clipped_rect()));
+                break;
+            }
+        }
+        let (final_rect, final_clip) =
+            final_tool_rect.expect("scrolling a Clip slot reveals the final Quick Tool");
+        assert!(final_clip.is_positive());
+        assert!(final_rect.min.x >= 0.0 && final_rect.max.x <= screen_size.x);
+
+        assert!(fixture.jump.queue_focus_intent(
+            final_target,
+            egui::ViewportId::ROOT,
+            fixture.jump.navigation_epoch(),
+        ));
+        fixture.frame(screen_size, Vec::new(), WidgetActivation::Click);
+        let activated = fixture
+            .frame(screen_size, vec![enter_event()], WidgetActivation::Click)
+            .expect("Jump focus followed by Enter activates the scrolled tool");
+        assert_eq!(activated.action.action, "query:tool nine");
+        assert_eq!(activated.query_override.as_deref(), Some("tool nine"));
+        assert_eq!(
+            fixture.dashboard.config.slots[0].overflow,
+            OverflowMode::Clip
+        );
     }
 
     #[test]
