@@ -27,3 +27,11 @@ The static HTML exporter uses pulldown-cmark's HTML event writer. Raw HTML event
 The document contains fixed CSS and a restrictive Content Security Policy, and adds no scripts, remote resources, embedded objects, or caller-supplied markup. Only current accepted Diagram SVG is embedded, each as a separate data image so generated SVG IDs cannot collide between fences. Unsupported Mermaid remains escaped source with a diagnostic. Markdown export returns the exact source bytes without newline normalization.
 
 The Diagram source-copy request is an in-memory typed transition to a new untitled document. It uses the Diagram controller's existing dirty Save/Discard/Cancel policy and never writes a temporary file or changes the Markdown source.
+
+## Markdown document state
+
+\`markdown_studio::MarkdownDocument\` owns one exact UTF-8 .md source snapshot, its selected path and SHA-256 disk digest, a content-based saved baseline, a monotonically increasing per-document revision, and a bounded delta undo/redo history. Open preserves a UTF-8 BOM and existing CRLF bytes; no JSON or sidecar format is written. Reads are limited to 1 MiB and reject directories, symlinks, invalid UTF-8, and changed candidates before they can replace the active draft.
+
+Undo keeps at most 64 edits and 2 MiB of changed text. A new edit drops redo history; undoing back to the saved source clears the dirty state. Prepared authoring and table edits from notes_markdown remain bound to their exact source snapshot and return a conflict when stale.
+
+Save As refuses an occupied path and publishes the new path, digest, and saved baseline only after the durable atomic write succeeds. Save checks the exact disk digest first and reports changed/deleted files without changing the draft. Untitled Save returns a typed Save As request, and dirty New/Open/Close transitions retain one pending action with Save/Discard/Cancel. A pending Open keeps its path and rereads it after Save before replacement.
