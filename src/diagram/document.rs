@@ -9,6 +9,7 @@ use super::session::{DiagramSession, DiagramSessionError, GraphOperation};
 use super::templates::{DiagramTemplate, DiagramTemplateError};
 use crate::common::atomic_file::save_atomic;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingDiagramTransition {
@@ -25,7 +26,28 @@ pub enum PendingDiagramTransition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagramSourceCopy {
     source: String,
+    origin: Option<DiagramSourceCopyOrigin>,
 }
+
+/// Runtime-only identity for a source copied from another editor. It is an
+/// allocation identity, not source text or a revision number, and is never
+/// serialized with a native Diagram document.
+#[derive(Clone, Debug)]
+pub struct DiagramSourceCopyOrigin(Arc<u8>);
+
+impl DiagramSourceCopyOrigin {
+    pub fn fresh() -> Self {
+        Self(Arc::new(0))
+    }
+}
+
+impl PartialEq for DiagramSourceCopyOrigin {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for DiagramSourceCopyOrigin {}
 
 impl DiagramSourceCopy {
     pub fn new(source: impl Into<String>) -> Result<Self, DiagramDocumentError> {
@@ -37,11 +59,23 @@ impl DiagramSourceCopy {
                 },
             ));
         }
-        Ok(Self { source })
+        Ok(Self {
+            source,
+            origin: None,
+        })
+    }
+
+    pub fn with_origin(mut self, origin: DiagramSourceCopyOrigin) -> Self {
+        self.origin = Some(origin);
+        self
     }
 
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    pub fn origin(&self) -> Option<&DiagramSourceCopyOrigin> {
+        self.origin.as_ref()
     }
 }
 
@@ -139,6 +173,7 @@ struct ActiveDocument {
     session: DiagramSession,
     path: Option<PathBuf>,
     disk_digest: Option<[u8; 32]>,
+    source_copy_origin: Option<DiagramSourceCopyOrigin>,
 }
 
 impl ActiveDocument {
@@ -147,6 +182,7 @@ impl ActiveDocument {
             session: DiagramSession::new(),
             path: None,
             disk_digest: None,
+            source_copy_origin: None,
         }
     }
 
@@ -155,14 +191,19 @@ impl ActiveDocument {
             session: loaded.session,
             path: Some(path),
             disk_digest: Some(loaded.disk_digest),
+            source_copy_origin: None,
         }
     }
 
-    fn untitled(session: DiagramSession) -> Self {
+    fn untitled(
+        session: DiagramSession,
+        source_copy_origin: Option<DiagramSourceCopyOrigin>,
+    ) -> Self {
         Self {
             session,
             path: None,
             disk_digest: None,
+            source_copy_origin,
         }
     }
 }
@@ -204,6 +245,19 @@ impl DiagramDocumentController {
 
     pub fn disk_digest(&self) -> Option<[u8; 32]> {
         self.active.as_ref().and_then(|active| active.disk_digest)
+    }
+
+    pub fn source_copy_origin(&self) -> Option<&DiagramSourceCopyOrigin> {
+        self.active
+            .as_ref()
+            .and_then(|active| active.source_copy_origin.as_ref())
+    }
+
+    pub fn pending_source_copy_origin(&self) -> Option<&DiagramSourceCopyOrigin> {
+        match self.pending.as_ref() {
+            Some(PendingDiagramTransition::CopySource(source)) => source.origin(),
+            _ => None,
+        }
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -325,7 +379,7 @@ impl DiagramDocumentController {
             self.pending = Some(requested);
             return Ok(TransitionOutcome::DecisionRequired);
         }
-        self.active = Some(ActiveDocument::untitled(candidate));
+        self.active = Some(ActiveDocument::untitled(candidate, None));
         Ok(TransitionOutcome::Applied)
     }
 
@@ -345,7 +399,7 @@ impl DiagramDocumentController {
             self.pending = Some(requested);
             return Ok(TransitionOutcome::DecisionRequired);
         }
-        self.active = Some(ActiveDocument::untitled(candidate));
+        self.active = Some(ActiveDocument::untitled(candidate, source.origin.clone()));
         Ok(TransitionOutcome::Applied)
     }
 
@@ -363,7 +417,7 @@ impl DiagramDocumentController {
             self.pending = Some(requested);
             return Ok(TransitionOutcome::DecisionRequired);
         }
-        self.active = Some(ActiveDocument::untitled(candidate));
+        self.active = Some(ActiveDocument::untitled(candidate, None));
         Ok(TransitionOutcome::Applied)
     }
 
@@ -457,14 +511,14 @@ impl DiagramDocumentController {
             PendingDiagramTransition::ImportMermaid(file) => {
                 let source = self.store.read_mermaid(&file)?;
                 let session = DiagramSession::from_fresh_source(source)?;
-                self.active = Some(ActiveDocument::untitled(session));
+                self.active = Some(ActiveDocument::untitled(session, None));
             }
             PendingDiagramTransition::CopySource(source) => {
                 let session = DiagramSession::from_fresh_source(&source.source)?;
-                self.active = Some(ActiveDocument::untitled(session));
+                self.active = Some(ActiveDocument::untitled(session, source.origin.clone()));
             }
             PendingDiagramTransition::ApplyTemplate(template) => {
-                self.active = Some(ActiveDocument::untitled(template.create_session()?));
+                self.active = Some(ActiveDocument::untitled(template.create_session()?, None));
             }
         }
         self.pending = None;
@@ -548,7 +602,7 @@ impl DiagramDocumentController {
 mod tests {
     use super::{
         DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
-        PendingDiagramTransition, TransitionDecision, TransitionOutcome,
+        DiagramSourceCopyOrigin, PendingDiagramTransition, TransitionDecision, TransitionOutcome,
     };
     use crate::diagram::{
         DiagramPersistenceError, DiagramSession, DiagramSessionError, DiagramTemplate,
@@ -1155,6 +1209,74 @@ mod tests {
                 DiagramSessionError::SourceTooLarge { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn diagram_document_source_copy_origin_tracks_applied_identity_only() {
+        let first_origin = DiagramSourceCopyOrigin::fresh();
+        let second_origin = DiagramSourceCopyOrigin::fresh();
+        let first = DiagramSourceCopy::new("flowchart TD\nA --> B\n")
+            .unwrap()
+            .with_origin(first_origin.clone());
+        let second = DiagramSourceCopy::new("flowchart LR\nC --> D\n")
+            .unwrap()
+            .with_origin(second_origin.clone());
+        let mut controller = DiagramDocumentController::new();
+
+        assert_eq!(
+            controller.request_source_copy(first).unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(controller.source_copy_origin(), Some(&first_origin));
+
+        controller
+            .replace_source("flowchart TD\nEdited A --> B\n")
+            .unwrap();
+        assert_eq!(
+            controller.request_source_copy(second).unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(controller.source_copy_origin(), Some(&first_origin));
+        assert_eq!(
+            controller.pending_source_copy_origin(),
+            Some(&second_origin)
+        );
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Cancel)
+                .unwrap(),
+            TransitionOutcome::Cancelled
+        );
+        assert_eq!(controller.source_copy_origin(), Some(&first_origin));
+        assert_eq!(controller.pending_source_copy_origin(), None);
+
+        controller
+            .request_source_copy(
+                DiagramSourceCopy::new("flowchart LR\nC --> D\n")
+                    .unwrap()
+                    .with_origin(second_origin.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Discard)
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(controller.source_copy_origin(), Some(&second_origin));
+        assert_eq!(controller.pending_source_copy_origin(), None);
+
+        assert_eq!(
+            controller.request_new().unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Discard)
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(controller.source_copy_origin(), None);
     }
 
     #[test]

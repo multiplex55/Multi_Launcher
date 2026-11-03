@@ -555,6 +555,7 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         "calc:pad" => Command::Dialog(DialogCommand::CalculationPad),
         "date:studio" => Command::Dialog(DialogCommand::DateTimeStudio),
         "diagram:studio" => Command::Dialog(DialogCommand::DiagramStudio),
+        "markdown:studio" => Command::Dialog(DialogCommand::MarkdownStudio),
         "help:show" => Command::Dialog(DialogCommand::Help),
         "timer:dialog:timer" => Command::Timer(TimerCommand::TimerDialog),
         "timer:dialog:alarm" => Command::Timer(TimerCommand::AlarmDialog),
@@ -3264,5 +3265,24 @@ mod zip_extractor_route_tests {
             parse_action(&action("zipper:open", None)).unwrap(),
             Command::External(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod markdown_studio_parser_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_studio_has_one_exact_typed_route() {
+        let action = Action {
+            label: "Markdown Studio".into(),
+            desc: String::new(),
+            action: "markdown:studio".into(),
+            args: None,
+        };
+        let parsed = parse_action(&action).unwrap();
+        assert_eq!(parsed, Command::Dialog(DialogCommand::MarkdownStudio));
+        assert_eq!(parsed.domain(), "dialog");
+        assert_eq!(parsed.kind_name(), "markdown_studio");
     }
 }

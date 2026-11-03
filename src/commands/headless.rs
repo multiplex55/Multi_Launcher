@@ -428,6 +428,9 @@ fn execute_with_external(
         Command::Dialog(DialogCommand::DiagramStudio) => {
             anyhow::bail!("Diagram Studio requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::MarkdownStudio) => {
+            anyhow::bail!("Markdown Studio requires the launcher interface")
+        }
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
@@ -1528,5 +1531,35 @@ mod zip_extractor_headless_tests {
                 .to_string()
                 .contains("requires the launcher interface")
         );
+    }
+}
+
+#[cfg(test)]
+mod markdown_studio_headless_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_studio_requires_the_launcher_interface_without_external_fallback() {
+        let original = Action {
+            label: "Markdown Studio".into(),
+            desc: String::new(),
+            action: "markdown:studio".into(),
+            args: None,
+        };
+        let mut calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::MarkdownStudio),
+            &original,
+            &mut |_, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Markdown Studio requires the launcher interface"
+        );
+        assert_eq!(calls, 0);
     }
 }

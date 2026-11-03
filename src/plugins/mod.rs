@@ -37,6 +37,7 @@ pub mod link;
 mod live_snapshot;
 pub mod lorem;
 pub mod macros;
+pub mod markdown_studio;
 pub mod media;
 pub mod missing;
 pub mod mkmacro;

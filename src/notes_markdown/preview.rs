@@ -272,39 +272,40 @@ impl MarkdownPreview {
                 "cannot replace the body of an unclosed Mermaid fence",
             ));
         }
+        let newline = dominant_newline(fence.raw_fence());
+        let normalized_source = normalize_line_endings(new_mermaid_source, newline);
         let (_, marker, marker_len) = fence.delimiter();
-        if !contains_closing_delimiter(new_mermaid_source, marker, marker_len) {
-            let mut replacement = new_mermaid_source.to_owned();
-            if !replacement.is_empty() && !replacement.ends_with(['\r', '\n']) {
-                replacement.push_str(dominant_newline(fence.raw_fence()));
+        if !contains_closing_delimiter(&normalized_source, marker, marker_len) {
+            let mut replacement = normalized_source;
+            if !replacement.is_empty() && !replacement.ends_with(newline) {
+                replacement.push_str(newline);
             }
             return PreparedMarkdownEdit::prepare_with_replacement_limit(
                 &self.source,
                 fence.body_range(),
                 replacement,
-                MAX_MERMAID_FENCE_BYTES + 2,
+                MAX_MERMAID_FENCE_BYTES.saturating_mul(2).saturating_add(2),
             );
         }
 
-        let delimiter_char = if longest_fence_run(new_mermaid_source, '`')
-            <= longest_fence_run(new_mermaid_source, '~')
+        let delimiter_char = if longest_fence_run(&normalized_source, '`')
+            <= longest_fence_run(&normalized_source, '~')
         {
             '`'
         } else {
             '~'
         };
-        let delimiter_len = longest_fence_run(new_mermaid_source, delimiter_char)
+        let delimiter_len = longest_fence_run(&normalized_source, delimiter_char)
             .saturating_add(1)
             .max(3);
         let (indent, _, _) = fence.delimiter();
-        let newline = dominant_newline(fence.raw_fence());
         let mut replacement = String::new();
         replacement.push_str(&" ".repeat(indent));
         replacement.extend(std::iter::repeat_n(delimiter_char, delimiter_len));
         replacement.push_str(fence.info());
         replacement.push_str(newline);
-        replacement.push_str(new_mermaid_source);
-        if !new_mermaid_source.is_empty() && !new_mermaid_source.ends_with(['\r', '\n']) {
+        replacement.push_str(&normalized_source);
+        if !normalized_source.is_empty() && !normalized_source.ends_with(newline) {
             replacement.push_str(newline);
         }
         replacement.push_str(&" ".repeat(indent));
@@ -316,9 +317,29 @@ impl MarkdownPreview {
             &self.source,
             fence.full_range(),
             replacement,
-            MAX_MERMAID_FENCE_BYTES + 256,
+            MAX_MERMAID_FENCE_BYTES
+                .saturating_mul(4)
+                .saturating_add(256),
         )
     }
+}
+
+fn normalize_line_endings(source: &str, newline: &str) -> String {
+    let mut normalized = String::with_capacity(source.len());
+    let mut characters = source.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                normalized.push_str(newline);
+            }
+            '\n' => normalized.push_str(newline),
+            character => normalized.push(character),
+        }
+    }
+    normalized
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -625,7 +646,7 @@ mod tests {
         let source = "before\r\n```mermaid\r\nold\r\n```\r\nafter\r\n";
         let preview = MarkdownPreview::analyze(source).unwrap();
         let edit = preview
-            .prepare_fence_replacement(0, "flowchart TD\r\nA --> B")
+            .prepare_fence_replacement(0, "flowchart TD\nA --> B")
             .unwrap();
         let applied = edit.apply(source).unwrap();
         assert!(applied.source.starts_with("before\r\n```mermaid\r\n"));
@@ -636,6 +657,10 @@ mod tests {
         assert_eq!(
             updated.mermaid_fences()[0].raw_source(),
             "flowchart TD\r\nA --> B\r\n"
+        );
+        assert_eq!(
+            applied.source,
+            "before\r\n```mermaid\r\nflowchart TD\r\nA --> B\r\n```\r\nafter\r\n"
         );
     }
 }

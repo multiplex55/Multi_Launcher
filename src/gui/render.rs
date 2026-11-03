@@ -9690,6 +9690,7 @@ impl LauncherApp {
                 crate::actions::clipboard::set_text(&text).map_err(|error| error.to_string());
             self.calculation_pad_dialog.copy_completed(result);
         }
+        self.markdown_studio_dialog.show(&ctx, first_ui_pass);
         let calendar_editor_open = self.calendar_editor_open;
         let date_time_studio_effect =
             self.date_time_studio_dialog
@@ -10158,6 +10159,17 @@ pub(crate) fn persist_launcher_close_preferences(
 }
 
 impl LauncherApp {
+    fn complete_markdown_diagram_handoff(&mut self) {
+        let active = self.diagram_studio_dialog.active_source_copy_origin();
+        let pending = self.diagram_studio_dialog.pending_source_copy_origin();
+        self.markdown_studio_dialog
+            .reconcile_diagram_source_origin(active, pending);
+        if let Some(handoff) = self.diagram_studio_dialog.take_markdown_source_handoff() {
+            self.markdown_studio_dialog
+                .apply_diagram_source_handoff(handoff);
+        }
+    }
+
     fn guard_overlay_app_exit(&mut self, ctx: &egui::Context) {
         let requested = ctx.input(|input| input.viewport().close_requested());
         if requested && !self.sequence_exit_requested {
@@ -10212,6 +10224,26 @@ impl eframe::App for LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
         }
+        let (markdown_effect, markdown_closed) =
+            self.markdown_studio_dialog.on_ui_frame_complete(_ctx);
+        if markdown_closed {
+            self.panel_states.markdown_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
+        }
+        if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect {
+            if self
+                .diagram_studio_dialog
+                .open_source_copy(source)
+                .is_some()
+            {
+                self.markdown_studio_dialog
+                    .track_diagram_source_origin(origin);
+                self.focus_panel(super::Panel::DiagramStudioDialog);
+                _ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+        }
+        self.complete_markdown_diagram_handoff();
         self.regex_tester_dialog.on_ui_frame_complete(_ctx);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
@@ -10388,6 +10420,26 @@ impl LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
         }
+        let (markdown_effect, markdown_closed) =
+            self.markdown_studio_dialog.on_ui_frame_complete(ctx);
+        if markdown_closed {
+            self.panel_states.markdown_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
+        }
+        if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect {
+            if self
+                .diagram_studio_dialog
+                .open_source_copy(source)
+                .is_some()
+            {
+                self.markdown_studio_dialog
+                    .track_diagram_source_origin(origin);
+                self.focus_panel(super::Panel::DiagramStudioDialog);
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+        }
+        self.complete_markdown_diagram_handoff();
         self.regex_tester_dialog.on_ui_frame_complete(ctx);
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
@@ -13576,6 +13628,235 @@ mod tests {
         let workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let app = root_list_app_at(ctx, results, workspace.root());
         (workspace, app)
+    }
+
+    #[test]
+    fn markdown_studio_query_enter_opens_an_empty_clean_source_editor() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let action = Action {
+            label: "Open Markdown Studio".into(),
+            desc: "Open the Markdown editor".into(),
+            action: "markdown:studio".into(),
+            args: None,
+        };
+        let (_workspace, mut app) = root_list_test_app(&ctx, vec![action]);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.selected = Some(0);
+
+        let mut input = actual_query_input(true);
+        input.events = vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)];
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+
+        assert!(app.markdown_studio_dialog.open);
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
+        assert!(!app.markdown_studio_dialog.test_is_dirty());
+        assert_eq!(app.markdown_studio_dialog.test_undo_depth(), 0);
+
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let editor = app
+            .markdown_studio_dialog
+            .test_editor_id()
+            .expect("the newly opened source editor is rendered");
+        assert!(ctx.memory(|memory| memory.has_focus(editor)));
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
+        assert!(!app.markdown_studio_dialog.test_is_dirty());
+        assert_eq!(app.markdown_studio_dialog.test_undo_depth(), 0);
+    }
+
+    #[test]
+    fn markdown_studio_tab_then_space_activates_the_focused_export_control() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+
+        let run_frame = |app: &mut LauncherApp, events| {
+            let mut input = actual_query_input(true);
+            input.events = events;
+            app.run_root_frame_for_test(&ctx, input, false)
+                .0
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..3 {
+            run_frame(&mut app, Vec::new());
+        }
+
+        let editor = app.markdown_studio_dialog.test_editor_id().unwrap();
+        assert!(ctx.memory(|memory| memory.has_focus(editor)));
+        run_frame(&mut app, vec![egui::Event::Text("saved draft".into())]);
+        let source = app.markdown_studio_dialog.test_source().unwrap().to_owned();
+        assert_eq!(source, "saved draft");
+        let save_as_path = workspace.root().join("tab-export-focus.md");
+        app.markdown_studio_dialog
+            .test_set_next_picker_result(Some(save_as_path.clone()));
+        let save_as_rect = app.markdown_studio_dialog.test_save_as_rect().unwrap();
+        assert!(ctx.content_rect().contains(save_as_rect.center()));
+        let save_as_id = app.markdown_studio_dialog.test_save_as_id().unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(save_as_id));
+        run_frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::NONE),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        run_frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        assert_eq!(std::fs::read_to_string(&save_as_path).unwrap(), source);
+        assert!(!app.markdown_studio_dialog.test_is_dirty());
+
+        let save_as_id = app.markdown_studio_dialog.test_save_as_id().unwrap();
+        let export_id = app.markdown_studio_dialog.test_export_id().unwrap();
+        let edit_id = app.markdown_studio_dialog.test_edit_id().unwrap();
+        assert_ne!(save_as_id, export_id);
+        assert_ne!(export_id, edit_id);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(save_as_id),
+            "the Save As action returns keyboard focus to its real control"
+        );
+
+        run_frame(
+            &mut app,
+            vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+        );
+        let focus_after_tab_press = ctx.memory(|memory| memory.focused());
+        run_frame(
+            &mut app,
+            vec![key_release(egui::Key::Tab, egui::Modifiers::NONE)],
+        );
+        let focus_after_tab_release = ctx.memory(|memory| memory.focused());
+        assert_eq!(focus_after_tab_press, Some(export_id));
+        assert_eq!(focus_after_tab_release, Some(export_id));
+
+        let mode_before_space = app.markdown_studio_dialog.test_view_mode();
+        run_frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::NONE),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.markdown_studio_dialog.test_view_mode(),
+            mode_before_space
+        );
+        assert_eq!(
+            app.markdown_studio_dialog.test_source(),
+            Some(source.as_str())
+        );
+        assert!(!app.markdown_studio_dialog.test_is_dirty());
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn markdown_studio_root_discards_unretained_source_save_and_uses_document_undo() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+
+        let run_frame = |app: &mut LauncherApp, events, discard| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, discard);
+            output.drop_without_applying_deltas();
+        };
+
+        for _ in 0..3 {
+            run_frame(&mut app, Vec::new(), false);
+        }
+        let editor = app
+            .markdown_studio_dialog
+            .test_editor_id()
+            .expect("the real Markdown TextEdit is rendered");
+        let saved_path = workspace.root().join("source-first.md");
+        app.markdown_studio_dialog
+            .test_set_next_picker_result(Some(saved_path.clone()));
+        let edit_and_save = || {
+            vec![
+                egui::Event::Text("# retained source".into()),
+                egui::Event::Key {
+                    key: egui::Key::S,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                },
+            ]
+        };
+
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        run_frame(&mut app, edit_and_save(), true);
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
+        assert_eq!(app.markdown_studio_dialog.test_picker_calls(), 0);
+        assert!(!saved_path.exists());
+
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        run_frame(&mut app, edit_and_save(), false);
+        assert_eq!(
+            app.markdown_studio_dialog.test_source(),
+            Some("# retained source")
+        );
+        assert_eq!(app.markdown_studio_dialog.test_picker_calls(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&saved_path).unwrap(),
+            "# retained source"
+        );
+
+        let command_key = |key, modifiers| {
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]
+        };
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        run_frame(
+            &mut app,
+            command_key(egui::Key::Z, egui::Modifiers::COMMAND),
+            false,
+        );
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        run_frame(
+            &mut app,
+            command_key(
+                egui::Key::Z,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            ),
+            false,
+        );
+        assert_eq!(
+            app.markdown_studio_dialog.test_source(),
+            Some("# retained source")
+        );
     }
 
     fn root_list_app_at(

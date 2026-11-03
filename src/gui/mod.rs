@@ -54,6 +54,8 @@ pub(crate) mod jump_mode;
 mod m7_startup_measurement;
 pub use jump_mode::ui::JumpModeScope;
 mod macro_dialog;
+mod markdown_preview;
+mod markdown_studio;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
@@ -148,7 +150,8 @@ pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
 pub(crate) use date_time_studio_dialog::{DateTimeStudioDialog, DateTimeStudioEffect};
-pub(crate) use diagram_studio::DiagramStudioDialog;
+pub(crate) use diagram_studio::{DiagramMarkdownSource, DiagramStudioDialog};
+pub(crate) use markdown_studio::{MarkdownStudioDialog, MarkdownStudioEffect};
 pub(crate) use search_replace_dialog::{
     ReplacementPreviewWorker, SearchReplaceDialogState, SearchReplaceUiCommand,
 };
@@ -751,6 +754,7 @@ pub enum Panel {
     CalculationPadDialog,
     DateTimeStudioDialog,
     DiagramStudioDialog,
+    MarkdownStudioDialog,
     BatchRenameDialog,
     SearchReplaceDialog,
     XmlToolkitDialog,
@@ -819,6 +823,7 @@ impl Panel {
             Self::CalculationPadDialog => "Calculation Pad",
             Self::DateTimeStudioDialog => "Date & Time Studio",
             Self::DiagramStudioDialog => "Diagram Studio",
+            Self::MarkdownStudioDialog => "Markdown Studio",
             Self::BatchRenameDialog => "Batch Renamer",
             Self::SearchReplaceDialog => "Search and Replace",
             Self::XmlToolkitDialog => "XML Toolkit",
@@ -888,6 +893,7 @@ struct PanelStates {
     calculation_pad_dialog: bool,
     date_time_studio_dialog: bool,
     diagram_studio_dialog: bool,
+    markdown_studio_dialog: bool,
     batch_rename_dialog: bool,
     search_replace_dialog: bool,
     xml_toolkit_dialog: bool,
@@ -1260,6 +1266,7 @@ pub struct LauncherApp {
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
     pub(crate) diagram_studio_dialog: DiagramStudioDialog,
+    pub(crate) markdown_studio_dialog: MarkdownStudioDialog,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
@@ -3167,6 +3174,7 @@ impl LauncherApp {
         let calculation_pad_dialog = CalculationPadDialog::new(&data_root);
         let convert_panel = ConvertPanel::with_data_root(&data_root);
         let diagram_studio_dialog = DiagramStudioDialog::new(&data_root);
+        let markdown_studio_dialog = MarkdownStudioDialog::new(&data_root);
         let data_recovery_dialog = DataRecoveryDialog::new(data_root.clone(), settings.clone(), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -3849,6 +3857,7 @@ impl LauncherApp {
             calculation_pad_dialog,
             date_time_studio_dialog: DateTimeStudioDialog::default(),
             diagram_studio_dialog,
+            markdown_studio_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
                 settings.table_utility_resources.to_policy(),
@@ -4561,7 +4570,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 63] = [
+    const TRACKED_PANELS: [Panel; 64] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4602,6 +4611,7 @@ impl LauncherApp {
         Panel::CalculationPadDialog,
         Panel::DateTimeStudioDialog,
         Panel::DiagramStudioDialog,
+        Panel::MarkdownStudioDialog,
         Panel::BatchRenameDialog,
         Panel::SearchReplaceDialog,
         Panel::XmlToolkitDialog,
@@ -4669,6 +4679,7 @@ impl LauncherApp {
             Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.open,
+            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.open,
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
@@ -4776,6 +4787,13 @@ impl LauncherApp {
             self.diagram_studio_dialog.request_close();
             self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
             if self.diagram_studio_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if panel == Panel::MarkdownStudioDialog {
+            self.markdown_studio_dialog.request_close();
+            if self.markdown_studio_dialog.open && !self.panel_stack.contains(&panel) {
                 self.panel_stack.push(panel);
             }
             return true;
@@ -4958,6 +4976,10 @@ impl LauncherApp {
             Panel::DiagramStudioDialog => {
                 self.diagram_studio_dialog.request_close();
                 self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
+            }
+            Panel::MarkdownStudioDialog => {
+                self.markdown_studio_dialog.request_close();
+                self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
@@ -5254,6 +5276,10 @@ impl LauncherApp {
                 self.diagram_studio_dialog.request_close();
                 self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
             }
+            Panel::MarkdownStudioDialog => {
+                self.markdown_studio_dialog.request_close();
+                self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
+            }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
                 self.panel_states.xml_toolkit_dialog = false;
@@ -5354,6 +5380,10 @@ impl LauncherApp {
             if !self.panel_stack.contains(&panel) {
                 self.panel_stack.push(panel);
             }
+        } else if panel == Panel::MarkdownStudioDialog && self.markdown_studio_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
         } else {
             self.panel_stack.retain(|p| *p != panel);
         }
@@ -5424,6 +5454,7 @@ impl LauncherApp {
             Panel::CalculationPadDialog => self.calculation_pad_dialog.ensure_open(),
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.ensure_open(),
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.ensure_open(),
+            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.ensure_open(),
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
@@ -5458,6 +5489,8 @@ impl LauncherApp {
         }
         if panel == Panel::DiagramStudioDialog && !self.diagram_studio_dialog.open {
             self.panel_stack.retain(|open_panel| *open_panel != panel);
+        } else if panel == Panel::MarkdownStudioDialog && !self.markdown_studio_dialog.open {
+            self.panel_stack.retain(|open_panel| *open_panel != panel);
         } else if !self.panel_stack.contains(&panel) {
             self.panel_stack.push(panel);
         }
@@ -5472,6 +5505,8 @@ impl LauncherApp {
             self.date_time_studio_dialog.open();
         } else if panel == Panel::DiagramStudioDialog {
             self.diagram_studio_dialog.open();
+        } else if panel == Panel::MarkdownStudioDialog {
+            self.markdown_studio_dialog.open();
         } else if panel == Panel::ConvertPanel {
             self.convert_panel.open();
         } else {
@@ -5591,6 +5626,7 @@ impl LauncherApp {
         check!(calculation_pad_dialog, Panel::CalculationPadDialog);
         check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
         check!(diagram_studio_dialog, Panel::DiagramStudioDialog);
+        check!(markdown_studio_dialog, Panel::MarkdownStudioDialog);
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(search_replace_dialog, Panel::SearchReplaceDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);

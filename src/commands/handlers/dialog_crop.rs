@@ -16,6 +16,7 @@ where
         Command::Dialog(DialogCommand::CalculationPad) => host.open_calculation_pad_dialog(),
         Command::Dialog(DialogCommand::DateTimeStudio) => host.open_date_time_studio_dialog(),
         Command::Dialog(DialogCommand::DiagramStudio) => host.open_diagram_studio_dialog(),
+        Command::Dialog(DialogCommand::MarkdownStudio) => host.open_markdown_studio_dialog(),
         Command::Dialog(DialogCommand::Help) => host.open_help_dialog(),
         Command::Dialog(DialogCommand::Convert) => host.open_convert_dialog(),
         Command::Dialog(DialogCommand::Settings) => host.open_settings_dialog(),
@@ -99,6 +100,9 @@ mod tests {
         }
         fn open_diagram_studio_dialog(&mut self) {
             self.mark("diagram_studio");
+        }
+        fn open_markdown_studio_dialog(&mut self) {
+            self.mark("markdown_studio");
         }
         fn open_help_dialog(&mut self) {
             self.mark("help");
@@ -217,6 +221,10 @@ mod tests {
             (
                 Command::Dialog(DialogCommand::DiagramStudio),
                 "diagram_studio",
+            ),
+            (
+                Command::Dialog(DialogCommand::MarkdownStudio),
+                "markdown_studio",
             ),
             (Command::Dialog(DialogCommand::Help), "help"),
             (Command::Timer(TimerCommand::TimerDialog), "timer"),

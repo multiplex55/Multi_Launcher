@@ -2,11 +2,12 @@
 use super::native_keyboard::reserve_windows_system_menu_alt_space;
 use crate::diagram::{
     DiagramDocument, DiagramDocumentController, DiagramDocumentError, DiagramExportFormat,
-    DiagramImageSnapshot, DiagramScene, DiagramSession, DiagramSourceSnapshot, DiagramTemplate,
-    EdgeId, FlowDirection, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES,
-    MermaidFile, NodeId, NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText,
-    PreviewState, SceneMetrics, ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment,
-    TransitionDecision, TransitionOutcome, build_scene,
+    DiagramImageSnapshot, DiagramScene, DiagramSession, DiagramSourceCopy, DiagramSourceCopyOrigin,
+    DiagramSourceSnapshot, DiagramTemplate, EdgeId, FlowDirection, GraphOperation, GroupId,
+    MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, MermaidFile, NodeId, NodePosition, NodeShape,
+    PendingDiagramTransition, Position, PreparedText, PreviewState, SceneMetrics, ScenePoint,
+    SceneRect, SessionStatus, TextHorizontalAlignment, TransitionDecision, TransitionOutcome,
+    build_scene,
 };
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -379,7 +380,7 @@ enum PendingMutation {
     Redo,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum DocumentIntent {
     New,
     Open,
@@ -389,6 +390,7 @@ enum DocumentIntent {
     Save,
     SaveAs,
     Export(DiagramExportFormat, ExportScale),
+    UseSourceInMarkdown(DiagramSourceCopyOrigin),
     Close,
     ResolvePending(TransitionDecision),
 }
@@ -451,6 +453,7 @@ pub(crate) struct DiagramStudioDialog {
     deferred_menu_focus: Option<(egui::ViewportId, MenuFocusRequest)>,
     active_menu_scope: Option<MenuFocusScope>,
     documents: DiagramDocumentController,
+    pending_markdown_source: Option<DiagramMarkdownSource>,
     default_directory: PathBuf,
     view_mode: ViewMode,
     export_scale: ExportScale,
@@ -499,6 +502,11 @@ pub(crate) struct DiagramStudioDialog {
     test_file_picker_calls: usize,
 }
 
+pub(crate) struct DiagramMarkdownSource {
+    pub(crate) origin: DiagramSourceCopyOrigin,
+    pub(crate) source: String,
+}
+
 impl Default for DiagramStudioDialog {
     fn default() -> Self {
         Self::new_with_directory(PathBuf::from("."))
@@ -523,6 +531,7 @@ impl DiagramStudioDialog {
             deferred_menu_focus: None,
             active_menu_scope: None,
             documents: DiagramDocumentController::new(),
+            pending_markdown_source: None,
             default_directory,
             view_mode: ViewMode::Split,
             export_scale: ExportScale::default(),
@@ -617,6 +626,43 @@ impl DiagramStudioDialog {
         if self.open {
             self.close_pending = true;
         }
+    }
+
+    /// Opens or focuses Diagram Studio with an exact Mermaid source copy from
+    /// another editor, using the same dirty-document transition as other
+    /// replacements.
+    pub(crate) fn open_source_copy(
+        &mut self,
+        source: DiagramSourceCopy,
+    ) -> Option<TransitionOutcome> {
+        self.open();
+        if !self.open {
+            return None;
+        }
+        match self.documents.request_source_copy(source) {
+            Ok(outcome) => {
+                self.finish_transition(outcome, false);
+                self.focus_viewport = true;
+                self.focus_source = true;
+                Some(outcome)
+            }
+            Err(error) => {
+                self.show_current_document_error("open copied Mermaid source", error);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn take_markdown_source_handoff(&mut self) -> Option<DiagramMarkdownSource> {
+        self.pending_markdown_source.take()
+    }
+
+    pub(crate) fn active_source_copy_origin(&self) -> Option<DiagramSourceCopyOrigin> {
+        self.documents.source_copy_origin().cloned()
+    }
+
+    pub(crate) fn pending_source_copy_origin(&self) -> Option<DiagramSourceCopyOrigin> {
+        self.documents.pending_source_copy_origin().cloned()
     }
 
     fn ensure_blank_after_close(&mut self) -> bool {
@@ -1095,11 +1141,12 @@ impl DiagramStudioDialog {
     fn apply_document_intent(&mut self, intent: DocumentIntent) -> bool {
         if self.documents.pending_transition().is_some()
             && matches!(
-                intent,
+                &intent,
                 DocumentIntent::ImportMermaid
                     | DocumentIntent::ApplyTemplate(_)
                     | DocumentIntent::AutoLayout
                     | DocumentIntent::Export(_, _)
+                    | DocumentIntent::UseSourceInMarkdown(_)
             )
         {
             self.message = Some(StudioNotice::error(
@@ -1107,7 +1154,7 @@ impl DiagramStudioDialog {
             ));
             return false;
         }
-        if matches!(intent, DocumentIntent::Save | DocumentIntent::SaveAs)
+        if matches!(&intent, DocumentIntent::Save | DocumentIntent::SaveAs)
             && self.documents.pending_transition().is_some()
         {
             self.message = Some(StudioNotice::error(
@@ -1190,6 +1237,23 @@ impl DiagramStudioDialog {
             }
             DocumentIntent::Export(format, scale) => {
                 self.export_document(format, scale);
+            }
+            DocumentIntent::UseSourceInMarkdown(origin) => {
+                if self.documents.source_copy_origin() != Some(&origin) {
+                    self.message = Some(StudioNotice::error(
+                        "This diagram is no longer linked to its originating Markdown block.",
+                    ));
+                } else if let Some(source) = self
+                    .documents
+                    .session()
+                    .map(|session| session.draft().to_owned())
+                {
+                    self.pending_markdown_source = Some(DiagramMarkdownSource { origin, source });
+                } else {
+                    self.message = Some(StudioNotice::error(
+                        "There is no active diagram source to send to Markdown.",
+                    ));
+                }
             }
             DocumentIntent::Close => {
                 match self.documents.request_close() {
@@ -1898,6 +1962,21 @@ impl DiagramStudioDialog {
                         test_action_rects.push((_name.into(), response.rect, ui.clip_rect()));
                         if response.clicked() && document_intent.is_none() {
                             *document_intent = Some(intent);
+                        }
+                    }
+                    if let Some(origin) = documents.source_copy_origin().cloned() {
+                        let response = ui.add_enabled(
+                            document_actions_allowed,
+                            egui::Button::new("Use source in Markdown"),
+                        );
+                        #[cfg(test)]
+                        test_action_rects.push((
+                            "use_source_in_markdown".into(),
+                            response.rect,
+                            ui.clip_rect(),
+                        ));
+                        if response.clicked() && document_intent.is_none() {
+                            *document_intent = Some(DocumentIntent::UseSourceInMarkdown(origin));
                         }
                     }
                     let mut import_item_ids = Vec::new();

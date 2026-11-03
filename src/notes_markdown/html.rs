@@ -372,7 +372,7 @@ fn escaped_fence_fallback(source: &str, range: Range<usize>, message: &str) -> S
     )
 }
 
-fn safe_link_destination(destination: &str) -> Option<String> {
+pub(crate) fn safe_link_destination(destination: &str) -> Option<String> {
     if destination.is_empty()
         || destination.len() > 8192
         || destination
