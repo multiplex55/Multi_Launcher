@@ -1152,6 +1152,8 @@ pub struct NotePanel {
     #[cfg(test)]
     last_editor_rect: Option<egui::Rect>,
     #[cfg(test)]
+    last_editor_clip_rect: Option<egui::Rect>,
+    #[cfg(test)]
     last_editor_font_size: Option<f32>,
     #[cfg(test)]
     last_split_editor_rect: Option<egui::Rect>,
@@ -1173,6 +1175,8 @@ pub struct NotePanel {
     test_next_markdown_export_path: Option<Option<PathBuf>>,
     #[cfg(test)]
     test_markdown_export_picker_calls: usize,
+    #[cfg(test)]
+    test_markdown_export_feedback_rect: Option<(egui::Rect, egui::Rect)>,
     #[cfg(test)]
     test_note_toolbar_edit_button: Option<(egui::Id, egui::Rect, egui::Rect)>,
     #[cfg(test)]
@@ -1674,6 +1678,8 @@ impl NotePanel {
             #[cfg(test)]
             last_editor_rect: None,
             #[cfg(test)]
+            last_editor_clip_rect: None,
+            #[cfg(test)]
             last_editor_font_size: None,
             #[cfg(test)]
             last_split_editor_rect: None,
@@ -1695,6 +1701,8 @@ impl NotePanel {
             test_next_markdown_export_path: None,
             #[cfg(test)]
             test_markdown_export_picker_calls: 0,
+            #[cfg(test)]
+            test_markdown_export_feedback_rect: None,
             #[cfg(test)]
             test_note_toolbar_edit_button: None,
             #[cfg(test)]
@@ -3186,6 +3194,16 @@ impl NotePanel {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_markdown_export_feedback_rect(&self) -> Option<(egui::Rect, egui::Rect)> {
+        self.test_markdown_export_feedback_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_last_editor_geometry(&self) -> Option<(egui::Rect, egui::Rect)> {
+        Some((self.last_editor_rect?, self.last_editor_clip_rect?))
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_has_pending_markdown_export(&self) -> bool {
         self.pending_root_effect
             .as_ref()
@@ -4067,6 +4085,7 @@ impl NotePanel {
                         self.last_ui_sections = NotePanelUiSections::default();
                         self.last_content_rect = None;
                         self.last_editor_rect = None;
+                        self.last_editor_clip_rect = None;
                         self.last_editor_font_size = None;
                         self.last_split_editor_rect = None;
                         self.last_split_preview_rect = None;
@@ -4074,6 +4093,7 @@ impl NotePanel {
                         self.last_preview_heading_rects.clear();
                         self.last_preview_heading_font_sizes.clear();
                         self.test_markdown_toolbar_menu = None;
+                        self.test_markdown_export_feedback_rect = None;
                         self.test_note_toolbar_edit_button = None;
                         self.test_markdown_tool_rects.clear();
                         self.test_mermaid_open_rects.clear();
@@ -4423,16 +4443,6 @@ impl NotePanel {
             {
                 let ctx = ui.ctx().clone();
                 self.build_toolbar_markdown_menu(ui, &ctx, editor_id, app);
-                if let Some((is_error, message)) = &self.markdown_export_feedback {
-                    ui.colored_label(
-                        if *is_error {
-                            ui.visuals().error_fg_color
-                        } else {
-                            ui.visuals().weak_text_color()
-                        },
-                        message,
-                    );
-                }
             }
             let open_resp = ui.button("Open Externally");
             let popup_id = open_resp.id.with("open_with_menu");
@@ -4575,6 +4585,26 @@ impl NotePanel {
                 }
             }
         });
+        if matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+            && self.last_textedit_id.is_some()
+            && let Some((is_error, message)) = &self.markdown_export_feedback
+        {
+            let feedback_width = ui.available_width();
+            ui.set_max_width(feedback_width);
+            let color = if *is_error {
+                ui.visuals().error_fg_color
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            let _response = ui.add(
+                egui::Label::new(egui::RichText::new(message.as_str()).color(color))
+                    .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+            #[cfg(test)]
+            {
+                self.test_markdown_export_feedback_rect = Some((_response.rect, ui.clip_rect()));
+            }
+        }
         save_now
     }
 
@@ -5734,6 +5764,7 @@ impl NotePanel {
         #[cfg(test)]
         {
             self.last_editor_rect = Some(response.rect);
+            self.last_editor_clip_rect = Some(ui.clip_rect());
             self.last_editor_font_size = Some(font_size);
         }
         response

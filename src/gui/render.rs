@@ -45399,7 +45399,11 @@ mod tests {
             .0
             .drop_without_applying_deltas();
 
-        let accepted_export = workspace.root().join("exports/accepted.md");
+        let accepted_export = workspace
+            .root()
+            .join("exports")
+            .join("long-feedback-destination-path-that-must-wrap-within-the-note-window-and-stay-within-root-bounds")
+            .join("accepted.md");
         app.note_panels[0].test_set_next_markdown_export_path(Some(accepted_export.clone()));
         focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
         assert_eq!(
@@ -45435,6 +45439,41 @@ mod tests {
                 .test_markdown_export_feedback()
                 .is_some_and(|(is_error, message)| !is_error && message.contains("accepted.md"))
         );
+        run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, egui::vec2(900.0, 750.0))
+            .drop_without_applying_deltas();
+        let root_rect = ctx.content_rect();
+        assert!((root_rect.width() - 900.0).abs() < 1.0);
+        let (feedback_rect, feedback_clip) = app.note_panels[0]
+            .test_markdown_export_feedback_rect()
+            .expect("the accepted export feedback is rendered below the toolbar row");
+        let (editor_rect, editor_clip) = app.note_panels[0]
+            .test_last_editor_geometry()
+            .expect("the Note editor remains rendered beside the feedback");
+        assert!(
+            feedback_rect.left() >= root_rect.left() - 1.0
+                && feedback_rect.right() <= root_rect.right() + 1.0,
+            "wrapped export feedback stays within ROOT width: root={root_rect:?}, feedback={feedback_rect:?}"
+        );
+        assert!(
+            feedback_rect.left() >= feedback_clip.left() - 1.0
+                && feedback_rect.right() <= feedback_clip.right() + 1.0,
+            "feedback label stays within its Note clip: clip={feedback_clip:?}, feedback={feedback_rect:?}"
+        );
+        assert!(
+            editor_rect.left() >= root_rect.left() - 1.0
+                && editor_rect.right() <= root_rect.right() + 1.0,
+            "the Note editor stays within ROOT width: root={root_rect:?}, editor={editor_rect:?}"
+        );
+        assert!(
+            editor_rect.left() >= editor_clip.left() - 1.0
+                && editor_rect.right() <= editor_clip.right() + 1.0,
+            "the Note editor stays within its actual clip: clip={editor_clip:?}, editor={editor_rect:?}"
+        );
+        assert!(
+            feedback_rect.height() > 20.0,
+            "the long export feedback wraps to multiple lines: feedback={feedback_rect:?}"
+        );
+        assert_eq!(app.note_panels[0].note_content(), source);
         drop(workspace);
     }
 
