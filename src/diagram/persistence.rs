@@ -1,6 +1,7 @@
 //! Bounded, explicit-path persistence for native Diagram Studio documents.
 
 use super::codec::{DiagramCodecError, MAX_DIAGRAM_SESSION_BYTES};
+use super::export::DiagramExportFormat;
 use super::mermaid::MAX_MERMAID_SOURCE_BYTES;
 use super::session::DiagramSession;
 use sha2::{Digest, Sha256};
@@ -9,6 +10,98 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 pub const MAX_DIAGRAM_DOCUMENT_BYTES: usize = MAX_DIAGRAM_SESSION_BYTES;
+
+#[derive(Debug)]
+pub enum DiagramExportPublicationError {
+    WrongExtension {
+        path: PathBuf,
+        expected: &'static str,
+    },
+    OccupiedPath(PathBuf),
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    AtomicWrite {
+        path: PathBuf,
+        source: anyhow::Error,
+    },
+}
+
+impl std::fmt::Display for DiagramExportPublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongExtension { path, expected } => write!(
+                formatter,
+                "Diagram export requires the .{expected} extension: {}",
+                path.display()
+            ),
+            Self::OccupiedPath(path) => write!(
+                formatter,
+                "refusing to overwrite occupied Diagram export path {}",
+                path.display()
+            ),
+            Self::Io { path, source } => write!(
+                formatter,
+                "failed to inspect Diagram export destination {}: {source}",
+                path.display()
+            ),
+            Self::AtomicWrite { path, source } => write!(
+                formatter,
+                "failed to atomically publish Diagram export {}: {source}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DiagramExportPublicationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::AtomicWrite { source, .. } => Some(source.as_ref()),
+            Self::WrongExtension { .. } | Self::OccupiedPath(_) => None,
+        }
+    }
+}
+
+pub(super) fn publish_export_unoccupied(
+    path: &Path,
+    format: DiagramExportFormat,
+    bytes: &[u8],
+    writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+) -> Result<(), DiagramExportPublicationError> {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(format.extension()))
+    {
+        return Err(DiagramExportPublicationError::WrongExtension {
+            path: path.to_path_buf(),
+            expected: format.extension(),
+        });
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(DiagramExportPublicationError::OccupiedPath(
+                path.to_path_buf(),
+            ));
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(DiagramExportPublicationError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    // Keep the destination check directly adjacent to the atomic writer. This
+    // refuses normal overwrite attempts but does not claim filesystem CAS.
+    writer(path, bytes).map_err(|source| DiagramExportPublicationError::AtomicWrite {
+        path: path.to_path_buf(),
+        source,
+    })
+}
 
 /// An explicitly selected UTF-8 Mermaid source file with the `.mmd` extension.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

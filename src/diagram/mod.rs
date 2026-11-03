@@ -2,6 +2,7 @@
 
 mod codec;
 mod document;
+mod export;
 mod layout;
 mod mermaid;
 mod model;
@@ -18,6 +19,11 @@ pub use document::{
     DiagramDocumentController, DiagramDocumentError, PendingDiagramTransition, TransitionDecision,
     TransitionOutcome,
 };
+pub use export::{
+    DiagramExportArtifact, DiagramExportError, DiagramExportFormat, DiagramExportWarnings,
+    DiagramImageSnapshot, DiagramSourceSnapshot, MAX_EXPORT_PIXELS, MAX_EXPORT_SIDE, MAX_PNG_BYTES,
+    MAX_PREPARED_GLYPHS, MAX_RASTER_PIXEL_VISITS, MAX_SVG_BYTES,
+};
 
 pub use layout::{DiagramLayoutError, layout_positions};
 pub use mermaid::{
@@ -31,8 +37,8 @@ pub use model::{
     Position,
 };
 pub use persistence::{
-    DiagramPersistenceError, DiskConflictKind, MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile,
-    MermaidImportError,
+    DiagramExportPublicationError, DiagramPersistenceError, DiskConflictKind,
+    MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile, MermaidImportError,
 };
 pub use scene::{
     ArrowHead, CubicBezier, DiagramScene, MAX_SCENE_COORDINATE_ABS, PreparedText, PreparedTextLine,

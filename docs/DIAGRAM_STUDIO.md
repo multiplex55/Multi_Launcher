@@ -3,6 +3,8 @@
 Diagram Studio edits the accepted Mermaid flowchart subset through either its
 source editor or graph canvas. The [subset reference](DIAGRAM_MERMAID_SUBSET.md)
 lists the exact syntax and bounds.
+The [export reference](DIAGRAM_EXPORT.md) describes current-only scene capture,
+SVG/PNG output limits, and exact-draft Mermaid export.
 
 Use **Source**, **Visual**, or **Split** to choose an editing view. A supported
 source change is parsed into the same graph used by the canvas. If the source
