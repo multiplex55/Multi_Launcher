@@ -1,6 +1,6 @@
 # Visual Productivity Studios handoff
 
-Partial delivery, updated2026-11-03T20:45:14Z. All independent implementation and scoped qualification are finished; full completion is withheld solely for policy-blocked HTML visual opening. The [canonical ledger](../../VISUAL_PRODUCTIVITY_STUDIOS.md) retains checkpoint commands, failures, corrections, source manifests and native process cleanup records. Evidence paths below are repository-relative, ignored local artifacts under `target/visual-studios/`.
+Complete, accepted November 3, 2026 (America/New_York). All six categories meet the scoped acceptance requirements. The final HTML visual gate is resolved by explicit user browser inspection of the unchanged export; agent policy restrictions were respected. The [canonical ledger](../../VISUAL_PRODUCTIVITY_STUDIOS.md) retains checkpoint commands, failures, corrections, source manifests and native process cleanup records. Evidence paths below are repository-relative, ignored local artifacts under `target/visual-studios/`.
 
 | Category | Acceptance | Delivered behavior / remaining gap |
 | --- | --- | --- |
@@ -9,7 +9,7 @@ Partial delivery, updated2026-11-03T20:45:14Z. All independent implementation an
 | C03 Date & Time | COMPLETE | Between/offset, calendar/time fields, named offline zones with DST explanations, bounded schedule preview and explicit unsaved-calendar handoff. Cumulative Prepare-button visibility verified at900×651. |
 | C04 Diagram / Mermaid | COMPLETE | Independent native editor, canonical graph/source synchronization for documented flowchart subset, unsupported-source preservation, save/restart, templates/layout/history and SVG/PNG/Mermaid exports. Hidden-launcher editing accepted. |
 | C05 Regex visualization | COMPLETE | Existing tester extended with AST/source-correlated syntax visualization and bounded constructors; existing engine, tests, substitutions and presets preserved. Native constrained geometry and keyboard behavior accepted. |
-| C06 Markdown / Notes | PARTIAL | Separate Studio plus collapsed Notes tools, safe unsaved exports, supported Mermaid previews and explicit origin return. Feedback passes native900/603px; Enter/Space mode activation preserves exact raw bytes and clean close. Only HTML visual opening remains policy-blocked. |
+| C06 Markdown / Notes | COMPLETE | Separate Studio plus collapsed Notes tools, safe unsaved exports, supported Mermaid previews and explicit origin return. Feedback passes native900/603px; Enter/Space preserves exact raw bytes and clean close. User confirms all five HTML browser checks pass. |
 
 ## Design and source ownership
 
@@ -70,6 +70,7 @@ Screenshots are actual app-owned GPU framebuffer captures, not simulated UI. WGC
 | `c06-final-notes-diagram-proof.json`, `native-c06-final-notes-diagram-proof-captures/` | Explicit Note fence copy, real child edit/return changes only its origin, saved file unchanged and original source restored by content-changing Undo |
 | `c06-feedback-native-proof.json`, `native-c06-feedback-corrective-captures/` | One corrective width run, actual long HTML status/editor contained at900×750 and603×750; saved Note and HTML bytes unchanged; third capture preserves dirty-prompt caveat |
 | `c06-mode-native-proof.json`, `c06-mode-native-{enter,space}-export-proof.json`, `native-c06-mode-corrective-captures/` | One mode-input corrective run: actual Edit Enter/Space each focuses editor, exact504-byte raw export matches saved fixture, CtrlW clean close without prompt; no autosave or original-file mutation |
+| `c06-html-user-visual-acceptance.json` | Explicit user browser confirmation: Unicode/source marker, formatting, local160px image, Draft→Review flowchart, missing-image/unsupported-source fallback and whole-page presentation all pass; exact artifact hash verified unchanged |
 
 Native Notes Markdown export was504bytes SHA256 `0FF03132F387F7D108F408D24B98FBDC2518F87F5179BF0044BA5C4A0EBD6B1E`; HTML was2108243bytes SHA256 `4CFE12F47604D894ABDA69BC9B3A8944E942C7F4099A7140752F572A5B72B317`. Artifact checks verified current unsaved source, embedded raster/SVG,160px local image, missing-image and unsupported-Mermaid fallback, CSP and absence of scripts/remote image sources. Occupied export left both sentinel and Note unchanged. Export preserved dirty state; only explicit Save updated the Note.
 
@@ -77,7 +78,7 @@ Native precision limits: AX source comparison trims presentation-only trailing w
 
 The feedback run resolved width within one correction cycle but exposed a dirty prompt whose trailing-byte cause AX could not establish. That run's uncertainty remains historical, not relabeled a pass. Subsequent actual ROOT reproduction proved the pre-existing mode-activation leak, and the narrow correction above now has stronger native evidence: actual Enter and Space each exported exact raw504-byte source and then closed cleanly. Autosave-on-close was disabled and dirty confirmation enabled; the original saved file stayed unchanged. Thus the required normal Notes clean-close/trailing-byte gap is resolved. PID36304's four captures bind the corrected source/binary and its guarded cleanup retired it2026-11-03T20:44:54.9230689Z. All earlier cleanup receipts remain preserved; no owned app/Cargo remains live.
 
-The browser rejected opening a local exported HTML URL. That visual-open requirement is **UNVERIFIED**, and no localhost, alternate browser or indirect execution workaround was attempted. Static artifact safety/structure checks passed; they do not replace a visual opening. Overall full completion is withheld solely for this external policy gate. The [current bounded-stop report](stalls/20261103T204514Z.md) supersedes the remaining-gap list in the [earlier preparation-time report](stalls/20261103T201559Z.md).
+The agent browser rejected opening a local exported HTML URL, and no localhost, alternate browser or indirect execution workaround was attempted. The user subsequently opened the linked export in their browser and explicitly confirmed: “All five checks pass. Everything that you described is visible in the browser when opening the HTML file. Everythign passes.” This is user-reported visual evidence, distinct from the agent's static checks and historical policy rejection. The reviewed file remains2108243bytes with SHA256 `4CFE12F47604D894ABDA69BC9B3A8944E942C7F4099A7140752F572A5B72B317`. The visual gate is now PASS and no required acceptance gap remains. The [prior policy stop](stalls/20261103T204514Z.md) and [earlier preparation-time report](stalls/20261103T201559Z.md) remain historical records.
 
 ## Git chain and review boundary
 
@@ -94,13 +95,13 @@ All six categories use one checkout and a distinct direct-child baseline. Initia
 
 Verification uses `git rev-parse <baseline>^` equality to the exact parent, baseline-to-final ancestry, local/upstream comparison and remote branch visibility. The external `program-final-handoff.json` records the reporting commit's own SHA and cleanliness after commit, avoiding a self-referential tracked hash. `program-checkpoints-final.json` retains each ordered post-baseline checkpoint's full SHA and subject, supplementing the canonical ledger. The next separately approved Goal must branch from that actual C06 final handoff tip, including final documents, never from master/main.
 
-No worktree, auxiliary checkout/clone, competing write agent, per-checkpoint branch, intermediate merge, rebase or cherry-pick was used. One implementer wrote source sequentially; planner/reviewer were read-only. No PR or merge was created. Proposed final integration only: one cumulative PR from `feat/visual-studios-06-markdown-studio` to the intended integration branch, titled **Visual productivity studios: Quick Tools, calculations, dates, diagrams, regex and Markdown**, with the partial native HTML acceptance gap disclosed. No automatic merge is authorized.
+No worktree, auxiliary checkout/clone, competing write agent, per-checkpoint branch, intermediate merge, rebase or cherry-pick was used. One implementer wrote source sequentially; planner/reviewer were read-only. No PR or merge was created. Proposed final integration only: one cumulative PR from `feat/visual-studios-06-markdown-studio` to the intended integration branch, titled **Visual productivity studios: Quick Tools, calculations, dates, diagrams, regex and Markdown**, with scoped test/native evidence and the user-confirmed HTML visual result included. No automatic merge is authorized.
 
 ## One end-only human review checklist
 
 - Review the six UI entry points and their default/compact presentation; compare with the accepted native evidence.
 - Try the documented supported Mermaid flowchart subset, explicit source return and unsupported-source preservation.
 - Review safe save/export behavior with a disposable document and the separate clean Notes menu.
-- Open the owned exported HTML locally and inspect its image, supported diagram, unsupported fallback and Unicode layout; this is the outstanding policy-blocked visual proof, not a claimed pass.
+- Completed: user opened the exported HTML locally and confirmed all five requested visual checks pass, including image, supported diagram, unsupported fallback, Unicode and page layout.
 - Review the corrected Note mode/menu/export close state with a disposable source; exact Enter/Space bytes and clean close are now covered by automated and native evidence.
-- Review this cumulative branch and acceptance gaps before approving the single integration PR. Continue a separately approved Goal from the final reporting SHA recorded in the handoff receipt.
+- Review this cumulative branch before approving the single integration PR. Continue a separately approved Goal from the final reporting SHA recorded in the handoff receipt.
