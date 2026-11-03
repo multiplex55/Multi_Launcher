@@ -10189,7 +10189,11 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_ui_frame_complete(&mut self, _ctx: &egui::Context) {
-        self.diagram_studio_dialog.on_ui_frame_complete(_ctx);
+        if self.diagram_studio_dialog.on_ui_frame_complete(_ctx) {
+            self.panel_states.diagram_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
+        }
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
     }
@@ -10360,7 +10364,11 @@ impl LauncherApp {
                 passes += 1;
             })
         });
-        self.diagram_studio_dialog.on_ui_frame_complete(ctx);
+        if self.diagram_studio_dialog.on_ui_frame_complete(ctx) {
+            self.panel_states.diagram_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
+        }
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();
@@ -10409,6 +10417,7 @@ thread_local! {
     static IMMEDIATE_VIEWPORT_RENDERER_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE: std::cell::Cell<Option<(egui::ViewportId, bool)>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
+    static IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID: std::cell::RefCell<Option<(egui::ViewportId, Option<egui::Id>)>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -10453,17 +10462,26 @@ pub(super) fn with_immediate_viewport_renderer<R>(
                     .inner_size
                     .unwrap_or_else(|| ctx.content_rect().size()),
             );
+            let close_requested = IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST.with(|request| {
+                if request.get() == Some(viewport_id) {
+                    request.set(None);
+                    true
+                } else {
+                    false
+                }
+            });
+            let mut viewport_info = egui::ViewportInfo {
+                parent: Some(parent_id),
+                title: viewport.builder.title.clone(),
+                inner_rect: Some(screen_rect),
+                focused,
+                ..Default::default()
+            };
+            if close_requested {
+                viewport_info.events.push(egui::ViewportEvent::Close);
+            }
             let mut viewports = ctx.input(|input| input.raw.viewports.clone());
-            viewports.insert(
-                viewport_id,
-                egui::ViewportInfo {
-                    parent: Some(parent_id),
-                    title: viewport.builder.title.clone(),
-                    inner_rect: Some(screen_rect),
-                    focused,
-                    ..Default::default()
-                },
-            );
+            viewports.insert(viewport_id, viewport_info);
             let events = IMMEDIATE_VIEWPORT_TEST_EVENTS
                 .with(|events| std::mem::take(&mut *events.borrow_mut()));
             let input = egui::RawInput {
@@ -10516,6 +10534,27 @@ pub(super) fn with_immediate_viewport_test_events<R>(
     let previous = IMMEDIATE_VIEWPORT_TEST_EVENTS
         .with(|current| std::mem::replace(&mut *current.borrow_mut(), events));
     let guard = EventsGuard(previous);
+    let output = run();
+    drop(guard);
+    output
+}
+
+#[cfg(test)]
+pub(super) fn with_immediate_viewport_test_close_request<R>(
+    viewport_id: egui::ViewportId,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct CloseRequestGuard(Option<egui::ViewportId>);
+
+    impl Drop for CloseRequestGuard {
+        fn drop(&mut self) {
+            IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST.with(|request| request.set(self.0));
+        }
+    }
+
+    let previous =
+        IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST.with(|request| request.replace(Some(viewport_id)));
+    let guard = CloseRequestGuard(previous);
     let output = run();
     drop(guard);
     output

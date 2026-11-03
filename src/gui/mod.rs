@@ -3164,6 +3164,7 @@ impl LauncherApp {
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
         let calculation_pad_dialog = CalculationPadDialog::new(&data_root);
         let convert_panel = ConvertPanel::with_data_root(&data_root);
+        let diagram_studio_dialog = DiagramStudioDialog::new(&data_root);
         let data_recovery_dialog = DataRecoveryDialog::new(data_root.clone(), settings.clone(), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -3845,7 +3846,7 @@ impl LauncherApp {
             regex_tester_dialog,
             calculation_pad_dialog,
             date_time_studio_dialog: DateTimeStudioDialog::default(),
-            diagram_studio_dialog: DiagramStudioDialog::default(),
+            diagram_studio_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
                 settings.table_utility_resources.to_policy(),
@@ -4769,6 +4770,14 @@ impl LauncherApp {
             }
             return true;
         }
+        if panel == Panel::DiagramStudioDialog {
+            self.diagram_studio_dialog.request_close();
+            self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
+            if self.diagram_studio_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
         self.retire_settings_navigation_for_panel(panel);
         match panel {
             Panel::AliasDialog => {
@@ -5339,6 +5348,10 @@ impl LauncherApp {
             if !self.panel_stack.contains(&panel) {
                 self.panel_stack.push(panel);
             }
+        } else if panel == Panel::DiagramStudioDialog && self.diagram_studio_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
         } else {
             self.panel_stack.retain(|p| *p != panel);
         }
@@ -5441,7 +5454,9 @@ impl LauncherApp {
                 }
             }
         }
-        if !self.panel_stack.contains(&panel) {
+        if panel == Panel::DiagramStudioDialog && !self.diagram_studio_dialog.open {
+            self.panel_stack.retain(|open_panel| *open_panel != panel);
+        } else if !self.panel_stack.contains(&panel) {
             self.panel_stack.push(panel);
         }
     }
@@ -8207,10 +8222,47 @@ mod tests {
         assert!(body_rendered && app_input_allowed);
 
         assert!(app.close_front_dialog());
-        assert!(!app.is_panel_open(Panel::DiagramStudioDialog));
+        assert!(app.is_panel_open(Panel::DiagramStudioDialog));
+        assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.diagram_studio_dialog.open);
+        assert_eq!(
+            app.diagram_studio_dialog.test_pending_transition(),
+            Some(&crate::diagram::PendingDiagramTransition::Close)
+        );
+        app.diagram_studio_dialog
+            .test_stage_pending_decision(crate::diagram::TransitionDecision::Cancel);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert!(app.diagram_studio_dialog.open);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
         app.focus_panel(Panel::DiagramStudioDialog);
         assert!(app.diagram_studio_dialog.open);
-        assert!(app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(
+            !app.diagram_studio_dialog.needs_viewport_bootstrap(),
+            "the cancelled dirty close kept the existing native viewport open"
+        );
         assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
         assert_eq!(
             app.diagram_studio_dialog.test_session().revision(),
@@ -8294,6 +8346,102 @@ mod tests {
             Some(egui::ViewportClass::Immediate)
         ));
         assert!(body_rendered && app_input_allowed);
+
+        app.pinned_panels.push(Panel::DiagramStudioDialog);
+        app.force_close_panel(Panel::DiagramStudioDialog);
+        assert!(app.diagram_studio_dialog.open);
+        assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.diagram_studio_dialog.test_pending_transition(),
+            Some(&crate::diagram::PendingDiagramTransition::Close)
+        );
+        app.diagram_studio_dialog
+            .test_stage_pending_decision(crate::diagram::TransitionDecision::Discard);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert!(!app.diagram_studio_dialog.open);
+        assert!(!app.panel_states.diagram_studio_dialog);
+        assert!(!app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        assert!(!app.diagram_studio_dialog.test_has_active_document());
+        app.enforce_pinned();
+        assert!(!app.diagram_studio_dialog.open);
+        assert!(!app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        app.focus_panel(Panel::DiagramStudioDialog);
+        assert!(app.diagram_studio_dialog.open);
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), "");
+        assert_eq!(app.diagram_studio_dialog.test_session().revision(), 0);
+
+        let unpinned_draft = "flowchart TD\n    Pending[\"Keep editing\"]";
+        app.diagram_studio_dialog
+            .test_replace_source(unpinned_draft);
+        app.toggle_pin(Panel::DiagramStudioDialog);
+        assert!(!app.pinned_panels.contains(&Panel::DiagramStudioDialog));
+        assert!(app.diagram_studio_dialog.open);
+        assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        assert!(
+            !Settings::load(&app.settings_path)
+                .unwrap()
+                .pinned_panels
+                .contains(&Panel::DiagramStudioDialog),
+            "unpin is persisted even when the dirty close is later cancelled"
+        );
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.diagram_studio_dialog.test_pending_transition(),
+            Some(&crate::diagram::PendingDiagramTransition::Close)
+        );
+        app.diagram_studio_dialog
+            .test_stage_pending_decision(crate::diagram::TransitionDecision::Cancel);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert!(app.diagram_studio_dialog.open);
+        assert_eq!(
+            app.diagram_studio_dialog.test_session().draft(),
+            unpinned_draft
+        );
+        assert!(app.diagram_studio_dialog.test_session().is_dirty());
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert!(!app.pinned_panels.contains(&Panel::DiagramStudioDialog));
+        assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
     }
 
     #[test]
