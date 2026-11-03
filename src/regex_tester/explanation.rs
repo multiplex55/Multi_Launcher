@@ -48,8 +48,28 @@ pub enum ExplanationResult {
 /// Explains supported syntax locally, or returns compiler/parser validation.
 /// Invalid patterns never return partial explanations.
 pub fn explain(pattern: &str, flags: &RegexFlags) -> ExplanationResult {
+    match analyze_syntax(pattern, flags) {
+        Ok(analysis) => ExplanationResult::Success {
+            explanations: analysis.explanations,
+        },
+        Err(error) => ExplanationResult::InvalidPattern(error),
+    }
+}
+
+/// One compiler-validated AST and its existing source explanations. The
+/// session shares this parse with the syntax projection instead of reparsing
+/// or reconstructing a tree from flat explanation spans.
+pub(crate) struct SyntaxAnalysis {
+    pub ast: Ast,
+    pub explanations: Vec<Explanation>,
+}
+
+pub(crate) fn analyze_syntax(
+    pattern: &str,
+    flags: &RegexFlags,
+) -> Result<SyntaxAnalysis, RegexValidationError> {
     if let Err(error) = compile_regex(pattern, flags) {
-        return ExplanationResult::InvalidPattern(error);
+        return Err(error);
     }
     let parsed = ast::parse::ParserBuilder::new()
         .ignore_whitespace(flags.ignore_whitespace)
@@ -58,7 +78,7 @@ pub fn explain(pattern: &str, flags: &RegexFlags) -> ExplanationResult {
     let parsed = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
-            return ExplanationResult::InvalidPattern(RegexValidationError {
+            return Err(RegexValidationError {
                 message: error.to_string(),
             });
         }
@@ -68,9 +88,10 @@ pub fn explain(pattern: &str, flags: &RegexFlags) -> ExplanationResult {
         explanations: Vec::new(),
     };
     collector.visit(&parsed);
-    ExplanationResult::Success {
+    Ok(SyntaxAnalysis {
+        ast: parsed,
         explanations: collector.explanations,
-    }
+    })
 }
 
 struct Collector<'a> {

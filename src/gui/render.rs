@@ -16,6 +16,28 @@ type SourceStateBeforeFrame = (
     Option<usize>,
 );
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DialogCopyOwner {
+    CalculationPad,
+    Converter,
+    DateTimeStudio,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RootDialogEffect {
+    CopyText {
+        owner: DialogCopyOwner,
+        text: String,
+    },
+    SaveConverterPreferences,
+    PrepareCalendar {
+        instant_utc: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+#[cfg(test)]
+const ROOT_DIALOG_EFFECTS_TEST_ID: &str = "retained-root-dialog-effects-test-sink";
+
 #[derive(Clone, Copy)]
 struct QueryShowGeometry {
     rect: egui::Rect,
@@ -4393,13 +4415,14 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 6] {
+    fn viewport_bootstrap_state(&self) -> [bool; 7] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
             self.radial_placement_viewport.needs_viewport_bootstrap(),
             self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
             self.xml_toolkit_dialog.needs_viewport_bootstrap(),
+            self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
         ]
     }
@@ -4413,7 +4436,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 6],
+        previously_pending: [bool; 7],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -4481,6 +4504,24 @@ impl LauncherApp {
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
                 == NavigationDialogKind::RegexTester.layer_id();
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if self.qa_framebuffer_needs_regex_observation() {
+            let observation = self.regex_tester_dialog.show_with_jump_mode_observation(
+                ctx,
+                root_scope.as_ref(),
+                instance,
+                application_input_allowed,
+                root_native_owner_current,
+                self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            );
+            self.qa_framebuffer_after_regex_show(
+                ctx,
+                root_visible,
+                self.regex_tester_dialog.open,
+                observation,
+            );
+            return;
+        }
         self.regex_tester_dialog.show_with_jump_mode(
             ctx,
             root_scope.as_ref(),
@@ -4488,6 +4529,38 @@ impl LauncherApp {
             application_input_allowed,
             root_native_owner_current,
             self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+        );
+    }
+
+    fn show_diagram_studio(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if self.qa_framebuffer_needs_diagram_observation() {
+            let observation = self.diagram_studio_dialog.show_with_observation(
+                ctx,
+                first_ui_pass,
+                application_input_allowed,
+                root_input_allowed,
+            );
+            self.qa_framebuffer_after_diagram_show(
+                ctx,
+                root_visible,
+                self.diagram_studio_dialog.open,
+                observation,
+            );
+            return;
+        }
+        self.diagram_studio_dialog.show(
+            ctx,
+            first_ui_pass,
+            application_input_allowed,
+            root_input_allowed,
         );
     }
 
@@ -6356,6 +6429,7 @@ impl LauncherApp {
             // usable while the launcher is hidden. Its ROOT scope and ROOT
             // native-owner eligibility stay disabled in this branch.
             self.show_regex_tester(&ctx, false);
+            self.show_diagram_studio(&ctx, first_ui_pass, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -9630,8 +9704,15 @@ impl LauncherApp {
         }
         #[cfg(not(feature = "qa-framebuffer-capture"))]
         self.qr_dialog.show(&ctx);
+        self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        let _ = self.calculation_pad_dialog.show(&ctx, first_ui_pass);
+        self.markdown_studio_dialog.show(&ctx, first_ui_pass);
+        let calendar_editor_open = self.calendar_editor_open;
+        let _ = self
+            .date_time_studio_dialog
+            .show(&ctx, first_ui_pass, calendar_editor_open);
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
-        conv_panel.ui(&ctx, self);
+        let _ = conv_panel.ui(&ctx, first_ui_pass);
         self.convert_panel = conv_panel;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(&ctx, self);
@@ -10066,6 +10147,275 @@ pub(crate) fn persist_launcher_close_preferences(
 }
 
 impl LauncherApp {
+    fn complete_markdown_diagram_handoff(&mut self, ctx: &egui::Context) {
+        let note_open_effects = self
+            .note_panels
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, panel)| {
+                panel
+                    .on_ui_frame_complete(ctx)
+                    .map(|effect| (index, effect))
+            })
+            .collect::<Vec<_>>();
+        for (panel_index, note_effect) in note_open_effects {
+            match note_effect {
+                super::note_panel::NotePanelEffect::Export(request) => {
+                    self.complete_note_markdown_export(ctx, panel_index, &request);
+                }
+                super::note_panel::NotePanelEffect::OpenDiagram { source, origin } => {
+                    let open_result = self
+                        .note_panels
+                        .iter()
+                        .find(|panel| panel.tracks_diagram_source_origin(&origin.identity))
+                        .map(|panel| panel.can_open_diagram_source_copy(ctx, &origin))
+                        .unwrap_or(Err("The originating Note is no longer open."));
+                    match open_result {
+                        Err(error) => self.report_error("notes.mermaid", error),
+                        Ok(()) => {
+                            if self
+                                .diagram_studio_dialog
+                                .open_source_copy(source)
+                                .is_some()
+                            {
+                                if let Some(panel) = self.note_panels.iter_mut().find(|panel| {
+                                    panel.tracks_diagram_source_origin(&origin.identity)
+                                }) {
+                                    panel.track_diagram_source_origin(origin);
+                                }
+                                self.focus_panel(super::Panel::DiagramStudioDialog);
+                                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let active = self.diagram_studio_dialog.active_source_copy_origin();
+        let pending = self.diagram_studio_dialog.pending_source_copy_origin();
+        self.markdown_studio_dialog
+            .reconcile_diagram_source_origin(active.clone(), pending.clone());
+        for panel in &mut self.note_panels {
+            panel.reconcile_diagram_source_origin(active.clone(), pending.clone());
+        }
+        if let Some(handoff) = self.diagram_studio_dialog.take_markdown_source_handoff() {
+            if self
+                .markdown_studio_dialog
+                .owns_active_diagram_source_origin(&handoff.origin)
+            {
+                self.markdown_studio_dialog
+                    .apply_diagram_source_handoff(handoff);
+            } else if let Some(index) = self
+                .note_panels
+                .iter()
+                .position(|panel| panel.owns_active_diagram_source_origin(&handoff.origin))
+            {
+                let mut panel = self.note_panels.remove(index);
+                panel.apply_diagram_source_handoff(ctx, handoff, self);
+                self.note_panels.insert(index, panel);
+            } else {
+                self.report_error(
+                    "notes.mermaid",
+                    "The originating Note or Markdown document is no longer open; source was not applied.",
+                );
+            }
+        }
+    }
+
+    fn complete_note_markdown_export(
+        &mut self,
+        ctx: &egui::Context,
+        panel_index: usize,
+        request: &super::note_panel::NoteExportRequest,
+    ) {
+        let Some(panel) = self.note_panels.get(panel_index) else {
+            return;
+        };
+        if let Err(error) = panel.validate_export_request(ctx, request) {
+            self.note_panels[panel_index].set_markdown_export_feedback(true, error);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+        let artifact = match self.note_panels[panel_index].encode_export_request(request) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                self.note_panels[panel_index].set_markdown_export_feedback(true, error);
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                return;
+            }
+        };
+        // Encoding can be expensive for HTML with local assets. Recheck the
+        // exact Note snapshot before exposing a native file chooser.
+        if let Err(error) = self.note_panels[panel_index].validate_export_request(ctx, request) {
+            self.note_panels[panel_index].set_markdown_export_feedback(true, error);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+        let Some(destination) =
+            self.note_panels[panel_index].pick_markdown_export_path(request.format)
+        else {
+            return;
+        };
+        // The chooser is a boundary where the owner may have changed. Validate
+        // again before checking paths or publishing any bytes.
+        if let Err(error) = self.note_panels[panel_index].validate_export_request(ctx, request) {
+            self.note_panels[panel_index].set_markdown_export_feedback(true, error);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+        let active_path = self.note_panels[panel_index].export_active_path();
+        match super::markdown_export::publish_export(&artifact, &destination, active_path) {
+            Ok(()) => {
+                let warnings = artifact.warnings();
+                let mut warning_parts = Vec::new();
+                for (count, label) in [
+                    (warnings.unsafe_links(), "unsafe links omitted"),
+                    (warnings.unavailable_images(), "images unavailable"),
+                    (warnings.blocked_remote_images(), "remote images blocked"),
+                    (
+                        warnings.unavailable_mermaid_previews(),
+                        "Mermaid previews unavailable",
+                    ),
+                ] {
+                    if count > 0 {
+                        warning_parts.push(format!("{count} {label}"));
+                    }
+                }
+                let suffix = if warning_parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", warning_parts.join(", "))
+                };
+                self.note_panels[panel_index].set_markdown_export_feedback(
+                    false,
+                    format!(
+                        "Exported {} bytes to {}{suffix}.",
+                        artifact.bytes().len(),
+                        destination.display()
+                    ),
+                );
+            }
+            Err(error) => self.note_panels[panel_index].set_markdown_export_feedback(true, error),
+        }
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
+        let mut effects = Vec::new();
+        if let Some(super::CalculationPadDialogEffect::CopyText(text)) =
+            self.calculation_pad_dialog.on_ui_frame_complete(ctx)
+        {
+            effects.push(RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::CalculationPad,
+                text,
+            });
+        }
+        match self.date_time_studio_dialog.on_ui_frame_complete(ctx) {
+            Some(super::DateTimeStudioEffect::CopyText(text)) => {
+                effects.push(RootDialogEffect::CopyText {
+                    owner: DialogCopyOwner::DateTimeStudio,
+                    text,
+                });
+            }
+            Some(super::DateTimeStudioEffect::PrepareCalendar { instant_utc }) => {
+                effects.push(RootDialogEffect::PrepareCalendar { instant_utc });
+            }
+            None => {}
+        }
+        match self.convert_panel.on_ui_frame_complete(ctx) {
+            Some(super::ConvertPanelEffect::CopyText(text)) => {
+                effects.push(RootDialogEffect::CopyText {
+                    owner: DialogCopyOwner::Converter,
+                    text,
+                });
+            }
+            Some(super::ConvertPanelEffect::SavePreferences) => {
+                effects.push(RootDialogEffect::SaveConverterPreferences);
+            }
+            None => {}
+        }
+
+        if !self.calculation_pad_dialog.open {
+            self.panel_states.calculation_pad_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::CalculationPadDialog);
+        }
+        if !self.date_time_studio_dialog.open {
+            self.panel_states.date_time_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::DateTimeStudioDialog);
+        }
+        if !self.convert_panel.open {
+            self.panel_states.convert_panel = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::ConvertPanel);
+        }
+        effects
+    }
+
+    fn dispatch_root_dialog_effects(
+        &mut self,
+        _ctx: &egui::Context,
+        effects: Vec<RootDialogEffect>,
+    ) {
+        #[cfg(test)]
+        if !effects.is_empty() {
+            _ctx.data_mut(|data| {
+                let key = egui::Id::new(ROOT_DIALOG_EFFECTS_TEST_ID);
+                let mut captured = data
+                    .get_temp::<Vec<RootDialogEffect>>(key)
+                    .unwrap_or_default();
+                captured.extend(effects.iter().cloned());
+                data.insert_temp(key, captured);
+            });
+        }
+
+        for effect in effects {
+            match effect {
+                RootDialogEffect::CopyText { owner, text } => {
+                    #[cfg(test)]
+                    let result = {
+                        let _ = (&owner, &text);
+                        Ok(())
+                    };
+                    #[cfg(not(test))]
+                    let result = crate::actions::clipboard::set_text(&text)
+                        .map_err(|error| error.to_string());
+                    match owner {
+                        DialogCopyOwner::CalculationPad => {
+                            self.calculation_pad_dialog.copy_completed(result)
+                        }
+                        DialogCopyOwner::Converter => self.convert_panel.copy_completed(result),
+                        DialogCopyOwner::DateTimeStudio => {
+                            self.date_time_studio_dialog.copy_completed(result)
+                        }
+                    }
+                }
+                RootDialogEffect::SaveConverterPreferences => {
+                    self.convert_panel.save_preferences();
+                }
+                RootDialogEffect::PrepareCalendar { instant_utc } => {
+                    let result = self.prepare_calendar_event_at(instant_utc);
+                    self.date_time_studio_dialog
+                        .calendar_prepare_completed(result);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn take_test_root_dialog_effects(ctx: &egui::Context) -> Vec<RootDialogEffect> {
+        ctx.data_mut(|data| {
+            let key = egui::Id::new(ROOT_DIALOG_EFFECTS_TEST_ID);
+            let effects = data
+                .get_temp::<Vec<RootDialogEffect>>(key)
+                .unwrap_or_default();
+            data.insert_temp(key, Vec::<RootDialogEffect>::new());
+            effects
+        })
+    }
+
     fn guard_overlay_app_exit(&mut self, ctx: &egui::Context) {
         let requested = ctx.input(|input| input.viewport().close_requested());
         if requested && !self.sequence_exit_requested {
@@ -10115,6 +10465,33 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_ui_frame_complete(&mut self, _ctx: &egui::Context) {
+        if self.diagram_studio_dialog.on_ui_frame_complete(_ctx) {
+            self.panel_states.diagram_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
+        }
+        let (markdown_effect, markdown_closed) =
+            self.markdown_studio_dialog.on_ui_frame_complete(_ctx);
+        if markdown_closed {
+            self.panel_states.markdown_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
+        }
+        if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
+            && self
+                .diagram_studio_dialog
+                .open_source_copy(source)
+                .is_some()
+        {
+            self.markdown_studio_dialog
+                .track_diagram_source_origin(origin);
+            self.focus_panel(super::Panel::DiagramStudioDialog);
+            _ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        self.complete_markdown_diagram_handoff(_ctx);
+        self.regex_tester_dialog.on_ui_frame_complete(_ctx);
+        let effects = self.complete_retained_tool_dialogs(_ctx);
+        self.dispatch_root_dialog_effects(_ctx, effects);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
     }
@@ -10285,6 +10662,34 @@ impl LauncherApp {
                 passes += 1;
             })
         });
+        if self.diagram_studio_dialog.on_ui_frame_complete(ctx) {
+            self.panel_states.diagram_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
+        }
+        let (markdown_effect, markdown_closed) =
+            self.markdown_studio_dialog.on_ui_frame_complete(ctx);
+        if markdown_closed {
+            self.panel_states.markdown_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
+        }
+        if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect {
+            if self
+                .diagram_studio_dialog
+                .open_source_copy(source)
+                .is_some()
+            {
+                self.markdown_studio_dialog
+                    .track_diagram_source_origin(origin);
+                self.focus_panel(super::Panel::DiagramStudioDialog);
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+        }
+        self.complete_markdown_diagram_handoff(ctx);
+        self.regex_tester_dialog.on_ui_frame_complete(ctx);
+        let effects = self.complete_retained_tool_dialogs(ctx);
+        self.dispatch_root_dialog_effects(ctx, effects);
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();
@@ -10333,11 +10738,15 @@ thread_local! {
     static IMMEDIATE_VIEWPORT_RENDERER_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE: std::cell::Cell<Option<(egui::ViewportId, bool)>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
+    static IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID: std::cell::RefCell<Option<(egui::ViewportId, Option<egui::Id>)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
-fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -> R) -> R {
+pub(super) fn with_immediate_viewport_renderer<R>(
+    ctx: &egui::Context,
+    run: impl FnOnce() -> R,
+) -> R {
     struct EmbedViewportsGuard {
         ctx: egui::Context,
         previous: bool,
@@ -10374,17 +10783,26 @@ fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -
                     .inner_size
                     .unwrap_or_else(|| ctx.content_rect().size()),
             );
+            let close_requested = IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST.with(|request| {
+                if request.get() == Some(viewport_id) {
+                    request.set(None);
+                    true
+                } else {
+                    false
+                }
+            });
+            let mut viewport_info = egui::ViewportInfo {
+                parent: Some(parent_id),
+                title: viewport.builder.title.clone(),
+                inner_rect: Some(screen_rect),
+                focused,
+                ..Default::default()
+            };
+            if close_requested {
+                viewport_info.events.push(egui::ViewportEvent::Close);
+            }
             let mut viewports = ctx.input(|input| input.raw.viewports.clone());
-            viewports.insert(
-                viewport_id,
-                egui::ViewportInfo {
-                    parent: Some(parent_id),
-                    title: viewport.builder.title.clone(),
-                    inner_rect: Some(screen_rect),
-                    focused,
-                    ..Default::default()
-                },
-            );
+            viewports.insert(viewport_id, viewport_info);
             let events = IMMEDIATE_VIEWPORT_TEST_EVENTS
                 .with(|events| std::mem::take(&mut *events.borrow_mut()));
             let input = egui::RawInput {
@@ -10417,6 +10835,55 @@ fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -
     let result = run();
     drop(guard);
     result
+}
+
+#[cfg(test)]
+pub(super) fn with_immediate_viewport_test_events<R>(
+    events: Vec<egui::Event>,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct EventsGuard(Vec<egui::Event>);
+
+    impl Drop for EventsGuard {
+        fn drop(&mut self) {
+            IMMEDIATE_VIEWPORT_TEST_EVENTS.with(|current| {
+                *current.borrow_mut() = std::mem::take(&mut self.0);
+            });
+        }
+    }
+
+    let previous = IMMEDIATE_VIEWPORT_TEST_EVENTS
+        .with(|current| std::mem::replace(&mut *current.borrow_mut(), events));
+    let guard = EventsGuard(previous);
+    let output = run();
+    drop(guard);
+    output
+}
+
+#[cfg(test)]
+pub(super) fn with_immediate_viewport_test_close_request<R>(
+    viewport_id: egui::ViewportId,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct CloseRequestGuard(Option<egui::ViewportId>);
+
+    impl Drop for CloseRequestGuard {
+        fn drop(&mut self) {
+            IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST.with(|request| request.set(self.0));
+        }
+    }
+
+    let previous =
+        IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST.with(|request| request.replace(Some(viewport_id)));
+    let guard = CloseRequestGuard(previous);
+    let output = run();
+    drop(guard);
+    output
+}
+
+#[cfg(test)]
+pub(super) fn immediate_viewport_test_focused_id() -> Option<(egui::ViewportId, Option<egui::Id>)> {
+    IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID.with(|focused| *focused.borrow())
 }
 
 #[cfg(test)]
@@ -13410,6 +13877,728 @@ mod tests {
         let workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let app = root_list_app_at(ctx, results, workspace.root());
         (workspace, app)
+    }
+
+    fn prepare_tool_dialog_root(ctx: &egui::Context, app: &mut LauncherApp) {
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.follow_mouse = false;
+        for _ in 0..3 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let _ = LauncherApp::take_test_root_dialog_effects(ctx);
+    }
+
+    fn tool_dialog_pointer_events(rect: egui::Rect, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(rect.center()),
+            egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn run_tool_dialog_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+        discard_after_render: bool,
+    ) -> egui::FullOutput {
+        let mut input = actual_query_input(true);
+        input.events = events;
+        app.run_root_frame_for_test(ctx, input, discard_after_render)
+            .0
+    }
+
+    fn run_tool_dialog_frame_at_size(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+        discard_after_render: bool,
+        screen_size: egui::Vec2,
+    ) -> egui::FullOutput {
+        let mut input = actual_query_input(true);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size));
+        input.events = events;
+        app.run_root_frame_for_test(ctx, input, discard_after_render)
+            .0
+    }
+
+    fn run_note_panel_key(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) {
+        for pressed in [true, false] {
+            let mut events = vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                },
+            ];
+            if !pressed {
+                events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            }
+            run_tool_dialog_frame(ctx, app, events, false).drop_without_applying_deltas();
+        }
+    }
+
+    fn run_note_panel_key_at_size(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+        screen_size: egui::Vec2,
+    ) {
+        for pressed in [true, false] {
+            let mut events = vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                },
+            ];
+            if !pressed {
+                events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            }
+            run_tool_dialog_frame_at_size(ctx, app, events, false, screen_size)
+                .drop_without_applying_deltas();
+        }
+    }
+
+    fn focus_mermaid_open_by_tab(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        index: usize,
+    ) -> (egui::Id, egui::Rect, egui::Rect) {
+        ctx.global_style_mut(|style| {
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (open_id, _, _) = app.note_panels[0]
+            .test_mermaid_open_rect(index)
+            .expect("the Mermaid card registers its actual Open action");
+        let (edit_id, edit_rect, edit_clip) = app.note_panels[0]
+            .test_note_toolbar_edit_button()
+            .expect("Preview mode exposes the actual Edit toolbar button");
+        assert!(edit_clip.contains_rect(edit_rect));
+        ctx.memory_mut(|memory| memory.request_focus(edit_id));
+        run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(edit_id)));
+
+        for _ in 0..32 {
+            if ctx.memory(|memory| memory.has_focus(open_id)) {
+                break;
+            }
+            run_note_panel_key(ctx, app, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(
+            ctx.memory(|memory| memory.has_focus(open_id)),
+            "ordinary Tab traversal reaches the real Mermaid Open action"
+        );
+        // ScrollArea applies targets after measuring the current response; a
+        // center request plus stale-offset corrections took 15 observations to settle.
+        const MAX_REVEAL_OBSERVATIONS: usize = 16;
+        let mut observations = Vec::with_capacity(MAX_REVEAL_OBSERVATIONS);
+        for observation in 0..MAX_REVEAL_OBSERVATIONS {
+            assert!(ctx.memory(|memory| memory.has_focus(open_id)));
+            let (current_id, rect, clip) = app.note_panels[0]
+                .test_mermaid_open_rect(index)
+                .expect("the focused action remains rendered");
+            assert_eq!(current_id, open_id);
+            let offsets = app.note_panels[0].test_preview_scroll_offsets();
+            observations.push((observation, rect, clip, offsets));
+            let scroll_settled = offsets.is_some_and(|(before, after)| before == after);
+            if clip.contains_rect(rect) && scroll_settled {
+                return (current_id, rect, clip);
+            }
+            run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        panic!(
+            "Tab focus did not produce a fully contained action on a settled scroll frame: {observations:#?}"
+        );
+    }
+
+    #[test]
+    fn retained_root_copy_effect_is_typed_once_and_discarded_copy_never_reaches_clipboard() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog
+            .test_replace_source("answer = 40 + 2");
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let copy = app
+            .calculation_pad_dialog
+            .test_copy_all_button_rect()
+            .expect("Copy all is an actual rendered Pad action");
+
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(copy, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(copy, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        assert!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
+            "a ROOT discard drops the typed clipboard effect"
+        );
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("answer = 40 + 2")
+        );
+
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let copy = app
+            .calculation_pad_dialog
+            .test_copy_all_button_rect()
+            .expect("an enabled Copy all action is republished after the discarded pass");
+
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(copy, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(copy, false),
+            false,
+        )
+        .drop_without_applying_deltas();
+        let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            &effects[0],
+            RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::CalculationPad,
+                text,
+            } if text.contains("r1 answer = 42")
+        ));
+        let repeated = app.complete_retained_tool_dialogs(&ctx);
+        app.dispatch_root_dialog_effects(&ctx, repeated);
+        assert!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
+            "a second completion does not emit the same copy twice"
+        );
+    }
+
+    #[test]
+    fn retained_root_converter_preferences_save_is_suppressed_on_discard_and_written_once() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::ConvertPanel);
+        app.convert_panel.test_set_fixed_preferences();
+        let path = workspace.root().join("converter_preferences.json");
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let save = app
+            .convert_panel
+            .test_save_preferences_button_rect()
+            .expect("the preference-save action is visible");
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(save, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(save, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        assert!(!path.exists());
+        assert!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
+            "the discarded Save Preferences action is not dispatched"
+        );
+
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let save = app
+            .convert_panel
+            .test_save_preferences_button_rect()
+            .expect("the explicit action remains available after discard");
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(save, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(save, false),
+            false,
+        )
+        .drop_without_applying_deltas();
+        assert!(path.exists());
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::SaveConverterPreferences]
+        ));
+    }
+
+    #[test]
+    fn retained_root_date_prepare_waits_for_acceptance_and_rechecks_calendar_owner() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| {
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::DateTimeStudioDialog);
+        app.date_time_studio_dialog
+            .test_set_schedule_preview("2026-11-02", "09:00", "UTC");
+
+        let prepare_target = |app: &LauncherApp| {
+            app.date_time_studio_dialog
+                .test_focusable_control("schedule_prepare_calendar")
+                .expect("Prepare is a real focusable schedule action")
+        };
+        let reveal_prepare = |app: &mut LauncherApp| {
+            // Publish the control again in an ordinary enabled ROOT frame
+            // before reading geometry from a discarded interaction pass.
+            run_tool_dialog_frame(&ctx, app, Vec::new(), false).drop_without_applying_deltas();
+            let (_, _, enabled, _, _) = app
+                .date_time_studio_dialog
+                .test_prepare_observation()
+                .expect("Prepare is republished by an ordinary enabled frame");
+            assert!(enabled);
+            // The focus transition can change content geometry once more; use
+            // the action only after two consecutive visible measurements.
+            let mut previous_visible_geometry = None;
+            for _ in 0..128 {
+                let (id, rect, clip) = prepare_target(app);
+                let focused = ctx.memory(|memory| memory.focused()) == Some(id);
+                let visible = clip.contains_rect(rect) && ctx.content_rect().contains_rect(rect);
+                if focused && visible {
+                    if previous_visible_geometry == Some((rect, clip)) {
+                        return (id, rect, clip);
+                    }
+                    previous_visible_geometry = Some((rect, clip));
+                } else {
+                    previous_visible_geometry = None;
+                }
+                if focused {
+                    run_tool_dialog_frame(&ctx, app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                } else {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        app,
+                        vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    run_tool_dialog_frame(
+                        &ctx,
+                        app,
+                        vec![key_release(egui::Key::Tab, egui::Modifiers::NONE)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+            }
+            let (id, rect, clip) = prepare_target(app);
+            panic!(
+                "Tab focus should reveal the actual Prepare response: focused={:?}, id={id:?}, rect={rect:?}, clip={clip:?}, root={:?}, latest_observation={:?}",
+                ctx.memory(|memory| memory.focused()),
+                ctx.content_rect(),
+                app.date_time_studio_dialog.test_prepare_observation()
+            );
+        };
+
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (prepare_id, prepare, prepare_clip) = reveal_prepare(&mut app);
+        assert!(prepare_clip.contains_rect(prepare));
+        assert!(ctx.content_rect().contains_rect(prepare));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        let (_, prepare_after_press, clip_after_press) = prepare_target(&app);
+        assert_eq!(prepare_id, prepare_target(&app).0);
+        assert!(clip_after_press.contains_rect(prepare_after_press));
+        assert!(ctx.content_rect().contains_rect(prepare_after_press));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(prepare_id));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare_after_press, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        let (prepare_rect, prepare_clip, enabled, clicked, pointer_pos) = app
+            .date_time_studio_dialog
+            .test_prepare_observation()
+            .expect("the actual Prepare response was observed");
+        assert!(
+            ctx.content_rect().contains_rect(prepare_rect)
+                && prepare_clip.contains_rect(prepare_rect),
+            "Prepare must be fully visible and hit-testable before the discarded release: rect={prepare_rect:?}, clip={prepare_clip:?}, root={:?}",
+            ctx.content_rect()
+        );
+        assert!(enabled, "Prepare must be enabled for the discarded click");
+        assert!(
+            clicked && pointer_pos.is_some(),
+            "the discarded release must click the actual Prepare response: observation={:?}",
+            app.date_time_studio_dialog.test_prepare_observation()
+        );
+        assert!(app.date_time_studio_dialog.test_prepare_effect_staged());
+        assert!(!app.date_time_studio_dialog.test_prepare_effect_retained());
+        assert!(!app.calendar_editor_open);
+        assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+
+        // Simulate another accepted ROOT owner opening the calendar editor
+        // after the Date window drew Prepare but before effects are completed.
+        let (prepare_id_after_discard, prepare, prepare_clip) = reveal_prepare(&mut app);
+        assert_eq!(prepare_id, prepare_id_after_discard);
+        assert!(prepare_clip.contains_rect(prepare));
+        assert!(ctx.content_rect().contains_rect(prepare));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        let (_, prepare_after_press, clip_after_press) = prepare_target(&app);
+        assert!(clip_after_press.contains_rect(prepare_after_press));
+        assert!(ctx.content_rect().contains_rect(prepare_after_press));
+        let mut input = actual_query_input(true);
+        input.events = tool_dialog_pointer_events(prepare_after_press, false);
+        let (output, passes) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            app.calendar_editor_open = true;
+        });
+        assert_eq!(passes, 1, "the accepted action frame is retained once");
+        output.drop_without_applying_deltas();
+        let (prepare_rect, prepare_clip, enabled, clicked, pointer_pos) = app
+            .date_time_studio_dialog
+            .test_prepare_observation()
+            .expect("the accepted Prepare response was observed");
+        assert!(
+            ctx.content_rect().contains_rect(prepare_rect)
+                && prepare_clip.contains_rect(prepare_rect),
+            "accepted Prepare geometry must be visible: rect={prepare_rect:?}, clip={prepare_clip:?}, root={:?}",
+            ctx.content_rect()
+        );
+        assert!(enabled && clicked && pointer_pos.is_some());
+        assert!(app.date_time_studio_dialog.test_prepare_effect_staged());
+        assert!(app.date_time_studio_dialog.test_prepare_effect_retained());
+        assert!(app.calendar_editor_open);
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::PrepareCalendar { .. }]
+        ));
+        assert!(
+            app.date_time_studio_dialog
+                .test_notice()
+                .is_some_and(|notice| notice.contains("already open"))
+        );
+
+        app.calendar_editor_open = false;
+        let (prepare_id_after_close, prepare, prepare_clip) = reveal_prepare(&mut app);
+        assert_eq!(prepare_id, prepare_id_after_close);
+        assert!(prepare_clip.contains_rect(prepare));
+        assert!(ctx.content_rect().contains_rect(prepare));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        let (_, prepare_after_press, clip_after_press) = prepare_target(&app);
+        assert!(clip_after_press.contains_rect(prepare_after_press));
+        assert!(ctx.content_rect().contains_rect(prepare_after_press));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare_after_press, false),
+            false,
+        )
+        .drop_without_applying_deltas();
+        assert!(app.date_time_studio_dialog.test_prepare_effect_staged());
+        assert!(app.date_time_studio_dialog.test_prepare_effect_retained());
+        assert!(app.calendar_editor_open);
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::PrepareCalendar { .. }]
+        ));
+    }
+
+    #[test]
+    fn markdown_studio_query_enter_opens_an_empty_clean_source_editor() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let action = Action {
+            label: "Open Markdown Studio".into(),
+            desc: "Open the Markdown editor".into(),
+            action: "markdown:studio".into(),
+            args: None,
+        };
+        let (_workspace, mut app) = root_list_test_app(&ctx, vec![action]);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.selected = Some(0);
+
+        let mut input = actual_query_input(true);
+        input.events = vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)];
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+
+        assert!(app.markdown_studio_dialog.open);
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
+        assert!(!app.markdown_studio_dialog.test_is_dirty());
+        assert_eq!(app.markdown_studio_dialog.test_undo_depth(), 0);
+
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        let editor = app
+            .markdown_studio_dialog
+            .test_editor_id()
+            .expect("the newly opened source editor is rendered");
+        assert!(ctx.memory(|memory| memory.has_focus(editor)));
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
+        assert!(!app.markdown_studio_dialog.test_is_dirty());
+        assert_eq!(app.markdown_studio_dialog.test_undo_depth(), 0);
+    }
+
+    #[test]
+    fn markdown_studio_tab_then_space_activates_the_focused_export_control() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+
+        let run_frame = |app: &mut LauncherApp, events| {
+            let mut input = actual_query_input(true);
+            input.events = events;
+            app.run_root_frame_for_test(&ctx, input, false)
+                .0
+                .drop_without_applying_deltas();
+        };
+        for _ in 0..3 {
+            run_frame(&mut app, Vec::new());
+        }
+
+        let editor = app.markdown_studio_dialog.test_editor_id().unwrap();
+        assert!(ctx.memory(|memory| memory.has_focus(editor)));
+        run_frame(&mut app, vec![egui::Event::Text("saved draft".into())]);
+        let source = app.markdown_studio_dialog.test_source().unwrap().to_owned();
+        assert_eq!(source, "saved draft");
+        let save_as_path = workspace.root().join("tab-export-focus.md");
+        app.markdown_studio_dialog
+            .test_set_next_picker_result(Some(save_as_path.clone()));
+        let save_as_rect = app.markdown_studio_dialog.test_save_as_rect().unwrap();
+        assert!(ctx.content_rect().contains(save_as_rect.center()));
+        let save_as_id = app.markdown_studio_dialog.test_save_as_id().unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(save_as_id));
+        run_frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::NONE),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        run_frame(
+            &mut app,
+            vec![key_release(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        assert_eq!(std::fs::read_to_string(&save_as_path).unwrap(), source);
+        assert!(!app.markdown_studio_dialog.test_is_dirty());
+
+        let save_as_id = app.markdown_studio_dialog.test_save_as_id().unwrap();
+        let export_id = app.markdown_studio_dialog.test_export_id().unwrap();
+        let edit_id = app.markdown_studio_dialog.test_edit_id().unwrap();
+        assert_ne!(save_as_id, export_id);
+        assert_ne!(export_id, edit_id);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(save_as_id),
+            "the Save As action returns keyboard focus to its real control"
+        );
+
+        run_frame(
+            &mut app,
+            vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+        );
+        let focus_after_tab_press = ctx.memory(|memory| memory.focused());
+        run_frame(
+            &mut app,
+            vec![key_release(egui::Key::Tab, egui::Modifiers::NONE)],
+        );
+        let focus_after_tab_release = ctx.memory(|memory| memory.focused());
+        assert_eq!(focus_after_tab_press, Some(export_id));
+        assert_eq!(focus_after_tab_release, Some(export_id));
+
+        let mode_before_space = app.markdown_studio_dialog.test_view_mode();
+        run_frame(
+            &mut app,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::NONE),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            app.markdown_studio_dialog.test_view_mode(),
+            mode_before_space
+        );
+        assert_eq!(
+            app.markdown_studio_dialog.test_source(),
+            Some(source.as_str())
+        );
+        assert!(!app.markdown_studio_dialog.test_is_dirty());
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn markdown_studio_root_discards_unretained_source_save_and_uses_document_undo() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+
+        let run_frame = |app: &mut LauncherApp, events, discard| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, discard);
+            output.drop_without_applying_deltas();
+        };
+
+        for _ in 0..3 {
+            run_frame(&mut app, Vec::new(), false);
+        }
+        let editor = app
+            .markdown_studio_dialog
+            .test_editor_id()
+            .expect("the real Markdown TextEdit is rendered");
+        let saved_path = workspace.root().join("source-first.md");
+        app.markdown_studio_dialog
+            .test_set_next_picker_result(Some(saved_path.clone()));
+        let edit_and_save = || {
+            vec![
+                egui::Event::Text("# retained source".into()),
+                egui::Event::Key {
+                    key: egui::Key::S,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                },
+            ]
+        };
+
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        run_frame(&mut app, edit_and_save(), true);
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
+        assert_eq!(app.markdown_studio_dialog.test_picker_calls(), 0);
+        assert!(!saved_path.exists());
+
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        run_frame(&mut app, edit_and_save(), false);
+        assert_eq!(
+            app.markdown_studio_dialog.test_source(),
+            Some("# retained source")
+        );
+        assert_eq!(app.markdown_studio_dialog.test_picker_calls(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&saved_path).unwrap(),
+            "# retained source"
+        );
+
+        let command_key = |key, modifiers| {
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]
+        };
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        run_frame(
+            &mut app,
+            command_key(egui::Key::Z, egui::Modifiers::COMMAND),
+            false,
+        );
+        assert_eq!(app.markdown_studio_dialog.test_source(), Some(""));
+        ctx.memory_mut(|memory| memory.request_focus(editor));
+        run_frame(
+            &mut app,
+            command_key(
+                egui::Key::Z,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            ),
+            false,
+        );
+        assert_eq!(
+            app.markdown_studio_dialog.test_source(),
+            Some("# retained source")
+        );
     }
 
     fn root_list_app_at(
@@ -44043,6 +45232,1145 @@ mod tests {
         assert!(!app.show_settings, "Escape remains a container command");
         assert!(app.test_activation_trace.is_empty());
         drop(workspace);
+    }
+
+    fn focus_note_markdown_export_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        label: &str,
+    ) -> (egui::Id, egui::Rect, egui::Rect) {
+        const SIZE: egui::Vec2 = egui::vec2(1200.0, 1000.0);
+        let (menu_id, menu_rect, menu_clip) = app.note_panels[0]
+            .test_markdown_toolbar_menu()
+            .expect("the Note toolbar contains its collapsed Markdown menu");
+        assert!(menu_clip.contains_rect(menu_rect));
+        ctx.memory_mut(|memory| memory.request_focus(menu_id));
+        run_tool_dialog_frame_at_size(ctx, app, Vec::new(), false, SIZE)
+            .drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(menu_id)));
+        run_note_panel_key_at_size(ctx, app, egui::Key::Space, egui::Modifiers::NONE, SIZE);
+
+        for _ in 0..8 {
+            if let Some((id, rect, clip)) = app.note_panels[0].test_markdown_tool_rect(label)
+                && clip.contains_rect(rect)
+            {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                run_tool_dialog_frame_at_size(ctx, app, Vec::new(), false, SIZE)
+                    .drop_without_applying_deltas();
+                let (id, rect, clip) = app.note_panels[0]
+                    .test_markdown_tool_rect(label)
+                    .expect("the menu item remains registered after focus");
+                assert!(clip.contains_rect(rect));
+                assert!(ctx.memory(|memory| memory.has_focus(id)));
+                return (id, rect, clip);
+            }
+            run_tool_dialog_frame_at_size(ctx, app, Vec::new(), false, SIZE)
+                .drop_without_applying_deltas();
+        }
+        panic!("the visible Markdown export action was not rendered: {label}");
+    }
+
+    fn note_export_input(events: Vec<egui::Event>) -> egui::RawInput {
+        let mut input = actual_query_input(true);
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1200.0, 1000.0),
+        ));
+        input.events = events;
+        input
+    }
+
+    fn activate_note_export_with_enter(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        discard_after_render: bool,
+    ) -> usize {
+        let input = note_export_input(vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ]);
+        let (output, passes) = app.run_root_frame_for_test(ctx, input, discard_after_render);
+        output.drop_without_applying_deltas();
+        passes
+    }
+
+    fn activate_note_export_with_enter_observing_stage(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        discard_after_render: bool,
+    ) -> (usize, bool) {
+        let input = note_export_input(vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ]);
+        let mut staged = false;
+        let (output, passes) =
+            app.run_root_frame_for_test_with(ctx, input, discard_after_render, |app, ui| {
+                app.render_root_ui(ui);
+                staged |= app.note_panels[0].test_has_pending_markdown_export();
+            });
+        output.drop_without_applying_deltas();
+        (passes, staged)
+    }
+
+    fn activate_note_toolbar_key(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        key: egui::Key,
+        include_space_text: bool,
+        discard_first_pass: bool,
+    ) -> usize {
+        let modifiers = egui::Modifiers::NONE;
+        let mut press = actual_query_input(true);
+        press.events = vec![
+            egui::Event::ModifiersChanged(modifiers),
+            key_press(key, modifiers),
+        ];
+        if include_space_text {
+            press.events.push(egui::Event::Text(" ".into()));
+        }
+        let (output, passes) = app.run_root_frame_for_test(ctx, press, discard_first_pass);
+        output.drop_without_applying_deltas();
+
+        let mut release = actual_query_input(true);
+        release.events = vec![
+            egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: false,
+                repeat: false,
+                modifiers,
+            },
+            egui::Event::ModifiersChanged(modifiers),
+        ];
+        app.run_root_frame_for_test(ctx, release, false)
+            .0
+            .drop_without_applying_deltas();
+        passes
+    }
+
+    #[test]
+    fn note_toolbar_enter_and_space_text_preserve_saved_markdown_source() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        for (key, include_space_text, discard_first_pass) in [
+            (egui::Key::Enter, false, true),
+            (egui::Key::Space, true, false),
+        ] {
+            let ctx = egui::Context::default();
+            let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.note_external_open = crate::plugins::note::NoteExternalOpen::Neither;
+            let source_path = workspace.root().join("notes/keyboard-preview.md");
+            let source = "# Preview Ω\r\nExact draft.\n";
+            std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+            std::fs::write(&source_path, source.as_bytes()).unwrap();
+            let note = crate::plugins::note::Note {
+                title: "Keyboard preview".into(),
+                path: source_path.clone(),
+                content: source.into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "keyboard-preview-source".into(),
+                alias: None,
+                aliases: Vec::new(),
+                entity_refs: Vec::new(),
+            };
+            let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+            panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+            panel.request_activation_handoff();
+            app.push_note_panel(panel);
+            for _ in 0..4 {
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                    .drop_without_applying_deltas();
+            }
+
+            let (edit_id, edit_rect, edit_clip) = app.note_panels[0]
+                .test_note_toolbar_edit_button()
+                .expect("Preview mode exposes the real Edit toolbar button");
+            assert!(edit_clip.contains_rect(edit_rect));
+            assert!(ctx.content_rect().contains_rect(edit_rect));
+            let before_revision = app.note_panels[0].test_content_revision();
+            let before_history = app.note_panels[0].test_replacement_history_counts();
+            assert_eq!(app.note_panels[0].test_saved_content_baseline(), source);
+            assert!(!app.note_panels[0].has_unsaved_changes());
+
+            ctx.memory_mut(|memory| memory.request_focus(edit_id));
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+            assert!(ctx.memory(|memory| memory.has_focus(edit_id)));
+            let activation_passes = activate_note_toolbar_key(
+                &ctx,
+                &mut app,
+                key,
+                include_space_text,
+                discard_first_pass,
+            );
+            if discard_first_pass {
+                assert!(
+                    activation_passes > 1,
+                    "Edit activation crosses a discarded ROOT pass"
+                );
+            }
+            for _ in 0..2 {
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                    .drop_without_applying_deltas();
+            }
+
+            assert_eq!(
+                app.note_panels[0].test_view_mode(),
+                crate::settings::NoteViewMode::Edit
+            );
+            assert_eq!(app.note_panels[0].note_content(), source);
+            assert_eq!(std::fs::read(&source_path).unwrap(), source.as_bytes());
+            assert_eq!(app.note_panels[0].test_saved_content_baseline(), source);
+            assert!(!app.note_panels[0].has_unsaved_changes());
+            assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+            assert_eq!(
+                app.note_panels[0].test_replacement_history_counts(),
+                before_history
+            );
+            let editor_id = app.note_panels[0]
+                .test_editor_widget_id()
+                .expect("Edit mode renders its actual TextEdit");
+            assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
+            assert!(
+                !egui::Popup::is_any_open(&ctx),
+                "keyboard activation does not trigger an unrelated toolbar popup"
+            );
+
+            if key == egui::Key::Space {
+                let (menu_id, menu_rect, menu_clip) = app.note_panels[0]
+                    .test_markdown_toolbar_menu()
+                    .expect("Edit mode exposes the collapsed Markdown menu");
+                assert!(menu_clip.contains_rect(menu_rect));
+                ctx.memory_mut(|memory| memory.request_focus(menu_id));
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                    .drop_without_applying_deltas();
+                assert!(ctx.memory(|memory| memory.has_focus(menu_id)));
+
+                activate_note_toolbar_key(&ctx, &mut app, egui::Key::Space, true, false);
+                for _ in 0..2 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let (_, item_rect, item_clip) = app.note_panels[0]
+                    .test_markdown_tool_rect("Bold Selection")
+                    .expect("the real keyboard activation opens the Markdown menu");
+                assert!(item_clip.contains_rect(item_rect));
+                assert_eq!(app.note_panels[0].note_content(), source);
+
+                run_note_panel_key(&ctx, &mut app, egui::Key::Escape, egui::Modifiers::NONE);
+                assert_eq!(app.note_panels[0].note_content(), source);
+                assert_eq!(app.note_panels[0].test_saved_content_baseline(), source);
+                assert!(!app.note_panels[0].has_unsaved_changes());
+                assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+                assert_eq!(
+                    app.note_panels[0].test_replacement_history_counts(),
+                    before_history
+                );
+            } else {
+                let mut character_press = actual_query_input(true);
+                character_press.events = vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                    key_press(egui::Key::Z, egui::Modifiers::NONE),
+                    egui::Event::Text("z".into()),
+                ];
+                app.run_root_frame_for_test(&ctx, character_press, false)
+                    .0
+                    .drop_without_applying_deltas();
+                app.run_root_frame_for_test(
+                    &ctx,
+                    egui::RawInput {
+                        events: vec![
+                            key_release(egui::Key::Z, egui::Modifiers::NONE),
+                            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                        ],
+                        ..actual_query_input(true)
+                    },
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+                let edited = app.note_panels[0].note_content().to_owned();
+                assert_eq!(edited.len(), source.len() + 1);
+                let z_index = edited
+                    .find('z')
+                    .expect("the fresh typed character is accepted");
+                let mut without_z = edited;
+                without_z.replace_range(z_index..z_index + 1, "");
+                assert_eq!(without_z, source);
+                assert!(app.note_panels[0].has_unsaved_changes());
+            }
+            drop(workspace);
+        }
+    }
+
+    #[test]
+    fn note_markdown_tools_export_exact_unsaved_source_once_after_retained_root() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let note_path = workspace.root().join("notes/export-draft.md");
+        let disk_source = "# On disk\r\n";
+        let source = "# Unsaved Ω\r\n\r\nExact draft.\r\n";
+        std::fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        std::fs::write(&note_path, disk_source).unwrap();
+        let note = crate::plugins::note::Note {
+            title: "Export draft".into(),
+            path: note_path.clone(),
+            content: disk_source.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-export-draft".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.replace_content_from_mutation(source.into(), 15.0);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..3 {
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                Vec::new(),
+                false,
+                egui::vec2(1200.0, 1000.0),
+            )
+            .drop_without_applying_deltas();
+        }
+
+        let discarded_export = workspace.root().join("exports/discarded.md");
+        std::fs::create_dir_all(discarded_export.parent().unwrap()).unwrap();
+        app.note_panels[0].test_set_next_markdown_export_path(Some(discarded_export.clone()));
+        let (item_id, item_rect, item_clip) =
+            focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        assert!(item_clip.contains_rect(item_rect));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(item_id));
+        let before_revision = app.note_panels[0].test_content_revision();
+        let before_history = app.note_panels[0].test_replacement_history_counts();
+        let before_edit_time = app.note_panels[0].test_last_edit_at_secs();
+        let before_baseline = app.note_panels[0].test_saved_content_baseline().to_owned();
+
+        let (passes, staged_before_discard) =
+            activate_note_export_with_enter_observing_stage(&ctx, &mut app, true);
+        assert!(
+            passes > 1,
+            "the real menu activation crossed a discarded ROOT pass"
+        );
+        assert!(
+            staged_before_discard,
+            "the actual menu action staged its export"
+        );
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 0);
+        assert!(!discarded_export.exists());
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(!app.note_panels[0].test_has_pending_markdown_export());
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_replacement_history_counts(),
+            before_history
+        );
+        assert_eq!(
+            app.note_panels[0].test_last_edit_at_secs(),
+            before_edit_time
+        );
+        assert_eq!(
+            app.note_panels[0].test_saved_content_baseline(),
+            before_baseline
+        );
+
+        let enter_release = note_export_input(vec![
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ]);
+        app.run_root_frame_for_test(&ctx, enter_release, false)
+            .0
+            .drop_without_applying_deltas();
+
+        let accepted_export = workspace
+            .root()
+            .join("exports")
+            .join("long-feedback-destination-path-that-must-wrap-within-the-note-window-and-stay-within-root-bounds")
+            .join("accepted.md");
+        app.note_panels[0].test_set_next_markdown_export_path(Some(accepted_export.clone()));
+        focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        assert_eq!(
+            activate_note_export_with_enter(&ctx, &mut app, false),
+            1,
+            "the accepted export is handled once"
+        );
+        assert_eq!(
+            std::fs::read(&accepted_export).unwrap(),
+            source.as_bytes(),
+            "export uses the unsaved Unicode/CRLF draft rather than disk contents"
+        );
+        assert_eq!(std::fs::read(&note_path).unwrap(), disk_source.as_bytes());
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_note_path(), note_path);
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_replacement_history_counts(),
+            before_history
+        );
+        assert_eq!(
+            app.note_panels[0].test_last_edit_at_secs(),
+            before_edit_time
+        );
+        assert_eq!(
+            app.note_panels[0].test_saved_content_baseline(),
+            before_baseline
+        );
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 1);
+        assert!(
+            app.note_panels[0]
+                .test_markdown_export_feedback()
+                .is_some_and(|(is_error, message)| !is_error && message.contains("accepted.md"))
+        );
+        run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, egui::vec2(900.0, 750.0))
+            .drop_without_applying_deltas();
+        let root_rect = ctx.content_rect();
+        assert!((root_rect.width() - 900.0).abs() < 1.0);
+        let (feedback_rect, feedback_clip) = app.note_panels[0]
+            .test_markdown_export_feedback_rect()
+            .expect("the accepted export feedback is rendered below the toolbar row");
+        let (editor_rect, editor_clip) = app.note_panels[0]
+            .test_last_editor_geometry()
+            .expect("the Note editor remains rendered beside the feedback");
+        assert!(
+            feedback_rect.left() >= root_rect.left() - 1.0
+                && feedback_rect.right() <= root_rect.right() + 1.0,
+            "wrapped export feedback stays within ROOT width: root={root_rect:?}, feedback={feedback_rect:?}"
+        );
+        assert!(
+            feedback_rect.left() >= feedback_clip.left() - 1.0
+                && feedback_rect.right() <= feedback_clip.right() + 1.0,
+            "feedback label stays within its Note clip: clip={feedback_clip:?}, feedback={feedback_rect:?}"
+        );
+        assert!(
+            editor_rect.left() >= root_rect.left() - 1.0
+                && editor_rect.right() <= root_rect.right() + 1.0,
+            "the Note editor stays within ROOT width: root={root_rect:?}, editor={editor_rect:?}"
+        );
+        assert!(
+            editor_rect.left() >= editor_clip.left() - 1.0
+                && editor_rect.right() <= editor_clip.right() + 1.0,
+            "the Note editor stays within its actual clip: clip={editor_clip:?}, editor={editor_rect:?}"
+        );
+        assert!(
+            feedback_rect.height() > 20.0,
+            "the long export feedback wraps to multiple lines: feedback={feedback_rect:?}"
+        );
+        assert_eq!(app.note_panels[0].note_content(), source);
+        drop(workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_export_cancel_and_active_path_refusal_preserve_note() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let note_path = workspace.root().join("notes/current.md");
+        let source = "# current\r\n";
+        std::fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        std::fs::write(&note_path, source).unwrap();
+        let note = crate::plugins::note::Note {
+            title: "Current note".into(),
+            path: note_path.clone(),
+            content: source.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-export-current".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..3 {
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                Vec::new(),
+                false,
+                egui::vec2(1200.0, 1000.0),
+            )
+            .drop_without_applying_deltas();
+        }
+
+        let before_revision = app.note_panels[0].test_content_revision();
+        let before_history = app.note_panels[0].test_replacement_history_counts();
+        let before_edit_time = app.note_panels[0].test_last_edit_at_secs();
+        app.note_panels[0].test_set_next_markdown_export_path(None);
+        focus_note_markdown_export_action(&ctx, &mut app, "Export HTML…");
+        activate_note_export_with_enter(&ctx, &mut app, false);
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 1);
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(!app.note_panels[0].has_unsaved_changes());
+
+        app.note_panels[0].test_set_next_markdown_export_path(Some(note_path.clone()));
+        focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        activate_note_export_with_enter(&ctx, &mut app, false);
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 2);
+        assert_eq!(std::fs::read(&note_path).unwrap(), source.as_bytes());
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(!app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_replacement_history_counts(),
+            before_history
+        );
+        assert_eq!(
+            app.note_panels[0].test_last_edit_at_secs(),
+            before_edit_time
+        );
+        assert!(
+            app.note_panels[0]
+                .test_markdown_export_feedback()
+                .is_some_and(|(is_error, message)| is_error && message.contains("active Markdown"))
+        );
+
+        let successful_path = workspace.root().join("exports/current.html");
+        std::fs::create_dir_all(successful_path.parent().unwrap()).unwrap();
+        app.note_panels[0].test_set_next_markdown_export_path(Some(successful_path.clone()));
+        focus_note_markdown_export_action(&ctx, &mut app, "Export HTML…");
+        activate_note_export_with_enter(&ctx, &mut app, false);
+        let html = std::fs::read_to_string(&successful_path).unwrap();
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("<h1>current</h1>"));
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 3);
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(!app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_replacement_history_counts(),
+            before_history
+        );
+        assert_eq!(
+            app.note_panels[0].test_last_edit_at_secs(),
+            before_edit_time
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_export_rechecks_source_and_modal_after_draw() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let source = "# snapshot\r\n";
+        let note = crate::plugins::note::Note {
+            title: "Snapshot note".into(),
+            path: workspace.root().join("notes/snapshot.md"),
+            content: source.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-export-snapshot".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..3 {
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                Vec::new(),
+                false,
+                egui::vec2(1200.0, 1000.0),
+            )
+            .drop_without_applying_deltas();
+        }
+
+        let stale_path = workspace.root().join("exports/stale.md");
+        std::fs::create_dir_all(stale_path.parent().unwrap()).unwrap();
+        app.note_panels[0].test_set_next_markdown_export_path(Some(stale_path.clone()));
+        let _ = focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        let mut changed_after_draw = false;
+        let mut input = note_export_input(vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ]);
+        let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            if !changed_after_draw && app.note_panels[0].test_has_pending_markdown_export() {
+                app.note_panels[0]
+                    .replace_content_from_mutation("# changed after draw\n".into(), 9.0);
+                changed_after_draw = true;
+            }
+        });
+        output.drop_without_applying_deltas();
+        assert!(
+            changed_after_draw,
+            "the actual menu action staged a snapshot"
+        );
+        assert!(!stale_path.exists());
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 0);
+        assert_eq!(app.note_panels[0].note_content(), "# changed after draw\n");
+        let modal_path = workspace.root().join("exports/modal.md");
+        app.note_panels[0].test_set_next_markdown_export_path(Some(modal_path.clone()));
+        focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        let mut modal_after_draw = false;
+        input = note_export_input(vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ]);
+        let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            if !modal_after_draw && app.note_panels[0].test_has_pending_markdown_export() {
+                app.note_panels[0].test_set_link_dialog_open(true);
+                modal_after_draw = true;
+            }
+        });
+        output.drop_without_applying_deltas();
+        assert!(modal_after_draw);
+        assert!(!modal_path.exists());
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 0);
+        assert_eq!(app.note_panels[0].note_content(), "# changed after draw\n");
+        assert!(
+            app.note_panels[0]
+                .test_markdown_export_feedback()
+                .is_some_and(|(is_error, message)| is_error
+                    && message.contains("Resolve the open Note dialog"))
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_card_opens_and_updates_only_its_originating_fence() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let original = concat!(
+            "# Mermaid handoff\n\nBefore.\n\n",
+            "```mermaid\nflowchart TD\n    A[\"Alpha\"]\n```\n\n",
+            "After.\n",
+        );
+        let note = crate::plugins::note::Note {
+            title: "Mermaid handoff".into(),
+            path: std::path::PathBuf::new(),
+            content: original.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-tools-handoff".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        assert_eq!(app.note_panels[0].test_mermaid_card_count(), 1);
+        let (open_id, open, open_clip) = focus_mermaid_open_by_tab(&ctx, &mut app, 0);
+        assert!(
+            open_clip.contains_rect(open),
+            "card action is clipped: {open:?}"
+        );
+        assert!(open.left() >= 0.0 && open.right() <= 900.0);
+        let mut discarded_activation = actual_query_input(true);
+        discarded_activation.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ];
+        let mut discarded_origin = None;
+        let mut discarded_action = None;
+        let (output, passes) =
+            app.run_root_frame_for_test_with(&ctx, discarded_activation, true, |app, ui| {
+                app.render_root_ui(ui);
+                if discarded_origin.is_none() {
+                    if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
+                        discarded_origin = Some(origin);
+                        discarded_action = app.note_panels[0].test_mermaid_open_rect(0);
+                    }
+                }
+            });
+        output.drop_without_applying_deltas();
+        assert!(
+            passes > 1,
+            "the real keyboard activation crossed a discarded ROOT pass"
+        );
+        let discarded_origin = discarded_origin
+            .expect("Enter on the focused card action stages its exact source origin");
+        let (discarded_id, discarded_rect, discarded_clip) =
+            discarded_action.expect("the activated Open action has real response geometry");
+        assert_eq!(discarded_id, open_id);
+        assert!(
+            discarded_clip.contains_rect(discarded_rect),
+            "the discarded activation occurred on a fully visible action: {discarded_rect:?} in {discarded_clip:?}"
+        );
+        let mut discarded_release = actual_query_input(true);
+        discarded_release.events = vec![
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ];
+        app.run_root_frame_for_test(&ctx, discarded_release, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(
+            !app.diagram_studio_dialog.open,
+            "a discarded ROOT pass cannot open Diagram Studio from a Note card"
+        );
+        assert_eq!(app.note_panels[0].note_content(), original);
+        assert!(
+            !app.note_panels[0].tracks_diagram_source_origin(&discarded_origin),
+            "the abandoned card activation does not retain a pending source origin"
+        );
+
+        let (retried_open_id, open, open_clip) = focus_mermaid_open_by_tab(&ctx, &mut app, 0);
+        assert_eq!(retried_open_id, open_id);
+        assert!(open_clip.contains_rect(open));
+        let mut accepted_activation = actual_query_input(true);
+        accepted_activation.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ];
+        let mut accepted_origin = None;
+        let mut accepted_action = None;
+        app.run_root_frame_for_test_with(&ctx, accepted_activation, false, |app, ui| {
+            app.render_root_ui(ui);
+            if accepted_origin.is_none() {
+                if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
+                    accepted_origin = Some(origin);
+                    accepted_action = app.note_panels[0].test_mermaid_open_rect(0);
+                }
+            }
+        })
+        .0
+        .drop_without_applying_deltas();
+        let accepted_origin = accepted_origin.expect("the accepted Enter activated the card");
+        let (accepted_id, accepted_rect, accepted_clip) =
+            accepted_action.expect("the accepted Open action has real response geometry");
+        assert_eq!(accepted_id, open_id);
+        assert!(
+            accepted_clip.contains_rect(accepted_rect),
+            "the accepted activation occurred on a fully visible action: {accepted_rect:?} in {accepted_clip:?}"
+        );
+        let mut accepted_release = actual_query_input(true);
+        accepted_release.events = vec![
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ];
+        app.run_root_frame_for_test(&ctx, accepted_release, false)
+            .0
+            .drop_without_applying_deltas();
+
+        let copied_source = "flowchart TD\n    A[\"Alpha\"]\n";
+        assert!(app.diagram_studio_dialog.open);
+        assert_eq!(
+            app.diagram_studio_dialog.test_session().draft(),
+            copied_source
+        );
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            original,
+            "opening a card copies source without editing its Markdown fence"
+        );
+        let origin = app
+            .diagram_studio_dialog
+            .active_source_copy_origin()
+            .expect("the Diagram keeps the exact Note/fence origin");
+        assert_eq!(origin, accepted_origin);
+        assert!(app.note_panels[0].owns_active_diagram_source_origin(&origin));
+
+        let changed_source = "flowchart LR\n    A[\"Edited in Diagram\"]\n";
+        app.diagram_studio_dialog
+            .test_replace_source(changed_source);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (use_source, use_source_clip) = app
+            .diagram_studio_dialog
+            .test_action_rect("use_source_in_markdown")
+            .expect("the linked Diagram exposes its source handoff action");
+        assert!(use_source_clip.contains_rect(use_source));
+        for pressed in [true, false] {
+            let (rect, clip) = app
+                .diagram_studio_dialog
+                .test_action_rect("use_source_in_markdown")
+                .expect("the same handoff action remains available");
+            assert!(clip.contains_rect(rect));
+            super::with_immediate_viewport_test_events(
+                tool_dialog_pointer_events(rect, pressed),
+                || run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false),
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            concat!(
+                "# Mermaid handoff\n\nBefore.\n\n",
+                "```mermaid\nflowchart LR\n    A[\"Edited in Diagram\"]\n```\n\n",
+                "After.\n",
+            )
+        );
+        assert!(app.note_panels[0].has_unsaved_changes());
+        assert!(
+            !app.note_panels[0].tracks_diagram_source_origin(&origin),
+            "a completed source handoff retires its one-use Note origin"
+        );
+        drop(_workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_handoff_rechecks_note_modal_after_card_draw() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.show_inline_errors = true;
+        app.error = None;
+        let original = "```mermaid\nflowchart TD\n    A --> B\n```\n";
+        let note = crate::plugins::note::Note {
+            title: "Protected Mermaid handoff".into(),
+            path: std::path::PathBuf::new(),
+            content: original.into(),
+            links: Vec::new(),
+            tags: Vec::new(),
+            slug: "markdown-tools-protected-handoff".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        let (open_id, _, _) = focus_mermaid_open_by_tab(&ctx, &mut app, 0);
+        let mut input = actual_query_input(true);
+        input.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ];
+        let mut staged_origin = None;
+        let mut staged_action = None;
+        let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            // Simulate a protected Note dialog becoming active after the card
+            // staged its effect but before ROOT accepts and dispatches it.
+            if staged_origin.is_none() {
+                if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
+                    staged_origin = Some(origin);
+                    staged_action = app.note_panels[0].test_mermaid_open_rect(0);
+                }
+            }
+            app.note_panels[0].test_set_link_dialog_open(true);
+        });
+        output.drop_without_applying_deltas();
+        let staged_origin = staged_origin.expect("Enter on the card stages its exact origin");
+        let (staged_id, staged_rect, staged_clip) =
+            staged_action.expect("the activated action has real response geometry");
+        assert_eq!(staged_id, open_id);
+        assert!(
+            staged_clip.contains_rect(staged_rect),
+            "the protected activation occurred on a fully visible action: {staged_rect:?} in {staged_clip:?}"
+        );
+        let mut input_release = actual_query_input(true);
+        input_release.events = vec![
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ];
+        app.run_root_frame_for_test(&ctx, input_release, false)
+            .0
+            .drop_without_applying_deltas();
+
+        assert!(
+            !app.diagram_studio_dialog.open,
+            "completion rechecks protected Note state after rendering"
+        );
+        assert_eq!(app.note_panels[0].note_content(), original);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|message| message.contains("Resolve the open Note dialog")),
+            "the rejected handoff reports one root-level explanation"
+        );
+        assert!(
+            !app.note_panels[0].tracks_diagram_source_origin(&staged_origin),
+            "the rejected pending origin is retired"
+        );
+        drop(_workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_toolbar_menu_is_keyboard_accessible_and_uses_one_undo() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let note = crate::plugins::note::Note {
+            title: "Markdown tools".into(),
+            path: std::path::PathBuf::new(),
+            content: "éclair".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-tools-toolbar".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        assert!(
+            app.note_panels[0]
+                .test_markdown_tool_rect("Bold Selection")
+                .is_none(),
+            "the contextual Markdown menu starts collapsed"
+        );
+        let editor_id = app.note_panels[0]
+            .test_editor_widget_id()
+            .expect("Edit mode rendered the real Note TextEdit");
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the editor has actual selection state");
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new("éclair".chars().count()),
+            )));
+        state.store(&ctx, editor_id);
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+
+        let (menu_id, menu_rect, menu_clip) = app.note_panels[0]
+            .test_markdown_toolbar_menu()
+            .expect("the existing Note toolbar contains the collapsed Markdown menu");
+        assert!(menu_clip.contains_rect(menu_rect));
+        ctx.memory_mut(|memory| memory.request_focus(menu_id));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(menu_id)));
+
+        run_note_panel_key(&ctx, &mut app, egui::Key::Space, egui::Modifiers::NONE);
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (bold_id, bold_rect, bold_clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Bold Selection")
+            .expect("keyboard opening exposes the actual Bold menu item");
+        assert!(bold_clip.contains_rect(bold_rect));
+        assert_eq!(app.note_panels[0].note_content(), "éclair");
+
+        for _ in 0..16 {
+            if ctx.memory(|memory| memory.has_focus(bold_id)) {
+                break;
+            }
+            run_note_panel_key(&ctx, &mut app, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(ctx.memory(|memory| memory.has_focus(bold_id)));
+        let mut enter_press = actual_query_input(true);
+        enter_press.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let (output, passes) = app.run_root_frame_for_test(&ctx, enter_press, true);
+        output.drop_without_applying_deltas();
+        assert!(passes > 1, "the action crossed a discarded ROOT pass");
+
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "**éclair**",
+            "menu activation does not leak Space/Enter into the source editor"
+        );
+        assert!(app.note_panels[0].has_unsaved_changes());
+        assert!(
+            ctx.memory(|memory| memory.has_focus(editor_id)),
+            "toolbar focus is restored only after the accepted ROOT pass"
+        );
+        let editor_state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the retained editor keeps the prepared selection");
+        let selected = editor_state
+            .cursor
+            .char_range()
+            .expect("the prepared text remains selected")
+            .as_sorted_char_range();
+        assert_eq!((selected.start.0, selected.end.0), (2, 8));
+
+        let mut enter_release = actual_query_input(true);
+        enter_release.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        app.run_root_frame_for_test(&ctx, enter_release, false)
+            .0
+            .drop_without_applying_deltas();
+        run_note_panel_key(&ctx, &mut app, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "éclair",
+            "the toolbar action is one undo step in the existing Note editor history"
+        );
+        drop(_workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_collapsed_toolbar_is_reachable_in_constrained_window() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (420.0, 320.0);
+        let screen = egui::vec2(480.0, 360.0);
+        let note = crate::plugins::note::Note {
+            title: "Constrained Markdown tools".into(),
+            path: std::path::PathBuf::new(),
+            content: "hello".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-tools-constrained".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..5 {
+            run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, screen)
+                .drop_without_applying_deltas();
+        }
+
+        let (menu_id, menu_rect, menu_clip) = app.note_panels[0]
+            .test_markdown_toolbar_menu()
+            .expect("the collapsed Markdown menu renders in the constrained Note window");
+        assert!(menu_clip.contains_rect(menu_rect));
+        assert!(egui::Rect::from_min_size(egui::Pos2::ZERO, screen).contains_rect(menu_rect));
+        assert!(
+            app.note_panels[0]
+                .test_markdown_tool_rect("Add Checkbox")
+                .is_none()
+        );
+
+        let editor_id = app.note_panels[0]
+            .test_editor_widget_id()
+            .expect("the constrained Edit view renders its source editor");
+        let mut editor = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the source editor has cursor state");
+        editor
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(0),
+            )));
+        editor.store(&ctx, editor_id);
+        run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, screen)
+            .drop_without_applying_deltas();
+
+        ctx.memory_mut(|memory| memory.request_focus(menu_id));
+        run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, screen)
+            .drop_without_applying_deltas();
+        run_note_panel_key_at_size(
+            &ctx,
+            &mut app,
+            egui::Key::Space,
+            egui::Modifiers::NONE,
+            screen,
+        );
+        for _ in 0..2 {
+            run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, screen)
+                .drop_without_applying_deltas();
+        }
+        let (add_id, add_rect, add_clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Add Checkbox")
+            .expect("opening the collapsed menu exposes a real action");
+        assert!(add_clip.contains_rect(add_rect));
+        assert!(egui::Rect::from_min_size(egui::Pos2::ZERO, screen).contains_rect(add_rect));
+
+        run_tool_dialog_frame_at_size(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(add_rect, true),
+            false,
+            screen,
+        )
+        .drop_without_applying_deltas();
+        let (pressed_add_id, add_rect, add_clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Add Checkbox")
+            .expect("the same action remains enabled after pointer-down");
+        assert_eq!(pressed_add_id, add_id);
+        assert!(add_clip.contains_rect(add_rect));
+        run_tool_dialog_frame_at_size(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(add_rect, false),
+            false,
+            screen,
+        )
+        .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "- [ ] hello",
+            "the constrained menu action applies once without leaking input into the editor"
+        );
+        drop(_workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_unowned_diagram_handoff_reports_one_root_error() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.show_inline_errors = true;
+        let original = app.diagram_studio_dialog.test_session().draft().to_owned();
+        let markdown_before = app.markdown_studio_dialog.test_source().map(str::to_owned);
+        app.diagram_studio_dialog
+            .test_stage_markdown_source_handoff(
+                crate::diagram::DiagramSourceCopyOrigin::fresh(),
+                "flowchart LR\n    A[\"Unowned\"]\n",
+            );
+
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+
+        let error = app
+            .error
+            .as_deref()
+            .expect("an unowned handoff has visible root-level feedback");
+        assert!(error.contains("originating Note or Markdown document"));
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), original);
+        assert!(app.note_panels.is_empty());
+        assert_eq!(
+            app.markdown_studio_dialog.test_source(),
+            markdown_before.as_deref()
+        );
+        drop(_workspace);
     }
 
     #[test]

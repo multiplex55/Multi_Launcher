@@ -19,6 +19,7 @@ use crate::plugins::crop::CropPlugin;
 use crate::plugins::csv::CsvPlugin;
 use crate::plugins::data::DataPlugin;
 use crate::plugins::date_arithmetic::DateArithmeticPlugin;
+use crate::plugins::diagram_studio::DiagramStudioPlugin;
 use crate::plugins::diff::DiffPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::duplicate_finder::DuplicateFinderPlugin;
@@ -38,6 +39,7 @@ use crate::plugins::layout::LayoutPlugin;
 use crate::plugins::link::LinkPlugin;
 use crate::plugins::lorem::LoremPlugin;
 use crate::plugins::macros::MacrosPlugin;
+use crate::plugins::markdown_studio::MarkdownStudioPlugin;
 use crate::plugins::media::MediaPlugin;
 use crate::plugins::missing::MissingPlugin;
 use crate::plugins::mkmacro::MkMacroPlugin;
@@ -947,6 +949,8 @@ impl PluginManager {
         self.register_with_settings(DataPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);
         self.register_with_settings(DateArithmeticPlugin, plugin_settings);
+        self.register_with_settings(DiagramStudioPlugin, plugin_settings);
+        self.register_with_settings(MarkdownStudioPlugin, plugin_settings);
         self.register_with_settings(
             IpPlugin::with_updates(Arc::clone(&self.services.search_updates)),
             plugin_settings,

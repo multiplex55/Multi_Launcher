@@ -10,7 +10,7 @@ use crate::plugins::calendar::{
     CALENDAR_EVENTS_FILE, CalendarEvent, CustomRecurrenceUnit, RecurrenceEnd, RecurrenceFrequency,
     RecurrenceRule, Reminder, new_event_id, update_events,
 };
-use chrono::{Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday};
 use eframe::egui;
 use std::collections::BTreeMap;
 
@@ -124,9 +124,21 @@ impl Default for CalendarEventEditor {
 impl CalendarEventEditor {
     pub fn open_new(&mut self, date: NaiveDate) {
         let now = Local::now().naive_local();
+        self.reset_new(date, now.format("%H:%M").to_string());
+    }
+
+    pub(crate) fn open_new_at(&mut self, start: NaiveDateTime) -> Result<(), String> {
+        if start.second() != 0 || start.nanosecond() != 0 {
+            return Err("Calendar Event times must be aligned to whole minutes.".into());
+        }
+        self.reset_new(start.date(), start.format("%H:%M").to_string());
+        Ok(())
+    }
+
+    fn reset_new(&mut self, date: NaiveDate, time: String) {
         self.title.clear();
         self.start_date = date.format("%Y-%m-%d").to_string();
-        self.start_time = now.format("%H:%M").to_string();
+        self.start_time = time;
         self.all_day = false;
         self.end_date.clear();
         self.end_time.clear();
@@ -968,6 +980,62 @@ mod persistence_tests {
     };
     use std::sync::{Arc, atomic::AtomicBool};
 
+    #[test]
+    fn date_time_studio_calendar_prefill_requires_minute_alignment_and_preserves_exact_minute() {
+        let mut editor = CalendarEventEditor::default();
+        let start = NaiveDate::from_ymd_opt(2026, 11, 2)
+            .unwrap()
+            .and_hms_opt(14, 35, 0)
+            .unwrap();
+        editor.open_new_at(start).unwrap();
+        assert_eq!(editor.start_date, "2026-11-02");
+        assert_eq!(editor.start_time, "14:35");
+
+        editor.title = "Keep this draft".into();
+        let subminute = start + Duration::milliseconds(1);
+        assert!(editor.open_new_at(subminute).is_err());
+        assert_eq!(editor.title, "Keep this draft");
+        assert_eq!(editor.start_time, "14:35");
+    }
+
+    #[test]
+    fn date_time_studio_prefill_is_machine_local_unsaved_and_refuses_open_editor_overwrite() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, directory.path());
+        let instant = NaiveDate::from_ymd_opt(2026, 11, 2)
+            .unwrap()
+            .and_hms_opt(14, 35, 0)
+            .unwrap()
+            .and_utc();
+        let expected_local = instant.with_timezone(&Local).naive_local();
+        let result = app.prepare_calendar_event_at(instant).unwrap();
+        assert!(result.contains("this computer's local time"));
+        assert!(app.calendar_editor_open);
+        assert_eq!(
+            app.calendar_event_editor.start_date,
+            expected_local.format("%Y-%m-%d").to_string()
+        );
+        assert_eq!(
+            app.calendar_event_editor.start_time,
+            expected_local.format("%H:%M").to_string()
+        );
+        assert!(app.calendar_event_editor.title.is_empty());
+
+        app.calendar_event_editor.title = "Existing unsaved draft".into();
+        let second = instant + Duration::hours(1);
+        assert!(app.prepare_calendar_event_at(second).is_err());
+        assert_eq!(app.calendar_event_editor.title, "Existing unsaved draft");
+        assert_eq!(
+            app.calendar_event_editor.start_date,
+            expected_local.format("%Y-%m-%d").to_string()
+        );
+        assert_eq!(
+            app.calendar_event_editor.start_time,
+            expected_local.format("%H:%M").to_string()
+        );
+    }
+
     fn event(id: &str, title: &str) -> CalendarEvent {
         CalendarEvent {
             id: id.into(),
@@ -998,6 +1066,8 @@ mod persistence_tests {
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         settings.enable_toasts = false;
         settings.show_inline_errors = false;
         settings.show_error_toasts = false;

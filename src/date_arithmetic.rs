@@ -1,9 +1,14 @@
 //! Deterministic date anchors for the date-arithmetic domain.
 //!
-//! Parsing receives its reference local date/time explicitly. This module
-//! never reads the system clock or interprets time zones.
+//! Parsing receives its reference local date/time explicitly. Structured Studio
+//! operations include offline named-zone resolution; no operation reads the
+//! system clock.
 
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday};
+
+pub mod studio;
+pub mod zones;
+pub use studio::*;
 
 /// An anchor retains whether its input represented a calendar date or a local
 /// date-time so later arithmetic can apply the correct rules.
@@ -377,16 +382,20 @@ fn difference_days(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OffsetUnit {
+pub enum DateOffsetUnit {
     Day,
     Week,
     Month,
     Year,
     Hour,
     Minute,
+    Second,
+    Millisecond,
+    Microsecond,
+    Nanosecond,
 }
 
-impl OffsetUnit {
+impl DateOffsetUnit {
     fn label(self) -> &'static str {
         match self {
             Self::Day => "day",
@@ -395,19 +404,38 @@ impl OffsetUnit {
             Self::Year => "year",
             Self::Hour => "hour",
             Self::Minute => "minute",
+            Self::Second => "second",
+            Self::Millisecond => "millisecond",
+            Self::Microsecond => "microsecond",
+            Self::Nanosecond => "nanosecond",
         }
     }
 
     fn is_subday(self) -> bool {
-        matches!(self, Self::Hour | Self::Minute)
+        matches!(
+            self,
+            Self::Hour
+                | Self::Minute
+                | Self::Second
+                | Self::Millisecond
+                | Self::Microsecond
+                | Self::Nanosecond
+        )
     }
+}
+
+/// A typed relative offset, shared by legacy expressions and structured callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateOffsetRequest {
+    pub amount: i64,
+    pub unit: DateOffsetUnit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RelativeOffset {
     anchor: String,
     amount: i64,
-    unit: OffsetUnit,
+    unit: DateOffsetUnit,
 }
 
 fn parse_relative_expression(
@@ -501,14 +529,14 @@ fn parse_amount(amount: &str, expression: &str) -> Result<i64, DateArithmeticErr
     }
 }
 
-fn parse_offset_unit(unit: &str) -> Option<OffsetUnit> {
+fn parse_offset_unit(unit: &str) -> Option<DateOffsetUnit> {
     match unit.to_lowercase().as_str() {
-        "day" | "days" => Some(OffsetUnit::Day),
-        "week" | "weeks" => Some(OffsetUnit::Week),
-        "month" | "months" => Some(OffsetUnit::Month),
-        "year" | "years" => Some(OffsetUnit::Year),
-        "hour" | "hours" => Some(OffsetUnit::Hour),
-        "minute" | "minutes" | "min" | "mins" => Some(OffsetUnit::Minute),
+        "day" | "days" => Some(DateOffsetUnit::Day),
+        "week" | "weeks" => Some(DateOffsetUnit::Week),
+        "month" | "months" => Some(DateOffsetUnit::Month),
+        "year" | "years" => Some(DateOffsetUnit::Year),
+        "hour" | "hours" => Some(DateOffsetUnit::Hour),
+        "minute" | "minutes" | "min" | "mins" => Some(DateOffsetUnit::Minute),
         _ => None,
     }
 }
@@ -516,7 +544,7 @@ fn parse_offset_unit(unit: &str) -> Option<OffsetUnit> {
 fn apply_offset(
     anchor: DateValue,
     amount: i64,
-    unit: OffsetUnit,
+    unit: DateOffsetUnit,
     expression: &str,
 ) -> Result<DateValue, DateArithmeticError> {
     if unit.is_subday() && matches!(anchor, DateValue::Date(_)) {
@@ -526,8 +554,8 @@ fn apply_offset(
         });
     }
 
-    if matches!(unit, OffsetUnit::Month | OffsetUnit::Year) {
-        let months = if unit == OffsetUnit::Year {
+    if matches!(unit, DateOffsetUnit::Month | DateOffsetUnit::Year) {
+        let months = if unit == DateOffsetUnit::Year {
             amount
                 .checked_mul(12)
                 .ok_or_else(|| out_of_range(expression))?
@@ -550,11 +578,15 @@ fn apply_offset(
     }
 
     let duration = match unit {
-        OffsetUnit::Day => Duration::try_days(amount),
-        OffsetUnit::Week => Duration::try_weeks(amount),
-        OffsetUnit::Hour => Duration::try_hours(amount),
-        OffsetUnit::Minute => Duration::try_minutes(amount),
-        OffsetUnit::Month | OffsetUnit::Year => unreachable!("calendar units handled above"),
+        DateOffsetUnit::Day => Duration::try_days(amount),
+        DateOffsetUnit::Week => Duration::try_weeks(amount),
+        DateOffsetUnit::Hour => Duration::try_hours(amount),
+        DateOffsetUnit::Minute => Duration::try_minutes(amount),
+        DateOffsetUnit::Second => Duration::try_seconds(amount),
+        DateOffsetUnit::Millisecond => Duration::try_milliseconds(amount),
+        DateOffsetUnit::Microsecond => Some(Duration::microseconds(amount)),
+        DateOffsetUnit::Nanosecond => Some(Duration::nanoseconds(amount)),
+        DateOffsetUnit::Month | DateOffsetUnit::Year => return Err(out_of_range(expression)),
     }
     .ok_or_else(|| out_of_range(expression))?;
 
@@ -568,6 +600,16 @@ fn apply_offset(
             .map(DateValue::DateTime)
             .ok_or_else(|| out_of_range(expression)),
     }
+}
+
+/// Applies a structured offset through the same checked arithmetic used by
+/// legacy date expressions.
+pub fn apply_offset_request(
+    anchor: DateValue,
+    request: DateOffsetRequest,
+) -> Result<DateValue, DateArithmeticError> {
+    let expression = format!("{} {}", request.amount, request.unit.label());
+    apply_offset(anchor, request.amount, request.unit, &expression)
 }
 
 fn shift_calendar_months(date: NaiveDate, months: i64) -> Option<NaiveDate> {

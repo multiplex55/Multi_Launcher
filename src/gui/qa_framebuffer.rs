@@ -1,7 +1,10 @@
 use super::LauncherApp;
+use super::diagram_studio::DiagramViewportObservation;
 use super::jump_mode::ui::visible_top_middle_layer;
 #[cfg(feature = "qa-framebuffer-capture")]
 use super::qr_dialog::QrViewportObservation;
+#[cfg(feature = "qa-framebuffer-capture")]
+use super::regex_tester_dialog::RegexViewportObservation;
 use eframe::egui::{
     self, ColorImage, Event, Key, Modifiers, UserData, ViewportCommand, ViewportId,
 };
@@ -33,7 +36,9 @@ pub(crate) fn qa_clipped_response_rect(response: egui::Rect, clip: egui::Rect) -
 
 fn selected_reply_timeout(target: CaptureTarget) -> Duration {
     match target {
-        CaptureTarget::Root => SCREENSHOT_REPLY_TIMEOUT,
+        CaptureTarget::Root | CaptureTarget::Diagram | CaptureTarget::Regex => {
+            SCREENSHOT_REPLY_TIMEOUT
+        }
         CaptureTarget::Qr => QR_STARTUP_CAPTURE_TIMEOUT,
     }
 }
@@ -55,6 +60,10 @@ enum CaptureTarget {
     Root,
     #[serde(rename = "QR")]
     Qr,
+    #[serde(rename = "DIAGRAM")]
+    Diagram,
+    #[serde(rename = "REGEX")]
+    Regex,
 }
 
 impl CaptureTarget {
@@ -62,6 +71,8 @@ impl CaptureTarget {
         match self {
             Self::Root => ViewportId::ROOT,
             Self::Qr => super::qr_dialog::viewport_id(),
+            Self::Diagram => super::diagram_studio::viewport_id(),
+            Self::Regex => super::regex_tester_dialog::viewport_id(),
         }
     }
 
@@ -69,6 +80,8 @@ impl CaptureTarget {
         match self {
             Self::Root => "ROOT",
             Self::Qr => "QR",
+            Self::Diagram => "DIAGRAM",
+            Self::Regex => "REGEX",
         }
     }
 
@@ -77,6 +90,12 @@ impl CaptureTarget {
             Self::Root => "ROOT framebuffer pixels; CPU UI completion before GPU presentation",
             Self::Qr => {
                 "QR native immediate-child framebuffer pixels; child paint and swap precede callback return; CPU observation is not GPU completion"
+            }
+            Self::Diagram => {
+                "Diagram native immediate-child framebuffer pixels; actual child render advancement and matching screenshot reply; ROOT may be hidden"
+            }
+            Self::Regex => {
+                "Regex Tester native immediate-child framebuffer pixels; actual child render advancement and matching screenshot reply; ROOT may be hidden"
             }
         }
     }
@@ -650,15 +669,24 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
     if manifest.target == CaptureTarget::Qr && manifest.trigger == CaptureTrigger::F11 {
         return Err("QR framebuffer capture supports the Startup trigger only".into());
     }
+    if manifest.target == CaptureTarget::Diagram && manifest.trigger != CaptureTrigger::F11 {
+        return Err("DIAGRAM framebuffer capture requires the F11 trigger".into());
+    }
+    if manifest.target == CaptureTarget::Regex && manifest.trigger != CaptureTrigger::F11 {
+        return Err("REGEX framebuffer capture requires the F11 trigger".into());
+    }
     if !(1..=MAX_CAPTURE_COUNT).contains(&manifest.capture_count) {
         return Err(format!(
             "manifest capture_count must be between 1 and {MAX_CAPTURE_COUNT}"
         ));
     }
     if manifest.capture_count > 1
-        && (manifest.target != CaptureTarget::Root || manifest.trigger != CaptureTrigger::F11)
+        && (!matches!(
+            manifest.target,
+            CaptureTarget::Root | CaptureTarget::Diagram | CaptureTarget::Regex
+        ) || manifest.trigger != CaptureTrigger::F11)
     {
-        return Err("multiple captures require the ROOT/F11 trigger".into());
+        return Err("multiple captures require a ROOT, DIAGRAM, or REGEX F11 request".into());
     }
     if manifest.diagnostics && manifest.target != CaptureTarget::Root {
         return Err("root geometry diagnostics require the ROOT capture target".into());
@@ -1052,6 +1080,392 @@ struct QrRenderEvidence {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct DiagramRenderEvidence {
+    child_viewport_id: String,
+    callback_class: &'static str,
+    callback_frame_nr: u64,
+    callback_pass_nr: u64,
+    callback_pass_index: usize,
+    completed_frame_nr: Option<u64>,
+    completed_pass_nr: Option<u64>,
+    visible: Option<bool>,
+    minimized: Option<bool>,
+    occluded: Option<bool>,
+    focused: Option<bool>,
+    body_rendered: bool,
+    still_open: bool,
+    application_input_allowed: bool,
+    child_modal_open: bool,
+    session_revision: u64,
+    rendered_scene_revision: Option<u64>,
+    preview: &'static str,
+    eligible: bool,
+    callback_observed_at_unix_ms: u64,
+    renderer_returned_at_unix_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct RegexRenderEvidence {
+    child_viewport_id: String,
+    callback_class: &'static str,
+    callback_frame_nr: u64,
+    callback_pass_nr: u64,
+    callback_pass_index: usize,
+    completed_frame_nr: Option<u64>,
+    completed_pass_nr: Option<u64>,
+    visible: Option<bool>,
+    minimized: Option<bool>,
+    occluded: Option<bool>,
+    focused: Option<bool>,
+    body_rendered: bool,
+    still_open: bool,
+    child_discarded: bool,
+    root_discarded: bool,
+    application_input_allowed: bool,
+    child_modal_open: bool,
+    pixels_per_point: f32,
+    native_pixels_per_point: Option<f32>,
+    zoom_factor: f32,
+    session_revision: u64,
+    evaluated_revision: Option<u64>,
+    evaluation_status: &'static str,
+    test_case_revision: u64,
+    replacement_identity: u64,
+    visualization_generation: Option<u64>,
+    visualization_view_identity: u64,
+    selected_node_id: Option<u64>,
+    information_open: bool,
+    information_section: &'static str,
+    eligible: bool,
+    callback_observed_at_unix_ms: u64,
+    renderer_returned_at_unix_ms: Option<u64>,
+}
+
+fn diagram_render_evidence(observation: &DiagramViewportObservation) -> DiagramRenderEvidence {
+    let eligible = observation.child_viewport_id == CaptureTarget::Diagram.viewport_id()
+        && observation.callback_class == egui::ViewportClass::Immediate
+        && observation.body_rendered
+        && observation.still_open
+        && observation.visible != Some(false)
+        && observation.minimized != Some(true)
+        && observation.occluded != Some(true)
+        && observation.application_input_allowed
+        && !observation.child_modal_open
+        && observation.completed_frame_nr.is_some()
+        && observation.completed_pass_nr.is_some()
+        && observation.renderer_returned_at_unix_ms.is_some();
+    DiagramRenderEvidence {
+        child_viewport_id: format!("{:?}", observation.child_viewport_id),
+        callback_class: if observation.callback_class == egui::ViewportClass::Immediate {
+            "Immediate"
+        } else if observation.callback_class == egui::ViewportClass::EmbeddedWindow {
+            "EmbeddedWindow"
+        } else {
+            "other"
+        },
+        callback_frame_nr: observation.callback_frame_nr,
+        callback_pass_nr: observation.callback_pass_nr,
+        callback_pass_index: observation.callback_pass_index,
+        completed_frame_nr: observation.completed_frame_nr,
+        completed_pass_nr: observation.completed_pass_nr,
+        visible: observation.visible,
+        minimized: observation.minimized,
+        occluded: observation.occluded,
+        focused: observation.focused,
+        body_rendered: observation.body_rendered,
+        still_open: observation.still_open,
+        application_input_allowed: observation.application_input_allowed,
+        child_modal_open: observation.child_modal_open,
+        session_revision: observation.session_revision,
+        rendered_scene_revision: observation.rendered_scene_revision,
+        preview: match observation.status.preview {
+            crate::diagram::PreviewState::Current => "current",
+            crate::diagram::PreviewState::Stale => "stale",
+            crate::diagram::PreviewState::NoPreview => "no_preview",
+        },
+        eligible,
+        callback_observed_at_unix_ms: observation.callback_observed_at_unix_ms,
+        renderer_returned_at_unix_ms: observation.renderer_returned_at_unix_ms,
+    }
+}
+
+fn regex_render_evidence(observation: &RegexViewportObservation) -> RegexRenderEvidence {
+    let eligible = observation.child_viewport_id == CaptureTarget::Regex.viewport_id()
+        && observation.callback_class == egui::ViewportClass::Immediate
+        && observation.body_rendered
+        && observation.still_open
+        && !observation.child_discarded
+        && !observation.root_discarded
+        && observation.visible != Some(false)
+        && observation.minimized != Some(true)
+        && observation.occluded != Some(true)
+        && observation.application_input_allowed
+        && !observation.child_modal_open
+        && observation.completed_frame_nr.is_some()
+        && observation.completed_pass_nr.is_some()
+        && observation.renderer_returned_at_unix_ms.is_some();
+    RegexRenderEvidence {
+        child_viewport_id: format!("{:?}", observation.child_viewport_id),
+        callback_class: viewport_class_label(observation.callback_class),
+        callback_frame_nr: observation.callback_frame_nr,
+        callback_pass_nr: observation.callback_pass_nr,
+        callback_pass_index: observation.callback_pass_index,
+        completed_frame_nr: observation.completed_frame_nr,
+        completed_pass_nr: observation.completed_pass_nr,
+        visible: observation.visible,
+        minimized: observation.minimized,
+        occluded: observation.occluded,
+        focused: observation.focused,
+        body_rendered: observation.body_rendered,
+        still_open: observation.still_open,
+        child_discarded: observation.child_discarded,
+        root_discarded: observation.root_discarded,
+        application_input_allowed: observation.application_input_allowed,
+        child_modal_open: observation.child_modal_open,
+        pixels_per_point: observation.pixels_per_point,
+        native_pixels_per_point: observation.native_pixels_per_point,
+        zoom_factor: observation.zoom_factor,
+        session_revision: observation.session_revision,
+        evaluated_revision: observation.evaluated_revision,
+        evaluation_status: observation.evaluation_status,
+        test_case_revision: observation.test_case_revision,
+        replacement_identity: observation.replacement_identity,
+        visualization_generation: observation.visualization_generation,
+        visualization_view_identity: observation.visualization_view_identity,
+        selected_node_id: observation.selected_node_id,
+        information_open: observation.information_open,
+        information_section: observation.information_section,
+        eligible,
+        callback_observed_at_unix_ms: observation.callback_observed_at_unix_ms,
+        renderer_returned_at_unix_ms: observation.renderer_returned_at_unix_ms,
+    }
+}
+
+fn viewport_class_label(class: egui::ViewportClass) -> &'static str {
+    if class == egui::ViewportClass::Immediate {
+        "Immediate"
+    } else if class == egui::ViewportClass::EmbeddedWindow {
+        "EmbeddedWindow"
+    } else {
+        "other"
+    }
+}
+
+fn diagram_child_advanced(
+    baseline: &DiagramRenderEvidence,
+    current: &DiagramRenderEvidence,
+) -> bool {
+    baseline
+        .completed_frame_nr
+        .zip(current.completed_frame_nr)
+        .is_some_and(|(before, after)| after > before)
+        && baseline
+            .completed_pass_nr
+            .zip(current.completed_pass_nr)
+            .is_some_and(|(before, after)| after > before)
+}
+
+fn same_diagram_revision(
+    baseline: &DiagramRenderEvidence,
+    current: &DiagramRenderEvidence,
+) -> bool {
+    baseline.session_revision == current.session_revision
+        && baseline.rendered_scene_revision == current.rendered_scene_revision
+        && baseline.preview == current.preview
+}
+
+fn regex_child_advanced(baseline: &RegexRenderEvidence, current: &RegexRenderEvidence) -> bool {
+    baseline
+        .completed_frame_nr
+        .zip(current.completed_frame_nr)
+        .is_some_and(|(before, after)| after > before)
+        && baseline
+            .completed_pass_nr
+            .zip(current.completed_pass_nr)
+            .is_some_and(|(before, after)| after > before)
+}
+
+fn same_regex_revision(baseline: &RegexRenderEvidence, current: &RegexRenderEvidence) -> bool {
+    baseline.session_revision == current.session_revision
+        && baseline.evaluated_revision == current.evaluated_revision
+        && baseline.evaluation_status == current.evaluation_status
+        && baseline.test_case_revision == current.test_case_revision
+        && baseline.replacement_identity == current.replacement_identity
+        && baseline.visualization_generation == current.visualization_generation
+        && baseline.visualization_view_identity == current.visualization_view_identity
+        && baseline.selected_node_id == current.selected_node_id
+        && baseline.information_open == current.information_open
+        && baseline.information_section == current.information_section
+}
+
+#[derive(Clone)]
+enum ImmediateChildRenderEvidence {
+    Diagram {
+        evidence: DiagramRenderEvidence,
+        pixels_per_point: f32,
+        native_pixels_per_point: Option<f32>,
+        zoom_factor: f32,
+    },
+    Regex(RegexRenderEvidence),
+}
+
+impl ImmediateChildRenderEvidence {
+    fn target(&self) -> CaptureTarget {
+        match self {
+            Self::Diagram { .. } => CaptureTarget::Diagram,
+            Self::Regex(_) => CaptureTarget::Regex,
+        }
+    }
+
+    fn eligible(&self) -> bool {
+        match self {
+            Self::Diagram { evidence, .. } => evidence.eligible,
+            Self::Regex(evidence) => evidence.eligible,
+        }
+    }
+
+    fn focused(&self) -> Option<bool> {
+        match self {
+            Self::Diagram { evidence, .. } => evidence.focused,
+            Self::Regex(evidence) => evidence.focused,
+        }
+    }
+
+    fn pixels_per_point(&self) -> f32 {
+        match self {
+            Self::Diagram {
+                pixels_per_point, ..
+            } => *pixels_per_point,
+            Self::Regex(evidence) => evidence.pixels_per_point,
+        }
+    }
+
+    fn native_pixels_per_point(&self) -> Option<f32> {
+        match self {
+            Self::Diagram {
+                native_pixels_per_point,
+                ..
+            } => *native_pixels_per_point,
+            Self::Regex(evidence) => evidence.native_pixels_per_point,
+        }
+    }
+
+    fn zoom_factor(&self) -> f32 {
+        match self {
+            Self::Diagram { zoom_factor, .. } => *zoom_factor,
+            Self::Regex(evidence) => evidence.zoom_factor,
+        }
+    }
+
+    fn completed_frame_nr(&self) -> Option<u64> {
+        match self {
+            Self::Diagram { evidence, .. } => evidence.completed_frame_nr,
+            Self::Regex(evidence) => evidence.completed_frame_nr,
+        }
+    }
+
+    fn completed_pass_nr(&self) -> Option<u64> {
+        match self {
+            Self::Diagram { evidence, .. } => evidence.completed_pass_nr,
+            Self::Regex(evidence) => evidence.completed_pass_nr,
+        }
+    }
+
+    fn same_content(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Diagram {
+                    evidence: before, ..
+                },
+                Self::Diagram {
+                    evidence: after, ..
+                },
+            ) => same_diagram_revision(before, after),
+            (Self::Regex(before), Self::Regex(after)) => same_regex_revision(before, after),
+            _ => false,
+        }
+    }
+
+    fn advanced_from(&self, baseline: &Self) -> bool {
+        match (baseline, self) {
+            (
+                Self::Diagram {
+                    evidence: before, ..
+                },
+                Self::Diagram {
+                    evidence: after, ..
+                },
+            ) => diagram_child_advanced(before, after),
+            (Self::Regex(before), Self::Regex(after)) => regex_child_advanced(before, after),
+            _ => false,
+        }
+    }
+
+    fn set_frame_evidence(&self, frame: &mut FrameEvidence) {
+        frame.viewport_id = self.target().label();
+        frame.viewport_focused = self.focused().unwrap_or(false);
+        frame.pixels_per_point = Some(self.pixels_per_point());
+        frame.native_pixels_per_point = self.native_pixels_per_point();
+        frame.zoom_factor = self.zoom_factor();
+        frame.eligible = self.eligible();
+        match self {
+            Self::Diagram { evidence, .. } => frame.diagram_observation = Some(evidence.clone()),
+            Self::Regex(evidence) => frame.regex_observation = Some(evidence.clone()),
+        }
+    }
+
+    fn set_reply_evidence(&self, reply: &mut ScreenshotReplyEvidence) {
+        reply.viewport_id = self.target().label();
+        match self {
+            Self::Diagram { evidence, .. } => reply.diagram_observation = Some(evidence.clone()),
+            Self::Regex(evidence) => reply.regex_observation = Some(evidence.clone()),
+        }
+    }
+}
+
+fn child_evidence_from_frame(
+    frame: &FrameEvidence,
+    target: CaptureTarget,
+) -> Option<ImmediateChildRenderEvidence> {
+    match target {
+        CaptureTarget::Diagram => frame.diagram_observation.clone().map(|evidence| {
+            ImmediateChildRenderEvidence::Diagram {
+                evidence,
+                pixels_per_point: frame.pixels_per_point.unwrap_or_default(),
+                native_pixels_per_point: frame.native_pixels_per_point,
+                zoom_factor: frame.zoom_factor,
+            }
+        }),
+        CaptureTarget::Regex => frame
+            .regex_observation
+            .clone()
+            .map(ImmediateChildRenderEvidence::Regex),
+        CaptureTarget::Root | CaptureTarget::Qr => None,
+    }
+}
+
+fn child_evidence_from_reply(
+    reply: &ScreenshotReplyEvidence,
+    target: CaptureTarget,
+) -> Option<ImmediateChildRenderEvidence> {
+    match target {
+        CaptureTarget::Diagram => reply.diagram_observation.clone().map(|evidence| {
+            ImmediateChildRenderEvidence::Diagram {
+                evidence,
+                pixels_per_point: 1.0,
+                native_pixels_per_point: None,
+                zoom_factor: 1.0,
+            }
+        }),
+        CaptureTarget::Regex => reply
+            .regex_observation
+            .clone()
+            .map(ImmediateChildRenderEvidence::Regex),
+        CaptureTarget::Root | CaptureTarget::Qr => None,
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct FrameEvidence {
     viewport_id: &'static str,
     logic_frame_id: u64,
@@ -1076,6 +1490,10 @@ struct FrameEvidence {
     jump_mode_observation: Option<JumpModeObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     qr_observation: Option<QrRenderEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagram_observation: Option<DiagramRenderEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    regex_observation: Option<RegexRenderEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1087,6 +1505,10 @@ struct ScreenshotReplyEvidence {
     height: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     qr_observation: Option<QrRenderEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagram_observation: Option<DiagramRenderEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    regex_observation: Option<RegexRenderEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1377,6 +1799,8 @@ impl FramebufferProbe {
                 width: u64::try_from(width).unwrap_or(u64::MAX),
                 height: u64::try_from(height).unwrap_or(u64::MAX),
                 qr_observation: None,
+                diagram_observation: None,
+                regex_observation: None,
             };
             self.receipt.screenshot_received = Some(evidence.clone());
             self.pending_reply = Some(PendingScreenshotReply { image, evidence });
@@ -1410,12 +1834,18 @@ impl FramebufferProbe {
     }
 
     fn revalidate_root_logic(&mut self, eligibility: SurfaceEligibility) {
+        if self.is_immediate_child_target() {
+            return;
+        }
         if self.phase_requires_eligibility() && !eligibility.eligible() {
             self.fail(eligibility.failure_reason());
         }
     }
 
     fn run_hidden_logic_tick(&mut self) {
+        if self.is_immediate_child_target() {
+            return;
+        }
         if self.phase == ProbePhase::Saving || self.target == CaptureTarget::Qr {
             self.poll_writer_outcome();
         }
@@ -1582,6 +2012,220 @@ impl FramebufferProbe {
         ctx.request_repaint_of(ViewportId::ROOT);
     }
 
+    /// Diagram capture is driven by the real child, independently of ROOT eligibility.
+    fn after_diagram_show(
+        &mut self,
+        ctx: &egui::Context,
+        open: bool,
+        observation: Option<DiagramViewportObservation>,
+        evidence: FrameEvidence,
+    ) {
+        let child = observation.map(|observation| ImmediateChildRenderEvidence::Diagram {
+            evidence: diagram_render_evidence(&observation),
+            pixels_per_point: observation.pixels_per_point,
+            native_pixels_per_point: observation.native_pixels_per_point,
+            zoom_factor: observation.zoom_factor,
+        });
+        self.after_immediate_child_show(ctx, open, child, evidence);
+    }
+
+    fn after_regex_show(
+        &mut self,
+        ctx: &egui::Context,
+        open: bool,
+        observation: Option<RegexViewportObservation>,
+        evidence: FrameEvidence,
+    ) {
+        let child = observation.map(|observation| {
+            ImmediateChildRenderEvidence::Regex(regex_render_evidence(&observation))
+        });
+        self.after_immediate_child_show(ctx, open, child, evidence);
+    }
+
+    /// Shared immediate-child screenshot protocol. Child-specific identity,
+    /// eligibility, content stability, DPI and serialized evidence stay typed
+    /// in their respective observations.
+    fn after_immediate_child_show(
+        &mut self,
+        ctx: &egui::Context,
+        open: bool,
+        observation: Option<ImmediateChildRenderEvidence>,
+        mut evidence: FrameEvidence,
+    ) {
+        let target = self.target;
+        if !matches!(target, CaptureTarget::Diagram | CaptureTarget::Regex) {
+            return;
+        }
+        let was_armed = self.phase == ProbePhase::Armed;
+        let pressed = take_unmodified_f11_for(ctx, target.viewport_id());
+        self.poll_writer_outcome();
+        if matches!(self.phase, ProbePhase::Complete | ProbePhase::Failed) {
+            return;
+        }
+        self.logic_frame_id = evidence.logic_frame_id;
+        self.ui_pass_id = evidence.ui_pass_id;
+        let Some(child) = observation else {
+            if self.phase_is_active() && !open {
+                self.fail(format!(
+                    "{} closed before child capture completed",
+                    target.label()
+                ));
+            }
+            return;
+        };
+        if child.target() != target {
+            if self.phase_is_active() {
+                self.fail(format!(
+                    "{} callback reported another child target",
+                    target.label()
+                ));
+            }
+            return;
+        }
+        if self.phase == ProbePhase::Armed {
+            if !was_armed || !pressed || child.focused() != Some(true) || !child.eligible() {
+                return;
+            }
+        } else if self.phase_is_active() && (!open || !child.eligible()) {
+            self.fail(format!("{} child lost capture eligibility", target.label()));
+            return;
+        }
+        if self.phase == ProbePhase::Saving {
+            return;
+        }
+
+        // Keep actual ROOT visibility/owners as context; eligibility belongs to the child.
+        child.set_frame_evidence(&mut evidence);
+
+        if self.phase == ProbePhase::Armed {
+            evidence.evidence_stage = if target == CaptureTarget::Diagram {
+                "diagram_screenshot_issued_after_child_callback"
+            } else {
+                "regex_screenshot_issued_after_child_callback"
+            };
+            self.receipt.issued = Some(evidence);
+            self.phase = ProbePhase::Issued;
+            if let Err(error) = self.arm_reply_wait() {
+                self.fail(format!(
+                    "failed to arm {} screenshot wait: {error}",
+                    target.label()
+                ));
+                return;
+            }
+            ctx.send_viewport_cmd_to(
+                target.viewport_id(),
+                ViewportCommand::Screenshot(self.token.clone()),
+            );
+            ctx.request_repaint_of(target.viewport_id());
+            ctx.request_repaint_of(ViewportId::ROOT);
+            return;
+        }
+
+        let Some(baseline) = self
+            .receipt
+            .issued
+            .as_ref()
+            .and_then(|frame| child_evidence_from_frame(frame, target))
+        else {
+            self.fail(format!(
+                "{} dispatch observation was missing",
+                target.label()
+            ));
+            return;
+        };
+        if !baseline.same_content(&child) {
+            self.fail(format!("{} content changed during capture", target.label()));
+            return;
+        }
+        if self.pending_reply.is_none()
+            && let Some(image) =
+                take_matching_screenshot_event(ctx, target.viewport_id(), &self.token)
+        {
+            let mut reply = ScreenshotReplyEvidence {
+                viewport_id: target.label(),
+                logic_frame_id: self.logic_frame_id,
+                received_at_unix_ms: unix_millis(),
+                width: image.size[0] as u64,
+                height: image.size[1] as u64,
+                qr_observation: None,
+                diagram_observation: None,
+                regex_observation: None,
+            };
+            child.set_reply_evidence(&mut reply);
+            self.pending_reply = Some(PendingScreenshotReply {
+                image,
+                evidence: reply,
+            });
+        }
+        match self.phase {
+            ProbePhase::Issued => {
+                if !child.advanced_from(&baseline) {
+                    return;
+                }
+                evidence.evidence_stage = if target == CaptureTarget::Diagram {
+                    "diagram_expected_capture_child_render_after_dispatch"
+                } else {
+                    "regex_expected_capture_child_render_after_dispatch"
+                };
+                self.receipt.captured = Some(evidence);
+                self.phase = ProbePhase::AwaitingReply;
+                ctx.request_repaint_of(target.viewport_id());
+                ctx.request_repaint_of(ViewportId::ROOT);
+            }
+            ProbePhase::AwaitingReply => {
+                let Some(captured) = self
+                    .receipt
+                    .captured
+                    .as_ref()
+                    .and_then(|frame| child_evidence_from_frame(frame, target))
+                else {
+                    self.fail(format!(
+                        "{} capture observation was missing",
+                        target.label()
+                    ));
+                    return;
+                };
+                if !child.advanced_from(&captured) {
+                    return;
+                }
+                let Some(reply) = self.pending_reply.take() else {
+                    return;
+                };
+                let reply_child = child_evidence_from_reply(&reply.evidence, target);
+                let valid_reply = reply_child.as_ref().is_some_and(|received| {
+                    captured.same_content(received)
+                        && captured
+                            .completed_frame_nr()
+                            .zip(received.completed_frame_nr())
+                            .is_some_and(|(capture, received)| received >= capture)
+                        && captured
+                            .completed_pass_nr()
+                            .zip(received.completed_pass_nr())
+                            .is_some_and(|(capture, received)| received >= capture)
+                });
+                if !valid_reply {
+                    self.fail(format!(
+                        "{} reply preceded the required child render boundary",
+                        target.label()
+                    ));
+                    return;
+                }
+                self.receipt.screenshot_received = Some(reply.evidence);
+                match self.writer_tx.try_send(WriterJob::Save {
+                    receipt: self.receipt.clone(),
+                    image: reply.image,
+                }) {
+                    Ok(()) => self.phase = ProbePhase::Saving,
+                    Err(error) => self.fail(format!(
+                        "failed to queue {} screenshot: {error}",
+                        target.label()
+                    )),
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn after_qr_show(
         &mut self,
         ctx: &egui::Context,
@@ -1686,6 +2330,8 @@ impl FramebufferProbe {
                         width: u64::try_from(width).unwrap_or(u64::MAX),
                         height: u64::try_from(height).unwrap_or(u64::MAX),
                         qr_observation: Some(qr_evidence),
+                        diagram_observation: None,
+                        regex_observation: None,
                     };
                     self.receipt.screenshot_received = Some(evidence.clone());
                     self.pending_reply = Some(PendingScreenshotReply { image, evidence });
@@ -1827,6 +2473,9 @@ impl FramebufferProbe {
                 }
 
                 let reply_is_ready = match self.target {
+                    CaptureTarget::Diagram | CaptureTarget::Regex => {
+                        false // Driven by the actual immediate-child callback.
+                    }
                     CaptureTarget::Root => self
                         .expected_reply_logic_frame_id
                         .zip(
@@ -1888,14 +2537,15 @@ impl FramebufferProbe {
     }
 
     fn needs_retained_marker(&self) -> bool {
-        self.jump_mode_observation_enabled
-            || matches!(
-                self.phase,
-                ProbePhase::Armed
-                    | ProbePhase::Ready
-                    | ProbePhase::Issued
-                    | ProbePhase::AwaitingReply
-            )
+        !self.is_immediate_child_target()
+            && (self.jump_mode_observation_enabled
+                || matches!(
+                    self.phase,
+                    ProbePhase::Armed
+                        | ProbePhase::Ready
+                        | ProbePhase::Issued
+                        | ProbePhase::AwaitingReply
+                ))
     }
 
     fn needs_input_eligibility(&self) -> bool {
@@ -1903,9 +2553,14 @@ impl FramebufferProbe {
     }
 
     fn needs_root_logic(&self) -> bool {
-        self.needs_input_eligibility()
-            || self.phase == ProbePhase::Saving
-            || self.jump_mode_observation_enabled
+        !self.is_immediate_child_target()
+            && (self.needs_input_eligibility()
+                || self.phase == ProbePhase::Saving
+                || self.jump_mode_observation_enabled)
+    }
+
+    fn is_immediate_child_target(&self) -> bool {
+        matches!(self.target, CaptureTarget::Diagram | CaptureTarget::Regex)
     }
 
     fn record_activation(
@@ -2492,11 +3147,9 @@ impl LauncherApp {
         ctx: &egui::Context,
         logical_root_visible: bool,
     ) {
-        if !self
-            .qa_framebuffer
-            .as_ref()
-            .is_some_and(FramebufferProbe::phase_requires_eligibility)
-        {
+        if !self.qa_framebuffer.as_ref().is_some_and(|probe| {
+            !probe.is_immediate_child_target() && probe.phase_requires_eligibility()
+        }) {
             return;
         }
         let eligibility = surface_eligibility(self, ctx, logical_root_visible);
@@ -2506,11 +3159,10 @@ impl LauncherApp {
     }
 
     pub(super) fn qa_framebuffer_run_hidden_logic_tick(&mut self) {
-        if let Some(probe) = self
-            .qa_framebuffer
-            .as_mut()
-            .filter(|probe| probe.phase_requires_eligibility() || probe.phase == ProbePhase::Saving)
-        {
+        if let Some(probe) = self.qa_framebuffer.as_mut().filter(|probe| {
+            !probe.is_immediate_child_target()
+                && (probe.phase_requires_eligibility() || probe.phase == ProbePhase::Saving)
+        }) {
             probe.run_hidden_logic_tick();
         }
     }
@@ -2518,6 +3170,92 @@ impl LauncherApp {
     pub(super) fn qa_framebuffer_start_ui_pass(&mut self, pass_index: u32) {
         if let Some(probe) = self.qa_framebuffer.as_mut() {
             probe.start_ui_pass(pass_index);
+        }
+    }
+
+    pub(super) fn qa_framebuffer_needs_diagram_observation(&self) -> bool {
+        self.qa_framebuffer.as_ref().is_some_and(|probe| {
+            probe.target == CaptureTarget::Diagram
+                && !matches!(probe.phase, ProbePhase::Complete | ProbePhase::Failed)
+        })
+    }
+
+    pub(super) fn qa_framebuffer_after_diagram_show(
+        &mut self,
+        ctx: &egui::Context,
+        logical_root_visible: bool,
+        open: bool,
+        observation: Option<DiagramViewportObservation>,
+    ) {
+        let Some((logic_frame_id, ui_pass_id)) = self
+            .qa_framebuffer
+            .as_ref()
+            .filter(|probe| probe.target == CaptureTarget::Diagram)
+            .map(|probe| {
+                (
+                    probe.logic_frame_id.saturating_add(1),
+                    probe.ui_pass_id.saturating_add(1),
+                )
+            })
+        else {
+            return;
+        };
+        let actual_root = surface_eligibility(self, ctx, logical_root_visible);
+        let evidence = frame_evidence(
+            self,
+            ctx,
+            logic_frame_id,
+            ui_pass_id,
+            ctx.current_pass_index().min(u32::MAX as usize) as u32,
+            "diagram_child_callback_observed",
+            logical_root_visible,
+            actual_root,
+        );
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.after_diagram_show(ctx, open, observation, evidence);
+        }
+    }
+
+    pub(super) fn qa_framebuffer_needs_regex_observation(&self) -> bool {
+        self.qa_framebuffer.as_ref().is_some_and(|probe| {
+            probe.target == CaptureTarget::Regex
+                && !matches!(probe.phase, ProbePhase::Complete | ProbePhase::Failed)
+        })
+    }
+
+    pub(super) fn qa_framebuffer_after_regex_show(
+        &mut self,
+        ctx: &egui::Context,
+        logical_root_visible: bool,
+        open: bool,
+        observation: Option<RegexViewportObservation>,
+    ) {
+        let Some((logic_frame_id, ui_pass_id)) = self
+            .qa_framebuffer
+            .as_ref()
+            .filter(|probe| probe.target == CaptureTarget::Regex)
+            .map(|probe| {
+                (
+                    probe.logic_frame_id.saturating_add(1),
+                    probe.ui_pass_id.saturating_add(1),
+                )
+            })
+        else {
+            return;
+        };
+        let actual_root = surface_eligibility(self, ctx, logical_root_visible);
+        let evidence = frame_evidence(
+            self,
+            ctx,
+            logic_frame_id,
+            ui_pass_id,
+            ctx.current_pass_index().min(u32::MAX as usize) as u32,
+            "regex_child_callback_observed",
+            logical_root_visible,
+            actual_root,
+        );
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.after_regex_show(ctx, open, observation, evidence);
         }
     }
 
@@ -3320,6 +4058,8 @@ fn frame_evidence(
         eligible: eligibility.eligible(),
         jump_mode_observation: None,
         qr_observation: None,
+        diagram_observation: None,
+        regex_observation: None,
     }
 }
 
@@ -4101,26 +4841,32 @@ fn take_matching_screenshot_event(
 }
 
 fn take_unmodified_f11(ctx: &egui::Context) -> bool {
-    ctx.input_mut(|input| {
-        let mut pressed = false;
-        input.events.retain(|event| {
-            if let Event::Key {
-                key: Key::F11,
-                pressed: true,
-                repeat: false,
-                modifiers,
-                ..
-            } = event
-                && *modifiers == Modifiers::NONE
-            {
-                pressed = true;
-                false
-            } else {
-                true
-            }
-        });
-        pressed
-    })
+    ctx.input_mut(consume_unmodified_f11)
+}
+
+fn take_unmodified_f11_for(ctx: &egui::Context, viewport_id: ViewportId) -> bool {
+    ctx.input_mut_for(viewport_id, consume_unmodified_f11)
+}
+
+fn consume_unmodified_f11(input: &mut egui::InputState) -> bool {
+    let mut pressed = false;
+    input.events.retain(|event| {
+        if let Event::Key {
+            key: Key::F11,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } = event
+            && *modifiers == Modifiers::NONE
+        {
+            pressed = true;
+            false
+        } else {
+            true
+        }
+    });
+    pressed
 }
 
 enum WriterJob {
@@ -4177,6 +4923,8 @@ fn spawn_writer(
                                     CaptureTarget::Qr => format!(
                                         "selected QR capture did not complete within {deadline}"
                                     ),
+                                    CaptureTarget::Diagram => format!("selected Diagram capture did not complete within {deadline}"),
+                                    CaptureTarget::Regex => format!("selected Regex capture did not complete within {deadline}"),
                                 });
                                 WriterJob::Failure(receipt)
                             }
@@ -4190,6 +4938,8 @@ fn spawn_writer(
                                         "capture owner exited before the selected QR child reply arrived"
                                             .into()
                                     }
+                                    CaptureTarget::Diagram => "capture owner exited before the selected Diagram child reply arrived".into(),
+                                    CaptureTarget::Regex => "capture owner exited before the selected Regex child reply arrived".into(),
                                 });
                                 WriterJob::Failure(receipt)
                             }
@@ -5216,6 +5966,549 @@ mod tests {
             eligible: true,
             jump_mode_observation: None,
             qr_observation: None,
+            diagram_observation: None,
+            regex_observation: None,
+        }
+    }
+
+    fn diagram_observation(frame: u64) -> DiagramViewportObservation {
+        DiagramViewportObservation {
+            child_viewport_id: CaptureTarget::Diagram.viewport_id(),
+            callback_class: egui::ViewportClass::Immediate,
+            callback_frame_nr: frame,
+            callback_pass_nr: frame,
+            callback_pass_index: 0,
+            completed_frame_nr: Some(frame + 1),
+            completed_pass_nr: Some(frame + 1),
+            visible: Some(true),
+            minimized: Some(false),
+            occluded: Some(false),
+            focused: Some(true),
+            body_rendered: true,
+            still_open: true,
+            application_input_allowed: true,
+            child_modal_open: false,
+            pixels_per_point: 1.5,
+            native_pixels_per_point: Some(1.5),
+            zoom_factor: 1.0,
+            session_revision: 7,
+            rendered_scene_revision: Some(7),
+            status: crate::diagram::SessionStatus {
+                preview: crate::diagram::PreviewState::Current,
+                diagnostic: None,
+            },
+            callback_observed_at_unix_ms: frame,
+            renderer_returned_at_unix_ms: Some(frame + 1),
+        }
+    }
+
+    fn regex_observation(frame: u64) -> RegexViewportObservation {
+        RegexViewportObservation {
+            child_viewport_id: CaptureTarget::Regex.viewport_id(),
+            callback_class: egui::ViewportClass::Immediate,
+            callback_frame_nr: frame,
+            callback_pass_nr: frame,
+            callback_pass_index: 0,
+            visible: Some(true),
+            minimized: Some(false),
+            occluded: Some(false),
+            focused: Some(true),
+            body_rendered: true,
+            still_open: true,
+            child_discarded: false,
+            root_discarded: false,
+            application_input_allowed: true,
+            child_modal_open: false,
+            pixels_per_point: 1.5,
+            native_pixels_per_point: Some(1.5),
+            zoom_factor: 1.0,
+            session_revision: 12,
+            evaluated_revision: Some(12),
+            evaluation_status: "current",
+            test_case_revision: 3,
+            replacement_identity: 17,
+            visualization_generation: Some(4),
+            visualization_view_identity: 21,
+            selected_node_id: Some(9),
+            information_open: true,
+            information_section: "visualization",
+            callback_observed_at_unix_ms: frame,
+            completed_frame_nr: Some(frame + 1),
+            completed_pass_nr: Some(frame + 1),
+            renderer_returned_at_unix_ms: Some(frame + 2),
+        }
+    }
+
+    fn diagram_tick(
+        probe: &mut FramebufferProbe,
+        ctx: &egui::Context,
+        observation: DiagramViewportObservation,
+    ) {
+        let mut evidence = test_evidence(probe.logic_frame_id + 1, probe.ui_pass_id + 1, 0);
+        evidence.logical_root_visible = false;
+        evidence.root_visibility_reported = Some(false);
+        evidence.root_visible = false;
+        evidence.eligible = false;
+        probe.after_diagram_show(ctx, observation.still_open, Some(observation), evidence);
+    }
+
+    fn regex_tick(
+        probe: &mut FramebufferProbe,
+        ctx: &egui::Context,
+        observation: RegexViewportObservation,
+    ) {
+        let mut evidence = test_evidence(probe.logic_frame_id + 1, probe.ui_pass_id + 1, 0);
+        evidence.logical_root_visible = false;
+        evidence.root_visibility_reported = Some(false);
+        evidence.root_visible = false;
+        evidence.eligible = false;
+        probe.after_regex_show(ctx, observation.still_open, Some(observation), evidence);
+    }
+
+    fn push_diagram_f11(ctx: &egui::Context, viewport: ViewportId) {
+        ctx.input_mut_for(viewport, |input| {
+            input.events.push(Event::Key {
+                key: Key::F11,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            })
+        });
+    }
+
+    fn push_child_f11(ctx: &egui::Context, viewport: ViewportId) {
+        ctx.input_mut_for(viewport, |input| {
+            input.events.push(Event::Key {
+                key: Key::F11,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            })
+        });
+    }
+
+    #[test]
+    fn diagram_capture_manifest_preserves_root_and_qr_restrictions() {
+        let mut request = test_request_for_target(
+            CaptureTarget::Diagram,
+            CaptureTrigger::F11,
+            PathBuf::from("unused"),
+        );
+        request.manifest.capture_count = 16;
+        validate_manifest(&request.manifest).unwrap();
+        request.manifest.trigger = CaptureTrigger::Startup;
+        assert!(
+            validate_manifest(&request.manifest)
+                .unwrap_err()
+                .contains("requires the F11")
+        );
+        request.manifest.trigger = CaptureTrigger::F11;
+        request.manifest.diagnostics = true;
+        assert!(
+            validate_manifest(&request.manifest)
+                .unwrap_err()
+                .contains("ROOT")
+        );
+        request.manifest.target = CaptureTarget::Qr;
+        request.manifest.diagnostics = false;
+        assert!(
+            validate_manifest(&request.manifest)
+                .unwrap_err()
+                .contains("Startup")
+        );
+    }
+
+    #[test]
+    fn regex_capture_manifest_is_f11_only_and_keeps_root_qr_permissions() {
+        let mut regex = test_request_for_target(
+            CaptureTarget::Regex,
+            CaptureTrigger::F11,
+            PathBuf::from("unused"),
+        );
+        regex.manifest.capture_count = 16;
+        validate_manifest(&regex.manifest).unwrap();
+        regex.manifest.trigger = CaptureTrigger::Startup;
+        assert!(
+            validate_manifest(&regex.manifest)
+                .unwrap_err()
+                .contains("F11")
+        );
+        regex.manifest.trigger = CaptureTrigger::F11;
+        regex.manifest.diagnostics = true;
+        assert!(
+            validate_manifest(&regex.manifest)
+                .unwrap_err()
+                .contains("ROOT")
+        );
+
+        let mut root = test_request_for_target(
+            CaptureTarget::Root,
+            CaptureTrigger::F11,
+            PathBuf::from("unused"),
+        );
+        root.manifest.capture_count = 16;
+        validate_manifest(&root.manifest).unwrap();
+
+        let mut qr = test_request_for_target(
+            CaptureTarget::Qr,
+            CaptureTrigger::F11,
+            PathBuf::from("unused"),
+        );
+        assert!(
+            validate_manifest(&qr.manifest)
+                .unwrap_err()
+                .contains("Startup")
+        );
+        qr.manifest.trigger = CaptureTrigger::Startup;
+        validate_manifest(&qr.manifest).unwrap();
+    }
+
+    #[test]
+    fn regex_capture_requires_exact_child_and_focused_child_f11() {
+        let good = regex_observation(10);
+        assert!(regex_render_evidence(&good).eligible);
+        for invalid in 0..9 {
+            let mut observation = good.clone();
+            match invalid {
+                0 => observation.child_viewport_id = ViewportId::ROOT,
+                1 => observation.callback_class = egui::ViewportClass::EmbeddedWindow,
+                2 => observation.visible = Some(false),
+                3 => observation.minimized = Some(true),
+                4 => observation.still_open = false,
+                5 => observation.child_modal_open = true,
+                6 => observation.body_rendered = false,
+                7 => observation.child_discarded = true,
+                _ => observation.root_discarded = true,
+            }
+            assert!(!regex_render_evidence(&observation).eligible);
+        }
+
+        let ctx = egui::Context::default();
+        let child_id = CaptureTarget::Regex.viewport_id();
+        let (mut probe, jobs, _) = test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Regex);
+        push_child_f11(&ctx, ViewportId::ROOT);
+        regex_tick(&mut probe, &ctx, good.clone());
+        assert_eq!(probe.phase, ProbePhase::Armed);
+        assert!(ctx.input_for(ViewportId::ROOT, |input| !input.events.is_empty()));
+
+        push_child_f11(&ctx, child_id);
+        let mut unfocused = good.clone();
+        unfocused.focused = Some(false);
+        regex_tick(&mut probe, &ctx, unfocused);
+        assert_eq!(probe.phase, ProbePhase::Armed);
+
+        push_child_f11(&ctx, child_id);
+        regex_tick(&mut probe, &ctx, good);
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert!(matches!(jobs.try_recv(), Ok(WriterJob::AwaitReply(_))));
+    }
+
+    #[test]
+    fn regex_capture_hidden_root_waits_for_child_render_and_matching_reply() {
+        let ctx = egui::Context::default();
+        let (mut probe, jobs, outcomes) =
+            test_probe_with_capture_count(CaptureTrigger::F11, CaptureTarget::Regex, 2);
+        let child_id = CaptureTarget::Regex.viewport_id();
+        push_child_f11(&ctx, child_id);
+        regex_tick(&mut probe, &ctx, regex_observation(10));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert!(!probe.needs_root_logic() && !probe.needs_retained_marker());
+        assert!(matches!(jobs.try_recv(), Ok(WriterJob::AwaitReply(_))));
+        probe.revalidate_root_logic(SurfaceEligibility::default());
+        probe.run_hidden_logic_tick();
+        regex_tick(&mut probe, &ctx, regex_observation(10));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+
+        let first_token = probe.token.clone();
+        ctx.input_mut_for(child_id, |input| {
+            input.events.extend([
+                Event::Screenshot {
+                    viewport_id: ViewportId::ROOT,
+                    user_data: first_token.clone(),
+                    image: test_image(egui::Color32::RED),
+                },
+                Event::Screenshot {
+                    viewport_id: child_id,
+                    user_data: UserData::new(ScreenshotToken(99)),
+                    image: test_image(egui::Color32::RED),
+                },
+                Event::Screenshot {
+                    viewport_id: child_id,
+                    user_data: first_token.clone(),
+                    image: test_image(egui::Color32::GREEN),
+                },
+            ])
+        });
+        regex_tick(&mut probe, &ctx, regex_observation(11));
+        assert_eq!(probe.phase, ProbePhase::AwaitingReply);
+        assert_eq!(ctx.input_for(child_id, |input| input.events.len()), 2);
+        regex_tick(&mut probe, &ctx, regex_observation(12));
+        assert_eq!(probe.phase, ProbePhase::Saving);
+        let job = jobs.try_recv().unwrap();
+        let WriterJob::Save { ref receipt, .. } = job else {
+            panic!("Regex uses the shared capture writer")
+        };
+        let captured = receipt.captured.as_ref().unwrap();
+        assert!(!captured.logical_root_visible && !captured.root_visible && captured.eligible);
+        assert_eq!(captured.viewport_id, "REGEX");
+        assert_eq!(captured.pixels_per_point, Some(1.5));
+        let render = captured.regex_observation.as_ref().unwrap();
+        assert_eq!(render.callback_class, "Immediate");
+        assert_eq!(render.evaluation_status, "current");
+        assert_eq!(render.visualization_generation, Some(4));
+        assert_eq!(render.test_case_revision, 3);
+        assert_eq!(render.replacement_identity, 17);
+        let directory = tempfile::tempdir().unwrap();
+        let written = write_job(directory.path(), job);
+        assert!(written.receipt_written && written.status == ReceiptStatus::Saved);
+        let (png_name, receipt_name) = capture_artifact_names(1, 2);
+        let png = image::open(directory.path().join(png_name))
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(png.get_pixel(0, 0).0, [0, 255, 0, 255]);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join(receipt_name)).unwrap())
+                .unwrap();
+        assert_eq!(saved["target"], "REGEX");
+        assert_eq!(
+            saved["captured"]["regex_observation"]["evaluation_status"],
+            "current"
+        );
+        let regex_observation_json = &saved["captured"]["regex_observation"];
+        for private_field in ["pattern", "sample_text", "replacement"] {
+            assert!(regex_observation_json.get(private_field).is_none());
+        }
+
+        outcomes.send(written).unwrap();
+        push_child_f11(&ctx, child_id);
+        regex_tick(&mut probe, &ctx, regex_observation(13));
+        assert_eq!(probe.phase, ProbePhase::Armed);
+        assert_ne!(probe.token, first_token);
+        assert!(jobs.try_recv().is_err());
+        push_child_f11(&ctx, child_id);
+        regex_tick(&mut probe, &ctx, regex_observation(14));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert_eq!(probe.receipt.capture_index, 2);
+    }
+
+    #[test]
+    fn regex_capture_fails_if_child_closes_or_content_changes() {
+        for change in 0..5 {
+            let ctx = egui::Context::default();
+            let (mut probe, jobs, _) =
+                test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Regex);
+            push_child_f11(&ctx, CaptureTarget::Regex.viewport_id());
+            regex_tick(&mut probe, &ctx, regex_observation(10));
+            assert!(matches!(jobs.try_recv(), Ok(WriterJob::AwaitReply(_))));
+            let mut changed = regex_observation(11);
+            match change {
+                0 => changed.still_open = false,
+                1 => changed.session_revision += 1,
+                2 => changed.test_case_revision += 1,
+                3 => changed.replacement_identity += 1,
+                _ => changed.visualization_view_identity += 1,
+            }
+            regex_tick(&mut probe, &ctx, changed);
+            assert_eq!(probe.phase, ProbePhase::Failed);
+            assert!(matches!(jobs.try_recv(), Ok(WriterJob::Failure(_))));
+        }
+    }
+
+    #[test]
+    fn regex_capture_reply_timeout_reports_regex_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = test_request_for_target(
+            CaptureTarget::Regex,
+            CaptureTrigger::F11,
+            directory.path().to_owned(),
+        );
+        let receipt = CompletionReceipt::new(&request, Duration::from_millis(5));
+        let (sender, receiver) = spawn_writer(
+            directory.path().to_owned(),
+            egui::Context::default(),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+        sender.send(WriterJob::AwaitReply(receipt)).unwrap();
+        let outcome = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(outcome.receipt_written && outcome.status == ReceiptStatus::Failed);
+        let saved: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join(RECEIPT_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["target"], "REGEX");
+        assert!(saved["failure"].as_str().unwrap().contains("Regex"));
+    }
+
+    #[test]
+    fn diagram_capture_requires_actual_child_and_child_f11_ownership() {
+        let good = diagram_observation(10);
+        assert!(diagram_render_evidence(&good).eligible);
+        for invalid in 0..6 {
+            let mut observation = good.clone();
+            match invalid {
+                0 => observation.child_viewport_id = ViewportId::ROOT,
+                1 => observation.callback_class = egui::ViewportClass::EmbeddedWindow,
+                2 => observation.visible = Some(false),
+                3 => observation.minimized = Some(true),
+                4 => observation.still_open = false,
+                _ => observation.child_modal_open = true,
+            }
+            assert!(!diagram_render_evidence(&observation).eligible);
+        }
+        let ctx = egui::Context::default();
+        let (mut probe, _jobs, _outcomes) =
+            test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Diagram);
+        push_diagram_f11(&ctx, ViewportId::ROOT);
+        diagram_tick(&mut probe, &ctx, good.clone());
+        assert_eq!(probe.phase, ProbePhase::Armed);
+        assert!(ctx.input_for(ViewportId::ROOT, |input| !input.events.is_empty()));
+        push_diagram_f11(&ctx, CaptureTarget::Diagram.viewport_id());
+        let mut unfocused = good;
+        unfocused.focused = Some(false);
+        diagram_tick(&mut probe, &ctx, unfocused);
+        assert_eq!(probe.phase, ProbePhase::Armed);
+    }
+
+    #[test]
+    fn diagram_capture_hidden_root_child_advancement_writer_and_rearm() {
+        let ctx = egui::Context::default();
+        let (mut probe, jobs, outcomes) =
+            test_probe_with_capture_count(CaptureTrigger::F11, CaptureTarget::Diagram, 2);
+        let child_id = CaptureTarget::Diagram.viewport_id();
+        push_diagram_f11(&ctx, child_id);
+        diagram_tick(&mut probe, &ctx, diagram_observation(10));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert!(!probe.needs_root_logic() && !probe.needs_retained_marker());
+        assert!(matches!(jobs.try_recv(), Ok(WriterJob::AwaitReply(_))));
+        probe.revalidate_root_logic(SurfaceEligibility::default());
+        probe.run_hidden_logic_tick();
+        diagram_tick(&mut probe, &ctx, diagram_observation(10));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert!(jobs.try_recv().is_err());
+        let first_token = probe.token.clone();
+        ctx.input_mut_for(child_id, |input| {
+            input.events.extend([
+                Event::Screenshot {
+                    viewport_id: ViewportId::ROOT,
+                    user_data: first_token.clone(),
+                    image: test_image(egui::Color32::RED),
+                },
+                Event::Screenshot {
+                    viewport_id: child_id,
+                    user_data: UserData::new(ScreenshotToken(99)),
+                    image: test_image(egui::Color32::RED),
+                },
+                Event::Screenshot {
+                    viewport_id: child_id,
+                    user_data: first_token.clone(),
+                    image: test_image(egui::Color32::GREEN),
+                },
+            ])
+        });
+        diagram_tick(&mut probe, &ctx, diagram_observation(11));
+        assert_eq!(probe.phase, ProbePhase::AwaitingReply);
+        assert!(jobs.try_recv().is_err());
+        assert_eq!(ctx.input_for(child_id, |input| input.events.len()), 2);
+        diagram_tick(&mut probe, &ctx, diagram_observation(12));
+        assert_eq!(probe.phase, ProbePhase::Saving);
+        let job = jobs.try_recv().unwrap();
+        let WriterJob::Save { ref receipt, .. } = job else {
+            panic!("expected shared writer save")
+        };
+        let captured = receipt.captured.as_ref().unwrap();
+        assert!(!captured.logical_root_visible && !captured.root_visible && captured.eligible);
+        assert_eq!(captured.pixels_per_point, Some(1.5));
+        assert_eq!(
+            captured
+                .diagram_observation
+                .as_ref()
+                .unwrap()
+                .callback_class,
+            "Immediate"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let written = write_job(directory.path(), job);
+        assert!(written.receipt_written && written.status == ReceiptStatus::Saved);
+        let (png_name, receipt_name) = capture_artifact_names(1, 2);
+        let png = image::open(directory.path().join(png_name))
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(png.dimensions(), (1, 1));
+        assert_eq!(png.get_pixel(0, 0).0, [0, 255, 0, 255]);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join(receipt_name)).unwrap())
+                .unwrap();
+        assert_eq!(saved["target"], "DIAGRAM");
+        assert_eq!(saved["captured"]["logical_root_visible"], false);
+        push_diagram_f11(&ctx, child_id); // Saving-time keys must not arm the next capture.
+        outcomes.send(written).unwrap();
+        diagram_tick(&mut probe, &ctx, diagram_observation(13));
+        assert_eq!(probe.phase, ProbePhase::Armed);
+        assert_ne!(probe.token, first_token);
+        assert!(jobs.try_recv().is_err());
+        push_diagram_f11(&ctx, child_id);
+        diagram_tick(&mut probe, &ctx, diagram_observation(14));
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        assert_eq!(probe.receipt.capture_index, 2);
+    }
+
+    #[test]
+    fn diagram_capture_fails_on_close_or_revision_change() {
+        for close in [true, false] {
+            let ctx = egui::Context::default();
+            let (mut probe, jobs, _outcomes) =
+                test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Diagram);
+            push_diagram_f11(&ctx, CaptureTarget::Diagram.viewport_id());
+            diagram_tick(&mut probe, &ctx, diagram_observation(10));
+            assert!(matches!(jobs.try_recv(), Ok(WriterJob::AwaitReply(_))));
+            let mut changed = diagram_observation(11);
+            if close {
+                changed.still_open = false;
+            } else {
+                changed.session_revision += 1;
+            }
+            diagram_tick(&mut probe, &ctx, changed);
+            assert_eq!(probe.phase, ProbePhase::Failed);
+            assert!(matches!(jobs.try_recv(), Ok(WriterJob::Failure(_))));
+        }
+    }
+
+    #[test]
+    fn diagram_capture_timeout_and_disconnect_write_failure_receipts() {
+        for disconnect in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let request = test_request_for_target(
+                CaptureTarget::Diagram,
+                CaptureTrigger::F11,
+                directory.path().to_owned(),
+            );
+            let receipt = CompletionReceipt::new(&request, Duration::from_millis(5));
+            let (sender, receiver) = spawn_writer(
+                directory.path().to_owned(),
+                egui::Context::default(),
+                Duration::from_millis(5),
+            )
+            .unwrap();
+            sender.send(WriterJob::AwaitReply(receipt)).unwrap();
+            if disconnect {
+                drop(sender);
+            }
+            let outcome = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(outcome.receipt_written && outcome.status == ReceiptStatus::Failed);
+            let receipt: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(directory.path().join(RECEIPT_FILE_NAME)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt["target"], "DIAGRAM");
+            assert!(
+                receipt["failure"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if disconnect { "exited" } else { "within" })
+            );
         }
     }
 
@@ -5363,6 +6656,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 qr_observation: None,
+                diagram_observation: None,
+                regex_observation: None,
             },
         });
         probe.retained_pass = Some(RetainedPassMarker {

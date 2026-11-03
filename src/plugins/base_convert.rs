@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::common::numeric_base::{NumericBase, convert_unsigned};
 use crate::plugin::Plugin;
 use shlex;
 
@@ -44,46 +45,6 @@ fn conversion_query(query: &str) -> Option<&str> {
     Some(rest.trim_start())
 }
 
-fn hex_to_dec(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 16).ok().map(|n| n.to_string())
-}
-
-fn bin_to_dec(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 2).ok().map(|n| n.to_string())
-}
-
-fn oct_to_dec(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 8).ok().map(|n| n.to_string())
-}
-
-fn bin_to_hex(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 2).ok().map(|n| format!("{:x}", n))
-}
-
-fn hex_to_bin(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 16).ok().map(|n| format!("{:b}", n))
-}
-
-fn bin_to_oct(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 2).ok().map(|n| format!("{:o}", n))
-}
-
-fn oct_to_bin(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 8).ok().map(|n| format!("{:b}", n))
-}
-
-fn dec_to_bin(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 10).ok().map(|n| format!("{:b}", n))
-}
-
-fn dec_to_hex(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 10).ok().map(|n| format!("{:x}", n))
-}
-
-fn dec_to_oct(s: &str) -> Option<String> {
-    u128::from_str_radix(s, 10).ok().map(|n| format!("{:o}", n))
-}
-
 fn text_to_hex(s: &str) -> Option<String> {
     Some(hex::encode(s.as_bytes()))
 }
@@ -121,17 +82,24 @@ fn bin_to_text(s: &str) -> Option<String> {
 }
 
 fn convert(value: &str, from: &str, to: &str) -> Option<String> {
+    let numeric_bases = match (from, to) {
+        ("bin", "hex") => Some((NumericBase::Binary, NumericBase::Hexadecimal)),
+        ("hex", "bin") => Some((NumericBase::Hexadecimal, NumericBase::Binary)),
+        ("bin", "oct") => Some((NumericBase::Binary, NumericBase::Octal)),
+        ("oct", "bin") => Some((NumericBase::Octal, NumericBase::Binary)),
+        ("dec", "bin") => Some((NumericBase::Decimal, NumericBase::Binary)),
+        ("dec", "hex") => Some((NumericBase::Decimal, NumericBase::Hexadecimal)),
+        ("dec", "oct") => Some((NumericBase::Decimal, NumericBase::Octal)),
+        ("bin", "dec") => Some((NumericBase::Binary, NumericBase::Decimal)),
+        ("hex", "dec") => Some((NumericBase::Hexadecimal, NumericBase::Decimal)),
+        ("oct", "dec") => Some((NumericBase::Octal, NumericBase::Decimal)),
+        _ => None,
+    };
+    if let Some((from, to)) = numeric_bases {
+        return convert_unsigned(value, from, to);
+    }
+
     match (from, to) {
-        ("bin", "hex") => bin_to_hex(value),
-        ("hex", "bin") => hex_to_bin(value),
-        ("bin", "oct") => bin_to_oct(value),
-        ("oct", "bin") => oct_to_bin(value),
-        ("dec", "bin") => dec_to_bin(value),
-        ("dec", "hex") => dec_to_hex(value),
-        ("dec", "oct") => dec_to_oct(value),
-        ("bin", "dec") => bin_to_dec(value),
-        ("hex", "dec") => hex_to_dec(value),
-        ("oct", "dec") => oct_to_dec(value),
         ("hex", "text") => hex_to_text(value),
         ("text", "hex") => text_to_hex(value),
         ("text", "bin") => text_to_bin(value),
@@ -186,5 +154,60 @@ impl Plugin for BaseConvertPlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BaseConvertPlugin;
+    use crate::plugin::Plugin;
+
+    #[test]
+    fn plugin_numeric_pairs_and_text_paths_keep_their_existing_contract() {
+        let plugin = BaseConvertPlugin;
+        let cases = [
+            ("conv 1010 bin to hex", "1010 bin = a hex", "clipboard:a"),
+            (
+                "conv ff hex to bin",
+                "ff hex = 11111111 bin",
+                "clipboard:11111111",
+            ),
+            ("conv 1010 bin to oct", "1010 bin = 12 oct", "clipboard:12"),
+            ("conv 17 oct to bin", "17 oct = 1111 bin", "clipboard:1111"),
+            ("conv 10 dec to bin", "10 dec = 1010 bin", "clipboard:1010"),
+            ("conv 255 dec to hex", "255 dec = ff hex", "clipboard:ff"),
+            ("conv 255 dec to oct", "255 dec = 377 oct", "clipboard:377"),
+            ("conv 1010 bin to dec", "1010 bin = 10 dec", "clipboard:10"),
+            ("conv ff hex to dec", "ff hex = 255 dec", "clipboard:255"),
+            ("conv 17 oct to dec", "17 oct = 15 dec", "clipboard:15"),
+            (
+                "conv hi text to hex",
+                "hi text = 6869 hex",
+                "clipboard:6869",
+            ),
+            (
+                "conv 6869 hex to text",
+                "6869 hex = hi text",
+                "clipboard:hi",
+            ),
+            (
+                "conv hi text to bin",
+                "hi text = 01101000 01101001 bin",
+                "clipboard:01101000 01101001",
+            ),
+            (
+                "conv \"01101000 01101001\" bin to text",
+                "01101000 01101001 bin = hi text",
+                "clipboard:hi",
+            ),
+        ];
+
+        for (query, label, action) in cases {
+            let results = plugin.search(query);
+            assert_eq!(results.len(), 1, "query: {query}");
+            assert_eq!(results[0].label, label, "query: {query}");
+            assert_eq!(results[0].action, action, "query: {query}");
+        }
+        assert!(plugin.search("conv 17 oct to hex").is_empty());
     }
 }

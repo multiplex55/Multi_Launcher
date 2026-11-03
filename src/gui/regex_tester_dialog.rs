@@ -5,6 +5,8 @@ use crate::gui::jump_mode::ui::{
 };
 use crate::gui::jump_mode::{SurfaceId, TargetGeneration};
 use crate::gui::jump_mode::{TargetId, TargetKind};
+#[cfg(windows)]
+use crate::gui::native_keyboard::reserve_windows_system_menu_alt_space;
 use crate::gui::theme::widgets::{
     ButtonEmphasis, StatusTone, compact_section_heading, secondary_help, semantic_status,
     with_button_emphasis,
@@ -13,9 +15,10 @@ use crate::gui::utility_dialog_size::{
     UtilityDialogSizeWindowExt as _, apply_native_utility_size_restore,
     close_native_utility_size_window,
 };
-use crate::regex_tester::{EvaluationResult, MatchCompleteness, RegexSession};
+use crate::regex_tester::{EvaluationResult, MatchCompleteness, RegexSession, RegexSyntaxNodeRef};
 use crate::settings::UtilityToolKey;
 use eframe::egui;
+use eframe::egui::emath::GuiRounding as _;
 use std::sync::Arc;
 use std::time::Instant;
 mod clipboard;
@@ -33,6 +36,68 @@ mod profiling;
 mod reference;
 mod substitution;
 mod test_cases;
+mod visualization;
+
+pub(super) fn viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("regex_tester_viewport")
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone)]
+pub(super) struct RegexViewportObservation {
+    pub child_viewport_id: egui::ViewportId,
+    pub callback_class: egui::ViewportClass,
+    pub callback_frame_nr: u64,
+    pub callback_pass_nr: u64,
+    pub callback_pass_index: usize,
+    pub visible: Option<bool>,
+    pub minimized: Option<bool>,
+    pub occluded: Option<bool>,
+    pub focused: Option<bool>,
+    pub body_rendered: bool,
+    pub still_open: bool,
+    pub child_discarded: bool,
+    pub root_discarded: bool,
+    pub application_input_allowed: bool,
+    pub child_modal_open: bool,
+    pub pixels_per_point: f32,
+    pub native_pixels_per_point: Option<f32>,
+    pub zoom_factor: f32,
+    pub session_revision: u64,
+    pub evaluated_revision: Option<u64>,
+    pub evaluation_status: &'static str,
+    pub test_case_revision: u64,
+    pub replacement_identity: u64,
+    pub visualization_generation: Option<u64>,
+    pub visualization_view_identity: u64,
+    pub selected_node_id: Option<u64>,
+    pub information_open: bool,
+    pub information_section: &'static str,
+    pub callback_observed_at_unix_ms: u64,
+    pub completed_frame_nr: Option<u64>,
+    pub completed_pass_nr: Option<u64>,
+    pub renderer_returned_at_unix_ms: Option<u64>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+impl RegexViewportObservation {
+    fn is_immediate_target(&self) -> bool {
+        self.callback_class == egui::ViewportClass::Immediate
+            && self.child_viewport_id == viewport_id()
+            && self.body_rendered
+            && self.still_open
+            && !self.child_discarded
+            && !self.root_discarded
+    }
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn regex_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
+}
 
 fn copy_text(
     clipboard: &dyn ClipboardBackend,
@@ -124,6 +189,56 @@ struct CoreLayout {
 
 impl CoreLayout {
     #[cfg(test)]
+    fn translated_y(mut self, delta: f32) -> Self {
+        let offset = egui::vec2(0.0, delta);
+        self.header = self.header.translate(offset);
+        if let Some(validation) = &mut self.validation {
+            *validation = validation.translate(offset);
+        }
+        self.editor = self.editor.translate(offset);
+        if let Some(information) = &mut self.information {
+            *information = information.translate(offset);
+        }
+        self.status = self.status.translate(offset);
+        self
+    }
+
+    fn visualization_workspace(
+        bounds: egui::Rect,
+        header_height: f32,
+        validation_height: Option<f32>,
+        editor_height: f32,
+        information_height: f32,
+        status_height: f32,
+        gap: f32,
+    ) -> Self {
+        let width = bounds.width();
+        let mut top = bounds.top();
+        let rect = |top: f32, height: f32| {
+            egui::Rect::from_min_size(egui::pos2(bounds.left(), top), egui::vec2(width, height))
+        };
+        let header = rect(top, header_height);
+        top = header.bottom() + gap;
+        let validation = validation_height.map(|height| {
+            let area = rect(top, height);
+            top = area.bottom() + gap;
+            area
+        });
+        let editor = rect(top, editor_height);
+        top = editor.bottom() + gap;
+        let information = rect(top, information_height);
+        top = information.bottom() + gap;
+        let status = rect(top, status_height);
+        Self {
+            header,
+            validation,
+            editor,
+            information: Some(information),
+            status,
+        }
+    }
+
+    #[cfg(test)]
     fn new(bounds: egui::Rect, information_open: bool, invalid_pattern: bool) -> Self {
         Self::with_header_height(bounds, information_open, invalid_pattern, 100.0)
     }
@@ -208,12 +323,13 @@ fn pattern_header_height(ui: &egui::Ui) -> f32 {
         .max(100.0)
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 enum InformationSection {
     #[default]
     Matches,
     MatchDetails,
     Explanation,
+    Visualization,
     Reference,
     Examples,
     History,
@@ -221,6 +337,12 @@ enum InformationSection {
     Substitution,
     Clipboard,
     TestCases,
+}
+
+#[derive(Clone, Copy)]
+enum VisualizationWorkspaceReveal {
+    Information,
+    Pattern,
 }
 
 /// Session-owned inputs survive closing the utility; persistence is explicit.
@@ -232,6 +354,14 @@ pub struct RegexTesterDialogState {
     information_open: bool,
     scroll_to_selected: bool,
     information_section: InformationSection,
+    visualization: visualization::VisualizationState,
+    pattern_selection: Option<visualization::SourceSelection>,
+    staged_visualization_action: Option<visualization::Action>,
+    staged_editor_selection: Option<Option<RegexSyntaxNodeRef>>,
+    pending_visualization_root_effects: Option<PendingVisualizationRootEffects>,
+    deferred_constructor: Option<(egui::ViewportId, visualization::ConstructorRequest)>,
+    deferred_syntax_focus: Option<(egui::ViewportId, RegexSyntaxNodeRef)>,
+    visualization_workspace_reveal: Option<VisualizationWorkspaceReveal>,
     test_cases_expanded: bool,
     reference: reference::ReferenceState,
     examples: examples::ExamplesState,
@@ -253,12 +383,35 @@ pub struct RegexTesterDialogState {
     last_metadata_geometry: Option<(egui::Rect, f32, f32)>,
     #[cfg(test)]
     last_pattern_controls: Option<(Option<egui::Rect>, [egui::Rect; 5])>,
+    #[cfg(test)]
+    last_visualize_button: Option<egui::Rect>,
+    #[cfg(test)]
+    last_visualization_viewport: Option<(egui::Rect, egui::Vec2, egui::Vec2)>,
+    #[cfg(test)]
+    last_visualization_selector_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_visualization_workspace: Option<(egui::Rect, egui::Vec2, egui::Vec2, CoreLayout)>,
+    #[cfg(test)]
+    last_status_rects: Option<[egui::Rect; 2]>,
+    #[cfg(test)]
+    last_test_text_rect: Option<egui::Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RegexViewportPresentation {
     Immediate,
     Embedded,
+}
+
+struct PendingVisualizationRootEffects {
+    root_frame_nr: u64,
+    root_pass_nr: u64,
+    viewport_id: egui::ViewportId,
+    child_frame_nr: u64,
+    child_pass_nr: u64,
+    verify_child_pass: bool,
+    editor_selection: Option<Option<RegexSyntaxNodeRef>>,
+    action: Option<visualization::Action>,
 }
 
 pub(super) struct JumpTargets<'a> {
@@ -411,6 +564,14 @@ impl RegexTesterDialogState {
             information_open: true,
             scroll_to_selected: false,
             information_section: InformationSection::default(),
+            visualization: visualization::VisualizationState::default(),
+            pattern_selection: None,
+            staged_visualization_action: None,
+            staged_editor_selection: None,
+            pending_visualization_root_effects: None,
+            deferred_constructor: None,
+            deferred_syntax_focus: None,
+            visualization_workspace_reveal: None,
             test_cases_expanded: true,
             reference: reference::ReferenceState::default(),
             examples: examples::ExamplesState::default(),
@@ -432,6 +593,18 @@ impl RegexTesterDialogState {
             last_metadata_geometry: None,
             #[cfg(test)]
             last_pattern_controls: None,
+            #[cfg(test)]
+            last_visualize_button: None,
+            #[cfg(test)]
+            last_visualization_viewport: None,
+            #[cfg(test)]
+            last_visualization_selector_rect: None,
+            #[cfg(test)]
+            last_visualization_workspace: None,
+            #[cfg(test)]
+            last_status_rects: None,
+            #[cfg(test)]
+            last_test_text_rect: None,
         }
     }
 
@@ -440,6 +613,11 @@ impl RegexTesterDialogState {
         self.focus_viewport = true;
         if !self.open {
             self.focus_pattern = true;
+            if self.information_open
+                && self.information_section == InformationSection::Visualization
+            {
+                self.visualization_workspace_reveal = Some(VisualizationWorkspaceReveal::Pattern);
+            }
             self.open = true;
         }
     }
@@ -482,7 +660,74 @@ impl RegexTesterDialogState {
         root_native_owner_current: bool,
         jump_mode_enabled: bool,
     ) {
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.show_with_jump_mode_impl(
+            ctx,
+            root_scope,
+            instance,
+            application_input_allowed,
+            root_native_owner_current,
+            jump_mode_enabled,
+            None,
+        );
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
+        self.show_with_jump_mode_impl(
+            ctx,
+            root_scope,
+            instance,
+            application_input_allowed,
+            root_native_owner_current,
+            jump_mode_enabled,
+        );
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn show_with_jump_mode_observation(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&JumpModeScope>,
+        instance: Option<u64>,
+        application_input_allowed: bool,
+        root_native_owner_current: bool,
+        jump_mode_enabled: bool,
+    ) -> Option<RegexViewportObservation> {
+        let mut observation = None;
+        self.show_with_jump_mode_impl(
+            ctx,
+            root_scope,
+            instance,
+            application_input_allowed,
+            root_native_owner_current,
+            jump_mode_enabled,
+            Some(&mut observation),
+        );
+        if let Some(observation) = observation.as_mut() {
+            observation.root_discarded |= ctx.will_discard();
+            if observation.is_immediate_target() {
+                observation.completed_frame_nr =
+                    Some(ctx.cumulative_frame_nr_for(observation.child_viewport_id));
+                observation.completed_pass_nr =
+                    Some(ctx.cumulative_pass_nr_for(observation.child_viewport_id));
+            }
+            observation.renderer_returned_at_unix_ms = Some(regex_unix_millis());
+        }
+        observation
+    }
+
+    fn show_with_jump_mode_impl(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&JumpModeScope>,
+        instance: Option<u64>,
+        application_input_allowed: bool,
+        root_native_owner_current: bool,
+        jump_mode_enabled: bool,
+        #[cfg(feature = "qa-framebuffer-capture")] mut observation_slot: Option<
+            &mut Option<RegexViewportObservation>,
+        >,
+    ) {
         if !self.open {
+            self.retire_deferred_visualization_effects();
             close_native_utility_size_window(ctx, UtilityToolKey::parse("regex-tester").unwrap());
             if self.observed_viewport.take().is_some() {
                 self.native_jump_mode.cancel_all();
@@ -490,107 +735,260 @@ impl RegexTesterDialogState {
             self.native_jump_frame = None;
             return;
         }
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("regex_tester_viewport"),
-            viewport_builder(),
-            |child, class| {
-                let process_case_actions = child.current_pass_index() == 0;
-                let independent = class == egui::ViewportClass::Immediate;
-                let presentation = if independent {
-                    RegexViewportPresentation::Immediate
-                } else {
-                    RegexViewportPresentation::Embedded
-                };
-                if let Some(instance) = instance {
-                    if self.observed_viewport != Some((instance, presentation)) {
-                        self.observed_viewport = Some((instance, presentation));
-                        self.native_jump_mode.cancel_all();
-                        self.native_jump_frame = None;
-                    }
-                } else {
+        ctx.show_viewport_immediate(viewport_id(), viewport_builder(), |child, class| {
+            #[cfg(windows)]
+            child.input_mut(|input| {
+                reserve_windows_system_menu_alt_space(&mut input.events);
+                reserve_windows_system_menu_alt_space(&mut input.raw.events);
+            });
+            let process_case_actions = child.current_pass_index() == 0;
+            let independent = class == egui::ViewportClass::Immediate;
+            let presentation = if independent {
+                RegexViewportPresentation::Immediate
+            } else {
+                RegexViewportPresentation::Embedded
+            };
+            if let Some(instance) = instance {
+                if self.observed_viewport != Some((instance, presentation)) {
+                    self.observed_viewport = Some((instance, presentation));
                     self.native_jump_mode.cancel_all();
                     self.native_jump_frame = None;
                 }
-                if independent && self.focus_viewport {
-                    child.send_viewport_cmd(egui::ViewportCommand::Focus);
+            } else {
+                self.native_jump_mode.cancel_all();
+                self.native_jump_frame = None;
+            }
+            if independent && self.focus_viewport {
+                child.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            self.focus_viewport = false;
+            let mut body_rendered = false;
+            if independent {
+                let close = self.show_native_viewport(
+                    child,
+                    class,
+                    instance,
+                    application_input_allowed,
+                    jump_mode_enabled,
+                    process_case_actions,
+                    ctx,
+                    &mut body_rendered,
+                );
+                if close {
+                    self.open = false;
+                    child.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.native_jump_mode.cancel_all();
+                    self.native_jump_frame = None;
                 }
-                self.focus_viewport = false;
-                if independent {
-                    let close = self.show_native_viewport(
-                        child,
-                        class,
-                        instance,
-                        application_input_allowed,
-                        jump_mode_enabled,
-                        process_case_actions,
-                    );
-                    if close {
-                        self.open = false;
-                        child.send_viewport_cmd(egui::ViewportCommand::Close);
-                        self.native_jump_mode.cancel_all();
-                        self.native_jump_frame = None;
-                    }
-                } else {
-                    let close = process_case_actions
+            } else {
+                self.begin_staged_visualization_effects();
+                let close = process_case_actions
+                    && root_native_owner_current
+                    && child.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                if close {
+                    if process_case_actions
                         && root_native_owner_current
-                        && child.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                                || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-                        });
-                    if close {
-                        self.open = false;
-                        return;
+                        && !child.will_discard()
+                        && !ctx.will_discard()
+                    {
+                        // A previously accepted constructor belongs to this
+                        // matching viewport callback even if the close key is
+                        // pressed before an idle frame arrives.
+                        self.apply_deferred_constructor(child, child.viewport_id());
                     }
-                    // Standalone egui contexts embed viewports. Keep that fallback
-                    // within its parent rather than changing root-window geometry.
-                    let size = child.input(|input| input.content_rect().size());
-                    let available = (size - egui::vec2(24.0, 48.0)).max(egui::vec2(1.0, 1.0));
-                    let mut open = self.open;
-                    egui::Window::new("Regex Tester")
-                        .id(egui::Id::new("regex_tester_embedded_window"))
-                        .collapsible(false)
-                        .resizable(true)
-                        .default_size(available.min(egui::vec2(960.0, 680.0)))
-                        .min_size(available.min(egui::vec2(360.0, 240.0)))
-                        .max_size(available)
-                        .show_utility(
-                            child,
-                            "regex-tester",
-                            egui::Id::new("regex_tester_embedded_window"),
-                            Some(&mut open),
-                            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                                    available.min(egui::vec2(960.0, 680.0)),
-                                ),
-                                egui::Vec2::ZERO,
-                                [None, None],
-                            )
-                            .with_minimum(available.min(egui::vec2(360.0, 240.0)))
-                            .with_maximum(available),
-                            |ui| {
-                                ui.add_enabled_ui(root_native_owner_current, |ui| {
-                                    self.body_in_viewport_scoped(
-                                        ui,
-                                        false,
-                                        process_case_actions
-                                            && application_input_allowed
-                                            && root_native_owner_current,
-                                        root_scope,
-                                        root_native_owner_current,
-                                    )
-                                })
-                            },
-                        );
-                    self.open = open;
+                    self.open = false;
+                    self.discard_staged_visualization_effects();
+                    self.retire_deferred_visualization_effects();
+                    #[cfg(feature = "qa-framebuffer-capture")]
+                    if let Some(slot) = observation_slot.as_deref_mut() {
+                        *slot = Some(self.viewport_observation(
+                            child.ctx(),
+                            ctx,
+                            class,
+                            application_input_allowed,
+                            false,
+                        ));
+                    }
+                    return;
                 }
-                if !self.open {
-                    close_native_utility_size_window(
-                        child.ctx(),
-                        UtilityToolKey::parse("regex-tester").unwrap(),
+                // Standalone egui contexts embed viewports. Keep that fallback
+                // within its parent rather than changing root-window geometry.
+                let size = child.input(|input| input.content_rect().size());
+                let available = (size - egui::vec2(24.0, 48.0)).max(egui::vec2(1.0, 1.0));
+                let mut open = self.open;
+                egui::Window::new("Regex Tester")
+                    .id(egui::Id::new("regex_tester_embedded_window"))
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_size(available.min(egui::vec2(960.0, 680.0)))
+                    .min_size(available.min(egui::vec2(360.0, 240.0)))
+                    .max_size(available)
+                    .show_utility(
+                        child,
+                        "regex-tester",
+                        egui::Id::new("regex_tester_embedded_window"),
+                        Some(&mut open),
+                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                            crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                                available.min(egui::vec2(960.0, 680.0)),
+                            ),
+                            egui::Vec2::ZERO,
+                            [None, None],
+                        )
+                        .with_minimum(available.min(egui::vec2(360.0, 240.0)))
+                        .with_maximum(available),
+                        |ui| {
+                            ui.add_enabled_ui(root_native_owner_current, |ui| {
+                                body_rendered = ui.is_visible() && !ui.is_sizing_pass();
+                                if body_rendered
+                                    && process_case_actions
+                                    && root_native_owner_current
+                                {
+                                    self.apply_deferred_constructor(
+                                        ui.ctx(),
+                                        ui.ctx().viewport_id(),
+                                    );
+                                    self.prepare_deferred_syntax_focus(ui.ctx().viewport_id());
+                                }
+                                self.body_in_viewport_scoped(
+                                    ui,
+                                    false,
+                                    process_case_actions
+                                        && application_input_allowed
+                                        && root_native_owner_current,
+                                    root_scope,
+                                    root_native_owner_current,
+                                )
+                            })
+                        },
                     );
+                self.open = open;
+                if body_rendered
+                    && process_case_actions
+                    && application_input_allowed
+                    && root_native_owner_current
+                    && !child.will_discard()
+                {
+                    self.stage_visualization_root_effects(
+                        child.ctx(),
+                        child.ctx(),
+                        child.ctx().viewport_id(),
+                        false,
+                    );
+                } else {
+                    self.discard_staged_visualization_effects();
                 }
-            },
-        );
+            }
+            if !self.open {
+                close_native_utility_size_window(
+                    child.ctx(),
+                    UtilityToolKey::parse("regex-tester").unwrap(),
+                );
+            }
+            #[cfg(feature = "qa-framebuffer-capture")]
+            if let Some(slot) = observation_slot.as_deref_mut() {
+                *slot = Some(self.viewport_observation(
+                    child.ctx(),
+                    ctx,
+                    class,
+                    application_input_allowed,
+                    body_rendered,
+                ));
+            }
+        });
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn viewport_observation(
+        &self,
+        ctx: &egui::Context,
+        root_ctx: &egui::Context,
+        callback_class: egui::ViewportClass,
+        application_input_allowed: bool,
+        body_rendered: bool,
+    ) -> RegexViewportObservation {
+        let (visible, minimized, occluded, focused) = ctx.input(|input| {
+            let viewport = input.viewport();
+            (
+                viewport.visible(),
+                viewport.minimized,
+                viewport.occluded,
+                Some(input.focused),
+            )
+        });
+        let session_revision = self.session.revision();
+        let evaluated_revision = self.session.evaluated_revision();
+        let mut replacement_hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&self.session.draft.replacement, &mut replacement_hasher);
+        let evaluation_status = if evaluated_revision != Some(session_revision) {
+            if matches!(self.session.result(), Some(EvaluationResult::Suspended(_))) {
+                "suspended"
+            } else {
+                "pending"
+            }
+        } else {
+            match self.session.result() {
+                Some(EvaluationResult::Success { .. }) => "current",
+                Some(EvaluationResult::InvalidPattern(_)) => "invalid",
+                Some(EvaluationResult::Suspended(_)) => "suspended",
+                None => "unevaluated",
+            }
+        };
+        let visualization_generation = self
+            .session
+            .visualization()
+            .and_then(|result| result.tree())
+            .map(|tree| tree.generation());
+        let information_section = match self.information_section {
+            InformationSection::Matches => "matches",
+            InformationSection::MatchDetails => "match_details",
+            InformationSection::Explanation => "explanation",
+            InformationSection::Visualization => "visualization",
+            InformationSection::Reference => "reference",
+            InformationSection::Examples => "examples",
+            InformationSection::History => "history",
+            InformationSection::Presets => "presets",
+            InformationSection::Substitution => "substitution",
+            InformationSection::Clipboard => "clipboard",
+            InformationSection::TestCases => "test_cases",
+        };
+        RegexViewportObservation {
+            child_viewport_id: ctx.viewport_id(),
+            callback_class,
+            callback_frame_nr: ctx.cumulative_frame_nr(),
+            callback_pass_nr: ctx.cumulative_pass_nr(),
+            callback_pass_index: ctx.current_pass_index(),
+            visible,
+            minimized,
+            occluded,
+            focused,
+            body_rendered,
+            still_open: self.open,
+            child_discarded: ctx.will_discard(),
+            root_discarded: root_ctx.will_discard(),
+            application_input_allowed,
+            child_modal_open: ctx.memory(|memory| memory.top_modal_layer().is_some()),
+            pixels_per_point: ctx.pixels_per_point(),
+            native_pixels_per_point: ctx.native_pixels_per_point(),
+            zoom_factor: ctx.zoom_factor(),
+            session_revision,
+            evaluated_revision,
+            evaluation_status,
+            test_case_revision: self.session.test_case_revision(),
+            replacement_identity: std::hash::Hasher::finish(&replacement_hasher),
+            visualization_generation,
+            visualization_view_identity: self.visualization.observation_identity(),
+            selected_node_id: self.visualization.selected_id().map(|id| id.get()),
+            information_open: self.information_open,
+            information_section,
+            callback_observed_at_unix_ms: regex_unix_millis(),
+            completed_frame_nr: None,
+            completed_pass_nr: None,
+            renderer_returned_at_unix_ms: None,
+        }
     }
 
     fn show_native_viewport(
@@ -601,9 +999,12 @@ impl RegexTesterDialogState {
         application_input_allowed: bool,
         jump_mode_enabled: bool,
         process_actions: bool,
+        root_context: &egui::Context,
+        body_rendered: &mut bool,
     ) -> bool {
+        self.begin_staged_visualization_effects();
         let ctx = child.ctx().clone();
-        let viewport = egui::ViewportId::from_hash_of("regex_tester_viewport");
+        let viewport = viewport_id();
         let owner = instance.map(|instance| NavigationOwner::Dialog {
             kind: NavigationDialogKind::RegexTester,
             instance,
@@ -652,7 +1053,15 @@ impl RegexTesterDialogState {
                     || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)))
                 || (process_actions && input.viewport().close_requested())
         });
+        if process_actions && native_owner_current && child.is_visible() && !child.is_sizing_pass()
+        {
+            self.apply_deferred_constructor(&ctx, viewport);
+            if !close {
+                self.prepare_deferred_syntax_focus(viewport);
+            }
+        }
         if close {
+            self.retire_deferred_visualization_effects();
             self.native_jump_mode.cancel_all();
             self.native_jump_frame = None;
             return true;
@@ -680,6 +1089,7 @@ impl RegexTesterDialogState {
 
         egui::CentralPanel::default().show(child, |ui| {
             ui.add_enabled_ui(native_owner_current, |ui| {
+                *body_rendered = ui.is_visible() && !ui.is_sizing_pass();
                 self.body_in_viewport_scoped(
                     ui,
                     true,
@@ -689,6 +1099,16 @@ impl RegexTesterDialogState {
                 )
             });
         });
+        if *body_rendered
+            && process_actions
+            && native_owner_current
+            && !ctx.will_discard()
+            && !root_context.will_discard()
+        {
+            self.stage_visualization_root_effects(root_context, &ctx, viewport, true);
+        } else {
+            self.discard_staged_visualization_effects();
+        }
 
         self.native_jump_mode.finish_ui_pass();
         let after_owner = binding.map_or(NavigationOwner::Blocked, |binding| {
@@ -719,6 +1139,147 @@ impl RegexTesterDialogState {
             self.native_jump_mode.cancel_all();
         }
         false
+    }
+
+    fn begin_staged_visualization_effects(&mut self) {
+        self.staged_visualization_action = None;
+        self.staged_editor_selection = None;
+    }
+
+    fn discard_staged_visualization_effects(&mut self) {
+        self.staged_visualization_action = None;
+        self.staged_editor_selection = None;
+    }
+
+    fn retire_deferred_visualization_effects(&mut self) {
+        self.pending_visualization_root_effects = None;
+        self.deferred_constructor = None;
+        self.deferred_syntax_focus = None;
+        self.staged_visualization_action = None;
+        self.staged_editor_selection = None;
+        self.visualization.clear_pending_source_focus();
+    }
+
+    fn stage_visualization_root_effects(
+        &mut self,
+        root_ctx: &egui::Context,
+        child_ctx: &egui::Context,
+        viewport_id: egui::ViewportId,
+        verify_child_pass: bool,
+    ) {
+        let action = self.staged_visualization_action.take();
+        let source_action = matches!(
+            &action,
+            Some(visualization::Action::Constructor(_) | visualization::Action::SelectNode(_))
+        );
+        let editor_selection = if source_action {
+            self.staged_editor_selection = None;
+            None
+        } else {
+            self.staged_editor_selection.take()
+        };
+        if action.is_none() && editor_selection.is_none() {
+            return;
+        }
+        self.pending_visualization_root_effects = Some(PendingVisualizationRootEffects {
+            root_frame_nr: root_ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
+            root_pass_nr: root_ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+            viewport_id,
+            child_frame_nr: child_ctx.cumulative_frame_nr(),
+            child_pass_nr: child_ctx.cumulative_pass_nr(),
+            verify_child_pass,
+            editor_selection,
+            action,
+        });
+    }
+
+    /// Commit only syntax interactions from the root frame/pass that actually
+    /// survived all egui discard requests. Focus is queued for the next matching
+    /// child callback, where its viewport-scoped TextEdit state can be updated.
+    pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) {
+        let Some(effects) = self.pending_visualization_root_effects.take() else {
+            return;
+        };
+        let retained_pass = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
+            == effects.root_frame_nr.saturating_add(1)
+            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
+                == effects.root_pass_nr.saturating_add(1)
+            && (!effects.verify_child_pass
+                || (ctx.cumulative_frame_nr_for(effects.viewport_id)
+                    == effects.child_frame_nr.saturating_add(1)
+                    && ctx.cumulative_pass_nr_for(effects.viewport_id)
+                        == effects.child_pass_nr.saturating_add(1)));
+        if !retained_pass {
+            return;
+        }
+
+        let mut repaint_child = false;
+        let tree = self
+            .session
+            .visualization()
+            .and_then(|result| result.tree());
+        self.visualization.accept_tree(tree);
+        if let (Some(tree), Some(selection)) = (tree, effects.editor_selection) {
+            repaint_child |= self.visualization.apply_editor_selection(tree, selection);
+        }
+        match effects.action {
+            Some(visualization::Action::Constructor(request)) => {
+                self.deferred_constructor = Some((effects.viewport_id, request));
+                repaint_child = true;
+            }
+            Some(visualization::Action::SelectNode(reference)) => {
+                if let Some(tree) = tree
+                    && self.visualization.select_node(tree, &reference)
+                    && let Some(current) = tree.node_ref(reference.id())
+                {
+                    self.deferred_syntax_focus = Some((effects.viewport_id, current));
+                    self.visualization_workspace_reveal =
+                        Some(VisualizationWorkspaceReveal::Pattern);
+                    repaint_child = true;
+                }
+            }
+            Some(visualization::Action::OpenExplanation) | None => {}
+        }
+        if repaint_child {
+            ctx.request_repaint_of(effects.viewport_id);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+    }
+
+    fn apply_deferred_constructor(&mut self, ctx: &egui::Context, viewport_id: egui::ViewportId) {
+        if !self
+            .deferred_constructor
+            .as_ref()
+            .is_some_and(|(target, _)| *target == viewport_id)
+        {
+            return;
+        }
+        if let Some((_, request)) = self.deferred_constructor.take() {
+            self.apply_constructor_request(ctx, request);
+        }
+    }
+
+    fn prepare_deferred_syntax_focus(&mut self, viewport_id: egui::ViewportId) {
+        if !self
+            .deferred_syntax_focus
+            .as_ref()
+            .is_some_and(|(target, _)| *target == viewport_id)
+        {
+            return;
+        }
+        let Some((_, reference)) = self.deferred_syntax_focus.take() else {
+            return;
+        };
+        if let Some(tree) = self
+            .session
+            .visualization()
+            .and_then(|result| result.tree())
+        {
+            self.visualization.accept_tree(Some(tree));
+            self.visualization.queue_source_focus(tree, &reference);
+        } else {
+            self.visualization.clear_pending_source_focus();
+        }
     }
 
     #[cfg(test)]
@@ -806,10 +1367,68 @@ impl RegexTesterDialogState {
         let bounds = ui.available_rect_before_wrap();
         let had_error = self.validation_error().is_some();
         let header_height = pattern_header_height(ui);
-        // Recompute after the toggle so collapsing frees editor space this frame.
-        let header =
-            CoreLayout::with_header_height(bounds, self.information_open, had_error, header_height)
-                .header;
+        let proposed_layout =
+            CoreLayout::with_header_height(bounds, self.information_open, had_error, header_height);
+        let minimum_information_height = visualization::minimum_viewport_height(ui);
+        let needs_visualization_workspace = self.information_open
+            && self.information_section == InformationSection::Visualization
+            && proposed_layout
+                .information
+                .is_some_and(|rect| rect.height() < minimum_information_height);
+        #[cfg(test)]
+        {
+            self.last_visualization_workspace = None;
+        }
+        if needs_visualization_workspace {
+            return self.visualization_workspace(
+                ui,
+                bounds,
+                header_height,
+                had_error,
+                now,
+                &mut form_targets,
+                &mut action_targets,
+                process_case_actions,
+            );
+        }
+
+        self.render_header(
+            ui,
+            proposed_layout.header,
+            &mut form_targets,
+            &mut action_targets,
+            process_case_actions,
+        );
+        let layout =
+            CoreLayout::with_header_height(bounds, self.information_open, had_error, header_height);
+        let layout = self.render_after_header(
+            ui,
+            layout,
+            had_error,
+            now,
+            &mut form_targets,
+            &mut action_targets,
+            process_case_actions,
+        );
+        if !self.information_open
+            || self.information_section != InformationSection::Visualization
+            || layout
+                .information
+                .is_some_and(|rect| rect.height() >= minimum_information_height)
+        {
+            self.visualization_workspace_reveal = None;
+        }
+        layout
+    }
+
+    fn render_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        header: egui::Rect,
+        form_targets: &mut JumpTargets<'_>,
+        action_targets: &mut JumpTargets<'_>,
+        process_case_actions: bool,
+    ) {
         bounded_area(ui, header, "regex_tester_header", |ui| {
             let _output = egui::ScrollArea::vertical()
                 .id_salt("regex_tester_header_scroll")
@@ -817,33 +1436,38 @@ impl RegexTesterDialogState {
                 .max_width(header.width())
                 .max_height(ui.available_height())
                 .show(ui, |ui| {
-                    self.pattern_area(
-                        ui,
-                        &mut form_targets,
-                        &mut action_targets,
-                        process_case_actions,
-                    )
+                    self.pattern_area(ui, form_targets, action_targets, process_case_actions)
                 });
             #[cfg(test)]
             {
                 self.last_header_viewport = Some(_output.inner_rect);
             }
         });
-        let layout =
-            CoreLayout::with_header_height(bounds, self.information_open, had_error, header_height);
+    }
+
+    fn render_after_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        layout: CoreLayout,
+        had_error: bool,
+        now: Instant,
+        form_targets: &mut JumpTargets<'_>,
+        action_targets: &mut JumpTargets<'_>,
+        process_case_actions: bool,
+    ) -> CoreLayout {
         bounded_area(ui, layout.editor, "regex_tester_editor_area", |ui| {
-            self.text_area(
-                ui,
-                &mut form_targets,
-                &mut action_targets,
-                process_case_actions,
-            )
+            self.text_area(ui, form_targets, action_targets, process_case_actions)
         });
         if self.session.tick(now) {
             self.record_history();
             self.scroll_to_selected = false;
             ui.ctx().request_repaint();
         }
+        let accepted_tree = self
+            .session
+            .visualization()
+            .and_then(|result| result.tree());
+        self.visualization.accept_tree(accepted_tree);
         if self.session.tick_test_cases(now) {
             ui.ctx().request_repaint();
         }
@@ -857,21 +1481,183 @@ impl RegexTesterDialogState {
         }
         if let Some(information) = layout.information {
             bounded_area(ui, information, "regex_tester_information_area", |ui| {
-                self.information_area(
-                    ui,
-                    process_case_actions,
-                    &mut form_targets,
-                    &mut action_targets,
-                )
+                self.information_area(ui, process_case_actions, form_targets, action_targets)
             });
         }
         bounded_area(ui, layout.status, "regex_tester_status", |ui| {
-            self.status_area(ui, &mut action_targets, process_case_actions)
+            self.status_area(ui, action_targets, process_case_actions)
         });
         if let Some(delay) = self.session.pending_delay(Instant::now()) {
             ui.ctx().request_repaint_after(delay);
         }
         layout
+    }
+
+    fn visualization_workspace(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport_bounds: egui::Rect,
+        header_height: f32,
+        had_error: bool,
+        now: Instant,
+        form_targets: &mut JumpTargets<'_>,
+        action_targets: &mut JumpTargets<'_>,
+        process_case_actions: bool,
+    ) -> CoreLayout {
+        let legacy_layout = CoreLayout::with_header_height(
+            viewport_bounds,
+            self.information_open,
+            had_error,
+            header_height,
+        );
+        let line_height = ui
+            .spacing()
+            .interact_size
+            .y
+            .max(ui.text_style_height(&egui::TextStyle::Body));
+        let validation_height = legacy_layout
+            .validation
+            .map(|rect| rect.height().max(line_height + ui.spacing().item_spacing.y));
+        let sample_label_height = ui.text_style_height(&egui::TextStyle::Body);
+        let sample_row_height = ui
+            .spacing()
+            .interact_size
+            .y
+            .max(ui.text_style_height(&egui::TextStyle::Monospace));
+        let sample_editor_height = sample_label_height
+            + ui.spacing().item_spacing.y
+            + sample_row_height
+            + ui.spacing().item_spacing.y;
+        let information_height = visualization::minimum_viewport_height(ui);
+        let status_height = ui
+            .spacing()
+            .interact_size
+            .y
+            .max(ui.text_style_height(&egui::TextStyle::Button));
+        let gap = 8.0_f32.min(viewport_bounds.height() * 0.03);
+        #[cfg(test)]
+        let mut content_origin_y = 0.0;
+        let output = egui::ScrollArea::vertical()
+            .id_salt("regex_tester_visualization_workspace")
+            .auto_shrink([false, false])
+            .max_height(viewport_bounds.height())
+            .show(ui, |workspace_ui| {
+                let workspace_bounds = workspace_ui.available_rect_before_wrap();
+                #[cfg(test)]
+                {
+                    content_origin_y = workspace_bounds.top();
+                }
+                let layout = CoreLayout::visualization_workspace(
+                    workspace_bounds,
+                    header_height,
+                    validation_height,
+                    sample_editor_height,
+                    information_height,
+                    status_height,
+                    gap,
+                );
+                // Match the nested ScrollArea content grid so section clipping
+                // cannot cut into a widget rounded above a fractional edge.
+                let align = |rect: egui::Rect| {
+                    rect.round_to_pixels(workspace_ui.pixels_per_point())
+                        .round_ui()
+                };
+                let layout = CoreLayout {
+                    header: align(layout.header),
+                    validation: layout.validation.map(align),
+                    editor: align(layout.editor),
+                    information: layout.information.map(align),
+                    status: align(layout.status),
+                };
+                let content_height = layout.status.bottom() - workspace_bounds.top();
+                workspace_ui.set_min_height(content_height);
+                self.render_header(
+                    workspace_ui,
+                    layout.header,
+                    form_targets,
+                    action_targets,
+                    process_case_actions,
+                );
+                let layout = self.render_after_header(
+                    workspace_ui,
+                    layout,
+                    had_error,
+                    now,
+                    form_targets,
+                    action_targets,
+                    process_case_actions,
+                );
+                if let Some(reveal) = self.visualization_workspace_reveal.take() {
+                    let reveal_rect = match reveal {
+                        VisualizationWorkspaceReveal::Information
+                            if self.information_open
+                                && self.information_section
+                                    == InformationSection::Visualization =>
+                        {
+                            layout.information
+                        }
+                        VisualizationWorkspaceReveal::Pattern => Some(layout.header),
+                        VisualizationWorkspaceReveal::Information => None,
+                    };
+                    if let Some(rect) = reveal_rect {
+                        workspace_ui.scroll_to_rect(rect, Some(egui::Align::Min));
+                        workspace_ui.ctx().request_repaint();
+                    }
+                }
+                layout
+            });
+        #[cfg(test)]
+        {
+            let translation = output.inner_rect.top() - content_origin_y - output.state.offset.y;
+            self.translate_visualization_test_geometry(egui::vec2(0.0, translation));
+            let final_layout = output.inner.translated_y(translation);
+            self.last_visualization_workspace = Some((
+                output.inner_rect,
+                output.content_size,
+                output.state.offset,
+                final_layout,
+            ));
+        }
+        output.inner
+    }
+
+    #[cfg(test)]
+    fn translate_visualization_test_geometry(&mut self, delta: egui::Vec2) {
+        let translate = |rect: egui::Rect| rect.translate(delta);
+        if let Some(rect) = &mut self.last_header_viewport {
+            *rect = translate(*rect);
+        }
+        if let Some((rect, _font)) = &mut self.last_pattern_geometry {
+            *rect = translate(*rect);
+        }
+        if let Some((rect, _font)) = &mut self.last_oversized_preview_geometry {
+            *rect = translate(*rect);
+        }
+        if let Some((rect, _width, _remaining)) = &mut self.last_metadata_geometry {
+            *rect = translate(*rect);
+        }
+        if let Some((suffix, flags)) = &mut self.last_pattern_controls {
+            if let Some(rect) = suffix {
+                *rect = translate(*rect);
+            }
+            flags.iter_mut().for_each(|rect| *rect = translate(*rect));
+        }
+        if let Some(rect) = &mut self.last_visualize_button {
+            *rect = translate(*rect);
+        }
+        if let Some((rect, _content, _offset)) = &mut self.last_visualization_viewport {
+            *rect = translate(*rect);
+        }
+        if let Some(rect) = &mut self.last_visualization_selector_rect {
+            *rect = translate(*rect);
+        }
+        if let Some(rects) = &mut self.last_status_rects {
+            rects.iter_mut().for_each(|rect| *rect = translate(*rect));
+        }
+        if let Some(rect) = &mut self.last_test_text_rect {
+            *rect = translate(*rect);
+        }
+        self.visualization.translate_test_geometry(delta);
     }
 
     fn pattern_area(
@@ -904,6 +1690,25 @@ impl RegexTesterDialogState {
             if with_button_emphasis(ui, toggle, ButtonEmphasis::Primary).clicked() && committing {
                 self.information_open = !self.information_open;
             }
+            let visualize = ui
+                .button("Visualize")
+                .on_hover_text("Inspect the current pattern as a syntax tree");
+            form_targets.button(
+                ui,
+                &visualize,
+                "visualize-regex-syntax",
+                "Visualize regex syntax",
+            );
+            #[cfg(test)]
+            {
+                self.last_visualize_button = Some(visualize.rect);
+            }
+            if committing && visualize.clicked() {
+                self.information_open = true;
+                self.information_section = InformationSection::Visualization;
+                self.visualization_workspace_reveal =
+                    Some(VisualizationWorkspaceReveal::Information);
+            }
         });
         #[cfg(test)]
         let pattern_row_available_width = ui.available_width();
@@ -920,6 +1725,7 @@ impl RegexTesterDialogState {
         ui.horizontal(|ui| {
             compact_section_heading(ui, "Pattern", None);
             if self.session.draft.pattern.len() > self.session.policy().pattern_bytes {
+                self.pattern_selection = None;
                 self.oversized_pattern_area(ui, action_targets, committing);
                 return;
             }
@@ -946,29 +1752,124 @@ impl RegexTesterDialogState {
                 editor_layout::plain(ui, text.as_str(), width, maximum_bytes, layouter_font.clone(), true)
             };
             let mut pattern_value = self.session.draft.pattern.clone();
-            let pattern = ui.add_sized(
-                [width, editor_height],
-                egui::TextEdit::singleline(&mut pattern_value)
-                    .id(egui::Id::new("regex_tester_pattern"))
-                    .font(font.clone())
-                    .layouter(&mut layouter)
-                    .hint_text("Regular expression"),
+            let mut pattern_output = egui::TextEdit::singleline(&mut pattern_value)
+                .id(visualization::pattern_id())
+                .font(font.clone())
+                .desired_width(width)
+                .min_size(egui::vec2(width, editor_height))
+                .layouter(&mut layouter)
+                .hint_text("Regular expression")
+                .show(ui);
+            let pattern_changed = pattern_output.response.changed();
+            let pending_focus = if committing && !pattern_changed {
+                self.session
+                    .visualization()
+                    .and_then(|result| result.tree())
+                    .filter(|tree| {
+                        tree.source() == pattern_value && tree.flags() == self.session.draft.flags
+                    })
+                    .and_then(|tree| self.visualization.take_source_focus_span(tree))
+            } else {
+                None
+            };
+            if let Some(span) = pending_focus
+                && let Some(char_range) = visualization::pattern_char_range(
+                    &pattern_value,
+                    span.as_range(),
+                )
+            {
+                let cursor = egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(char_range.start),
+                    egui::text::CCursor::new(char_range.end),
+                );
+                pattern_output.state.cursor.set_char_range(Some(cursor));
+                pattern_output.cursor_range = Some(cursor);
+                pattern_output
+                    .state
+                    .clone()
+                    .store(ui.ctx(), pattern_output.response.id);
+                pattern_output.response.request_focus();
+                pattern_output
+                    .response
+                    .scroll_to_me(Some(egui::Align::Center));
+                if committing {
+                    self.focus_pattern = false;
+                }
+            }
+            form_targets.text_entry(
+                ui,
+                &pattern_output.response,
+                "pattern",
+                "Regular expression",
             );
-            form_targets.text_entry(ui, &pattern, "pattern", "Regular expression");
-            if pattern.changed() && committing {
+            let char_selection = pattern_output
+                .cursor_range
+                .or_else(|| pattern_output.state.cursor.char_range())
+                .map(|range| {
+                    let range = range.as_sorted_char_range();
+                    range.start.0..range.end.0
+                });
+            if committing
+                && !pattern_changed
+                && pattern_output.response.has_focus()
+                && let Some(selection) = char_selection
+                    .as_ref()
+                    .and_then(|range| {
+                        visualization::byte_range_from_char_range(
+                            &pattern_value,
+                            range.clone(),
+                        )
+                    })
+                && let Some(tree) = self
+                        .session
+                        .visualization()
+                        .and_then(|result| result.tree())
+                        .filter(|tree| {
+                            tree.source() == pattern_value
+                                && tree.flags() == self.session.draft.flags
+                        })
+            {
+                let candidate = self.visualization.reference_from_editor(tree, selection);
+                if !self.visualization.selection_matches(&candidate) {
+                    self.staged_editor_selection = Some(candidate);
+                }
+            }
+            if committing && (pattern_output.response.has_focus() || pattern_changed) {
+                self.pattern_selection = char_selection
+                    .and_then(|range| {
+                        visualization::byte_range_from_char_range(&pattern_value, range)
+                    })
+                    .map(|bytes| visualization::SourceSelection {
+                        pattern: pattern_value.clone(),
+                        flags: self.session.draft.flags,
+                        bytes,
+                    });
+            } else if committing && self.pattern_selection.as_ref().is_none_or(|selection| {
+                selection.pattern != pattern_value || selection.flags != self.session.draft.flags
+            }) {
+                let end = pattern_value.len();
+                self.pattern_selection = Some(visualization::SourceSelection {
+                    pattern: pattern_value.clone(),
+                    flags: self.session.draft.flags,
+                    bytes: end..end,
+                });
+            }
+            if pattern_changed && committing {
                 self.session.draft.pattern = pattern_value;
                 self.mark_changed();
             }
             if self.focus_pattern {
-                pattern.request_focus();
-                pattern.scroll_to_me(Some(egui::Align::Center));
+                pattern_output.response.request_focus();
+                pattern_output
+                    .response
+                    .scroll_to_me(Some(egui::Align::Center));
                 if committing {
                     self.focus_pattern = false;
                 }
             }
             #[cfg(test)]
             {
-                self.last_pattern_geometry = Some((pattern.rect, font.clone()));
+                self.last_pattern_geometry = Some((pattern_output.response.rect, font.clone()));
             }
             let _suffix = ui.label(egui::RichText::new(suffix).font(font));
             #[cfg(test)]
@@ -1063,6 +1964,10 @@ impl RegexTesterDialogState {
         action_targets: &mut JumpTargets<'_>,
         committing: bool,
     ) {
+        #[cfg(test)]
+        {
+            self.last_test_text_rect = None;
+        }
         ui.label("Input / test text");
         if self.session.draft.test_text.len() > self.session.policy().text_bytes {
             self.oversized_text_area(ui, action_targets, committing);
@@ -1076,6 +1981,8 @@ impl RegexTesterDialogState {
         }
         let maximum_bytes = self.session.policy().text_bytes;
         let editor_size = ui.available_size().max(egui::vec2(1.0, 1.0));
+        #[cfg(test)]
+        let mut editor_rect = None;
         egui::ScrollArea::both()
             .id_salt("regex_tester_text_scroll")
             .auto_shrink([false, false])
@@ -1102,6 +2009,10 @@ impl RegexTesterDialogState {
                         .layouter(&mut layouter)
                         .hint_text("Type or paste text to test")
                         .show(ui);
+                    #[cfg(test)]
+                    {
+                        editor_rect = Some(output.response.rect);
+                    }
                     form_targets.text_entry(
                         ui,
                         &output.response,
@@ -1125,6 +2036,10 @@ impl RegexTesterDialogState {
                         .min_size(editor_size)
                         .hint_text("Type or paste text to test")
                         .show(ui);
+                    #[cfg(test)]
+                    {
+                        editor_rect = Some(output.response.rect);
+                    }
                     form_targets.text_entry(
                         ui,
                         &output.response,
@@ -1137,12 +2052,79 @@ impl RegexTesterDialogState {
                     self.mark_changed();
                 }
             });
+        #[cfg(test)]
+        {
+            self.last_test_text_rect = editor_rect;
+        }
     }
 
     fn mark_changed(&mut self) {
         self.scroll_to_selected = false;
+        self.visualization.clear_pending_source_focus();
         self.copy_feedback = None;
         self.session.mark_changed(Instant::now());
+    }
+
+    fn apply_constructor_request(
+        &mut self,
+        ctx: &egui::Context,
+        request: visualization::ConstructorRequest,
+    ) {
+        let source = &request.selection.pattern;
+        let maximum_bytes = self.session.policy().pattern_bytes;
+        if source.len() > maximum_bytes
+            || self.session.draft.pattern != request.selection.pattern
+            || self.session.draft.flags != request.selection.flags
+            || !self.pattern_selection.as_ref().is_some_and(|selection| {
+                selection.pattern == request.selection.pattern
+                    && selection.flags == request.selection.flags
+                    && selection.bytes == request.selection.bytes
+            })
+        {
+            return;
+        }
+        let Some(mut editor_state) =
+            egui::widgets::text_edit::TextEditState::load(ctx, visualization::pattern_id())
+        else {
+            return;
+        };
+        let Some(selection_chars) =
+            visualization::pattern_char_range(source, request.selection.bytes.clone())
+        else {
+            return;
+        };
+        let Some((updated, cursor_bytes)) = visualization::constructor_replacement(&request) else {
+            return;
+        };
+        if updated.len() > maximum_bytes || updated.as_str() == source {
+            return;
+        }
+        let Some(cursor_chars) = visualization::pattern_char_range(&updated, cursor_bytes.clone())
+        else {
+            return;
+        };
+
+        let before_cursor = egui::text::CCursorRange::two(
+            egui::text::CCursor::new(selection_chars.start),
+            egui::text::CCursor::new(selection_chars.end),
+        );
+        let after_cursor =
+            egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_chars.end));
+        let before_state = (before_cursor, source.clone());
+        let after_state = (after_cursor, updated.clone());
+        let mut undoer = editor_state.undoer();
+        undoer.add_undo(&before_state);
+        undoer.feed_state(ctx.input(|input| input.time), &after_state);
+        undoer.add_undo(&after_state);
+        editor_state.set_undoer(undoer);
+        editor_state.cursor.set_char_range(Some(after_cursor));
+        editor_state.store(ctx, visualization::pattern_id());
+
+        self.session.draft.pattern = updated;
+        self.mark_changed();
+        self.focus_pattern = true;
+        self.visualization_workspace_reveal = Some(VisualizationWorkspaceReveal::Pattern);
+        ctx.request_repaint();
     }
 
     fn request_match_scroll(&mut self, ui: &egui::Ui) {
@@ -1151,6 +2133,40 @@ impl RegexTesterDialogState {
     }
 
     fn information_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        process_case_actions: bool,
+        form_targets: &mut JumpTargets<'_>,
+        targets: &mut JumpTargets<'_>,
+    ) {
+        #[cfg(test)]
+        {
+            self.last_visualization_viewport = None;
+            self.last_visualization_selector_rect = None;
+        }
+        if self.information_section == InformationSection::Visualization {
+            let _output = egui::ScrollArea::vertical()
+                .id_salt("regex_visualization_information")
+                .auto_shrink([false, false])
+                .min_scrolled_height(visualization::minimum_viewport_height(ui))
+                .max_height(ui.available_height())
+                .show(ui, |ui| {
+                    self.information_area_contents(ui, process_case_actions, form_targets, targets);
+                });
+            #[cfg(test)]
+            {
+                self.last_visualization_viewport = Some((
+                    _output.inner_rect.intersect(ui.clip_rect()),
+                    _output.content_size,
+                    _output.state.offset,
+                ));
+            }
+        } else {
+            self.information_area_contents(ui, process_case_actions, form_targets, targets);
+        }
+    }
+
+    fn information_area_contents(
         &mut self,
         ui: &mut egui::Ui,
         process_case_actions: bool,
@@ -1166,6 +2182,7 @@ impl RegexTesterDialogState {
                 InformationSection::Matches => "Matches",
                 InformationSection::MatchDetails => "Selected match",
                 InformationSection::Explanation => "Explanation",
+                InformationSection::Visualization => "Syntax structure",
                 InformationSection::Reference => "Reference",
                 InformationSection::Examples => "Examples",
                 InformationSection::History => "History",
@@ -1194,6 +2211,17 @@ impl RegexTesterDialogState {
                     &response,
                     "section/explanation",
                     "Explanation section",
+                );
+                let response = ui.selectable_value(
+                    &mut section,
+                    InformationSection::Visualization,
+                    "Syntax structure",
+                );
+                popup_targets.selectable(
+                    ui,
+                    &response,
+                    "section/visualization",
+                    "Regex syntax structure",
                 );
                 let response =
                     ui.selectable_value(&mut section, InformationSection::Reference, "Reference");
@@ -1225,6 +2253,10 @@ impl RegexTesterDialogState {
                     ui.selectable_value(&mut section, InformationSection::TestCases, "Test Cases");
                 popup_targets.selectable(ui, &response, "section/test-cases", "Test case section");
             });
+        #[cfg(test)]
+        if section == InformationSection::Visualization {
+            self.last_visualization_selector_rect = Some(section_response.response.rect);
+        }
         form_targets.combo_box(
             ui,
             &section_response
@@ -1233,7 +2265,13 @@ impl RegexTesterDialogState {
             "information-section",
             "Information section",
         );
-        if process_case_actions {
+        if process_case_actions && section != self.information_section {
+            if section == InformationSection::Visualization {
+                self.visualization_workspace_reveal =
+                    Some(VisualizationWorkspaceReveal::Information);
+            } else {
+                self.visualization_workspace_reveal = None;
+            }
             self.information_section = section;
         }
         if section != InformationSection::TestCases
@@ -1259,6 +2297,31 @@ impl RegexTesterDialogState {
                 // Compiler validation is authoritative; pending revisions have
                 // no accessible stale analysis.
                 secondary_help(ui, &self.summary());
+            }
+            return;
+        }
+        if section == InformationSection::Visualization {
+            if let Some(action) = visualization::show(
+                ui,
+                &mut self.visualization,
+                &self.session,
+                self.pattern_selection.as_ref(),
+                targets,
+                process_case_actions && !ui.ctx().will_discard(),
+            ) {
+                match action {
+                    visualization::Action::Constructor(request) => {
+                        self.staged_visualization_action =
+                            Some(visualization::Action::Constructor(request));
+                    }
+                    visualization::Action::SelectNode(reference) => {
+                        self.staged_visualization_action =
+                            Some(visualization::Action::SelectNode(reference));
+                    }
+                    visualization::Action::OpenExplanation => {
+                        self.information_section = InformationSection::Explanation;
+                    }
+                }
             }
             return;
         }
@@ -1672,7 +2735,11 @@ impl RegexTesterDialogState {
     }
 
     fn status_area(&mut self, ui: &mut egui::Ui, targets: &mut JumpTargets<'_>, committing: bool) {
-        ui.horizontal(|ui| {
+        #[cfg(test)]
+        {
+            self.last_status_rects = None;
+        }
+        let _output = ui.horizontal(|ui| {
             let enabled = !self.session.matches().is_empty();
             let previous = ui
                 .add_enabled(enabled, egui::Button::new("Previous"))
@@ -1692,7 +2759,13 @@ impl RegexTesterDialogState {
                 egui::Label::new(egui::RichText::new(self.navigation_summary()).weak()).truncate(),
             )
             .on_hover_text(self.summary());
+            #[cfg(test)]
+            [previous.rect, next.rect]
         });
+        #[cfg(test)]
+        {
+            self.last_status_rects = Some(_output.inner);
+        }
     }
 }
 
@@ -1907,9 +2980,242 @@ mod tests {
             .expect("default raw input includes the root viewport")
             .native_pixels_per_point = Some(pixels_per_point);
         ctx.run_ui(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+            dialog.begin_staged_visualization_effects();
+            let process_actions = ctx.current_pass_index() == 0;
+            if process_actions {
+                dialog.apply_deferred_constructor(ctx, egui::ViewportId::ROOT);
+                dialog.prepare_deferred_syntax_focus(egui::ViewportId::ROOT);
+            }
+            egui::CentralPanel::default().show(ctx, |ui| {
+                dialog.body_in_viewport_scoped(ui, false, process_actions, None, true)
+            });
+            if process_actions && !ctx.will_discard() {
+                dialog.stage_visualization_root_effects(ctx, ctx, egui::ViewportId::ROOT, false);
+            } else {
+                dialog.discard_staged_visualization_effects();
+            }
         })
         .drop_without_applying_deltas();
+        dialog.on_ui_frame_complete(ctx);
+    }
+
+    fn scroll_scaled_gesture(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        size: egui::Vec2,
+        pixels_per_point: f32,
+        point: egui::Pos2,
+        delta_y: f32,
+    ) {
+        render_scaled_regex_frame(
+            ctx,
+            dialog,
+            size,
+            pixels_per_point,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::Vec2::ZERO,
+                    phase: egui::TouchPhase::Start,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, delta_y),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_scaled_regex_frame(
+            ctx,
+            dialog,
+            size,
+            pixels_per_point,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::Vec2::ZERO,
+                phase: egui::TouchPhase::End,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+
+    fn scroll_scaled_syntax_row_into_view(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        size: egui::Vec2,
+        pixels_per_point: f32,
+        node_id: crate::regex_tester::RegexSyntaxNodeId,
+    ) -> Option<(egui::Rect, egui::Id)> {
+        let fully_visible_row = |dialog: &RegexTesterDialogState| {
+            let rect = dialog.visualization.test_node_rect(node_id)?;
+            let widget_id = dialog.visualization.test_node_widget_id(node_id)?;
+            let tree_clip = dialog.visualization.test_tree_scroll_geometry()?.1;
+            let workspace_clip = dialog.last_visualization_workspace?.0;
+            (tree_clip.contains_rect(rect) && workspace_clip.contains_rect(rect))
+                .then_some((rect, widget_id))
+        };
+        render_scaled_regex_frame(ctx, dialog, size, pixels_per_point, Vec::new());
+        if let Some(row) = fully_visible_row(dialog) {
+            return Some(row);
+        }
+
+        let (outer_viewport, outer_content, outer_offset) = dialog.last_visualization_viewport?;
+        let (tree_viewport, _, _, _, _row_step) =
+            dialog.visualization.test_tree_scroll_geometry()?;
+        let outer_max_offset = (outer_content.y - outer_viewport.height()).max(0.0);
+        let outer_delta = (tree_viewport.top() - (outer_viewport.top() + 2.0))
+            .clamp(-outer_offset.y, outer_max_offset - outer_offset.y);
+        if outer_delta.abs() > 1.0 {
+            // The section selector may already be scrolled out of view. Use a
+            // point in the measured visible pane so the real enclosing
+            // Visualization scroll area owns this gesture.
+            let point = egui::pos2(outer_viewport.left() + 2.0, outer_viewport.top() + 2.0);
+            render_scaled_regex_frame(
+                ctx,
+                dialog,
+                size,
+                pixels_per_point,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::Vec2::ZERO,
+                        phase: egui::TouchPhase::Start,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -outer_delta),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            render_scaled_regex_frame(
+                ctx,
+                dialog,
+                size,
+                pixels_per_point,
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::Vec2::ZERO,
+                    phase: egui::TouchPhase::End,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            let applied = dialog.last_visualization_viewport?.2.y;
+            assert!(
+                (applied - (outer_offset.y + outer_delta)).abs() < 1.0,
+                "outer scroll did not reach its measured target: old={outer_offset:?}, delta={outer_delta}, applied={applied}, viewport={outer_viewport:?}, tree={:?}, pointer={:?}",
+                dialog.visualization.test_tree_scroll_geometry(),
+                point,
+            );
+            if let Some(row) = fully_visible_row(dialog) {
+                return Some(row);
+            }
+        }
+
+        let (tree_viewport, tree_clip, tree_content, tree_offset, row_step) =
+            dialog.visualization.test_tree_scroll_geometry()?;
+        let row_index = dialog.visualization.test_row_index(node_id)?;
+        if !tree_clip.is_positive() {
+            return None;
+        }
+        let max_tree_offset = (tree_content.y - tree_viewport.height()).max(0.0);
+        let requested_offset = (row_index as f32 * row_step).clamp(0.0, max_tree_offset);
+        let tree_delta = requested_offset - tree_offset.y;
+        if tree_delta.abs() > 1.0 {
+            let point = tree_clip.center();
+            render_scaled_regex_frame(
+                ctx,
+                dialog,
+                size,
+                pixels_per_point,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::Vec2::ZERO,
+                        phase: egui::TouchPhase::Start,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -tree_delta),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            render_scaled_regex_frame(
+                ctx,
+                dialog,
+                size,
+                pixels_per_point,
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::Vec2::ZERO,
+                    phase: egui::TouchPhase::End,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            let applied = dialog.visualization.test_tree_scroll_geometry()?.3.y;
+            assert!(
+                (applied - requested_offset).abs() < 1.0,
+                "tree scroll did not reach its measured target: requested={requested_offset}, applied={applied}, clip={tree_clip:?}, row={row_index}, step={row_step}"
+            );
+        }
+        if let Some(row) = fully_visible_row(dialog) {
+            return Some(row);
+        }
+
+        let (outer_viewport, outer_content, outer_offset) = dialog.last_visualization_viewport?;
+        let (tree_viewport, tree_clip, _, tree_offset, _) =
+            dialog.visualization.test_tree_scroll_geometry()?;
+        let target_top = tree_viewport.top() + row_index as f32 * row_step - tree_offset.y;
+        let outer_max_offset = (outer_content.y - outer_viewport.height()).max(0.0);
+        let outer_delta = (target_top - (outer_viewport.top() + 2.0))
+            .clamp(-outer_offset.y, outer_max_offset - outer_offset.y);
+        if outer_delta.abs() > 1.0 && tree_clip.is_positive() {
+            let point = tree_clip.center();
+            render_scaled_regex_frame(
+                ctx,
+                dialog,
+                size,
+                pixels_per_point,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::Vec2::ZERO,
+                        phase: egui::TouchPhase::Start,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -outer_delta),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            render_scaled_regex_frame(
+                ctx,
+                dialog,
+                size,
+                pixels_per_point,
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::Vec2::ZERO,
+                    phase: egui::TouchPhase::End,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        fully_visible_row(dialog)
     }
 
     #[test]
@@ -3094,6 +4400,10 @@ mod tests {
         static REGEX_IMMEDIATE_RENDERER_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static REGEX_VIEWPORT_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
         static REGEX_VIEWPORT_FOCUSED_ID: std::cell::RefCell<Option<egui::Id>> = const { std::cell::RefCell::new(None) };
+        static REGEX_VIEWPORT_FOCUS_ID_TO_SET: std::cell::RefCell<Option<egui::Id>> = const { std::cell::RefCell::new(None) };
+        static REGEX_VIEWPORT_PATTERN_CURSOR: std::cell::RefCell<Option<std::ops::Range<usize>>> = const { std::cell::RefCell::new(None) };
+        static REGEX_VIEWPORT_PATTERN_CURSOR_TO_SET: std::cell::RefCell<Option<std::ops::Range<usize>>> = const { std::cell::RefCell::new(None) };
+        static REGEX_VIEWPORT_DISCARD_AFTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static REGEX_VIEWPORT_POPUP_ID: std::cell::Cell<Option<egui::Id>> = const { std::cell::Cell::new(None) };
         static REGEX_VIEWPORT_POPUP_OPEN: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     }
@@ -3120,6 +4430,8 @@ mod tests {
                     parent: Some(parent_id),
                     focused: Some(true),
                     inner_rect: Some(screen_rect),
+                    minimized: Some(false),
+                    occluded: Some(false),
                     title: viewport.builder.title.clone(),
                     ..Default::default()
                 },
@@ -3138,7 +4450,39 @@ mod tests {
                 |ui| {
                     assert_eq!(ui.ctx().viewport_id(), viewport_id);
                     assert_eq!(ui.ctx().parent_viewport_id(), parent_id);
+                    if let Some(range) = REGEX_VIEWPORT_PATTERN_CURSOR_TO_SET
+                        .with(|pending| pending.borrow_mut().take())
+                        && let Some(mut state) = egui::widgets::text_edit::TextEditState::load(
+                            ui.ctx(),
+                            visualization::pattern_id(),
+                        )
+                    {
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(range.start),
+                                egui::text::CCursor::new(range.end),
+                            )));
+                        state.store(ui.ctx(), visualization::pattern_id());
+                        ui.ctx()
+                            .memory_mut(|memory| memory.request_focus(visualization::pattern_id()));
+                    }
+                    if let Some(id) =
+                        REGEX_VIEWPORT_FOCUS_ID_TO_SET.with(|pending| pending.borrow_mut().take())
+                    {
+                        ui.ctx().memory_mut(|memory| memory.request_focus(id));
+                    }
                     (viewport.viewport_ui_cb)(ui);
+                    let cursor = egui::widgets::text_edit::TextEditState::load(
+                        ui.ctx(),
+                        visualization::pattern_id(),
+                    )
+                    .and_then(|state| state.cursor.char_range())
+                    .map(|range| {
+                        let range = range.as_sorted_char_range();
+                        range.start.0..range.end.0
+                    });
+                    REGEX_VIEWPORT_PATTERN_CURSOR.with(|stored| *stored.borrow_mut() = cursor);
                     REGEX_VIEWPORT_FOCUSED_ID.with(|focused| {
                         *focused.borrow_mut() = ui.ctx().memory(|memory| memory.focused());
                     });
@@ -3149,6 +4493,11 @@ mod tests {
                                 .map(|id| egui::ComboBox::is_open(ui.ctx(), id)),
                         );
                     });
+                    if REGEX_VIEWPORT_DISCARD_AFTER_CALLBACK.with(|discard| discard.replace(false))
+                    {
+                        ui.ctx()
+                            .request_discard("Regex Tester child-pass test discard");
+                    }
                 },
             );
             output.drop_without_applying_deltas();
@@ -3177,6 +4526,287 @@ mod tests {
             },
         );
         output.drop_without_applying_deltas();
+        dialog.on_ui_frame_complete(ctx);
+    }
+
+    fn render_regex_embedded_frame(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        events: Vec<egui::Event>,
+    ) {
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 680.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                dialog.show_with_jump_mode(ctx, None, Some(1), true, true, true);
+            },
+        );
+        output.drop_without_applying_deltas();
+        dialog.on_ui_frame_complete(ctx);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn render_regex_immediate_observation_frame(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+    ) -> Option<RegexViewportObservation> {
+        REGEX_VIEWPORT_EVENTS.with(|pending| pending.borrow_mut().clear());
+        let mut observation = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 680.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            |ctx| {
+                observation =
+                    dialog.show_with_jump_mode_observation(ctx, None, Some(1), true, false, true);
+            },
+        );
+        output.drop_without_applying_deltas();
+        dialog.on_ui_frame_complete(ctx);
+        observation
+    }
+
+    fn render_regex_immediate_frame_with_root_discard(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        events: Vec<egui::Event>,
+    ) {
+        REGEX_VIEWPORT_EVENTS.with(|pending| *pending.borrow_mut() = events);
+        let discard_first = std::cell::Cell::new(true);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 680.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            |ctx| {
+                dialog.show_with_jump_mode(ctx, None, Some(1), true, false, true);
+                if discard_first.replace(false) {
+                    ctx.request_discard("Regex Tester root-pass test discard");
+                }
+            },
+        );
+        output.drop_without_applying_deltas();
+        dialog.on_ui_frame_complete(ctx);
+    }
+
+    fn set_regex_immediate_pattern_cursor(range: std::ops::Range<usize>) {
+        REGEX_VIEWPORT_PATTERN_CURSOR_TO_SET.with(|pending| *pending.borrow_mut() = Some(range));
+    }
+
+    fn set_regex_pattern_cursor_in_context(ctx: &egui::Context, range: std::ops::Range<usize>) {
+        let id = visualization::pattern_id();
+        let mut state = egui::TextEdit::load_state(ctx, id)
+            .expect("the rendered Regex source editor retains its TextEdit state");
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(range.start),
+                egui::text::CCursor::new(range.end),
+            )));
+        state.store(ctx, id);
+        ctx.memory_mut(|memory| memory.request_focus(id));
+    }
+
+    fn regex_immediate_pattern_cursor() -> Option<std::ops::Range<usize>> {
+        REGEX_VIEWPORT_PATTERN_CURSOR.with(|stored| stored.borrow().clone())
+    }
+
+    fn regex_visualization_dialog(pattern: &str) -> RegexTesterDialogState {
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.information_open = true;
+        dialog.information_section = InformationSection::Visualization;
+        dialog.session.draft.pattern = pattern.to_owned();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog.open();
+        dialog
+    }
+
+    fn regex_eval_pattern(dialog: &mut RegexTesterDialogState, pattern: &str) {
+        dialog.session.draft.pattern = pattern.to_owned();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+    }
+
+    fn click_regex_immediate_point(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        point: egui::Pos2,
+    ) {
+        render_regex_immediate_frame(
+            ctx,
+            dialog,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_regex_immediate_frame(
+            ctx,
+            dialog,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+
+    fn click_regex_immediate_point_with_child_discard(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        point: egui::Pos2,
+    ) {
+        render_regex_immediate_frame(
+            ctx,
+            dialog,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        REGEX_VIEWPORT_DISCARD_AFTER_CALLBACK.with(|discard| discard.set(true));
+        render_regex_immediate_frame(
+            ctx,
+            dialog,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+
+    fn click_regex_immediate_point_with_root_discard(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        point: egui::Pos2,
+    ) {
+        render_regex_immediate_frame(
+            ctx,
+            dialog,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_regex_immediate_frame_with_root_discard(
+            ctx,
+            dialog,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+
+    fn immediate_key_events(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+        vec![
+            keyboard_event_state(key, true, modifiers),
+            keyboard_event_state(key, false, modifiers),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn regex_alt_space_events(with_adjacent_text: bool) -> Vec<egui::Event> {
+        let alt = egui::Modifiers::ALT;
+        let mut events = vec![
+            egui::Event::ModifiersChanged(alt),
+            egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: alt,
+            },
+            egui::Event::Text(" ".into()),
+        ];
+        if with_adjacent_text {
+            events.extend([
+                egui::Event::Text("adjacent".into()),
+                egui::Event::Text(" ".into()),
+            ]);
+        }
+        events.extend([
+            egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: alt,
+            },
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ]);
+        events
+    }
+
+    #[cfg(windows)]
+    fn send_regex_immediate_key(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) {
+        for pressed in [true, false] {
+            let mut events = vec![
+                egui::Event::ModifiersChanged(modifiers),
+                keyboard_event_state(key, pressed, modifiers),
+            ];
+            if !pressed {
+                events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            }
+            render_regex_immediate_frame(ctx, dialog, events);
+        }
     }
 
     fn regex_native_target(
@@ -3251,6 +4881,777 @@ mod tests {
             repeat: false,
             modifiers,
         }
+    }
+
+    #[test]
+    fn regex_visualize_opener_and_node_selection_focus_exact_unicode_source() {
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut dialog = RegexTesterDialogState::default();
+        regex_eval_pattern(&mut dialog, r"(?P<word>é+)");
+        dialog.open();
+
+        for _ in 0..3 {
+            render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        }
+        assert_eq!(dialog.information_section, InformationSection::Matches);
+        let visualize = dialog
+            .last_visualize_button
+            .expect("the header publishes its Visualize action");
+        click_regex_immediate_point(&ctx, &mut dialog, visualize.center());
+        assert!(dialog.information_open);
+        assert_eq!(
+            dialog.information_section,
+            InformationSection::Visualization
+        );
+
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        let (expected_chars, expected_id) = {
+            let tree = dialog
+                .session
+                .visualization()
+                .and_then(|result| result.tree())
+                .expect("the accepted pattern has a syntax tree");
+            let node = tree
+                .nodes()
+                .iter()
+                .find(|node| {
+                    tree.node_ref(node.id())
+                        .and_then(|reference| tree.focus_source_for(&reference))
+                        == Some("é")
+                })
+                .expect("the literal Unicode scalar has its own syntax focus span");
+            (
+                visualization::pattern_char_range(tree.source(), node.focus_span().as_range())
+                    .expect("the Unicode focus span maps to editor characters"),
+                node.id(),
+            )
+        };
+        let node_rect = dialog
+            .visualization
+            .test_node_rect(expected_id)
+            .expect("the current Unicode node is visible in the syntax list");
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+
+        click_regex_immediate_point(&ctx, &mut dialog, node_rect.center());
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(dialog.session.revision(), revision);
+        assert_eq!(dialog.visualization.test_selected_id(), Some(expected_id));
+        assert_eq!(regex_immediate_pattern_cursor(), Some(expected_chars));
+        assert_eq!(
+            REGEX_VIEWPORT_FOCUSED_ID.with(|focused| *focused.borrow()),
+            Some(visualization::pattern_id()),
+            "accepted node selection returns focus to the source editor"
+        );
+
+        let (source_node_id, source_selection) = {
+            let tree = dialog
+                .session
+                .visualization()
+                .and_then(|result| result.tree())
+                .expect("the accepted pattern keeps its syntax tree");
+            let source_node = tree
+                .best_node_for_selection(9..12)
+                .expect("selecting the complete Unicode repetition maps back to syntax");
+            (
+                source_node.id(),
+                visualization::pattern_char_range(tree.source(), 9..12).unwrap(),
+            )
+        };
+        assert_ne!(source_node_id, expected_id);
+        set_regex_immediate_pattern_cursor(source_selection);
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        assert_eq!(
+            dialog.visualization.test_selected_id(),
+            Some(source_node_id),
+            "an editor selection updates the syntax-tree selection"
+        );
+
+        let source_node_rect = dialog
+            .visualization
+            .test_node_rect(source_node_id)
+            .expect("the source-selected syntax row remains visible");
+        click_regex_immediate_point(&ctx, &mut dialog, source_node_rect.center());
+        let end = dialog.session.draft.pattern.chars().count();
+        set_regex_immediate_pattern_cursor(end..end);
+        render_regex_immediate_frame(&ctx, &mut dialog, vec![egui::Event::Text("x".into())]);
+        assert!(dialog.session.draft.pattern.ends_with('x'));
+        assert_eq!(
+            regex_immediate_pattern_cursor(),
+            Some(end + 1..end + 1),
+            "a newer source edit supersedes a pending node-to-source focus request"
+        );
+        assert!(!dialog.visualization.test_has_pending_source_focus());
+    }
+
+    #[test]
+    fn regex_visualization_panel_stays_usable_at_200_percent_and_row_ids_survive_collapse() {
+        let size = egui::vec2(360.0, 240.0);
+        let pixels_per_point = 2.0;
+        let ctx = egui::Context::default();
+        let mut theme = crate::settings::ThemeSettings::default();
+        theme.preferences.typography_scale = 2.0;
+        crate::gui::theme::publish_committed(&ctx, &theme);
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.animation_time = 0.0;
+        style.scroll_animation = egui::style::ScrollAnimation::none();
+        ctx.set_style_of(ctx.theme(), style);
+
+        let mut dialog = RegexTesterDialogState::default();
+        regex_eval_pattern(&mut dialog, r"(?:a+|b+)c+");
+        dialog.information_open = true;
+        dialog.information_section = InformationSection::Matches;
+        for _ in 0..3 {
+            render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        }
+        let visualize = dialog
+            .last_visualize_button
+            .expect("the constrained header exposes Visualize");
+        assert!(
+            dialog
+                .last_header_viewport
+                .unwrap()
+                .contains_rect(visualize)
+        );
+        for events in [
+            vec![
+                egui::Event::PointerMoved(visualize.center()),
+                egui::Event::PointerButton {
+                    pos: visualize.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerButton {
+                pos: visualize.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, events);
+        }
+        assert_eq!(
+            dialog.information_section,
+            InformationSection::Visualization
+        );
+
+        for _ in 0..3 {
+            render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        }
+        let (workspace_clip, workspace_content, opened_workspace_offset, workspace_layout) = dialog
+            .last_visualization_workspace
+            .expect("the constrained Visualize section uses its containing workspace scroll");
+        let information_rect = workspace_layout
+            .information
+            .expect("the Visualization section has a workspace allocation");
+        assert!(workspace_content.y > workspace_clip.height());
+        assert!(
+            workspace_clip.contains_rect(information_rect),
+            "the one-shot Visualize reveal brings the complete pane into the workspace: clip={workspace_clip:?}, info={information_rect:?}"
+        );
+        let (information_clip, _, _) = dialog
+            .last_visualization_viewport
+            .expect("the Visualization pane reports its measured nested viewport");
+        let selector = dialog
+            .last_visualization_selector_rect
+            .expect("the pane selector publishes its actual control bounds");
+        assert!(
+            information_clip.contains_rect(selector),
+            "information selector must fit its viewport: selector={selector:?}, info_clip={information_clip:?}, info_allocation={information_rect:?}, workspace_clip={workspace_clip:?}, info_scroll={:?}",
+            dialog.last_visualization_viewport,
+        );
+        assert!(
+            dialog
+                .last_status_rects
+                .expect("status actions publish their measured controls")
+                .iter()
+                .all(|rect| workspace_clip.contains_rect(*rect)),
+            "status actions remain reachable with the workspace revealing Visualization"
+        );
+        render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        assert_eq!(
+            dialog.last_visualization_workspace.unwrap().2,
+            opened_workspace_offset,
+            "idle frames preserve the user's workspace offset after the one-shot reveal"
+        );
+
+        let group_control = dialog
+            .visualization
+            .test_constructor_rect("Group")
+            .expect("the constructor palette publishes the real Group control");
+        let (information_clip, information_content, information_offset) = dialog
+            .last_visualization_viewport
+            .expect("the Visualization pane remains scrollable inside the workspace");
+        let information_max_offset = (information_content.y - information_clip.height()).max(0.0);
+        let requested_information_offset = (information_offset.y + group_control.bottom()
+            - information_clip.bottom())
+        .clamp(0.0, information_max_offset);
+        let information_delta = requested_information_offset - information_offset.y;
+        if information_delta.abs() > 1.0 {
+            let point = egui::pos2(information_clip.left() + 2.0, information_clip.top() + 2.0);
+            scroll_scaled_gesture(
+                &ctx,
+                &mut dialog,
+                size,
+                pixels_per_point,
+                point,
+                -information_delta,
+            );
+        }
+        render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        let (information_clip, _, information_offset) = dialog
+            .last_visualization_viewport
+            .expect("the nested pane keeps its scroll viewport after movement");
+        let group_control = dialog
+            .visualization
+            .test_constructor_rect("Group")
+            .expect("the Group constructor remains laid out after scrolling");
+        assert!(
+            (information_offset.y - requested_information_offset).abs() < 1.0,
+            "the real nested pane gesture reaches the measured constructor offset"
+        );
+        assert!(information_clip.contains_rect(group_control));
+        let (workspace_clip, _, _, _) = dialog.last_visualization_workspace.unwrap();
+        assert!(workspace_clip.contains_rect(group_control));
+        let stable_information_offset = information_offset;
+        render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        assert_eq!(
+            dialog.last_visualization_viewport.unwrap().2,
+            stable_information_offset,
+            "idle frames do not re-reveal the constructor palette"
+        );
+
+        let tree = dialog
+            .session
+            .visualization()
+            .and_then(|result| result.tree())
+            .expect("the current source has its accepted syntax tree");
+        let sibling_pair = tree.nodes().iter().find_map(|branch| {
+            if branch.children().is_empty() {
+                return None;
+            }
+            tree.nodes()
+                .iter()
+                .find(|later| {
+                    later.id() != branch.id()
+                        && later.parent() == branch.parent()
+                        && later.span().start_byte() >= branch.span().end_byte()
+                })
+                .map(|later| (branch.id(), later.id()))
+        });
+        let (branch_id, later_id) =
+            sibling_pair.expect("the fixture has a grouped branch and a later sibling");
+        let hidden_child_id = tree
+            .node(branch_id)
+            .and_then(|branch| branch.children().first())
+            .copied()
+            .expect("the collapsed branch has a child");
+        let (later_row, original_widget_id) =
+            scroll_scaled_syntax_row_into_view(&ctx, &mut dialog, size, pixels_per_point, later_id)
+                .expect("scrolling the constrained syntax list reveals the later sibling");
+        let tree_clip = dialog
+            .visualization
+            .test_tree_scroll_geometry()
+            .expect("the nested syntax viewport reports its actual clipped area")
+            .1;
+        assert!(tree_clip.contains_rect(later_row));
+        assert!(
+            dialog
+                .last_visualization_workspace
+                .unwrap()
+                .0
+                .contains_rect(later_row),
+            "a selected syntax row is visible through the root workspace clip"
+        );
+        let (outer_clip, outer_content, outer_offset) = dialog
+            .last_visualization_viewport
+            .expect("the complete Visualization pane reports its actual viewport");
+        assert!(outer_content.y > outer_clip.height());
+        assert!(
+            outer_offset.y > 0.0,
+            "the outer pane scrolls the selector/constructors with the tree into reach"
+        );
+        assert!(later_row.left() >= 0.0 && later_row.right() <= size.x + 0.1);
+        let before_selection = dialog.session.draft.clone();
+        let before_selection_revision = dialog.session.revision();
+        let expected_selection = {
+            let tree = dialog.session.visualization().unwrap().tree().unwrap();
+            visualization::pattern_char_range(
+                tree.source(),
+                tree.node(later_id).unwrap().focus_span().as_range(),
+            )
+            .unwrap()
+        };
+        render_scaled_regex_frame(
+            &ctx,
+            &mut dialog,
+            size,
+            pixels_per_point,
+            vec![
+                egui::Event::PointerMoved(later_row.center()),
+                egui::Event::PointerButton {
+                    pos: later_row.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_scaled_regex_frame(
+            &ctx,
+            &mut dialog,
+            size,
+            pixels_per_point,
+            vec![egui::Event::PointerButton {
+                pos: later_row.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(dialog.visualization.test_selected_id(), Some(later_id));
+        assert_eq!(dialog.session.draft, before_selection);
+        assert_eq!(dialog.session.revision(), before_selection_revision);
+
+        for _ in 0..3 {
+            render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        }
+        assert!(ctx.memory(|memory| memory.has_focus(visualization::pattern_id())));
+        let actual_selection = egui::TextEdit::load_state(&ctx, visualization::pattern_id())
+            .and_then(|state| state.cursor.char_range())
+            .map(|range| {
+                let range = range.as_sorted_char_range();
+                range.start.0..range.end.0
+            });
+        assert_eq!(actual_selection, Some(expected_selection));
+        let (workspace_clip, _, _, workspace_layout) = dialog.last_visualization_workspace.unwrap();
+        assert!(
+            workspace_clip.contains_rect(workspace_layout.header),
+            "accepted node-to-source focus reveals the pattern header from the scrolled workspace"
+        );
+        let pattern_rect = dialog.last_pattern_geometry.as_ref().unwrap().0;
+        assert!(workspace_clip.contains_rect(pattern_rect));
+        assert!(
+            dialog
+                .last_header_viewport
+                .unwrap()
+                .contains_rect(pattern_rect),
+            "the actual pattern control remains inside its header viewport after workspace reveal"
+        );
+
+        let editor_bottom = workspace_layout.editor.bottom();
+        let workspace_scroll = (editor_bottom - workspace_clip.bottom()).max(0.0);
+        let (_, workspace_content, previous_workspace_offset, _) =
+            dialog.last_visualization_workspace.unwrap();
+        let workspace_max_offset = (workspace_content.y - workspace_clip.height()).max(0.0);
+        let requested_editor_offset =
+            (previous_workspace_offset.y + workspace_scroll).clamp(0.0, workspace_max_offset);
+        if workspace_scroll > 1.0 {
+            let editor_gap = workspace_layout.header.bottom()
+                + (workspace_layout.editor.top() - workspace_layout.header.bottom()) * 0.5;
+            let point = egui::pos2(workspace_clip.right() - 2.0, editor_gap);
+            assert!(workspace_clip.contains(point));
+            scroll_scaled_gesture(
+                &ctx,
+                &mut dialog,
+                size,
+                pixels_per_point,
+                point,
+                -workspace_scroll,
+            );
+        }
+        render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        let (workspace_clip, _, editor_offset, editor_layout) =
+            dialog.last_visualization_workspace.unwrap();
+        assert!(
+            (editor_offset.y - requested_editor_offset).abs() < 1.0,
+            "the workspace gesture reaches the measured sample-editor offset"
+        );
+        assert!(workspace_clip.contains_rect(editor_layout.editor));
+        assert!(
+            workspace_clip.contains_rect(dialog.last_test_text_rect.unwrap()),
+            "the sample editor can be brought fully into view with a real workspace scroll"
+        );
+        render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        assert_eq!(
+            dialog.last_visualization_workspace.unwrap().2,
+            editor_offset,
+            "idle frames preserve the user's sample-editor scroll position"
+        );
+
+        let (_, workspace_content, current_offset, current_layout) =
+            dialog.last_visualization_workspace.unwrap();
+        let target_information = current_layout.information.unwrap();
+        let workspace_delta = (target_information.top() - workspace_clip.top()).max(0.0);
+        let workspace_max_offset = (workspace_content.y - workspace_clip.height()).max(0.0);
+        let requested_information_workspace_offset =
+            (current_offset.y + workspace_delta).clamp(0.0, workspace_max_offset);
+        if workspace_delta > 1.0 {
+            let editor_gap = current_layout.header.bottom()
+                + (current_layout.editor.top() - current_layout.header.bottom()) * 0.5;
+            let point = egui::pos2(workspace_clip.right() - 2.0, editor_gap);
+            assert!(workspace_clip.contains(point));
+            scroll_scaled_gesture(
+                &ctx,
+                &mut dialog,
+                size,
+                pixels_per_point,
+                point,
+                -workspace_delta,
+            );
+        }
+        render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        let (workspace_clip, _, information_workspace_offset, workspace_layout) =
+            dialog.last_visualization_workspace.unwrap();
+        assert!(
+            (information_workspace_offset.y - requested_information_workspace_offset).abs() < 1.0,
+            "the workspace gesture reaches the measured Visualization allocation"
+        );
+        assert!(workspace_clip.contains_rect(workspace_layout.information.unwrap()));
+
+        scroll_scaled_syntax_row_into_view(&ctx, &mut dialog, size, pixels_per_point, branch_id)
+            .expect("scrolling back reveals the branch whose disclosure will be collapsed");
+        let disclosure = dialog
+            .visualization
+            .test_disclosure_rect(branch_id)
+            .expect("the branch disclosure is visible in the virtualized rows");
+        let tree_clip = dialog
+            .visualization
+            .test_tree_scroll_geometry()
+            .expect("the syntax viewport remains available for the disclosure")
+            .1;
+        assert!(tree_clip.contains_rect(disclosure));
+
+        render_scaled_regex_frame(
+            &ctx,
+            &mut dialog,
+            size,
+            pixels_per_point,
+            vec![
+                egui::Event::PointerMoved(disclosure.center()),
+                egui::Event::PointerButton {
+                    pos: disclosure.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_scaled_regex_frame(
+            &ctx,
+            &mut dialog,
+            size,
+            pixels_per_point,
+            vec![egui::Event::PointerButton {
+                pos: disclosure.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let (later_row_after, _) =
+            scroll_scaled_syntax_row_into_view(&ctx, &mut dialog, size, pixels_per_point, later_id)
+                .expect("the later sibling remains reachable after the collapse");
+        let tree_clip = dialog
+            .visualization
+            .test_tree_scroll_geometry()
+            .expect("the syntax viewport remains available after collapse")
+            .1;
+        assert!(tree_clip.contains_rect(later_row_after));
+        assert!(
+            dialog
+                .last_visualization_workspace
+                .unwrap()
+                .0
+                .contains_rect(later_row_after)
+        );
+        assert_eq!(
+            dialog.visualization.test_node_widget_id(later_id),
+            Some(original_widget_id),
+            "virtualization and collapse do not transfer a focused row identity to another node"
+        );
+        assert!(
+            dialog
+                .visualization
+                .test_node_rect(hidden_child_id)
+                .is_none()
+        );
+        assert!(later_row_after.left() >= 0.0 && later_row_after.right() <= size.x + 0.1);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[test]
+    fn regex_qa_observation_comes_from_the_actual_immediate_child_callback() {
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut dialog = regex_visualization_dialog("(?P<word>é+)");
+        let mut observation = None;
+        for _ in 0..4 {
+            observation = render_regex_immediate_observation_frame(&ctx, &mut dialog);
+        }
+        let observation = observation.expect("the open Regex viewport invokes its callback");
+        assert_eq!(observation.child_viewport_id, viewport_id());
+        assert!(matches!(
+            observation.callback_class,
+            egui::ViewportClass::Immediate
+        ));
+        assert!(observation.body_rendered && observation.still_open);
+        assert!(!observation.child_discarded && !observation.root_discarded);
+        assert_eq!(observation.visible, Some(true));
+        assert_eq!(observation.focused, Some(true));
+        assert!(observation.application_input_allowed);
+        assert!(!observation.child_modal_open);
+        assert!(observation.pixels_per_point > 0.0);
+        assert!(observation.zoom_factor > 0.0);
+        assert!(observation.renderer_returned_at_unix_ms.is_some());
+        assert!(observation.completed_frame_nr.is_some());
+        assert!(observation.completed_pass_nr.is_some());
+        assert_eq!(observation.session_revision, dialog.session.revision());
+        assert_eq!(
+            observation.evaluated_revision,
+            Some(dialog.session.revision())
+        );
+        assert_eq!(
+            observation.test_case_revision,
+            dialog.session.test_case_revision()
+        );
+        assert_eq!(observation.evaluation_status, "current");
+        assert!(observation.visualization_generation.is_some());
+        assert_eq!(observation.information_section, "visualization");
+    }
+
+    #[test]
+    fn regex_visualization_constructor_is_one_undoable_edit_and_respects_discarded_passes() {
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut dialog = regex_visualization_dialog("é+");
+        dialog.open();
+        for _ in 0..3 {
+            render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        }
+
+        // Establish one ordinary editor undo before invoking the constructor.
+        set_regex_immediate_pattern_cursor(0..0);
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        render_regex_immediate_frame(&ctx, &mut dialog, vec![egui::Event::Text("x".to_owned())]);
+        assert_eq!(dialog.session.draft.pattern, "xé+");
+        let typed_revision = dialog.session.revision();
+        dialog
+            .session
+            .tick(Instant::now() + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+
+        set_regex_immediate_pattern_cursor(1..2);
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        assert_eq!(
+            dialog
+                .pattern_selection
+                .as_ref()
+                .map(|selection| selection.bytes.clone()),
+            Some(1..3),
+            "the selected Unicode scalar is captured as UTF-8 bytes"
+        );
+        let revision_before_constructor = dialog.session.revision();
+        let group_rect = dialog
+            .visualization
+            .test_constructor_rect("Group")
+            .expect("the visible constructor palette publishes Group");
+
+        // A discarded child pass and a later discarded ROOT pass must not
+        // apply the staged source mutation. The same control remains usable
+        // in an accepted pass below.
+        click_regex_immediate_point_with_child_discard(&ctx, &mut dialog, group_rect.center());
+        assert_eq!(dialog.session.draft.pattern, "xé+");
+        assert_eq!(dialog.session.revision(), revision_before_constructor);
+        assert!(dialog.deferred_constructor.is_none());
+
+        let group_rect = dialog
+            .visualization
+            .test_constructor_rect("Group")
+            .expect("the constructor remains available after a child discard");
+        click_regex_immediate_point_with_root_discard(&ctx, &mut dialog, group_rect.center());
+        assert_eq!(dialog.session.draft.pattern, "xé+");
+        assert_eq!(dialog.session.revision(), revision_before_constructor);
+        assert!(dialog.deferred_constructor.is_none());
+
+        let group_rect = dialog
+            .visualization
+            .test_constructor_rect("Group")
+            .expect("the constructor remains available after a ROOT discard");
+        click_regex_immediate_point(&ctx, &mut dialog, group_rect.center());
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        assert_eq!(dialog.session.draft.pattern, "x(?:é)+");
+        assert_eq!(
+            dialog.session.revision(),
+            revision_before_constructor + 1,
+            "one accepted palette activation is one source revision"
+        );
+
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            immediate_key_events(egui::Key::Z, egui::Modifiers::COMMAND),
+        );
+        assert_eq!(dialog.session.draft.pattern, "xé+");
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            immediate_key_events(egui::Key::Z, egui::Modifiers::COMMAND),
+        );
+        assert_eq!(
+            dialog.session.draft.pattern, "é+",
+            "the constructor preserves the preceding ordinary typing undo"
+        );
+        let mut redo = egui::Modifiers::COMMAND;
+        redo.shift = true;
+        render_regex_immediate_frame(&ctx, &mut dialog, immediate_key_events(egui::Key::Z, redo));
+        assert_eq!(dialog.session.draft.pattern, "xé+");
+        render_regex_immediate_frame(&ctx, &mut dialog, immediate_key_events(egui::Key::Z, redo));
+        assert_eq!(dialog.session.draft.pattern, "x(?:é)+");
+        assert_eq!(typed_revision, revision_before_constructor);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn regex_windows_alt_space_preserves_source_and_does_not_activate_constructor() {
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut dialog = regex_visualization_dialog("é+");
+        for _ in 0..3 {
+            render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        }
+        set_regex_immediate_pattern_cursor(0..0);
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        let source_id = visualization::pattern_id();
+        assert_eq!(
+            REGEX_VIEWPORT_FOCUSED_ID.with(|focused| *focused.borrow()),
+            Some(source_id),
+            "the real Immediate source editor owns keyboard focus"
+        );
+
+        let source = dialog.session.draft.pattern.clone();
+        let revision = dialog.session.revision();
+        render_regex_immediate_frame(&ctx, &mut dialog, regex_alt_space_events(false));
+        assert_eq!(dialog.session.draft.pattern, source);
+        assert_eq!(dialog.session.revision(), revision);
+        render_regex_immediate_frame(&ctx, &mut dialog, regex_alt_space_events(true));
+        assert_eq!(dialog.session.draft.pattern, "adjacent é+");
+        assert_eq!(dialog.session.revision(), revision + 1);
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            immediate_key_events(egui::Key::Z, egui::Modifiers::COMMAND),
+        );
+        assert_eq!(dialog.session.draft.pattern, source);
+        let mut redo = egui::Modifiers::COMMAND;
+        redo.shift = true;
+        render_regex_immediate_frame(&ctx, &mut dialog, immediate_key_events(egui::Key::Z, redo));
+        assert_eq!(dialog.session.draft.pattern, "adjacent é+");
+
+        regex_eval_pattern(&mut dialog, "é+");
+        set_regex_immediate_pattern_cursor(0..1);
+        for _ in 0..3 {
+            render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        }
+        assert_eq!(
+            dialog
+                .pattern_selection
+                .as_ref()
+                .map(|selection| selection.bytes.clone()),
+            Some(0..2),
+            "the focused Group control will act on the actual Unicode source selection"
+        );
+        let group = regex_native_target(
+            &dialog,
+            "Regex constructor",
+            Some("syntax-constructor/Group"),
+        );
+        REGEX_VIEWPORT_FOCUS_ID_TO_SET.with(|pending| {
+            *pending.borrow_mut() = Some(group.response_id());
+        });
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        assert_eq!(
+            REGEX_VIEWPORT_FOCUSED_ID.with(|focused| *focused.borrow()),
+            Some(group.response_id()),
+            "the actual Group constructor response owns focus"
+        );
+
+        let source = dialog.session.draft.pattern.clone();
+        let revision = dialog.session.revision();
+        render_regex_immediate_frame(&ctx, &mut dialog, regex_alt_space_events(false));
+        assert_eq!(dialog.session.draft.pattern, source);
+        assert_eq!(dialog.session.revision(), revision);
+        assert!(dialog.deferred_constructor.is_none());
+
+        send_regex_immediate_key(&ctx, &mut dialog, egui::Key::Space, egui::Modifiers::NONE);
+        for _ in 0..2 {
+            render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        }
+        assert_eq!(
+            dialog.session.draft.pattern, "(?:é)+",
+            "ordinary Space still activates the focused constructor"
+        );
+        assert_eq!(dialog.session.revision(), revision + 1);
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            immediate_key_events(egui::Key::Z, egui::Modifiers::COMMAND),
+        );
+        assert_eq!(dialog.session.draft.pattern, source);
+        render_regex_immediate_frame(&ctx, &mut dialog, immediate_key_events(egui::Key::Z, redo));
+        assert_eq!(dialog.session.draft.pattern, "(?:é)+");
+    }
+
+    #[test]
+    fn regex_visualization_accepted_constructor_applies_before_close_and_reopen() {
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut dialog = regex_visualization_dialog("a+");
+        dialog.open();
+        for _ in 0..3 {
+            render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        }
+        set_regex_immediate_pattern_cursor(0..1);
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        assert_eq!(
+            dialog
+                .pattern_selection
+                .as_ref()
+                .map(|selection| selection.bytes.clone()),
+            Some(0..1),
+            "Group wraps the actual selected 'a' rather than an empty caret"
+        );
+        let constructor = dialog
+            .visualization
+            .test_constructor_rect("Group")
+            .expect("the constructor palette is visible");
+        click_regex_immediate_point(&ctx, &mut dialog, constructor.center());
+        assert!(dialog.deferred_constructor.is_some());
+
+        render_regex_immediate_frame(
+            &ctx,
+            &mut dialog,
+            immediate_key_events(egui::Key::W, egui::Modifiers::COMMAND),
+        );
+        assert!(!dialog.open);
+        assert_eq!(dialog.session.draft.pattern, "(?:a)+");
+        assert!(dialog.deferred_constructor.is_none());
+
+        dialog.open();
+        render_regex_immediate_frame(&ctx, &mut dialog, Vec::new());
+        assert!(dialog.open);
+        assert_eq!(dialog.session.draft.pattern, "(?:a)+");
+        assert!(dialog.deferred_constructor.is_none());
     }
 
     #[test]
@@ -4272,5 +6673,70 @@ mod tests {
         assert!(dialog.open);
         assert_eq!(dialog.session.draft, draft);
         assert!(dialog.session.substitution_enabled());
+    }
+
+    #[test]
+    fn regex_embedded_accepted_constructor_applies_before_close() {
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(true);
+        let mut dialog = regex_visualization_dialog("a+");
+        for _ in 0..4 {
+            render_regex_embedded_frame(&ctx, &mut dialog, Vec::new());
+        }
+        set_regex_pattern_cursor_in_context(&ctx, 0..1);
+        render_regex_embedded_frame(&ctx, &mut dialog, Vec::new());
+        assert_eq!(
+            dialog
+                .pattern_selection
+                .as_ref()
+                .map(|selection| selection.bytes.clone()),
+            Some(0..1),
+            "the embedded editor commits the selected source before the constructor click"
+        );
+        let group = dialog
+            .visualization
+            .test_constructor_rect("Group")
+            .expect("the embedded syntax panel exposes the Group constructor");
+        let point = group.center();
+        render_regex_embedded_frame(
+            &ctx,
+            &mut dialog,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_regex_embedded_frame(
+            &ctx,
+            &mut dialog,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(dialog.deferred_constructor.is_some());
+        let revision = dialog.session.revision();
+
+        render_regex_embedded_frame(
+            &ctx,
+            &mut dialog,
+            immediate_key_events(egui::Key::W, egui::Modifiers::COMMAND),
+        );
+        assert!(!dialog.open);
+        assert_eq!(dialog.session.draft.pattern, "(?:a)+");
+        assert_eq!(dialog.session.revision(), revision + 1);
+        assert!(dialog.deferred_constructor.is_none());
+        dialog.open();
+        render_regex_embedded_frame(&ctx, &mut dialog, Vec::new());
+        assert!(dialog.open);
+        assert_eq!(dialog.session.draft.pattern, "(?:a)+");
+        assert!(dialog.deferred_constructor.is_none());
     }
 }

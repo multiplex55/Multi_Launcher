@@ -7,6 +7,7 @@ mod alias_dialog;
 mod batch_rename_dialog;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
+mod calculation_pad_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
@@ -21,6 +22,8 @@ mod cpu_list_dialog;
 pub mod crop_dialog;
 mod dashboard_editor_dialog;
 mod data_recovery_dialog;
+mod date_time_studio_dialog;
+mod diagram_studio;
 mod diff_dialog;
 mod duplicate_finder_dialog;
 #[cfg(feature = "dev-smoke-binaries")]
@@ -35,6 +38,8 @@ pub(crate) mod hotfolder_dialog;
 pub(crate) mod hotfolder_dispatch;
 pub(crate) mod hotfolder_runtime;
 mod hotkey_directory_dialog;
+#[cfg(windows)]
+mod native_keyboard;
 #[cfg(feature = "perf-harness")]
 pub use hotfolder_runtime::HotFolderIdleFixture;
 mod image_compare_dialog;
@@ -49,6 +54,9 @@ pub(crate) mod jump_mode;
 mod m7_startup_measurement;
 pub use jump_mode::ui::JumpModeScope;
 mod macro_dialog;
+mod markdown_export;
+mod markdown_preview;
+mod markdown_studio;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
@@ -137,16 +145,21 @@ pub use alias_dialog::AliasDialog;
 pub(crate) use batch_rename_dialog::{BatchRenameDialogState, BatchRenameUiCommand};
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BrightnessDialog;
+pub(crate) use calculation_pad_dialog::{CalculationPadDialog, CalculationPadDialogEffect};
 pub use calendar_event_details::CalendarEventDetails;
 pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
+pub(crate) use date_time_studio_dialog::{DateTimeStudioDialog, DateTimeStudioEffect};
+pub(crate) use diagram_studio::{DiagramMarkdownSource, DiagramStudioDialog};
+pub(crate) use markdown_studio::{MarkdownStudioDialog, MarkdownStudioEffect};
 pub(crate) use search_replace_dialog::{
     ReplacementPreviewWorker, SearchReplaceDialogState, SearchReplaceUiCommand,
 };
 
 pub use clipboard_modify_dialog::{ClipboardModifyDialogSection, ClipboardModifyDialogState};
 pub use convert_panel::ConvertPanel;
+pub(crate) use convert_panel::ConvertPanelEffect;
 pub use cpu_list_dialog::CpuListDialog;
 pub(crate) use data_recovery_dialog::{
     DataRecoveryDialog, DataRecoveryUiAction, PendingRecoveryIntent, SafeStartupDiagnostic,
@@ -254,7 +267,7 @@ use crate::visibility::{
     VisiblePlacementPolicy, apply_visibility, apply_visibility_with_focus_intent,
 };
 use action_sheet::ActionSheetState;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Timelike};
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
@@ -739,6 +752,10 @@ pub enum Panel {
     JsonUtilityDialog,
     ZipExtractorDialog,
     RegexTesterDialog,
+    CalculationPadDialog,
+    DateTimeStudioDialog,
+    DiagramStudioDialog,
+    MarkdownStudioDialog,
     BatchRenameDialog,
     SearchReplaceDialog,
     XmlToolkitDialog,
@@ -804,6 +821,10 @@ impl Panel {
             Self::JsonUtilityDialog => "JSON Utility",
             Self::ZipExtractorDialog => "ZIP Extractor",
             Self::RegexTesterDialog => "Regex Tester",
+            Self::CalculationPadDialog => "Calculation Pad",
+            Self::DateTimeStudioDialog => "Date & Time Studio",
+            Self::DiagramStudioDialog => "Diagram Studio",
+            Self::MarkdownStudioDialog => "Markdown Studio",
             Self::BatchRenameDialog => "Batch Renamer",
             Self::SearchReplaceDialog => "Search and Replace",
             Self::XmlToolkitDialog => "XML Toolkit",
@@ -870,6 +891,10 @@ struct PanelStates {
     json_utility_dialog: bool,
     zip_extractor_dialog: bool,
     regex_tester_dialog: bool,
+    calculation_pad_dialog: bool,
+    date_time_studio_dialog: bool,
+    diagram_studio_dialog: bool,
+    markdown_studio_dialog: bool,
     batch_rename_dialog: bool,
     search_replace_dialog: bool,
     xml_toolkit_dialog: bool,
@@ -1239,6 +1264,10 @@ pub struct LauncherApp {
     #[cfg(windows)]
     pub(crate) archive_session: crate::archive::ArchiveSession,
     pub regex_tester_dialog: RegexTesterDialogState,
+    pub(crate) calculation_pad_dialog: CalculationPadDialog,
+    pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
+    pub(crate) diagram_studio_dialog: DiagramStudioDialog,
+    pub(crate) markdown_studio_dialog: MarkdownStudioDialog,
     pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
@@ -3143,6 +3172,10 @@ impl LauncherApp {
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
+        let calculation_pad_dialog = CalculationPadDialog::new(&data_root);
+        let convert_panel = ConvertPanel::with_data_root(&data_root);
+        let diagram_studio_dialog = DiagramStudioDialog::new(&data_root);
+        let markdown_studio_dialog = MarkdownStudioDialog::new(&data_root);
         let data_recovery_dialog = DataRecoveryDialog::new(data_root.clone(), settings.clone(), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -3822,6 +3855,10 @@ impl LauncherApp {
             #[cfg(windows)]
             archive_session,
             regex_tester_dialog,
+            calculation_pad_dialog,
+            date_time_studio_dialog: DateTimeStudioDialog::default(),
+            diagram_studio_dialog,
+            markdown_studio_dialog,
             xml_toolkit_dialog: XmlToolkitDialogState::default(),
             table_utility_dialog: TableUtilityDialogState::with_resource_policy(
                 settings.table_utility_resources.to_policy(),
@@ -3837,7 +3874,7 @@ impl LauncherApp {
                 .hide_launcher_after_apply,
             clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),
             clipboard_modify_events: Vec::new(),
-            convert_panel: ConvertPanel::default(),
+            convert_panel,
             volume_dialog: VolumeDialog::default(),
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
@@ -4534,7 +4571,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 60] = [
+    const TRACKED_PANELS: [Panel; 64] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4572,6 +4609,10 @@ impl LauncherApp {
         Panel::JsonUtilityDialog,
         Panel::ZipExtractorDialog,
         Panel::RegexTesterDialog,
+        Panel::CalculationPadDialog,
+        Panel::DateTimeStudioDialog,
+        Panel::DiagramStudioDialog,
+        Panel::MarkdownStudioDialog,
         Panel::BatchRenameDialog,
         Panel::SearchReplaceDialog,
         Panel::XmlToolkitDialog,
@@ -4636,6 +4677,10 @@ impl LauncherApp {
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
+            Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
+            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
+            Panel::DiagramStudioDialog => self.diagram_studio_dialog.open,
+            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.open,
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
             Panel::SearchReplaceDialog => self.search_replace_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
@@ -4730,6 +4775,45 @@ impl LauncherApp {
         if self.pinned_panels.contains(&panel) {
             self.panel_stack.push(panel);
             return false;
+        }
+        if panel == Panel::CalculationPadDialog {
+            self.calculation_pad_dialog.request_close();
+            self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
+            if self.calculation_pad_dialog.open {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if panel == Panel::DateTimeStudioDialog {
+            self.date_time_studio_dialog.request_close();
+            self.panel_states.date_time_studio_dialog = self.date_time_studio_dialog.open;
+            if self.date_time_studio_dialog.open {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if panel == Panel::ConvertPanel {
+            self.convert_panel.request_close();
+            self.panel_states.convert_panel = self.convert_panel.open;
+            if self.convert_panel.open {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if panel == Panel::DiagramStudioDialog {
+            self.diagram_studio_dialog.request_close();
+            self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
+            if self.diagram_studio_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if panel == Panel::MarkdownStudioDialog {
+            self.markdown_studio_dialog.request_close();
+            if self.markdown_studio_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return true;
         }
         self.retire_settings_navigation_for_panel(panel);
         match panel {
@@ -4895,6 +4979,25 @@ impl LauncherApp {
                 self.regex_tester_dialog.open = false;
                 self.panel_states.regex_tester_dialog = false;
             }
+            Panel::CalculationPadDialog => {
+                self.calculation_pad_dialog.request_close();
+                self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
+                if self.calculation_pad_dialog.open {
+                    self.panel_stack.push(panel);
+                }
+            }
+            Panel::DateTimeStudioDialog => {
+                self.date_time_studio_dialog.request_close();
+                self.panel_states.date_time_studio_dialog = self.date_time_studio_dialog.open;
+            }
+            Panel::DiagramStudioDialog => {
+                self.diagram_studio_dialog.request_close();
+                self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
+            }
+            Panel::MarkdownStudioDialog => {
+                self.markdown_studio_dialog.request_close();
+                self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
+            }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
                 self.panel_states.xml_toolkit_dialog = false;
@@ -4923,8 +5026,8 @@ impl LauncherApp {
                 self.close_zip_extractor_dialog();
             }
             Panel::ConvertPanel => {
-                self.convert_panel.open = false;
-                self.panel_states.convert_panel = false;
+                self.convert_panel.request_close();
+                self.panel_states.convert_panel = self.convert_panel.open;
             }
             Panel::VolumeDialog => {
                 self.volume_dialog.open = false;
@@ -5178,6 +5281,22 @@ impl LauncherApp {
                 self.regex_tester_dialog.open = false;
                 self.panel_states.regex_tester_dialog = false;
             }
+            Panel::CalculationPadDialog => {
+                self.calculation_pad_dialog.request_close();
+                self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
+            }
+            Panel::DateTimeStudioDialog => {
+                self.date_time_studio_dialog.request_close();
+                self.panel_states.date_time_studio_dialog = self.date_time_studio_dialog.open;
+            }
+            Panel::DiagramStudioDialog => {
+                self.diagram_studio_dialog.request_close();
+                self.panel_states.diagram_studio_dialog = self.diagram_studio_dialog.open;
+            }
+            Panel::MarkdownStudioDialog => {
+                self.markdown_studio_dialog.request_close();
+                self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
+            }
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.end_session();
                 self.panel_states.xml_toolkit_dialog = false;
@@ -5206,8 +5325,8 @@ impl LauncherApp {
                 self.close_zip_extractor_dialog();
             }
             Panel::ConvertPanel => {
-                self.convert_panel.open = false;
-                self.panel_states.convert_panel = false;
+                self.convert_panel.request_close();
+                self.panel_states.convert_panel = self.convert_panel.open;
             }
             Panel::VolumeDialog => {
                 self.volume_dialog.open = false;
@@ -5270,7 +5389,29 @@ impl LauncherApp {
                 self.panel_states.radial_editor = false;
             }
         }
-        self.panel_stack.retain(|p| *p != panel);
+        if panel == Panel::CalculationPadDialog && self.calculation_pad_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+        } else if panel == Panel::DateTimeStudioDialog && self.date_time_studio_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+        } else if panel == Panel::ConvertPanel && self.convert_panel.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+        } else if panel == Panel::DiagramStudioDialog && self.diagram_studio_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+        } else if panel == Panel::MarkdownStudioDialog && self.markdown_studio_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+        } else {
+            self.panel_stack.retain(|p| *p != panel);
+        }
     }
 
     fn ensure_open(&mut self, panel: Panel) {
@@ -5335,6 +5476,10 @@ impl LauncherApp {
                     self.regex_tester_dialog.open();
                 }
             }
+            Panel::CalculationPadDialog => self.calculation_pad_dialog.ensure_open(),
+            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.ensure_open(),
+            Panel::DiagramStudioDialog => self.diagram_studio_dialog.ensure_open(),
+            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.ensure_open(),
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
@@ -5367,7 +5512,11 @@ impl LauncherApp {
                 }
             }
         }
-        if !self.panel_stack.contains(&panel) {
+        if panel == Panel::DiagramStudioDialog && !self.diagram_studio_dialog.open {
+            self.panel_stack.retain(|open_panel| *open_panel != panel);
+        } else if panel == Panel::MarkdownStudioDialog && !self.markdown_studio_dialog.open {
+            self.panel_stack.retain(|open_panel| *open_panel != panel);
+        } else if !self.panel_stack.contains(&panel) {
             self.panel_stack.push(panel);
         }
     }
@@ -5375,7 +5524,19 @@ impl LauncherApp {
     pub(crate) fn focus_panel(&mut self, panel: Panel) {
         self.panel_stack.retain(|p| *p != panel);
         self.panel_stack.push(panel);
-        self.ensure_open(panel);
+        if panel == Panel::CalculationPadDialog {
+            self.calculation_pad_dialog.open();
+        } else if panel == Panel::DateTimeStudioDialog {
+            self.date_time_studio_dialog.open();
+        } else if panel == Panel::DiagramStudioDialog {
+            self.diagram_studio_dialog.open();
+        } else if panel == Panel::MarkdownStudioDialog {
+            self.markdown_studio_dialog.open();
+        } else if panel == Panel::ConvertPanel {
+            self.convert_panel.open();
+        } else {
+            self.ensure_open(panel);
+        }
     }
 
     fn enforce_pinned(&mut self) {
@@ -5487,6 +5648,10 @@ impl LauncherApp {
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
         check!(zip_extractor_dialog, Panel::ZipExtractorDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
+        check!(calculation_pad_dialog, Panel::CalculationPadDialog);
+        check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
+        check!(diagram_studio_dialog, Panel::DiagramStudioDialog);
+        check!(markdown_studio_dialog, Panel::MarkdownStudioDialog);
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
         check!(search_replace_dialog, Panel::SearchReplaceDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
@@ -5724,6 +5889,29 @@ impl LauncherApp {
             self.calendar_event_editor.open_new(date);
         }
         self.calendar_editor_open = true;
+    }
+
+    pub(crate) fn prepare_calendar_event_at(
+        &mut self,
+        instant_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<String, String> {
+        if self.calendar_editor_open {
+            return Err("The Calendar Event editor is already open.".into());
+        }
+        let local = date_time_studio_dialog::machine_local_datetime(instant_utc)?;
+        if local.time().second() != 0 || local.time().nanosecond() != 0 {
+            return Err(
+                "Calendar Event times must be aligned to whole minutes; the preview was not changed."
+                    .into(),
+            );
+        }
+        self.calendar_event_editor.open_new_at(local)?;
+        self.calendar_selected_date = Some(local.date());
+        self.focus_panel(Panel::CalendarEventEditor);
+        Ok(format!(
+            "Prepared an unsaved Calendar Event for {} in this computer's local time.",
+            local.format("%Y-%m-%d %H:%M")
+        ))
     }
 
     /// Filter the note list to only show notes containing the given tag.
@@ -6173,6 +6361,8 @@ mod tests {
             (Panel::MkMacroDialog, "MKMacro"),
             (Panel::DataRecoveryDialog, "Data & Recovery"),
             (Panel::CpuListDialog, "CPU Usage"),
+            (Panel::CalculationPadDialog, "Calculation Pad"),
+            (Panel::DateTimeStudioDialog, "Date & Time Studio"),
         ] {
             assert_eq!(panel.display_label(), expected);
         }
@@ -7835,6 +8025,600 @@ mod tests {
         assert!(!app.regex_tester_dialog.open);
         assert!(!app.panel_stack.contains(&Panel::RegexTesterDialog));
         assert_eq!(app.regex_tester_dialog.session.draft, draft);
+    }
+
+    #[test]
+    fn calculation_pad_panel_reopen_preserves_draft_and_dirty_close_uses_one_prompt() {
+        use crate::commands::DialogCommandHost;
+
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new_isolated_for_test_at(
+            &ctx,
+            directory.path(),
+            settings,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+        );
+        app.mark_visible_root_for_test();
+        app.focus_query = false;
+
+        DialogCommandHost::open_calculation_pad_dialog(&mut app);
+        app.calculation_pad_dialog
+            .test_replace_source("estimate = 12\nr1 * 3");
+
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.calculation_pad_dialog.test_editor_has_focus(&ctx));
+
+        let other_focus = egui::Id::new("calculation-pad-reopen-focus-regression");
+        ctx.memory_mut(|memory| memory.request_focus(other_focus));
+        assert!(ctx.memory(|memory| memory.has_focus(other_focus)));
+        app.ensure_open(Panel::CalculationPadDialog);
+        assert!(
+            !app.calculation_pad_dialog.test_focus_source_pending(),
+            "passive panel enforcement must not steal focus"
+        );
+        app.focus_panel(Panel::CalculationPadDialog);
+        assert!(app.calculation_pad_dialog.test_focus_source_pending());
+
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("estimate = 12\nr1 * 3")
+        );
+        assert!(app.calculation_pad_dialog.test_can_undo());
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::CalculationPadDialog)
+                .count(),
+            1,
+            "repeated open focuses the existing Pad panel"
+        );
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.calculation_pad_dialog.test_was_rendered());
+        assert!(app.calculation_pad_dialog.test_editor_has_focus(&ctx));
+
+        assert!(app.close_front_dialog());
+        assert!(app.calculation_pad_dialog.open);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, true);
+        output.drop_without_applying_deltas();
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(
+            app.calculation_pad_dialog.test_pending_transition(),
+            None,
+            "a discarded ROOT close request must not create a pending transition"
+        );
+        assert!(app.panel_stack.contains(&Panel::CalculationPadDialog));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert_eq!(
+            app.calculation_pad_dialog.test_pending_transition(),
+            Some(crate::calculation_pad::PendingTransition::Close)
+        );
+        assert!(app.panel_stack.contains(&Panel::CalculationPadDialog));
+
+        app.calculation_pad_dialog
+            .test_resolve_pending(crate::calculation_pad::TransitionDecision::Discard);
+        app.update_panel_stack();
+        assert!(!app.is_panel_open(Panel::CalculationPadDialog));
+        assert!(!app.panel_stack.contains(&Panel::CalculationPadDialog));
+
+        app.focus_panel(Panel::CalculationPadDialog);
+        app.update_panel_stack();
+        assert!(app.calculation_pad_dialog.open);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(""));
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::CalculationPadDialog)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn date_time_studio_typed_opener_preserves_reference_and_focuses_existing_panel() {
+        use crate::commands::DialogCommandHost;
+
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new_isolated_for_test_at(
+            &ctx,
+            directory.path(),
+            settings,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+        );
+        app.mark_visible_root_for_test();
+        app.focus_query = false;
+        let reference = chrono::NaiveDate::from_ymd_opt(2026, 10, 25)
+            .unwrap()
+            .and_hms_opt(9, 15, 0)
+            .unwrap();
+
+        DialogCommandHost::open_date_time_studio_dialog(&mut app);
+        app.date_time_studio_dialog
+            .test_set_anchor_and_reference("now".into(), reference);
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.date_time_studio_dialog.test_was_rendered());
+        assert!(
+            app.date_time_studio_dialog
+                .test_primary_input_has_focus(&ctx)
+        );
+
+        let other_focus = egui::Id::new("date-time-studio-other-focus");
+        ctx.memory_mut(|memory| memory.request_focus(other_focus));
+        app.ensure_open(Panel::DateTimeStudioDialog);
+        assert!(!app.date_time_studio_dialog.test_focus_pending());
+        app.focus_panel(Panel::DateTimeStudioDialog);
+        assert!(app.date_time_studio_dialog.test_focus_pending());
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::DateTimeStudioDialog)
+                .count(),
+            1
+        );
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(
+            app.date_time_studio_dialog
+                .test_primary_input_has_focus(&ctx)
+        );
+        assert_eq!(
+            app.date_time_studio_dialog.test_anchor_and_reference(),
+            ("now", Some(reference))
+        );
+
+        assert!(app.close_front_dialog());
+        assert!(app.date_time_studio_dialog.open);
+        assert!(app.panel_stack.contains(&Panel::DateTimeStudioDialog));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, true);
+        output.drop_without_applying_deltas();
+        assert!(app.date_time_studio_dialog.open);
+        assert!(app.panel_stack.contains(&Panel::DateTimeStudioDialog));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert!(!app.is_panel_open(Panel::DateTimeStudioDialog));
+        app.focus_panel(Panel::DateTimeStudioDialog);
+        assert!(app.date_time_studio_dialog.open);
+        assert_eq!(
+            app.date_time_studio_dialog.test_anchor_and_reference(),
+            ("now", Some(reference))
+        );
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::DateTimeStudioDialog)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn converter_force_close_is_retired_only_after_a_retained_root_frame() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new_isolated_for_test_at(
+            &ctx,
+            directory.path(),
+            settings,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+        );
+        app.mark_visible_root_for_test();
+        app.focus_query = false;
+        app.focus_panel(Panel::ConvertPanel);
+
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+
+        app.force_close_panel(Panel::ConvertPanel);
+        assert!(app.convert_panel.open);
+        assert!(app.panel_states.convert_panel);
+        assert!(app.panel_stack.contains(&Panel::ConvertPanel));
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, true);
+        output.drop_without_applying_deltas();
+        assert!(app.convert_panel.open);
+        assert!(app.panel_states.convert_panel);
+        assert!(app.panel_stack.contains(&Panel::ConvertPanel));
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert!(!app.convert_panel.open);
+        assert!(!app.panel_states.convert_panel);
+        assert!(!app.panel_stack.contains(&Panel::ConvertPanel));
+    }
+
+    #[test]
+    fn diagram_studio_typed_opener_focuses_child_and_hidden_root_keeps_it_rendering() {
+        use crate::commands::DialogCommandHost;
+
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new_isolated_for_test_at(
+            &ctx,
+            directory.path(),
+            settings,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+        );
+        app.mark_visible_root_for_test();
+        app.focus_query = false;
+
+        DialogCommandHost::open_diagram_studio_dialog(&mut app);
+        assert!(app.diagram_studio_dialog.needs_viewport_bootstrap());
+        app.diagram_studio_dialog
+            .test_replace_source("flowchart TD\n    A[\"Alpha\"]");
+        let source = app.diagram_studio_dialog.test_session().draft().to_owned();
+        let revision = app.diagram_studio_dialog.test_session().revision();
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.diagram_studio_dialog.open);
+        assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(app.diagram_studio_dialog.test_source_editor_has_focus(&ctx));
+        let (callback_id, callback_class, body_rendered, app_input_allowed) =
+            app.diagram_studio_dialog.test_last_callback();
+        assert_eq!(callback_id, Some(diagram_studio::viewport_id()));
+        assert!(matches!(
+            callback_class,
+            Some(egui::ViewportClass::Immediate)
+        ));
+        assert!(body_rendered && app_input_allowed);
+
+        assert!(app.close_front_dialog());
+        assert!(app.is_panel_open(Panel::DiagramStudioDialog));
+        assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.diagram_studio_dialog.open);
+        assert_eq!(
+            app.diagram_studio_dialog.test_pending_transition(),
+            Some(&crate::diagram::PendingDiagramTransition::Close)
+        );
+        app.diagram_studio_dialog
+            .test_stage_pending_decision(crate::diagram::TransitionDecision::Cancel);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert!(app.diagram_studio_dialog.open);
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        app.focus_panel(Panel::DiagramStudioDialog);
+        assert!(app.diagram_studio_dialog.open);
+        assert!(
+            !app.diagram_studio_dialog.needs_viewport_bootstrap(),
+            "the cancelled dirty close kept the existing native viewport open"
+        );
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        assert_eq!(
+            app.diagram_studio_dialog.test_session().revision(),
+            revision
+        );
+        assert!(app.diagram_studio_dialog.test_session().can_undo());
+
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(app.diagram_studio_dialog.test_source_editor_has_focus(&ctx));
+
+        let other_focus = egui::Id::new("diagram-studio-passive-open-focus");
+        app.diagram_studio_dialog
+            .test_move_child_focus_to(other_focus);
+        app.ensure_open(Panel::DiagramStudioDialog);
+        assert!(!app.diagram_studio_dialog.test_source_focus_pending());
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(!app.diagram_studio_dialog.test_source_editor_has_focus(&ctx));
+
+        app.focus_panel(Panel::DiagramStudioDialog);
+        assert!(app.diagram_studio_dialog.test_source_focus_pending());
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(app.diagram_studio_dialog.test_source_editor_has_focus(&ctx));
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), source);
+        assert_eq!(
+            app.diagram_studio_dialog.test_session().revision(),
+            revision
+        );
+
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.focus_query = false;
+        assert!(!app.diagram_studio_dialog.needs_viewport_bootstrap());
+        assert!(!<LauncherApp as eframe::App>::needs_root_ui_when_hidden(
+            &app
+        ));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        let (callback_id, callback_class, body_rendered, app_input_allowed) =
+            app.diagram_studio_dialog.test_last_callback();
+        assert_eq!(callback_id, Some(diagram_studio::viewport_id()));
+        assert!(matches!(
+            callback_class,
+            Some(egui::ViewportClass::Immediate)
+        ));
+        assert!(body_rendered && app_input_allowed);
+
+        app.pinned_panels.push(Panel::DiagramStudioDialog);
+        app.force_close_panel(Panel::DiagramStudioDialog);
+        assert!(app.diagram_studio_dialog.open);
+        assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.diagram_studio_dialog.test_pending_transition(),
+            Some(&crate::diagram::PendingDiagramTransition::Close)
+        );
+        app.diagram_studio_dialog
+            .test_stage_pending_decision(crate::diagram::TransitionDecision::Discard);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert!(!app.diagram_studio_dialog.open);
+        assert!(!app.panel_states.diagram_studio_dialog);
+        assert!(!app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        assert!(!app.diagram_studio_dialog.test_has_active_document());
+        app.enforce_pinned();
+        assert!(!app.diagram_studio_dialog.open);
+        assert!(!app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        app.focus_panel(Panel::DiagramStudioDialog);
+        assert!(app.diagram_studio_dialog.open);
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), "");
+        assert_eq!(app.diagram_studio_dialog.test_session().revision(), 0);
+
+        let unpinned_draft = "flowchart TD\n    Pending[\"Keep editing\"]";
+        app.diagram_studio_dialog
+            .test_replace_source(unpinned_draft);
+        app.toggle_pin(Panel::DiagramStudioDialog);
+        assert!(!app.pinned_panels.contains(&Panel::DiagramStudioDialog));
+        assert!(app.diagram_studio_dialog.open);
+        assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
+        assert!(
+            !Settings::load(&app.settings_path)
+                .unwrap()
+                .pinned_panels
+                .contains(&Panel::DiagramStudioDialog),
+            "unpin is persisted even when the dirty close is later cancelled"
+        );
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.diagram_studio_dialog.test_pending_transition(),
+            Some(&crate::diagram::PendingDiagramTransition::Close)
+        );
+        app.diagram_studio_dialog
+            .test_stage_pending_decision(crate::diagram::TransitionDecision::Cancel);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+        assert!(app.diagram_studio_dialog.open);
+        assert_eq!(
+            app.diagram_studio_dialog.test_session().draft(),
+            unpinned_draft
+        );
+        assert!(app.diagram_studio_dialog.test_session().is_dirty());
+        assert!(
+            app.diagram_studio_dialog
+                .test_pending_transition()
+                .is_none()
+        );
+        assert!(!app.pinned_panels.contains(&Panel::DiagramStudioDialog));
+        assert!(app.panel_stack.contains(&Panel::DiagramStudioDialog));
     }
 
     #[test]

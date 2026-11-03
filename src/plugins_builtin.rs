@@ -58,6 +58,14 @@ struct CalculatorPluginSettings {
 impl Plugin for CalculatorPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
+        if trimmed.eq_ignore_ascii_case("calc pad") {
+            return vec![Action {
+                label: "Open Calculation Pad".into(),
+                desc: "Calculator".into(),
+                action: "calc:pad".into(),
+                args: None,
+            }];
+        }
         if trimmed.eq_ignore_ascii_case("calc list")
             || trimmed.eq_ignore_ascii_case("= history")
             || trimmed.eq_ignore_ascii_case("= list")
@@ -126,6 +134,12 @@ impl Plugin for CalculatorPlugin {
     fn commands(&self) -> Vec<Action> {
         vec![
             Action {
+                label: "calc pad".into(),
+                desc: "Open multi-line calculations".into(),
+                action: "query:calc pad".into(),
+                args: None,
+            },
+            Action {
                 label: "=".into(),
                 desc: "Calculator".into(),
                 action: "query:= ".into(),
@@ -168,5 +182,27 @@ impl Plugin for CalculatorPlugin {
             Err(e) => tracing::error!("failed to serialize calculator settings: {e}"),
         }
         self.save_on_enter = cfg.save_on_enter;
+    }
+}
+
+#[cfg(test)]
+mod calculator_plugin_tests {
+    use super::*;
+
+    #[test]
+    fn calc_pad_is_an_exact_opener_and_inline_calculator_behavior_is_preserved() {
+        let plugin = CalculatorPlugin {
+            save_on_enter: true,
+        };
+        let actions = plugin.search("  CaLc PaD  ");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "calc:pad");
+        assert_eq!(actions[0].args, None);
+        assert!(plugin.search("calc pad more").is_empty());
+
+        let inline = plugin.search("= 1 + 1");
+        assert_eq!(inline.len(), 1);
+        assert_eq!(inline[0].action, "calc:2");
+        assert_eq!(inline[0].args.as_deref(), Some("1 + 1"));
     }
 }

@@ -32,6 +32,7 @@ pub mod entity_ref;
 pub mod json_watch;
 pub mod lru;
 pub mod number_format;
+pub mod numeric_base;
 pub mod persistence;
 pub mod query;
 pub(crate) mod repair_watch;
