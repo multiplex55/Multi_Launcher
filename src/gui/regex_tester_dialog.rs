@@ -1809,8 +1809,10 @@ impl RegexTesterDialogState {
                     let range = range.as_sorted_char_range();
                     range.start.0..range.end.0
                 });
-            if committing && !pattern_changed && pattern_output.response.has_focus() {
-                if let Some(selection) = char_selection
+            if committing
+                && !pattern_changed
+                && pattern_output.response.has_focus()
+                && let Some(selection) = char_selection
                     .as_ref()
                     .and_then(|range| {
                         visualization::byte_range_from_char_range(
@@ -1818,7 +1820,7 @@ impl RegexTesterDialogState {
                             range.clone(),
                         )
                     })
-                    && let Some(tree) = self
+                && let Some(tree) = self
                         .session
                         .visualization()
                         .and_then(|result| result.tree())
@@ -1826,11 +1828,10 @@ impl RegexTesterDialogState {
                             tree.source() == pattern_value
                                 && tree.flags() == self.session.draft.flags
                         })
-                {
-                    let candidate = self.visualization.reference_from_editor(tree, selection);
-                    if !self.visualization.selection_matches(&candidate) {
-                        self.staged_editor_selection = Some(candidate);
-                    }
+            {
+                let candidate = self.visualization.reference_from_editor(tree, selection);
+                if !self.visualization.selection_matches(&candidate) {
+                    self.staged_editor_selection = Some(candidate);
                 }
             }
             if committing && (pattern_output.response.has_focus() || pattern_changed) {

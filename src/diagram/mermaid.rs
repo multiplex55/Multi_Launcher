@@ -109,9 +109,8 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
     let mut active_group_span = None;
     let mut saw_header = false;
     let mut byte_offset = 0usize;
-    let mut line_number = 1usize;
-
-    for line_with_newline in source.split_inclusive('\n') {
+    for (line_index, line_with_newline) in source.split_inclusive('\n').enumerate() {
+        let line_number = line_index + 1;
         let line_with_cr = line_with_newline
             .strip_suffix('\n')
             .unwrap_or(line_with_newline);
@@ -218,7 +217,6 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
             }
         }
         byte_offset = byte_offset.saturating_add(line_with_newline.len());
-        line_number += 1;
     }
 
     if !saw_header {

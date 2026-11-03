@@ -144,8 +144,8 @@ pub fn evaluate_between(request: DateBetweenRequest) -> Result<DateBetweenResult
         }
         _ => return Err(DateStudioError::IncompatibleDateKinds),
     };
-    let days = difference_days(first, second, "structured between")
-        .map_err(|error| DateStudioError::Offset(error))?;
+    let days =
+        difference_days(first, second, "structured between").map_err(DateStudioError::Offset)?;
     if !days.is_finite() {
         return Err(DateStudioError::OutOfRange);
     }

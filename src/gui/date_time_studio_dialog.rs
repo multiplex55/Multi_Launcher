@@ -184,6 +184,7 @@ struct TestPrepareUiObservation {
     interact_pointer_pos: Option<egui::Pos2>,
 }
 
+#[derive(Default)]
 pub(crate) struct DateTimeStudioDialog {
     pub(crate) open: bool,
     focus_pending: bool,
@@ -203,31 +204,6 @@ pub(crate) struct DateTimeStudioDialog {
     test_prepare_effect_staged: bool,
     #[cfg(test)]
     test_prepare_effect_retained: bool,
-}
-
-impl Default for DateTimeStudioDialog {
-    fn default() -> Self {
-        Self {
-            open: false,
-            focus_pending: false,
-            draft: StudioDraft::default(),
-            notice: None,
-            pending_root_effects: None,
-            host_close_requested: false,
-            #[cfg(test)]
-            test_window_rect: None,
-            #[cfg(test)]
-            test_controls: Vec::new(),
-            #[cfg(test)]
-            test_focusable_controls: Vec::new(),
-            #[cfg(test)]
-            test_prepare_observation: None,
-            #[cfg(test)]
-            test_prepare_effect_staged: false,
-            #[cfg(test)]
-            test_prepare_effect_retained: false,
-        }
-    }
 }
 
 impl DateTimeStudioDialog {
@@ -711,11 +687,11 @@ impl DateTimeStudioDialog {
                 ));
                 ui.label(format_calendar_span(result.calendar_span));
                 let copy_text = format!(
-                    "Between {} and {}: {}; {}; {}.",
+                    "Between {} and {}: {}; {} days; {}.",
                     format_date_value(result.first),
                     format_date_value(result.second),
                     format_signed_duration(result.exact_duration),
-                    format!("{} days", format_f64(result.days)),
+                    format_f64(result.days),
                     format_calendar_span(result.calendar_span)
                 );
                 let copy = stable_action_button(ui, "copy-between", "Copy difference");
@@ -798,10 +774,10 @@ impl DateTimeStudioDialog {
         let include_time = ui.checkbox(&mut draft.offset_include_time, "Use a local time");
         if include_time.changed() {
             *changed = true;
-            if let Some(reference) = draft.reference_now {
-                if draft.offset_time.trim().is_empty() {
-                    draft.offset_time = format_time(reference.time());
-                }
+            if let Some(reference) = draft.reference_now
+                && draft.offset_time.trim().is_empty()
+            {
+                draft.offset_time = format_time(reference.time());
             }
         }
         #[cfg(test)]
@@ -819,14 +795,14 @@ impl DateTimeStudioDialog {
             );
             anchor_time_changed = time_before != draft.offset_time;
         }
-        if picker_date_changed || include_time.changed() || anchor_time_changed {
-            if let Ok(date) = parse_date(&draft.offset_picker_date) {
-                draft.offset_anchor = if draft.offset_include_time {
-                    format!("{} {}", date, draft.offset_time)
-                } else {
-                    date.to_string()
-                };
-            }
+        if (picker_date_changed || include_time.changed() || anchor_time_changed)
+            && let Ok(date) = parse_date(&draft.offset_picker_date)
+        {
+            draft.offset_anchor = if draft.offset_include_time {
+                format!("{} {}", date, draft.offset_time)
+            } else {
+                date.to_string()
+            };
         }
 
         ui.horizontal_wrapped(|ui| {
@@ -1404,7 +1380,7 @@ impl DateTimeStudioDialog {
                                     if cell > 0 && cell % 7 == 0 {
                                         ui.end_row();
                                     }
-                                    let day = cell as i32 - first_weekday + 1;
+                                    let day = cell - first_weekday + 1;
                                     if day < 1 || day > days as i32 {
                                         ui.label(" ");
                                         continue;

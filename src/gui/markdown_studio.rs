@@ -856,28 +856,28 @@ impl MarkdownStudioDialog {
         // egui may collapse a TextEdit's mechanical cursor when a toolbar
         // button takes focus. Keep the dialog's source-bound logical
         // selection in that case; only a focused editor can author a new one.
-        if ui.memory(|memory| memory.has_focus(id)) {
-            if let Some(range) = cursor_range_to_bytes(ctx, id, source) {
-                *selection = range;
-            }
+        if ui.memory(|memory| memory.has_focus(id))
+            && let Some(range) = cursor_range_to_bytes(ctx, id, source)
+        {
+            *selection = range;
         }
-        if let Some(analysis) = self.cache.as_ref().and_then(MarkdownPreviewCache::analysis) {
-            if !analysis.headings.is_empty() {
-                ui.collapsing("Outline", |ui| {
-                    for heading in &analysis.headings {
-                        if ui
-                            .selectable_label(
-                                heading.byte_range.contains(&selection.start),
-                                &heading.title,
-                            )
-                            .clicked()
-                        {
-                            *selection_to_install = Some(heading.byte_range.clone());
-                            *selection = heading.byte_range.clone();
-                        }
+        if let Some(analysis) = self.cache.as_ref().and_then(MarkdownPreviewCache::analysis)
+            && !analysis.headings.is_empty()
+        {
+            ui.collapsing("Outline", |ui| {
+                for heading in &analysis.headings {
+                    if ui
+                        .selectable_label(
+                            heading.byte_range.contains(&selection.start),
+                            &heading.title,
+                        )
+                        .clicked()
+                    {
+                        *selection_to_install = Some(heading.byte_range.clone());
+                        *selection = heading.byte_range.clone();
                     }
-                });
-            }
+                }
+            });
         }
     }
 
@@ -1424,10 +1424,10 @@ impl LocalAssets {
         };
         let mut destinations = HashSet::new();
         for (event, _) in Parser::new_ext(source, Options::ENABLE_TABLES).into_offset_iter() {
-            if let Event::Start(Tag::Image { dest_url, .. }) = event {
-                if destinations.len() < MAX_LOCAL_ASSET_COUNT {
-                    destinations.insert(dest_url.to_string());
-                }
+            if let Event::Start(Tag::Image { dest_url, .. }) = event
+                && destinations.len() < MAX_LOCAL_ASSET_COUNT
+            {
+                destinations.insert(dest_url.to_string());
             }
         }
         let Ok(base) = fs::canonicalize(base) else {

@@ -10356,12 +10356,12 @@ impl LauncherApp {
 
     fn dispatch_root_dialog_effects(
         &mut self,
-        ctx: &egui::Context,
+        _ctx: &egui::Context,
         effects: Vec<RootDialogEffect>,
     ) {
         #[cfg(test)]
         if !effects.is_empty() {
-            ctx.data_mut(|data| {
+            _ctx.data_mut(|data| {
                 let key = egui::Id::new(ROOT_DIALOG_EFFECTS_TEST_ID);
                 let mut captured = data
                     .get_temp::<Vec<RootDialogEffect>>(key)
@@ -10477,17 +10477,16 @@ impl eframe::App for LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::MarkdownStudioDialog);
         }
-        if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect {
-            if self
+        if let Some(super::MarkdownStudioEffect::OpenDiagram { source, origin }) = markdown_effect
+            && self
                 .diagram_studio_dialog
                 .open_source_copy(source)
                 .is_some()
-            {
-                self.markdown_studio_dialog
-                    .track_diagram_source_origin(origin);
-                self.focus_panel(super::Panel::DiagramStudioDialog);
-                _ctx.request_repaint_of(egui::ViewportId::ROOT);
-            }
+        {
+            self.markdown_studio_dialog
+                .track_diagram_source_origin(origin);
+            self.focus_panel(super::Panel::DiagramStudioDialog);
+            _ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         self.complete_markdown_diagram_handoff(_ctx);
         self.regex_tester_dialog.on_ui_frame_complete(_ctx);

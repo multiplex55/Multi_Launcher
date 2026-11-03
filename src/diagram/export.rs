@@ -956,9 +956,7 @@ fn charge_line_work(
     let brush_width = (STROKE_WIDTH / 2.0).ceil() as u64 * 2 + 1;
     charge_work(
         work,
-        (steps as u64 + 1)
-            .checked_mul(brush_width * brush_width)
-            .unwrap_or(u64::MAX),
+        (steps as u64 + 1).saturating_mul(brush_width * brush_width),
     )
 }
 
@@ -1730,7 +1728,7 @@ impl Write for BoundedBytes {
         }
         self.bytes
             .try_reserve(bytes.len())
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+            .map_err(|error| io::Error::other(error.to_string()))?;
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }

@@ -202,7 +202,7 @@ pub fn export_html(
     let fences = preview.mermaid_fences();
     let mut warnings = MarkdownExportWarnings::default();
     let mut events = Vec::new();
-    let mut source_events = Parser::new_ext(source, html_options()).into_offset_iter();
+    let source_events = Parser::new_ext(source, html_options()).into_offset_iter();
     let mut event_count = 0usize;
     let mut aggregate_assets = 0usize;
     let mut aggregate_svg = 0usize;
@@ -211,7 +211,7 @@ pub fn export_html(
     let mut skipped_links = Vec::<bool>::new();
     let mut image_outputs = Vec::<ImageOutput>::new();
 
-    while let Some((event, range)) = source_events.next() {
+    for (event, range) in source_events {
         event_count = event_count.saturating_add(1);
         if event_count > MAX_MARKDOWN_HTML_EVENTS {
             return Err(MarkdownHtmlError::EventLimitExceeded);

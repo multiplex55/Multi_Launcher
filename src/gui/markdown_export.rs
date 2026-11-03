@@ -55,6 +55,7 @@ struct OwnedRaster {
     format: LocalRasterFormat,
 }
 
+#[derive(Default)]
 struct NoteRasterAssets {
     by_destination: HashMap<String, usize>,
     width_by_destination: HashMap<String, Option<f32>>,
@@ -173,16 +174,6 @@ impl NoteRasterAssets {
     }
 }
 
-impl Default for NoteRasterAssets {
-    fn default() -> Self {
-        Self {
-            by_destination: HashMap::new(),
-            width_by_destination: HashMap::new(),
-            files: Vec::new(),
-        }
-    }
-}
-
 impl LocalRasterResolver for NoteRasterAssets {
     fn resolve<'a>(&'a self, relative_destination: &str) -> Option<LocalRasterAsset<'a>> {
         let index = *self.by_destination.get(relative_destination)?;
@@ -241,10 +232,10 @@ pub(crate) fn publish_export(
     destination: &Path,
     active_path: Option<&Path>,
 ) -> Result<(), String> {
-    if let Some(active) = active_path {
-        if paths_equal(active, destination).map_err(|error| error.to_string())? {
-            return Err("Export cannot overwrite the active Markdown document.".into());
-        }
+    if let Some(active) = active_path
+        && paths_equal(active, destination).map_err(|error| error.to_string())?
+    {
+        return Err("Export cannot overwrite the active Markdown document.".into());
     }
     match fs::symlink_metadata(destination) {
         Ok(_) => {

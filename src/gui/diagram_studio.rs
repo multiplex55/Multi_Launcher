@@ -829,7 +829,7 @@ impl DiagramStudioDialog {
                 && application_input_allowed
                 && !modal_open;
 
-            let popup_open = egui::Popup::is_any_open(&child);
+            let popup_open = egui::Popup::is_any_open(child);
             let keyboard_close = if actions_allowed {
                 child.input_mut(|input| {
                     (!popup_open && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
@@ -1093,7 +1093,7 @@ impl DiagramStudioDialog {
             || effects.os_close_requested;
         let repaint_root = bootstrap_completed || repaint_child;
 
-        if let Some(target_viewport) = child_viewport_id.clone() {
+        if let Some(target_viewport) = child_viewport_id {
             if let Some(id) = effects.canvas_focus_requested {
                 self.deferred_canvas_focus = Some((target_viewport, id));
             }
@@ -1127,10 +1127,8 @@ impl DiagramStudioDialog {
         if effects.close_dialog {
             self.close_pending = false;
         }
-        if repaint_child {
-            if let Some(target_viewport) = child_viewport_id {
-                ctx.request_repaint_of(target_viewport);
-            }
+        if repaint_child && let Some(target_viewport) = child_viewport_id {
+            ctx.request_repaint_of(target_viewport);
         }
         if repaint_root {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -2231,24 +2229,25 @@ impl DiagramStudioDialog {
                     );
                     #[cfg(test)]
                     test_action_rects.push(("add_node".into(), add_node.rect, ui.clip_rect()));
-                    if add_node.clicked() && pending.is_none() {
-                        if let Some(graph) = graph {
-                            match next_node(graph, camera.center) {
-                                Ok((id, position)) => {
-                                    *pending = Some(PendingMutation::Transaction {
-                                        operations: vec![GraphOperation::AddNode {
-                                            id: id.clone(),
-                                            label: "New node".into(),
-                                            shape: NodeShape::Rectangle,
-                                            position,
-                                            group: None,
-                                        }],
-                                        expected_revision: revision,
-                                        select_after: Some(DiagramElement::Node(id)),
-                                    });
-                                }
-                                Err(error) => *message = Some(StudioNotice::error(error)),
+                    if add_node.clicked()
+                        && pending.is_none()
+                        && let Some(graph) = graph
+                    {
+                        match next_node(graph, camera.center) {
+                            Ok((id, position)) => {
+                                *pending = Some(PendingMutation::Transaction {
+                                    operations: vec![GraphOperation::AddNode {
+                                        id: id.clone(),
+                                        label: "New node".into(),
+                                        shape: NodeShape::Rectangle,
+                                        position,
+                                        group: None,
+                                    }],
+                                    expected_revision: revision,
+                                    select_after: Some(DiagramElement::Node(id)),
+                                });
                             }
+                            Err(error) => *message = Some(StudioNotice::error(error)),
                         }
                     }
                     if ui
@@ -2304,7 +2303,7 @@ impl DiagramStudioDialog {
                         }
                     }
                     let can_remove = visual_mutations_allowed
-                        && (selected_nodes.len() > 0
+                        && (!selected_nodes.is_empty()
                             || selection.as_ref().is_some_and(|selected| {
                                 !matches!(selected, DiagramElement::Node(_))
                             }));
@@ -2312,16 +2311,15 @@ impl DiagramStudioDialog {
                         .add_enabled(can_remove, egui::Button::new("Remove selection"))
                         .clicked()
                         && pending.is_none()
+                        && graph.is_some()
                     {
-                        if graph.is_some() {
-                            let operations = removal_operations(selection.as_ref(), selected_nodes);
-                            if !operations.is_empty() {
-                                *pending = Some(PendingMutation::Transaction {
-                                    operations,
-                                    expected_revision: revision,
-                                    select_after: None,
-                                });
-                            }
+                        let operations = removal_operations(selection.as_ref(), selected_nodes);
+                        if !operations.is_empty() {
+                            *pending = Some(PendingMutation::Transaction {
+                                operations,
+                                expected_revision: revision,
+                                select_after: None,
+                            });
                         }
                     }
                     let auto_layout =
@@ -3176,8 +3174,8 @@ fn next_node(
         .iter()
         .map(|node| node.position)
         .collect::<Vec<_>>();
-    let center_x = snap_world(f64::from(camera_center.x));
-    let center_y = snap_world(f64::from(camera_center.y));
+    let center_x = snap_world(camera_center.x);
+    let center_y = snap_world(camera_center.y);
     let position = (0_i32..=32)
         .flat_map(|radius| {
             (-radius..=radius).flat_map(move |dy| {

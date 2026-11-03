@@ -752,11 +752,11 @@ fn display_label(
         } else {
             character
         };
-        let marker_reserve = characters
-            .peek()
-            .is_some()
-            .then_some('…'.len_utf8())
-            .unwrap_or(0);
+        let marker_reserve = if characters.peek().is_some() {
+            '…'.len_utf8()
+        } else {
+            0
+        };
         if label.len() + rendered.len_utf8() + marker_reserve > MAX_DISPLAY_LABEL_BYTES {
             if label.len() + '…'.len_utf8() <= MAX_DISPLAY_LABEL_BYTES {
                 label.push('…');

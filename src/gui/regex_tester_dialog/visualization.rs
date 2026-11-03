@@ -568,10 +568,12 @@ fn show_tree(
                             state.node_rects.insert(row.id, response.rect);
                             state.node_widget_ids.insert(row.id, response.id);
                         }
-                        if committing && response.clicked() && action.is_none() {
-                            if let Some(reference) = tree.node_ref(row.id) {
-                                *action = Some(Action::SelectNode(reference));
-                            }
+                        if committing
+                            && response.clicked()
+                            && action.is_none()
+                            && let Some(reference) = tree.node_ref(row.id)
+                        {
+                            *action = Some(Action::SelectNode(reference));
                         }
                     });
                 });

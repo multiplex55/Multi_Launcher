@@ -669,11 +669,11 @@ impl ConvertPanel {
             }
             self.focus_input = false;
         }
-        if effects.focus_add_target {
-            if let Some(add_target_id) = effects.add_target_id {
-                ctx.memory_mut(|memory| memory.request_focus(add_target_id));
-                ctx.request_repaint();
-            }
+        if effects.focus_add_target
+            && let Some(add_target_id) = effects.add_target_id
+        {
+            ctx.memory_mut(|memory| memory.request_focus(add_target_id));
+            ctx.request_repaint();
         }
         self.open = effects.window_open;
         if !effects.window_open {

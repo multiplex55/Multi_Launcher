@@ -410,13 +410,12 @@ fn filter_unsafe_open_urls(ctx: &egui::Context, first_new_command: usize) -> usi
         let first = first_new_command.min(output.commands.len());
         let mut new_commands = output.commands.split_off(first);
         let original_len = new_commands.len();
-        new_commands.retain(|command| match command {
-            egui::OutputCommand::OpenUrl(open_url)
-                if crate::notes_markdown::html::safe_link_destination(&open_url.url).is_none() =>
-            {
-                false
-            }
-            _ => true,
+        new_commands.retain(|command| {
+            !matches!(
+                command,
+                egui::OutputCommand::OpenUrl(open_url)
+                    if crate::notes_markdown::html::safe_link_destination(&open_url.url).is_none()
+            )
         });
         let blocked = original_len.saturating_sub(new_commands.len());
         output.commands.extend(new_commands);

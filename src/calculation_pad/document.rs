@@ -373,7 +373,7 @@ struct PreparedLine {
 enum PreparedStatement {
     Blank,
     Comment,
-    Scalar(CheckedExpression),
+    Scalar(Box<CheckedExpression>),
     PhysicalConversion(String),
     PhysicalReference {
         destination: Unit,
@@ -564,7 +564,7 @@ fn prepare_line(
             PreparedLine {
                 source_range,
                 assignment_name,
-                statement: PreparedStatement::Scalar(parsed),
+                statement: PreparedStatement::Scalar(Box::new(parsed)),
                 references,
                 dependencies: Vec::new(),
                 diagnostic: None,

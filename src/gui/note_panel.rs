@@ -2341,14 +2341,13 @@ impl NotePanel {
         if retained && still_matches {
             Some(staged.effect)
         } else {
-            if let NotePanelEffect::OpenDiagram { origin, .. } = &staged.effect {
-                if self
+            if let NotePanelEffect::OpenDiagram { origin, .. } = &staged.effect
+                && self
                     .pending_mermaid_origin
                     .as_ref()
                     .is_some_and(|pending| pending.identity == origin.identity)
-                {
-                    self.pending_mermaid_origin = None;
-                }
+            {
+                self.pending_mermaid_origin = None;
             }
             None
         }
