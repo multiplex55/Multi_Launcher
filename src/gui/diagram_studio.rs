@@ -1,13 +1,17 @@
 use crate::diagram::{
-    DiagramDocument, DiagramDocumentController, DiagramDocumentError, DiagramScene, DiagramSession,
-    EdgeId, FlowDirection, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, NodeId,
-    NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText, PreviewState,
-    SceneMetrics, ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment,
+    DiagramDocument, DiagramDocumentController, DiagramDocumentError, DiagramExportFormat,
+    DiagramImageSnapshot, DiagramScene, DiagramSession, DiagramSourceSnapshot, DiagramTemplate,
+    EdgeId, FlowDirection, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES,
+    MermaidFile, NodeId, NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText,
+    PreviewState, SceneMetrics, ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment,
     TransitionDecision, TransitionOutcome, build_scene,
 };
 use eframe::egui;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
 
 const DEFAULT_VIEWPORT_SIZE: [f32; 2] = [1180.0, 760.0];
 const MIN_VIEWPORT_SIZE: [f32; 2] = [480.0, 360.0];
@@ -43,6 +47,150 @@ fn ensure_native_extension(mut path: PathBuf) -> PathBuf {
         path.set_extension(NATIVE_DIAGRAM_EXTENSION);
     }
     path
+}
+
+fn ensure_export_extension(mut path: PathBuf, format: DiagramExportFormat) -> PathBuf {
+    let has_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| !extension.is_empty());
+    if !has_extension {
+        path.set_extension(format.extension());
+    }
+    path
+}
+
+const fn export_format_name(format: DiagramExportFormat) -> &'static str {
+    match format {
+        DiagramExportFormat::Mermaid => "Mermaid source",
+        DiagramExportFormat::Svg => "SVG image",
+        DiagramExportFormat::Png => "PNG image",
+    }
+}
+
+const fn export_filter_name(format: DiagramExportFormat) -> &'static str {
+    match format {
+        DiagramExportFormat::Mermaid => "Mermaid source (*.mmd)",
+        DiagramExportFormat::Svg => "SVG image (*.svg)",
+        DiagramExportFormat::Png => "PNG image (*.png)",
+    }
+}
+
+fn same_export_destination(native_path: &Path, export_path: &Path) -> io::Result<bool> {
+    paths_equal_for_export(
+        &resolved_export_path_identity(native_path)?,
+        &resolved_export_path_identity(export_path)?,
+    )
+}
+
+fn resolved_export_path_identity(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let absolute = lexically_normalize(&strip_windows_verbatim_prefix(&absolute));
+    let mut existing = absolute.clone();
+    let mut missing_components: Vec<OsString> = Vec::new();
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some(file_name) = existing.file_name() else {
+                    return Err(error);
+                };
+                missing_components.push(file_name.to_os_string());
+                let Some(parent) = existing.parent() else {
+                    return Err(error);
+                };
+                existing = parent.to_path_buf();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let mut resolved = fs::canonicalize(existing)?;
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(lexically_normalize(&strip_windows_verbatim_prefix(
+        &resolved,
+    )))
+}
+
+#[cfg(windows)]
+fn paths_equal_for_export(left: &Path, right: &Path) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+
+    let left = left.as_os_str().encode_wide().collect::<Vec<_>>();
+    let right = right.as_os_str().encode_wide().collect::<Vec<_>>();
+    if left.len() > i32::MAX as usize || right.len() > i32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "export path exceeds the Windows comparison length limit",
+        ));
+    }
+    if left.is_empty() || right.is_empty() {
+        return Ok(left.is_empty() && right.is_empty());
+    }
+    // SAFETY: both UTF-16 buffers stay alive for the call, their lengths fit
+    // the Windows API's i32 parameters, and CompareStringOrdinal only compares
+    // the supplied slices without retaining pointers or opening either path.
+    let result = unsafe { CompareStringOrdinal(&left, &right, BOOL(1)) };
+    if result.0 == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(result == CSTR_EQUAL)
+}
+
+#[cfg(not(windows))]
+fn paths_equal_for_export(left: &Path, right: &Path) -> io::Result<bool> {
+    Ok(left == right)
+}
+
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        const VERBATIM_UNC_PREFIX: [u16; 8] = [92, 92, 63, 92, 85, 78, 67, 92];
+        const VERBATIM_PREFIX: [u16; 4] = [92, 92, 63, 92];
+        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        let is_verbatim_unc = wide.len() >= VERBATIM_UNC_PREFIX.len()
+            && wide[..4] == VERBATIM_PREFIX
+            && matches!(wide[4], 85 | 117)
+            && matches!(wide[5], 78 | 110)
+            && matches!(wide[6], 67 | 99)
+            && wide[7] == VERBATIM_UNC_PREFIX[7];
+        if is_verbatim_unc {
+            let mut normalized = vec![92, 92];
+            normalized.extend_from_slice(&wide[VERBATIM_UNC_PREFIX.len()..]);
+            return PathBuf::from(OsString::from_wide(&normalized));
+        }
+        if wide.starts_with(&VERBATIM_PREFIX) {
+            return PathBuf::from(OsString::from_wide(&wide[VERBATIM_PREFIX.len()..]));
+        }
+    }
+    path.to_path_buf()
 }
 
 #[cfg(windows)]
@@ -126,6 +274,33 @@ enum ViewMode {
     Visual,
     #[default]
     Split,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ExportScale {
+    Half,
+    #[default]
+    One,
+    OneAndHalf,
+    Two,
+}
+
+impl ExportScale {
+    const ALL: [(Self, &'static str, &'static str); 4] = [
+        (Self::Half, "0.5×", "half"),
+        (Self::One, "1×", "one"),
+        (Self::OneAndHalf, "1.5×", "one_and_half"),
+        (Self::Two, "2×", "two"),
+    ];
+
+    const fn factor(self) -> f64 {
+        match self {
+            Self::Half => 0.5,
+            Self::One => 1.0,
+            Self::OneAndHalf => 1.5,
+            Self::Two => 2.0,
+        }
+    }
 }
 
 impl ViewMode {
@@ -235,10 +410,41 @@ enum PendingMutation {
 enum DocumentIntent {
     New,
     Open,
+    ImportMermaid,
+    ApplyTemplate(DiagramTemplate),
+    AutoLayout,
     Save,
     SaveAs,
+    Export(DiagramExportFormat, ExportScale),
     Close,
     ResolvePending(TransitionDecision),
+}
+
+#[derive(Clone, Debug)]
+struct MenuFocusScope {
+    popup_id: egui::Id,
+    trigger_id: egui::Id,
+    item_ids: Vec<egui::Id>,
+    sizing_pass: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MenuFocusDestination {
+    Item(egui::Id),
+    Trigger(egui::Id),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MenuFocusRequest {
+    popup_id: egui::Id,
+    destination: MenuFocusDestination,
+}
+
+#[derive(Default)]
+struct DrawBodyEffects {
+    menu_focus_request: Option<MenuFocusRequest>,
+    export_scale_requested: Option<ExportScale>,
+    active_menu_scope: Option<MenuFocusScope>,
 }
 
 struct PendingRootEffects {
@@ -252,6 +458,10 @@ struct PendingRootEffects {
     focus_viewport: bool,
     canvas_focus_requested: Option<egui::Id>,
     source_focus_requested: Option<egui::Id>,
+    menu_focus_request: Option<MenuFocusRequest>,
+    export_scale_requested: Option<ExportScale>,
+    menu_scope_observed: bool,
+    active_menu_scope: Option<MenuFocusScope>,
     mutation: Option<PendingMutation>,
     document_intent: Option<DocumentIntent>,
 }
@@ -265,9 +475,12 @@ pub(crate) struct DiagramStudioDialog {
     pending_root_effects: Option<PendingRootEffects>,
     deferred_canvas_focus: Option<(egui::ViewportId, egui::Id)>,
     deferred_source_focus: Option<(egui::ViewportId, egui::Id)>,
+    deferred_menu_focus: Option<(egui::ViewportId, MenuFocusRequest)>,
+    active_menu_scope: Option<MenuFocusScope>,
     documents: DiagramDocumentController,
     default_directory: PathBuf,
     view_mode: ViewMode,
+    export_scale: ExportScale,
     cache: Option<RevisionCache>,
     camera: Camera,
     selection: Option<DiagramElement>,
@@ -285,6 +498,8 @@ pub(crate) struct DiagramStudioDialog {
     test_canvas_id: Option<egui::Id>,
     #[cfg(test)]
     test_action_rects: Vec<(String, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_action_focus_ids: Vec<(String, egui::Id)>,
     #[cfg(test)]
     test_discard_button_id: Option<egui::Id>,
     #[cfg(test)]
@@ -332,9 +547,12 @@ impl DiagramStudioDialog {
             pending_root_effects: None,
             deferred_canvas_focus: None,
             deferred_source_focus: None,
+            deferred_menu_focus: None,
+            active_menu_scope: None,
             documents: DiagramDocumentController::new(),
             default_directory,
             view_mode: ViewMode::Split,
+            export_scale: ExportScale::default(),
             cache: None,
             camera: Camera::default(),
             selection: None,
@@ -352,6 +570,8 @@ impl DiagramStudioDialog {
             test_canvas_id: None,
             #[cfg(test)]
             test_action_rects: Vec::new(),
+            #[cfg(test)]
+            test_action_focus_ids: Vec::new(),
             #[cfg(test)]
             test_discard_button_id: None,
             #[cfg(test)]
@@ -395,6 +615,8 @@ impl DiagramStudioDialog {
         self.focus_source = true;
         self.deferred_canvas_focus = None;
         self.deferred_source_focus = None;
+        self.deferred_menu_focus = None;
+        self.active_menu_scope = None;
     }
 
     /// Pinned-panel maintenance may show the child but does not steal focus.
@@ -456,6 +678,8 @@ impl DiagramStudioDialog {
         self.focus_source = false;
         self.deferred_canvas_focus = None;
         self.deferred_source_focus = None;
+        self.deferred_menu_focus = None;
+        self.active_menu_scope = None;
         self.reset_document_presentation();
     }
 
@@ -540,6 +764,9 @@ impl DiagramStudioDialog {
         let mut focus_requested = false;
         let mut canvas_focus_requested = None;
         let mut source_focus_requested = None;
+        let mut menu_focus_request = None;
+        let mut export_scale_requested = None;
+        let mut active_menu_scope = None;
         let mut document_intent = None;
         let mut body_rendered = false;
         let mut child_modal_open = false;
@@ -583,35 +810,38 @@ impl DiagramStudioDialog {
                 && application_input_allowed
                 && !modal_open;
 
+            let popup_open = egui::Popup::is_any_open(&child);
             let keyboard_close = if actions_allowed {
                 child.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    (!popup_open && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
                         || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                 })
             } else {
                 false
             };
-            let keyboard_document_intent =
-                if actions_allowed && self.documents.pending_transition().is_none() {
-                    child.input_mut(|input| {
-                        if input.consume_key(egui::Modifiers::COMMAND, egui::Key::N) {
-                            Some(DocumentIntent::New)
-                        } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::O) {
-                            Some(DocumentIntent::Open)
-                        } else if input.consume_key(
-                            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                            egui::Key::S,
-                        ) {
-                            Some(DocumentIntent::SaveAs)
-                        } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::S) {
-                            Some(DocumentIntent::Save)
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
-                };
+            let keyboard_document_intent = if actions_allowed
+                && !popup_open
+                && self.documents.pending_transition().is_none()
+            {
+                child.input_mut(|input| {
+                    if input.consume_key(egui::Modifiers::COMMAND, egui::Key::N) {
+                        Some(DocumentIntent::New)
+                    } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::O) {
+                        Some(DocumentIntent::Open)
+                    } else if input.consume_key(
+                        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                        egui::Key::S,
+                    ) {
+                        Some(DocumentIntent::SaveAs)
+                    } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::S) {
+                        Some(DocumentIntent::Save)
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
             document_intent = keyboard_document_intent;
             os_close_requested = close_requested_by_os;
             if pass_authorized && (close_requested_by_os || keyboard_close || self.close_pending) {
@@ -622,7 +852,7 @@ impl DiagramStudioDialog {
             if independent {
                 egui::CentralPanel::default().show(child, |ui| {
                     body_rendered = ui.is_visible() && !ui.is_sizing_pass();
-                    self.draw_body(
+                    let effects = self.draw_body(
                         ui,
                         actions_allowed,
                         close_requested,
@@ -632,10 +862,13 @@ impl DiagramStudioDialog {
                         &mut source_focus_requested,
                         source_focus_allowed,
                     );
+                    menu_focus_request = effects.menu_focus_request;
+                    export_scale_requested = effects.export_scale_requested;
+                    active_menu_scope = effects.active_menu_scope;
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
-                self.draw_body(
+                let effects = self.draw_body(
                     child,
                     actions_allowed,
                     close_requested,
@@ -645,6 +878,9 @@ impl DiagramStudioDialog {
                     &mut source_focus_requested,
                     source_focus_allowed,
                 );
+                menu_focus_request = effects.menu_focus_request;
+                export_scale_requested = effects.export_scale_requested;
+                active_menu_scope = effects.active_menu_scope;
             }
             if body_rendered
                 && pass_authorized
@@ -663,6 +899,32 @@ impl DiagramStudioDialog {
                 {
                     self.deferred_source_focus = None;
                     child.memory_mut(|memory| memory.request_focus(id));
+                }
+                if let Some((target_viewport, request)) = self.deferred_menu_focus
+                    && target_viewport == child_context.viewport_id()
+                {
+                    let target_id = match request.destination {
+                        MenuFocusDestination::Item(id)
+                            if active_menu_scope.as_ref().is_some_and(|scope| {
+                                scope.popup_id == request.popup_id
+                                    && !scope.sizing_pass
+                                    && scope.item_ids.contains(&id)
+                            }) =>
+                        {
+                            Some(id)
+                        }
+                        MenuFocusDestination::Trigger(id)
+                            if active_menu_scope.is_none()
+                                && !egui::Popup::is_id_open(&child_context, request.popup_id) =>
+                        {
+                            Some(id)
+                        }
+                        _ => None,
+                    };
+                    self.deferred_menu_focus = None;
+                    if let Some(id) = target_id {
+                        child.memory_mut(|memory| memory.request_focus(id));
+                    }
                 }
             }
             #[cfg(test)]
@@ -749,6 +1011,16 @@ impl DiagramStudioDialog {
                 source_focus_requested: (child_pass_accepted && !close_requested)
                     .then_some(source_focus_requested)
                     .flatten(),
+                menu_focus_request: (child_pass_accepted && !close_requested && body_rendered)
+                    .then_some(menu_focus_request)
+                    .flatten(),
+                export_scale_requested: (child_pass_accepted && !close_requested && body_rendered)
+                    .then_some(export_scale_requested)
+                    .flatten(),
+                menu_scope_observed: child_pass_accepted && body_rendered,
+                active_menu_scope: (child_pass_accepted && body_rendered)
+                    .then_some(active_menu_scope)
+                    .flatten(),
                 mutation: (mutation_authorized && child_pass_accepted)
                     .then_some(pending)
                     .flatten(),
@@ -786,10 +1058,15 @@ impl DiagramStudioDialog {
         if bootstrap_completed {
             self.viewport_bootstrap_pending = false;
         }
+        if effects.menu_scope_observed {
+            self.active_menu_scope = effects.active_menu_scope;
+        }
         let child_viewport_id = effects.child_viewport_id;
         let repaint_child = effects.focus_viewport
             || effects.canvas_focus_requested.is_some()
             || effects.source_focus_requested.is_some()
+            || effects.menu_focus_request.is_some()
+            || effects.export_scale_requested.is_some()
             || effects.mutation.is_some()
             || effects.close_dialog
             || effects.close_viewport
@@ -805,6 +1082,12 @@ impl DiagramStudioDialog {
                 self.deferred_source_focus = Some((target_viewport, id));
                 self.focus_source = false;
             }
+            if let Some(request) = effects.menu_focus_request {
+                self.deferred_menu_focus = Some((target_viewport, request));
+            }
+        }
+        if let Some(scale) = effects.export_scale_requested {
+            self.export_scale = scale;
         }
         if effects.focus_viewport {
             ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
@@ -837,6 +1120,20 @@ impl DiagramStudioDialog {
     }
 
     fn apply_document_intent(&mut self, intent: DocumentIntent) -> bool {
+        if self.documents.pending_transition().is_some()
+            && matches!(
+                intent,
+                DocumentIntent::ImportMermaid
+                    | DocumentIntent::ApplyTemplate(_)
+                    | DocumentIntent::AutoLayout
+                    | DocumentIntent::Export(_, _)
+            )
+        {
+            self.message = Some(StudioNotice::error(
+                "Resolve the pending document action before importing, changing the template, laying out, or exporting.",
+            ));
+            return false;
+        }
         if matches!(intent, DocumentIntent::Save | DocumentIntent::SaveAs)
             && self.documents.pending_transition().is_some()
         {
@@ -867,6 +1164,43 @@ impl DiagramStudioDialog {
                     }
                 }
             }
+            DocumentIntent::ImportMermaid => {
+                if let Some(path) = self.pick_mermaid_source() {
+                    match MermaidFile::new(&path)
+                        .map_err(DiagramDocumentError::from)
+                        .and_then(|file| self.documents.request_mermaid_import(file))
+                    {
+                        Ok(outcome) => {
+                            self.finish_transition(outcome, false);
+                        }
+                        Err(error) => {
+                            self.show_document_error("import Mermaid source", Some(&path), error);
+                        }
+                    }
+                }
+            }
+            DocumentIntent::ApplyTemplate(template) => {
+                match self.documents.request_template(template) {
+                    Ok(outcome) => {
+                        self.finish_transition(outcome, false);
+                    }
+                    Err(error) => {
+                        self.show_document_error("apply template", None, error);
+                    }
+                }
+            }
+            DocumentIntent::AutoLayout => match self.documents.auto_layout() {
+                Ok(changed) => {
+                    if changed {
+                        self.refresh_cache();
+                        self.camera.fit_next = true;
+                        self.message = Some(StudioNotice::info("Automatic layout applied."));
+                    }
+                }
+                Err(error) => {
+                    self.show_current_document_error("lay out the diagram", error);
+                }
+            },
             DocumentIntent::Save => match self.documents.save() {
                 Ok(()) => self.message = Some(StudioNotice::info("Diagram saved.")),
                 Err(DiagramDocumentError::SaveAsRequired) => {
@@ -880,6 +1214,9 @@ impl DiagramStudioDialog {
                 if let Some(path) = self.pick_native_document(true) {
                     self.save_as_to(path);
                 }
+            }
+            DocumentIntent::Export(format, scale) => {
+                self.export_document(format, scale);
             }
             DocumentIntent::Close => {
                 match self.documents.request_close() {
@@ -934,6 +1271,149 @@ impl DiagramStudioDialog {
                 self.show_document_error("save", Some(&path), error);
             }
         }
+    }
+
+    fn export_document(&mut self, format: DiagramExportFormat, scale: ExportScale) {
+        if self.documents.pending_transition().is_some() {
+            self.message = Some(StudioNotice::error(
+                "Resolve the pending document action before exporting.",
+            ));
+            return;
+        }
+        let Some(session) = self.documents.session() else {
+            self.message = Some(StudioNotice::error(
+                "There is no active Diagram Studio document.",
+            ));
+            return;
+        };
+        let artifact = match format {
+            DiagramExportFormat::Mermaid => Ok(DiagramSourceSnapshot::capture(session).encode()),
+            DiagramExportFormat::Svg => {
+                DiagramImageSnapshot::capture(session, SceneMetrics::default())
+                    .and_then(|snapshot| snapshot.encode_svg(scale.factor()))
+            }
+            DiagramExportFormat::Png => {
+                DiagramImageSnapshot::capture(session, SceneMetrics::default())
+                    .and_then(|snapshot| snapshot.encode_png(scale.factor()))
+            }
+        };
+        let artifact = match artifact {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                self.message = Some(StudioNotice::error(format!(
+                    "Could not encode {} export: {error}",
+                    export_format_name(format)
+                )));
+                return;
+            }
+        };
+        let Some(path) = self.pick_export_destination(format) else {
+            self.message = Some(StudioNotice::info(format!(
+                "{} export cancelled.",
+                export_format_name(format)
+            )));
+            return;
+        };
+        if let Some(native_path) = self.documents.path() {
+            match same_export_destination(native_path, &path) {
+                Ok(true) => {
+                    self.message = Some(StudioNotice::error(format!(
+                        "Cannot export over the active native Diagram document: {}",
+                        path.display()
+                    )));
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.message = Some(StudioNotice::error(format!(
+                        "Could not resolve the export destination {}: {error}",
+                        path.display()
+                    )));
+                    return;
+                }
+            }
+        }
+
+        let revision = artifact.revision();
+        let dimensions = artifact.dimensions();
+        let substitutions = artifact.warnings().glyph_substitutions();
+        match artifact.publish_unoccupied(&path) {
+            Ok(()) => {
+                let size_message = dimensions.map_or_else(String::new, |(width, height)| {
+                    format!(" ({width}×{height})")
+                });
+                let substitution_message = if substitutions == 0 {
+                    String::new()
+                } else {
+                    format!("; {substitutions} glyph substitutions")
+                };
+                self.message = Some(StudioNotice::info(format!(
+                    "Exported {} revision {revision} to {}{size_message}{substitution_message}.",
+                    export_format_name(format),
+                    path.display()
+                )));
+            }
+            Err(error) => {
+                self.message = Some(StudioNotice::error(error.to_string()));
+            }
+        }
+    }
+
+    fn pick_mermaid_source(&mut self) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
+            return self.test_next_file_picker_result.take().unwrap_or(None);
+        }
+        #[cfg(not(test))]
+        {
+            let directory = self.picker_directory();
+            let mut picker = rfd::FileDialog::new().add_filter("Mermaid source (*.mmd)", &["mmd"]);
+            if directory.is_dir() {
+                picker = picker.set_directory(directory);
+            }
+            picker.pick_file()
+        }
+    }
+
+    fn pick_export_destination(&mut self, format: DiagramExportFormat) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
+            return self
+                .test_next_file_picker_result
+                .take()
+                .unwrap_or(None)
+                .map(|path| ensure_export_extension(path, format));
+        }
+        #[cfg(not(test))]
+        {
+            let directory = self.picker_directory();
+            let default_name = self
+                .documents
+                .path()
+                .and_then(Path::file_stem)
+                .and_then(|name| name.to_str())
+                .unwrap_or("diagram");
+            let file_name = format!("{default_name}.{}", format.extension());
+            let mut picker = rfd::FileDialog::new()
+                .add_filter(export_filter_name(format), &[format.extension()])
+                .set_file_name(&file_name);
+            if directory.is_dir() {
+                picker = picker.set_directory(directory);
+            }
+            picker
+                .save_file()
+                .map(|path| ensure_export_extension(path, format))
+        }
+    }
+
+    fn picker_directory(&self) -> &Path {
+        self.documents
+            .path()
+            .and_then(Path::parent)
+            .filter(|directory| directory.is_dir())
+            .unwrap_or(self.default_directory.as_path())
     }
 
     fn finish_transition(&mut self, outcome: TransitionOutcome, closes: bool) -> bool {
@@ -1034,6 +1514,7 @@ impl DiagramStudioDialog {
             self.test_canvas_rect = None;
             self.test_canvas_id = None;
             self.test_action_rects.clear();
+            self.test_action_focus_ids.clear();
             self.test_discard_button_id = None;
             self.test_body_rendered = false;
         }
@@ -1163,6 +1644,8 @@ impl DiagramStudioDialog {
         self.message = None;
         self.deferred_canvas_focus = None;
         self.deferred_source_focus = None;
+        self.deferred_menu_focus = None;
+        self.active_menu_scope = None;
         self.refresh_cache();
     }
 
@@ -1262,6 +1745,20 @@ impl DiagramStudioDialog {
     }
 
     #[cfg(test)]
+    fn test_action_has_focus(&self, name: &str) -> bool {
+        let Some((_, expected)) = self
+            .test_action_focus_ids
+            .iter()
+            .find(|(action, _)| action == name)
+        else {
+            return false;
+        };
+        super::render::immediate_viewport_test_focused_id().is_some_and(|(viewport, focused)| {
+            viewport == viewport_id() && focused == Some(*expected)
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_source_focus_pending(&self) -> bool {
         self.focus_source
     }
@@ -1309,8 +1806,12 @@ impl DiagramStudioDialog {
         canvas_focus_requested: &mut Option<egui::Id>,
         source_focus_requested: &mut Option<egui::Id>,
         source_focus_allowed: bool,
-    ) {
+    ) -> DrawBodyEffects {
         self.refresh_cache();
+        let focused_at_start = ui.memory(|memory| memory.focused());
+        let previous_menu_scope = self.active_menu_scope.as_ref().cloned();
+        let mut draw_effects = DrawBodyEffects::default();
+        let mut active_menu_scope: Option<MenuFocusScope> = None;
         #[cfg(test)]
         if !closing_requested && pending.is_none() {
             *pending = self.test_pending_mutation.take();
@@ -1326,6 +1827,7 @@ impl DiagramStudioDialog {
         let Self {
             documents,
             view_mode,
+            export_scale,
             cache,
             camera,
             selection,
@@ -1345,6 +1847,8 @@ impl DiagramStudioDialog {
             #[cfg(test)]
             test_action_rects,
             #[cfg(test)]
+            test_action_focus_ids,
+            #[cfg(test)]
             test_discard_button_id,
             ..
         } = self;
@@ -1356,17 +1860,22 @@ impl DiagramStudioDialog {
         let document_dirty = documents.is_dirty();
         let can_undo = documents.can_undo();
         let can_redo = documents.can_redo();
-        let document_actions_allowed =
+        let popup_open_at_start = egui::Popup::is_any_open(ui.ctx());
+        let document_actions_allowed = actions_allowed
+            && !closing_requested
+            && pending_transition.is_none()
+            && !popup_open_at_start;
+        let menu_actions_allowed =
             actions_allowed && !closing_requested && pending_transition.is_none();
         let revision = session.revision();
         let cache = cache.as_ref().expect("cache refreshed before drawing");
         let status = &cache.status;
         let graph = session.preview_graph();
-        let editing_allowed = actions_allowed && !closing_requested && pending_transition.is_none();
-        let source_edit_allowed = actions_allowed && pending_transition.is_none();
-        let visual_mutations_allowed = editing_allowed && status.preview == PreviewState::Current;
+        let base_editing_allowed =
+            actions_allowed && !closing_requested && pending_transition.is_none();
 
-        if editing_allowed
+        if base_editing_allowed
+            && !popup_open_at_start
             && pending.is_none()
             && let Some(action) = take_history_shortcut(ui)
         {
@@ -1418,6 +1927,173 @@ impl DiagramStudioDialog {
                             *document_intent = Some(intent);
                         }
                     }
+                    let mut import_item_ids = Vec::new();
+                    let mut import_sizing_pass = false;
+                    let _import_menu = ui.menu_button("Import", |menu_ui| {
+                        import_sizing_pass = menu_ui.is_sizing_pass();
+                        let response = menu_ui.add_enabled(
+                            menu_actions_allowed,
+                            egui::Button::new("Mermaid source…"),
+                        );
+                        if response.enabled() {
+                            import_item_ids.push(response.id);
+                        }
+                        #[cfg(test)]
+                        test_action_rects.push((
+                            "import_mermaid".into(),
+                            response.rect,
+                            menu_ui.clip_rect(),
+                        ));
+                        #[cfg(test)]
+                        test_action_focus_ids.push(("import_mermaid".into(), response.id));
+                        if response.clicked() && document_intent.is_none() {
+                            *document_intent = Some(DocumentIntent::ImportMermaid);
+                            menu_ui.close();
+                        }
+                    });
+                    #[cfg(test)]
+                    test_action_rects.push((
+                        "menu_import".into(),
+                        _import_menu.response.rect,
+                        ui.clip_rect(),
+                    ));
+                    #[cfg(test)]
+                    test_action_focus_ids.push(("menu_import".into(), _import_menu.response.id));
+                    let import_popup_id = egui::Popup::default_response_id(&_import_menu.response);
+                    if egui::Popup::is_id_open(ui.ctx(), import_popup_id) {
+                        active_menu_scope = Some(MenuFocusScope {
+                            popup_id: import_popup_id,
+                            trigger_id: _import_menu.response.id,
+                            item_ids: import_item_ids,
+                            sizing_pass: import_sizing_pass,
+                        });
+                    }
+
+                    let mut template_item_ids = Vec::new();
+                    let mut templates_sizing_pass = false;
+                    let _templates_menu = ui.menu_button("Templates", |menu_ui| {
+                        templates_sizing_pass = menu_ui.is_sizing_pass();
+                        for template in DiagramTemplate::ALL {
+                            let response = menu_ui.add_enabled(
+                                menu_actions_allowed,
+                                egui::Button::new(template.name()),
+                            );
+                            if response.enabled() {
+                                template_item_ids.push(response.id);
+                            }
+                            #[cfg(test)]
+                            test_action_rects.push((
+                                format!("template_{}", template.name().to_lowercase()),
+                                response.rect,
+                                menu_ui.clip_rect(),
+                            ));
+                            #[cfg(test)]
+                            test_action_focus_ids.push((
+                                format!("template_{}", template.name().to_lowercase()),
+                                response.id,
+                            ));
+                            if response.clicked() && document_intent.is_none() {
+                                *document_intent = Some(DocumentIntent::ApplyTemplate(template));
+                                menu_ui.close();
+                            }
+                        }
+                    });
+                    #[cfg(test)]
+                    test_action_rects.push((
+                        "menu_templates".into(),
+                        _templates_menu.response.rect,
+                        ui.clip_rect(),
+                    ));
+                    #[cfg(test)]
+                    test_action_focus_ids
+                        .push(("menu_templates".into(), _templates_menu.response.id));
+                    let templates_popup_id =
+                        egui::Popup::default_response_id(&_templates_menu.response);
+                    if egui::Popup::is_id_open(ui.ctx(), templates_popup_id) {
+                        active_menu_scope = Some(MenuFocusScope {
+                            popup_id: templates_popup_id,
+                            trigger_id: _templates_menu.response.id,
+                            item_ids: template_item_ids,
+                            sizing_pass: templates_sizing_pass,
+                        });
+                    }
+
+                    let mut export_item_ids = Vec::new();
+                    let mut export_sizing_pass = false;
+                    let _export_menu = ui.menu_button("Export", |menu_ui| {
+                        export_sizing_pass = menu_ui.is_sizing_pass();
+                        for (format, label, _name) in [
+                            (DiagramExportFormat::Mermaid, "Mermaid source…", "mermaid"),
+                            (DiagramExportFormat::Svg, "SVG image…", "svg"),
+                            (DiagramExportFormat::Png, "PNG image…", "png"),
+                        ] {
+                            let enabled = menu_actions_allowed
+                                && (format == DiagramExportFormat::Mermaid
+                                    || status.preview == PreviewState::Current);
+                            let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
+                            if response.enabled() {
+                                export_item_ids.push(response.id);
+                            }
+                            #[cfg(test)]
+                            test_action_rects.push((
+                                format!("export_{_name}"),
+                                response.rect,
+                                menu_ui.clip_rect(),
+                            ));
+                            #[cfg(test)]
+                            test_action_focus_ids.push((format!("export_{_name}"), response.id));
+                            if response.clicked() && document_intent.is_none() {
+                                *document_intent =
+                                    Some(DocumentIntent::Export(format, *export_scale));
+                                menu_ui.close();
+                            }
+                        }
+                        menu_ui.separator();
+                        menu_ui.label("Image scale");
+                        menu_ui.horizontal_wrapped(|menu_ui| {
+                            for (scale, label, _name) in ExportScale::ALL {
+                                let response = menu_ui.add_enabled(
+                                    menu_actions_allowed,
+                                    egui::Button::selectable(*export_scale == scale, label),
+                                );
+                                if response.enabled() {
+                                    export_item_ids.push(response.id);
+                                }
+                                #[cfg(test)]
+                                test_action_rects.push((
+                                    format!("export_scale_{_name}"),
+                                    response.rect,
+                                    menu_ui.clip_rect(),
+                                ));
+                                #[cfg(test)]
+                                test_action_focus_ids
+                                    .push((format!("export_scale_{_name}"), response.id));
+                                if response.clicked() && menu_actions_allowed {
+                                    draw_effects.export_scale_requested = Some(scale);
+                                    menu_ui.close();
+                                }
+                            }
+                        });
+                    });
+                    #[cfg(test)]
+                    test_action_rects.push((
+                        "menu_export".into(),
+                        _export_menu.response.rect,
+                        ui.clip_rect(),
+                    ));
+                    #[cfg(test)]
+                    test_action_focus_ids.push(("menu_export".into(), _export_menu.response.id));
+                    let export_popup_id = egui::Popup::default_response_id(&_export_menu.response);
+                    if egui::Popup::is_id_open(ui.ctx(), export_popup_id) {
+                        active_menu_scope = Some(MenuFocusScope {
+                            popup_id: export_popup_id,
+                            trigger_id: _export_menu.response.id,
+                            item_ids: export_item_ids,
+                            sizing_pass: export_sizing_pass,
+                        });
+                    }
+                    let background_actions_allowed =
+                        base_editing_allowed && active_menu_scope.is_none();
                     if let Some(path) = document_path.as_deref() {
                         ui.weak(
                             path.file_name()
@@ -1433,29 +2109,33 @@ impl DiagramStudioDialog {
                     ui.separator();
                     for (mode, label) in ViewMode::ALL {
                         let response = ui.selectable_label(*view_mode == mode, label);
-                        if editing_allowed && response.clicked() {
+                        if background_actions_allowed && response.clicked() {
                             *view_mode = mode;
                         }
                     }
                     ui.separator();
-                    let undo =
-                        ui.add_enabled(editing_allowed && can_undo, egui::Button::new("Undo"));
+                    let undo = ui.add_enabled(
+                        background_actions_allowed && can_undo,
+                        egui::Button::new("Undo"),
+                    );
                     if undo.clicked() && pending.is_none() {
                         *pending = Some(PendingMutation::Undo);
                     }
-                    let redo =
-                        ui.add_enabled(editing_allowed && can_redo, egui::Button::new("Redo"));
+                    let redo = ui.add_enabled(
+                        background_actions_allowed && can_redo,
+                        egui::Button::new("Redo"),
+                    );
                     if redo.clicked() && pending.is_none() {
                         *pending = Some(PendingMutation::Redo);
                     }
                     if ui
-                        .add_enabled(editing_allowed, egui::Button::new("Fit"))
+                        .add_enabled(background_actions_allowed, egui::Button::new("Fit"))
                         .clicked()
                     {
                         camera.fit_next = true;
                     }
                     if ui
-                        .add_enabled(editing_allowed, egui::Button::new("Reset view"))
+                        .add_enabled(background_actions_allowed, egui::Button::new("Reset view"))
                         .clicked()
                     {
                         *camera = Camera::default();
@@ -1463,8 +2143,15 @@ impl DiagramStudioDialog {
                     }
                 });
 
+                let menu_open = active_menu_scope.is_some();
+                let editing_allowed = base_editing_allowed && !menu_open;
+                let source_edit_allowed =
+                    actions_allowed && pending_transition.is_none() && !menu_open;
+                let visual_mutations_allowed =
+                    editing_allowed && status.preview == PreviewState::Current;
+                let decision_actions_allowed = actions_allowed && !closing_requested && !menu_open;
+
                 ui.horizontal_wrapped(|ui| {
-                    let current = status.preview == PreviewState::Current;
                     let add_node = ui.add_enabled(
                         visual_mutations_allowed
                             && graph.is_some_and(|graph| graph.nodes.len() < MAX_DIAGRAM_NODES),
@@ -1565,8 +2252,111 @@ impl DiagramStudioDialog {
                             }
                         }
                     }
-                    direction_control(ui, graph, current, editing_allowed, revision, pending);
+                    let auto_layout =
+                        ui.add_enabled(visual_mutations_allowed, egui::Button::new("Auto-layout"));
+                    #[cfg(test)]
+                    test_action_rects.push((
+                        "auto_layout".into(),
+                        auto_layout.rect,
+                        ui.clip_rect(),
+                    ));
+                    if auto_layout.clicked() && document_intent.is_none() {
+                        *document_intent = Some(DocumentIntent::AutoLayout);
+                    }
                 });
+                let _direction_row = ui.horizontal(|ui| {
+                    ui.label("Direction");
+                    direction_control(
+                        ui,
+                        graph,
+                        status.preview == PreviewState::Current,
+                        editing_allowed,
+                        revision,
+                        pending,
+                    );
+                });
+                #[cfg(test)]
+                test_action_rects.push((
+                    "direction".into(),
+                    _direction_row.response.rect,
+                    ui.clip_rect(),
+                ));
+
+                if let Some(scope) = active_menu_scope.as_ref() {
+                    if actions_allowed
+                        && !closing_requested
+                        && !scope.sizing_pass
+                        && !scope.item_ids.is_empty()
+                    {
+                        let navigation = ui.input_mut(|input| {
+                            if consume_menu_key(input, egui::Key::Tab, egui::Modifiers::SHIFT) {
+                                Some(false)
+                            } else if consume_menu_key(input, egui::Key::Tab, egui::Modifiers::NONE)
+                                || consume_menu_key(
+                                    input,
+                                    egui::Key::ArrowDown,
+                                    egui::Modifiers::NONE,
+                                )
+                                || consume_menu_key(
+                                    input,
+                                    egui::Key::ArrowRight,
+                                    egui::Modifiers::NONE,
+                                )
+                            {
+                                Some(true)
+                            } else if consume_menu_key(
+                                input,
+                                egui::Key::ArrowUp,
+                                egui::Modifiers::NONE,
+                            ) || consume_menu_key(
+                                input,
+                                egui::Key::ArrowLeft,
+                                egui::Modifiers::NONE,
+                            ) {
+                                Some(false)
+                            } else {
+                                None
+                            }
+                        });
+                        if navigation.is_some() {
+                            // egui's pass-level focus traversal is computed before
+                            // these menu responses are drawn. Clear that traversal
+                            // so it cannot move focus behind the popup after the
+                            // retained menu target is applied.
+                            ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+                        }
+                        let focused_index = scope
+                            .item_ids
+                            .iter()
+                            .position(|id| Some(*id) == focused_at_start);
+                        let target_index = match (focused_index, navigation) {
+                            (Some(index), Some(true)) => Some((index + 1) % scope.item_ids.len()),
+                            (Some(index), Some(false)) => Some(if index == 0 {
+                                scope.item_ids.len() - 1
+                            } else {
+                                index - 1
+                            }),
+                            (None, Some(true)) | (None, None) => Some(0),
+                            (None, Some(false)) => Some(scope.item_ids.len() - 1),
+                            (Some(_), None) => None,
+                        };
+                        if let Some(index) = target_index {
+                            draw_effects.menu_focus_request = Some(MenuFocusRequest {
+                                popup_id: scope.popup_id,
+                                destination: MenuFocusDestination::Item(scope.item_ids[index]),
+                            });
+                        }
+                    }
+                } else if actions_allowed
+                    && ui.input(|input| input.key_pressed(egui::Key::Escape))
+                    && let Some(scope) = previous_menu_scope.as_ref()
+                {
+                    draw_effects.menu_focus_request = Some(MenuFocusRequest {
+                        popup_id: scope.popup_id,
+                        destination: MenuFocusDestination::Trigger(scope.trigger_id),
+                    });
+                }
+                draw_effects.active_menu_scope = active_menu_scope;
 
                 if let Some(transition) = pending_transition.as_ref() {
                     ui.group(|ui| {
@@ -1591,7 +2381,7 @@ impl DiagramStudioDialog {
                                 ("decision_cancel", "Cancel", TransitionDecision::Cancel),
                             ] {
                                 let response = ui.add_enabled(
-                                    actions_allowed && !closing_requested,
+                                    decision_actions_allowed,
                                     egui::Button::new(label),
                                 );
                                 #[cfg(test)]
@@ -1768,6 +2558,7 @@ impl DiagramStudioDialog {
                     }
                 }
             });
+        draw_effects
     }
 }
 
@@ -2884,6 +3675,28 @@ fn take_history_shortcut(ui: &mut egui::Ui) -> Option<PendingMutation> {
     })
 }
 
+fn consume_menu_key(
+    input: &mut egui::InputState,
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+) -> bool {
+    let mut consumed = false;
+    input.events.retain(|event| {
+        let matches = matches!(
+            event,
+            egui::Event::Key {
+                key: event_key,
+                pressed: true,
+                modifiers: event_modifiers,
+                ..
+            } if *event_key == key && *event_modifiers == modifiers
+        );
+        consumed |= matches;
+        !matches
+    });
+    consumed
+}
+
 fn canvas_shortcuts(
     ui: &mut egui::Ui,
     canvas_id: egui::Id,
@@ -3148,6 +3961,16 @@ mod tests {
         });
     }
 
+    fn frame_with_events_and_root_discard(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        super::super::render::with_immediate_viewport_test_events(events, || {
+            frame_with_root_discard(dialog, ctx)
+        });
+    }
+
     fn initialized_dialog() -> DiagramStudioDialog {
         let mut dialog = DiagramStudioDialog::default();
         dialog.test_replace_source("flowchart TD\n    A[\"Alpha\"]");
@@ -3208,6 +4031,40 @@ mod tests {
                 ],
             );
         }
+    }
+
+    fn focus_action_with_keyboard(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        name: &str,
+    ) {
+        for _ in 0..40 {
+            if dialog.test_action_has_focus(name) {
+                return;
+            }
+            send_child_key(dialog, ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(
+            dialog.test_action_has_focus(name),
+            "Tab should reach {name}"
+        );
+    }
+
+    fn open_menu_with_keyboard(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        trigger: &str,
+        first_item: &str,
+    ) {
+        focus_action_with_keyboard(dialog, ctx, trigger);
+        send_child_key(dialog, ctx, egui::Key::Space, egui::Modifiers::NONE);
+        for _ in 0..4 {
+            frame(dialog, ctx);
+        }
+        assert!(
+            dialog.test_action_has_focus(first_item),
+            "menu should focus {first_item}"
+        );
     }
 
     #[test]
@@ -4192,11 +5049,35 @@ mod tests {
         let canvas = dialog
             .test_canvas_rect
             .expect("Split draws its visual canvas");
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let action_rects = dialog
+            .test_action_rects
+            .iter()
+            .map(|(name, rect, clip)| (name.as_str(), *rect, *clip))
+            .collect::<Vec<_>>();
         assert!(
             canvas.width() >= 220.0,
-            "canvas geometry is too narrow: {canvas:?}"
+            "canvas geometry is too narrow: canvas={canvas:?}, viewport={viewport:?}, actions={action_rects:#?}"
         );
-        assert!(canvas.left() >= 0.0 && canvas.right() <= size.x);
+        assert!(
+            canvas.left() >= viewport.left() && canvas.right() <= viewport.right(),
+            "canvas must stay inside viewport width: canvas={canvas:?}, viewport={viewport:?}, actions={action_rects:#?}"
+        );
+        for name in [
+            "menu_import",
+            "menu_templates",
+            "menu_export",
+            "auto_layout",
+            "direction",
+        ] {
+            let (_, rect, clip) = dialog
+                .test_action_rects
+                .iter()
+                .find(|(action, _, _)| action == name)
+                .unwrap_or_else(|| panic!("the narrow toolbar exposes {name}"));
+            assert!(clip.contains_rect(*rect), "{name} is clipped: {rect:?}");
+            assert!(rect.left() >= 0.0 && rect.right() <= size.x);
+        }
         let (_, add_node, clip) = dialog
             .test_action_rects
             .iter()
@@ -4204,6 +5085,207 @@ mod tests {
             .expect("the visual toolbar exposes Add node");
         assert!(clip.left() <= add_node.left() && clip.right() >= add_node.right());
         assert!(add_node.left() >= 0.0 && add_node.right() <= size.x);
+    }
+
+    #[test]
+    fn diagram_studio_escape_dismisses_import_menu_before_closing_document() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        click_action(&mut dialog, &ctx, "menu_import");
+        assert!(
+            dialog
+                .test_action_rects
+                .iter()
+                .any(|(name, _, _)| { name == "import_mermaid" })
+        );
+        send_child_key(&mut dialog, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+
+        assert!(dialog.open, "Escape should dismiss the open menu first");
+        assert!(dialog.documents.pending_transition().is_none());
+        assert!(
+            !dialog
+                .test_action_rects
+                .iter()
+                .any(|(name, _, _)| name == "import_mermaid")
+        );
+    }
+
+    #[test]
+    fn diagram_studio_keyboard_import_menu_activates_one_picker_without_early_source_edits() {
+        let directory = tempfile::tempdir().expect("temporary Mermaid import directory");
+        let import_path = directory.path().join("keyboard.mmd");
+        let imported_source = "flowchart LR\nB[\"Keyboard import\"]\n";
+        std::fs::write(&import_path, imported_source.as_bytes()).expect("write Mermaid source");
+
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.open();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let original_source = dialog.test_session().draft().to_owned();
+        let original_revision = dialog.test_session().revision();
+        let original_undo = dialog.test_session().undo_depth();
+        let original_redo = dialog.test_session().redo_depth();
+        dialog.test_set_next_file_picker_result(Some(import_path));
+
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_import", "import_mermaid");
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::ArrowDown,
+            egui::Modifiers::NONE,
+        );
+        assert!(dialog.test_action_has_focus("import_mermaid"));
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert_eq!(dialog.test_session().draft(), original_source.as_str());
+        assert_eq!(dialog.test_session().revision(), original_revision);
+        assert_eq!(dialog.test_session().undo_depth(), original_undo);
+        assert_eq!(dialog.test_session().redo_depth(), original_redo);
+
+        send_child_key(&mut dialog, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert_eq!(dialog.test_session().draft(), imported_source);
+        assert_eq!(dialog.documents.path(), None);
+        assert_eq!(dialog.test_session().revision(), original_revision + 1);
+        assert_eq!(dialog.test_session().undo_depth(), original_undo + 1);
+        assert_eq!(dialog.test_session().redo_depth(), 0);
+        assert!(dialog.open);
+    }
+
+    #[test]
+    fn diagram_studio_keyboard_template_and_export_menu_actions_run_once() {
+        let directory = tempfile::tempdir().expect("temporary Mermaid export directory");
+        let export_path = directory.path().join("keyboard-export.mmd");
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.open();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let initial_source = dialog.test_session().draft().to_owned();
+        let initial_revision = dialog.test_session().revision();
+        let initial_undo = dialog.test_session().undo_depth();
+        let initial_redo = dialog.test_session().redo_depth();
+
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_templates", "template_linear");
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::ArrowDown,
+            egui::Modifiers::NONE,
+        );
+        assert!(dialog.test_action_has_focus("template_decision"));
+        assert_eq!(dialog.test_session().draft(), initial_source.as_str());
+        assert_eq!(dialog.test_session().revision(), initial_revision);
+        assert_eq!(dialog.test_session().undo_depth(), initial_undo);
+        assert_eq!(dialog.test_session().redo_depth(), initial_redo);
+
+        send_child_key(&mut dialog, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            dialog.test_session().draft(),
+            DiagramTemplate::Decision.source()
+        );
+        assert_eq!(dialog.test_session().revision(), initial_revision + 1);
+        assert_eq!(dialog.test_session().undo_depth(), initial_undo + 1);
+
+        let template_source = dialog.test_session().draft().to_owned();
+        let template_revision = dialog.test_session().revision();
+        let template_undo = dialog.test_session().undo_depth();
+        let template_redo = dialog.test_session().redo_depth();
+        dialog.test_set_next_file_picker_result(Some(export_path.clone()));
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_export", "export_mermaid");
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert_eq!(dialog.test_session().draft(), template_source.as_str());
+        assert_eq!(dialog.test_session().revision(), template_revision);
+        assert_eq!(dialog.test_session().undo_depth(), template_undo);
+        assert_eq!(dialog.test_session().redo_depth(), template_redo);
+
+        send_child_key(&mut dialog, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert_eq!(
+            std::fs::read(export_path).unwrap(),
+            template_source.as_bytes()
+        );
+        assert_eq!(dialog.test_session().draft(), template_source.as_str());
+        assert_eq!(dialog.test_session().revision(), template_revision);
+        assert_eq!(dialog.test_session().undo_depth(), template_undo);
+        assert_eq!(dialog.test_session().redo_depth(), template_redo);
+        assert_eq!(dialog.documents.path(), None);
+        assert!(dialog.open);
+    }
+
+    #[test]
+    fn diagram_studio_keyboard_menu_focus_is_retained_root_scoped_and_escape_restores_trigger() {
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.open();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let source = dialog.test_session().draft().to_owned();
+        let revision = dialog.test_session().revision();
+        let undo = dialog.test_session().undo_depth();
+        let redo = dialog.test_session().redo_depth();
+
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_export", "export_mermaid");
+        assert!(dialog.deferred_menu_focus.is_none());
+
+        frame_with_events_and_root_discard(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+        assert!(
+            dialog.deferred_menu_focus.is_none(),
+            "a discarded ROOT pass must not publish menu focus"
+        );
+        assert_eq!(dialog.test_session().draft(), source.as_str());
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo);
+        assert_eq!(dialog.test_session().redo_depth(), redo);
+
+        send_child_key(&mut dialog, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert!(dialog.test_action_has_focus("export_scale_two"));
+        send_child_key(&mut dialog, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(dialog.export_scale, ExportScale::Two);
+        assert!(dialog.open);
+        assert_eq!(dialog.test_session().draft(), source.as_str());
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo);
+        assert_eq!(dialog.test_session().redo_depth(), redo);
+
+        open_menu_with_keyboard(&mut dialog, &ctx, "menu_export", "export_mermaid");
+        send_child_key(&mut dialog, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(dialog.open, "Escape should close the menu, not the Studio");
+        assert!(dialog.test_action_has_focus("menu_export"));
+        assert_eq!(dialog.test_session().draft(), source.as_str());
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo);
+        assert_eq!(dialog.test_session().redo_depth(), redo);
     }
 
     #[test]
@@ -4849,6 +5931,480 @@ mod tests {
             &dialog.message,
             Some(StudioNotice::Error(message))
                 if message.contains("changed while these properties were open")
+        ));
+    }
+
+    #[test]
+    fn diagram_studio_imports_unsupported_mermaid_and_exports_exact_draft() {
+        let directory = tempfile::tempdir().expect("temporary Mermaid import directory");
+        let import_path = directory.path().join("source.mmd");
+        let source = "\u{feff}flowchart TD\r\nA[\"こんにちは\"]\r\nA --- B\r\n";
+        std::fs::write(&import_path, source.as_bytes()).expect("write Mermaid import fixture");
+        let export_path = directory.path().join("roundtrip.mmd");
+
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.open();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        dialog.test_set_next_file_picker_result(Some(import_path));
+        click_action(&mut dialog, &ctx, "menu_import");
+        click_action(&mut dialog, &ctx, "import_mermaid");
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.documents.path(), None);
+        assert_eq!(
+            dialog.test_session().status().preview,
+            PreviewState::NoPreview
+        );
+
+        let revision = dialog.test_session().revision();
+        let undo_depth = dialog.test_session().undo_depth();
+        let redo_depth = dialog.test_session().redo_depth();
+        let dirty = dialog.documents.is_dirty();
+        let disk_digest = dialog.documents.disk_digest();
+        dialog.test_set_next_file_picker_result(Some(export_path.clone()));
+        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "export_mermaid");
+
+        assert_eq!(dialog.test_file_picker_calls(), 2);
+        assert_eq!(std::fs::read(&export_path).unwrap(), source.as_bytes());
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+        assert_eq!(dialog.test_session().redo_depth(), redo_depth);
+        assert_eq!(dialog.documents.path(), None);
+        assert_eq!(dialog.documents.disk_digest(), disk_digest);
+        assert_eq!(dialog.documents.is_dirty(), dirty);
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message))
+                if message.contains("Mermaid source")
+                    && message.contains(&format!("revision {revision}"))
+                    && message.contains("roundtrip.mmd")
+        ));
+    }
+
+    #[test]
+    fn diagram_studio_same_frame_source_export_follows_edit_and_rejected_edit_aborts_picker() {
+        let directory = tempfile::tempdir().expect("temporary export directory");
+        let accepted_path = directory.path().join("accepted.mmd");
+        let accepted_source = "flowchart LR\nA[\"Accepted source\"]\n";
+        let mut accepted = DiagramStudioDialog::default();
+        accepted.open();
+        let accepted_ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut accepted, &accepted_ctx);
+        }
+        let revision = accepted.test_session().revision();
+        accepted.test_set_next_file_picker_result(Some(accepted_path.clone()));
+        accepted.test_pending_mutation =
+            Some(PendingMutation::ReplaceSource(accepted_source.to_owned()));
+        accepted.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Mermaid,
+            ExportScale::One,
+        ));
+        frame(&mut accepted, &accepted_ctx);
+        assert_eq!(accepted.test_file_picker_calls(), 1);
+        assert_eq!(
+            std::fs::read(&accepted_path).unwrap(),
+            accepted_source.as_bytes()
+        );
+        assert_eq!(accepted.test_session().draft(), accepted_source);
+        assert_eq!(accepted.test_session().revision(), revision + 1);
+        assert_eq!(accepted.documents.path(), None);
+        assert!(accepted.documents.is_dirty());
+
+        let rejected_path = directory.path().join("rejected.mmd");
+        let mut rejected = DiagramStudioDialog::default();
+        rejected.open();
+        let rejected_ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut rejected, &rejected_ctx);
+        }
+        let original_revision = rejected.test_session().revision();
+        rejected.test_set_next_file_picker_result(Some(rejected_path.clone()));
+        rejected.test_pending_mutation = Some(PendingMutation::ReplaceSource(
+            "x".repeat(crate::diagram::MAX_MERMAID_SOURCE_BYTES + 1),
+        ));
+        rejected.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Mermaid,
+            ExportScale::One,
+        ));
+        frame(&mut rejected, &rejected_ctx);
+        assert_eq!(rejected.test_file_picker_calls(), 0);
+        assert!(!rejected_path.exists());
+        assert_eq!(rejected.test_session().draft(), "");
+        assert_eq!(rejected.test_session().revision(), original_revision);
+        assert!(!rejected.documents.is_dirty());
+        assert!(matches!(
+            &rejected.message,
+            Some(StudioNotice::Error(message))
+                if message.contains("source exceeds") && message.contains("byte limit")
+        ));
+    }
+
+    #[test]
+    fn diagram_studio_discarded_export_pass_does_not_open_picker_or_write() {
+        let directory = tempfile::tempdir().expect("temporary export directory");
+        let destination = directory.path().join("discarded.svg");
+        let mut dialog = initialized_dialog();
+        let source = dialog.test_session().draft().to_owned();
+        let revision = dialog.test_session().revision();
+        let undo_depth = dialog.test_session().undo_depth();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame_with_root_discard(&mut dialog, &ctx);
+
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert!(!destination.exists());
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+    }
+
+    #[test]
+    fn diagram_studio_exports_do_not_change_document_state_on_success_cancel_or_failure() {
+        let directory = tempfile::tempdir().expect("temporary export directory");
+        let png_path = directory.path().join("diagram.png");
+        let occupied_path = directory.path().join("occupied.mmd");
+        let occupied_bytes = b"leave existing export untouched";
+        std::fs::write(&occupied_path, occupied_bytes).expect("prepare occupied export target");
+
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let original_source = dialog.test_session().draft().to_owned();
+        let original_revision = dialog.test_session().revision();
+        let original_undo = dialog.test_session().undo_depth();
+        let original_redo = dialog.test_session().redo_depth();
+        let original_dirty = dialog.documents.is_dirty();
+        let original_path = dialog.documents.path().map(Path::to_path_buf);
+        let original_digest = dialog.documents.disk_digest();
+
+        dialog.test_set_next_file_picker_result(Some(png_path.clone()));
+        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "export_png");
+        let png = std::fs::read(&png_path).expect("read published PNG");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(image::load_from_memory(&png).is_ok());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message))
+                if message.contains(&format!("revision {original_revision}"))
+                    && message.contains("diagram.png")
+                    && message.contains("×")
+        ));
+
+        dialog.test_set_next_file_picker_result(None);
+        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "export_svg");
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message)) if message.contains("cancelled")
+        ));
+
+        dialog.test_set_next_file_picker_result(Some(occupied_path.clone()));
+        click_action(&mut dialog, &ctx, "menu_export");
+        click_action(&mut dialog, &ctx, "export_mermaid");
+        assert_eq!(std::fs::read(&occupied_path).unwrap(), occupied_bytes);
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Error(message)) if message.contains("occupied")
+        ));
+        assert_eq!(dialog.test_file_picker_calls(), 3);
+        assert_eq!(dialog.test_session().draft(), original_source);
+        assert_eq!(dialog.test_session().revision(), original_revision);
+        assert_eq!(dialog.test_session().undo_depth(), original_undo);
+        assert_eq!(dialog.test_session().redo_depth(), original_redo);
+        assert_eq!(dialog.documents.is_dirty(), original_dirty);
+        assert_eq!(dialog.documents.path(), original_path.as_deref());
+        assert_eq!(dialog.documents.disk_digest(), original_digest);
+    }
+
+    #[test]
+    fn diagram_studio_stale_and_pending_states_block_image_and_document_exports() {
+        let directory = tempfile::tempdir().expect("temporary export directory");
+        let stale_path = directory.path().join("stale.svg");
+        let mut stale = initialized_dialog();
+        stale.test_replace_source("flowchart TD\nA -->\n");
+        let stale_ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut stale, &stale_ctx);
+        }
+        stale.test_set_next_file_picker_result(Some(stale_path.clone()));
+        stale.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut stale, &stale_ctx);
+        assert_eq!(stale.test_file_picker_calls(), 0);
+        assert!(!stale_path.exists());
+        assert_eq!(stale.test_session().status().preview, PreviewState::Stale);
+        assert!(matches!(
+            &stale.message,
+            Some(StudioNotice::Error(message)) if message.contains("preview")
+        ));
+
+        let pending_path = directory.path().join("pending.mmd");
+        let mut pending = initialized_dialog();
+        let pending_ctx = egui::Context::default();
+        assert_eq!(
+            pending.documents.request_new().unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        pending.test_set_next_file_picker_result(Some(pending_path.clone()));
+        pending.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Mermaid,
+            ExportScale::One,
+        ));
+        frame(&mut pending, &pending_ctx);
+        assert_eq!(pending.test_file_picker_calls(), 0);
+        assert!(!pending_path.exists());
+        assert_eq!(
+            pending.documents.pending_transition(),
+            Some(&PendingDiagramTransition::New)
+        );
+        assert!(pending.documents.is_dirty());
+        assert!(matches!(
+            &pending.message,
+            Some(StudioNotice::Error(message)) if message.contains("pending document action")
+        ));
+    }
+
+    #[test]
+    fn diagram_studio_template_discard_replaces_equal_revision_and_resets_presentation() {
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.open();
+        dialog.test_replace_source("flowchart TD\nA[\"Old graph\"]\n");
+        let revision = dialog.test_session().revision();
+        assert_eq!(revision, 1);
+        let node_id = NodeId::new("A").unwrap();
+        dialog.set_selection(DiagramElement::Node(node_id.clone()), false);
+        dialog.property_draft = Some(PropertyDraft {
+            target: DiagramElement::Node(node_id),
+            basis_revision: revision,
+            fields: PropertyFields::Node {
+                label: "pending edit".into(),
+                shape: NodeShape::Rectangle,
+                group: None,
+            },
+        });
+        dialog.camera = Camera {
+            center: ScenePoint {
+                x: 900.0,
+                y: -400.0,
+            },
+            zoom: 3.0,
+            fit_next: false,
+        };
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        click_action(&mut dialog, &ctx, "menu_templates");
+        for name in ["template_linear", "template_decision", "template_process"] {
+            assert!(
+                dialog
+                    .test_action_rects
+                    .iter()
+                    .any(|(action, _, _)| action == name)
+            );
+        }
+        click_action(&mut dialog, &ctx, "template_linear");
+        assert_eq!(
+            dialog.documents.pending_transition(),
+            Some(&PendingDiagramTransition::ApplyTemplate(
+                DiagramTemplate::Linear
+            ))
+        );
+        click_action(&mut dialog, &ctx, "decision_discard");
+
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(
+            dialog.test_session().draft(),
+            DiagramTemplate::Linear.source()
+        );
+        assert_eq!(
+            dialog.test_session().status().preview,
+            PreviewState::Current
+        );
+        assert_eq!(dialog.documents.path(), None);
+        assert_eq!(dialog.documents.disk_digest(), None);
+        assert!(dialog.selection.is_none());
+        assert!(dialog.selected_nodes.is_empty());
+        assert!(dialog.property_draft.is_none());
+        assert!(dialog.drag.is_none());
+        assert_eq!(dialog.camera.zoom, 1.0);
+        assert_eq!(dialog.camera.center, ScenePoint::default());
+        assert!(dialog.camera.fit_next);
+        let cache = dialog.cache.as_ref().unwrap();
+        assert_eq!(cache.revision, revision);
+        let scene = cache.scene.as_ref().unwrap();
+        assert_eq!(scene.nodes.len(), 3);
+        assert!(scene.nodes.iter().any(|node| node.id.as_str() == "Start"));
+        assert!(!scene.nodes.iter().any(|node| node.id.as_str() == "A"));
+    }
+
+    #[test]
+    fn diagram_studio_auto_layout_is_one_undoable_edit_and_repeat_is_noop() {
+        let mut dialog = initialized_dialog();
+        dialog.test_replace_source("flowchart LR\nA --> B\nA --> C\nC --> D\n");
+        let overlapping_positions = dialog
+            .test_session()
+            .current_graph()
+            .unwrap()
+            .nodes
+            .iter()
+            .map(|node| NodePosition {
+                id: node.id.clone(),
+                position: Position::new(500.0, 500.0).unwrap(),
+            })
+            .collect::<Vec<_>>();
+        dialog
+            .documents
+            .apply_transaction(&[GraphOperation::MoveNodes {
+                positions: overlapping_positions,
+            }])
+            .unwrap();
+        dialog.refresh_cache();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let original_positions = current_node_positions(&dialog);
+        let revision = dialog.test_session().revision();
+        let undo_depth = dialog.test_session().undo_depth();
+
+        click_action(&mut dialog, &ctx, "auto_layout");
+        let layout_positions = current_node_positions(&dialog);
+        assert_ne!(layout_positions, original_positions);
+        assert_eq!(dialog.test_session().revision(), revision + 1);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth + 1);
+
+        click_action(&mut dialog, &ctx, "auto_layout");
+        assert_eq!(current_node_positions(&dialog), layout_positions);
+        assert_eq!(dialog.test_session().revision(), revision + 1);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth + 1);
+
+        dialog.test_pending_mutation = Some(PendingMutation::Undo);
+        frame(&mut dialog, &ctx);
+        assert_eq!(current_node_positions(&dialog), original_positions);
+        assert!(dialog.test_session().can_redo());
+    }
+
+    #[test]
+    fn diagram_studio_deleted_native_export_identity_normalizes_windows_path_spellings() {
+        let current_dir = std::env::current_dir().expect("resolve test working directory");
+        let test_root = current_dir.join("target/visual-studios");
+        std::fs::create_dir_all(&test_root).expect("create owned test evidence directory");
+        let directory = tempfile::Builder::new()
+            .prefix("diagram-export-path-")
+            .tempdir_in(test_root)
+            .expect("create path identity fixture");
+        let active_path = directory.path().join("Native.mld");
+        assert!(!active_path.exists(), "the compared native path is deleted");
+
+        let dot_alias = active_path.parent().unwrap().join(".").join("Native.mld");
+        assert!(same_export_destination(&active_path, &dot_alias).unwrap());
+        let relative = active_path
+            .strip_prefix(&current_dir)
+            .expect("fixture is under the repository root")
+            .to_path_buf();
+        assert!(same_export_destination(&active_path, &relative).unwrap());
+
+        #[cfg(windows)]
+        {
+            let ascii_case_variant = PathBuf::from(active_path.to_string_lossy().to_uppercase());
+            let verbatim = PathBuf::from(format!(r"\\?\{}", active_path.display()));
+            let unicode_upper_sigma = directory.path().join("sigma\u{03a3}.mld");
+            let unicode_lower_sigma = directory.path().join("sigma\u{03c3}.mld");
+            let unicode_final_sigma = directory.path().join("sigma\u{03c2}.mld");
+            assert!(same_export_destination(&active_path, &ascii_case_variant).unwrap());
+            assert!(same_export_destination(&active_path, &verbatim).unwrap());
+            assert!(
+                same_export_destination(&unicode_upper_sigma, &unicode_lower_sigma).unwrap(),
+                "Windows ordinal case-insensitive comparison folds capital and ordinary sigma"
+            );
+            assert!(
+                !same_export_destination(&unicode_upper_sigma, &unicode_final_sigma).unwrap(),
+                "the final sigma remains a distinct Windows filename"
+            );
+
+            let parent_alias = directory.path().with_extension("alias");
+            if std::os::windows::fs::symlink_dir(directory.path(), &parent_alias).is_ok() {
+                assert!(
+                    same_export_destination(&active_path, &parent_alias.join("Native.mld"))
+                        .unwrap()
+                );
+                std::fs::remove_dir(parent_alias).expect("remove temporary parent alias");
+            }
+        }
+    }
+
+    #[test]
+    fn diagram_studio_export_refuses_deleted_active_native_path_without_state_change() {
+        let current_dir = std::env::current_dir().expect("resolve test working directory");
+        let test_root = current_dir.join("target/visual-studios");
+        std::fs::create_dir_all(&test_root).expect("create owned test evidence directory");
+        let directory = tempfile::Builder::new()
+            .prefix("diagram-export-native-path-")
+            .tempdir_in(test_root)
+            .expect("create native path fixture");
+        let native_path = directory.path().join("native.mld");
+        let mut dialog = initialized_dialog();
+        dialog
+            .documents
+            .save_as(&native_path)
+            .expect("establish active native identity");
+        dialog.test_replace_source("flowchart TD\nA[\"Unsaved edit\"]\n");
+        let source = dialog.test_session().draft().to_owned();
+        let revision = dialog.test_session().revision();
+        let undo_depth = dialog.test_session().undo_depth();
+        let disk_digest = dialog.documents.disk_digest();
+        assert!(dialog.documents.is_dirty());
+        std::fs::remove_file(&native_path).expect("remove active file while keeping identity");
+
+        let relative = native_path
+            .strip_prefix(&current_dir)
+            .expect("fixture is under the repository root");
+        let selected_path = relative
+            .parent()
+            .unwrap()
+            .join(".")
+            .join(relative.file_name().unwrap());
+        dialog.test_set_next_file_picker_result(Some(selected_path));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert!(!native_path.exists());
+        assert_eq!(dialog.documents.path(), Some(native_path.as_path()));
+        assert_eq!(dialog.documents.disk_digest(), disk_digest);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+        assert!(dialog.documents.is_dirty());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Error(message)) if message.contains("active native Diagram document")
         ));
     }
 }
