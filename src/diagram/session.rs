@@ -260,6 +260,48 @@ impl DiagramSession {
         }
     }
 
+    /// Creates a new untitled session whose first edit is the supplied raw
+    /// source. Invalid Mermaid remains an exact NoPreview draft; it does not
+    /// inherit the blank session's empty last-good graph as a stale preview.
+    pub(crate) fn from_fresh_source(source: impl AsRef<str>) -> Result<Self, DiagramSessionError> {
+        let source = source.as_ref();
+        if source.len() > MAX_MERMAID_SOURCE_BYTES {
+            return Err(DiagramSessionError::SourceTooLarge {
+                max_bytes: MAX_MERMAID_SOURCE_BYTES,
+            });
+        }
+        if source.is_empty() {
+            return Ok(Self::new());
+        }
+
+        let mut session = Self::new();
+        let before = session.current.clone();
+        let after = match parse_mermaid(source) {
+            Ok(parsed) => SessionSnapshot {
+                draft: source.to_owned(),
+                last_good: Some(session.reconcile_source(parsed, source)?),
+            },
+            Err(_) => SessionSnapshot {
+                draft: source.to_owned(),
+                last_good: None,
+            },
+        };
+        let next_revision = session.next_revision()?;
+        let next_edge_id = after
+            .last_good
+            .as_ref()
+            .map_or(session.next_edge_id, |last_good| {
+                session.next_edge_id.max(last_good.graph.next_edge_id)
+            });
+        let entry = make_history_entry(before, after.clone())?;
+
+        session.history.record(entry);
+        session.current = after;
+        session.revision = next_revision;
+        session.next_edge_id = next_edge_id;
+        Ok(session)
+    }
+
     pub fn draft(&self) -> &str {
         &self.current.draft
     }
@@ -1036,6 +1078,52 @@ mod tests {
 
     fn baseline(session: &DiagramSession) -> Vec<u8> {
         session.encode().unwrap()
+    }
+
+    #[test]
+    fn diagram_session_fresh_invalid_source_is_exact_no_preview_and_codec_roundtrips() {
+        let source = "\u{feff}%% keep these bytes\r\nflowchart TD\r\nA --> B\r\n";
+        let session = DiagramSession::from_fresh_source(source).unwrap();
+        assert_eq!(session.draft(), source);
+        assert_eq!(session.status().preview, PreviewState::NoPreview);
+        assert_eq!(session.last_good_source(), None);
+        assert_eq!(session.revision(), 1);
+        assert_eq!(session.undo_depth(), 1);
+        assert!(session.is_dirty());
+
+        let mut decoded = DiagramSession::decode(&session.encode().unwrap()).unwrap();
+        assert_eq!(decoded.draft(), source);
+        assert_eq!(decoded.status().preview, PreviewState::NoPreview);
+        assert_eq!(decoded.last_good_source(), None);
+        assert_eq!(decoded.revision(), 1);
+        assert_eq!(decoded.undo_depth(), 1);
+        assert!(!decoded.is_dirty());
+        assert!(decoded.undo().unwrap());
+        assert_eq!(decoded.draft(), "");
+        assert_eq!(decoded.status().preview, PreviewState::Current);
+        assert!(decoded.redo().unwrap());
+        assert_eq!(decoded.draft(), source);
+        assert_eq!(decoded.status().preview, PreviewState::NoPreview);
+    }
+
+    #[test]
+    fn diagram_session_fresh_supported_source_has_one_undoable_initial_edit() {
+        let source = "flowchart LR\r\nA[\"Alpha\"]\r\nB[\"Beta\"]\r\nA --> B\r\n";
+        let mut session = DiagramSession::from_fresh_source(source).unwrap();
+        assert_eq!(session.draft(), source);
+        assert_eq!(session.status().preview, PreviewState::Current);
+        assert_eq!(session.revision(), 1);
+        assert_eq!(session.undo_depth(), 1);
+        assert!(session.is_dirty());
+        assert_eq!(session.current_graph().unwrap().nodes.len(), 2);
+
+        assert!(session.undo().unwrap());
+        assert_eq!(session.draft(), "");
+        assert_eq!(session.status().preview, PreviewState::Current);
+        assert_eq!(session.revision(), 2);
+        assert!(session.redo().unwrap());
+        assert_eq!(session.draft(), source);
+        assert_eq!(session.status().preview, PreviewState::Current);
     }
 
     #[test]

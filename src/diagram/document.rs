@@ -1,7 +1,12 @@
 //! Explicit native document identity and replacement/close transitions.
 
-use super::persistence::{DiagramDocumentStore, DiagramPersistenceError, LoadedDiagramDocument};
+use super::layout::{DiagramLayoutError, layout_positions};
+use super::persistence::{
+    DiagramDocumentStore, DiagramPersistenceError, LoadedDiagramDocument, MermaidFile,
+    MermaidImportError,
+};
 use super::session::{DiagramSession, DiagramSessionError, GraphOperation};
+use super::templates::{DiagramTemplate, DiagramTemplateError};
 use crate::common::atomic_file::save_atomic;
 use std::path::{Path, PathBuf};
 
@@ -9,6 +14,8 @@ use std::path::{Path, PathBuf};
 pub enum PendingDiagramTransition {
     New,
     Open(PathBuf),
+    ImportMermaid(MermaidFile),
+    ApplyTemplate(DiagramTemplate),
     Close,
 }
 
@@ -34,6 +41,9 @@ pub enum DiagramDocumentError {
     NoPendingTransition,
     Session(DiagramSessionError),
     Persistence(DiagramPersistenceError),
+    MermaidImport(MermaidImportError),
+    Template(DiagramTemplateError),
+    Layout(DiagramLayoutError),
 }
 
 impl std::fmt::Display for DiagramDocumentError {
@@ -49,6 +59,9 @@ impl std::fmt::Display for DiagramDocumentError {
             }
             Self::Session(error) => error.fmt(formatter),
             Self::Persistence(error) => error.fmt(formatter),
+            Self::MermaidImport(error) => error.fmt(formatter),
+            Self::Template(error) => error.fmt(formatter),
+            Self::Layout(error) => error.fmt(formatter),
         }
     }
 }
@@ -58,6 +71,9 @@ impl std::error::Error for DiagramDocumentError {
         match self {
             Self::Session(error) => Some(error),
             Self::Persistence(error) => Some(error),
+            Self::MermaidImport(error) => Some(error),
+            Self::Template(error) => Some(error),
+            Self::Layout(error) => Some(error),
             _ => None,
         }
     }
@@ -72,6 +88,24 @@ impl From<DiagramSessionError> for DiagramDocumentError {
 impl From<DiagramPersistenceError> for DiagramDocumentError {
     fn from(error: DiagramPersistenceError) -> Self {
         Self::Persistence(error)
+    }
+}
+
+impl From<MermaidImportError> for DiagramDocumentError {
+    fn from(error: MermaidImportError) -> Self {
+        Self::MermaidImport(error)
+    }
+}
+
+impl From<DiagramTemplateError> for DiagramDocumentError {
+    fn from(error: DiagramTemplateError) -> Self {
+        Self::Template(error)
+    }
+}
+
+impl From<DiagramLayoutError> for DiagramDocumentError {
+    fn from(error: DiagramLayoutError) -> Self {
+        Self::Layout(error)
     }
 }
 
@@ -95,6 +129,14 @@ impl ActiveDocument {
             session: loaded.session,
             path: Some(path),
             disk_digest: Some(loaded.disk_digest),
+        }
+    }
+
+    fn untitled(session: DiagramSession) -> Self {
+        Self {
+            session,
+            path: None,
+            disk_digest: None,
         }
     }
 }
@@ -180,6 +222,20 @@ impl DiagramDocumentController {
         self.ensure_editable()?.redo().map_err(Into::into)
     }
 
+    /// Applies deterministic positions as one guarded, undoable session edit.
+    pub fn auto_layout(&mut self) -> Result<bool, DiagramDocumentError> {
+        let session = self.ensure_editable()?;
+        let graph = session
+            .current_graph()
+            .ok_or(DiagramDocumentError::Session(
+                DiagramSessionError::VisualEditsBlocked,
+            ))?;
+        let positions = layout_positions(graph)?;
+        session
+            .apply_transaction(&[GraphOperation::MoveNodes { positions }])
+            .map_err(Into::into)
+    }
+
     /// Save always writes the complete native session, even when source/graph
     /// content is clean, so revision, allocator, and history state are retained.
     pub fn save(&mut self) -> Result<(), DiagramDocumentError> {
@@ -223,6 +279,45 @@ impl DiagramDocumentController {
             return Ok(TransitionOutcome::DecisionRequired);
         }
         self.active = Some(ActiveDocument::loaded(loaded, path));
+        Ok(TransitionOutcome::Applied)
+    }
+
+    /// Requests a bounded UTF-8 `.mmd` import. Pending imports retain the path
+    /// and reread it when applied after a Save decision.
+    pub fn request_mermaid_import(
+        &mut self,
+        file: MermaidFile,
+    ) -> Result<TransitionOutcome, DiagramDocumentError> {
+        let requested = PendingDiagramTransition::ImportMermaid(file.clone());
+        if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
+            return Ok(outcome);
+        }
+
+        let source = self.store.read_mermaid(&file)?;
+        let candidate = DiagramSession::from_fresh_source(source)?;
+        if self.is_dirty() {
+            self.pending = Some(requested);
+            return Ok(TransitionOutcome::DecisionRequired);
+        }
+        self.active = Some(ActiveDocument::untitled(candidate));
+        Ok(TransitionOutcome::Applied)
+    }
+
+    /// Requests a built-in validated template as a new untitled session.
+    pub fn request_template(
+        &mut self,
+        template: DiagramTemplate,
+    ) -> Result<TransitionOutcome, DiagramDocumentError> {
+        let requested = PendingDiagramTransition::ApplyTemplate(template);
+        if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
+            return Ok(outcome);
+        }
+        let candidate = template.create_session()?;
+        if self.is_dirty() {
+            self.pending = Some(requested);
+            return Ok(TransitionOutcome::DecisionRequired);
+        }
+        self.active = Some(ActiveDocument::untitled(candidate));
         Ok(TransitionOutcome::Applied)
     }
 
@@ -313,6 +408,14 @@ impl DiagramDocumentController {
                 let loaded = self.store.open(&path)?;
                 self.active = Some(ActiveDocument::loaded(loaded, path));
             }
+            PendingDiagramTransition::ImportMermaid(file) => {
+                let source = self.store.read_mermaid(&file)?;
+                let session = DiagramSession::from_fresh_source(source)?;
+                self.active = Some(ActiveDocument::untitled(session));
+            }
+            PendingDiagramTransition::ApplyTemplate(template) => {
+                self.active = Some(ActiveDocument::untitled(template.create_session()?));
+            }
         }
         self.pending = None;
         Ok(TransitionOutcome::Applied)
@@ -398,8 +501,9 @@ mod tests {
         TransitionDecision, TransitionOutcome,
     };
     use crate::diagram::{
-        DiagramPersistenceError, DiagramSession, DiskConflictKind, FlowDirection, GraphOperation,
-        MAX_DIAGRAM_DOCUMENT_BYTES, NodeId, NodePosition, Position, PreviewState,
+        DiagramPersistenceError, DiagramSession, DiagramTemplate, DiskConflictKind, FlowDirection,
+        GraphOperation, MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile, MermaidImportError, NodeId,
+        NodePosition, Position, PreviewState,
     };
     use std::fs;
 
@@ -908,6 +1012,183 @@ mod tests {
             controller.session().unwrap().draft(),
             "flowchart TD\nUnsaved version\n"
         );
+        assert!(controller.is_dirty());
+        assert_eq!(controller.pending_transition(), pending.as_ref());
+    }
+
+    #[test]
+    fn diagram_document_mermaid_import_is_exact_untitled_and_reports_no_preview() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = "\u{feff}%% retain BOM, CRLF and comment\r\nflowchart TD\r\nA --> B\r\n";
+        let path = directory.path().join("unsupported.mmd");
+        let native_path = directory.path().join("before-import.native");
+        fs::write(&path, source.as_bytes()).unwrap();
+
+        let mut controller = DiagramDocumentController::new();
+        controller.save_as(&native_path).unwrap();
+        assert_eq!(controller.path(), Some(native_path.as_path()));
+        let invalid_utf8 = directory.path().join("invalid.mmd");
+        fs::write(&invalid_utf8, [0xff_u8]).unwrap();
+        assert!(matches!(
+            controller.request_mermaid_import(MermaidFile::new(&invalid_utf8).unwrap()),
+            Err(DiagramDocumentError::MermaidImport(
+                MermaidImportError::InvalidUtf8(_)
+            ))
+        ));
+        assert_eq!(controller.session().unwrap().draft(), "");
+        assert_eq!(controller.path(), Some(native_path.as_path()));
+        assert_eq!(controller.pending_transition(), None);
+
+        assert_eq!(
+            controller
+                .request_mermaid_import(MermaidFile::new(&path).unwrap())
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        let session = controller.session().unwrap();
+        assert_eq!(session.draft(), source);
+        assert_eq!(session.status().preview, PreviewState::NoPreview);
+        assert_eq!(session.last_good_source(), None);
+        assert_eq!(session.revision(), 1);
+        assert_eq!(session.undo_depth(), 1);
+        assert!(session.is_dirty());
+        assert_eq!(controller.path(), None);
+        assert_eq!(controller.disk_digest(), None);
+    }
+
+    #[test]
+    fn diagram_document_dirty_template_replacement_cancels_or_discards_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let native_path = directory.path().join("before-template.native");
+        let mut controller = DiagramDocumentController::new();
+        controller.replace_source("flowchart TD\nOld\n").unwrap();
+        controller.save_as(&native_path).unwrap();
+        controller
+            .replace_source("flowchart TD\nEdited old\n")
+            .unwrap();
+        let original = controller.session().unwrap().draft().to_owned();
+
+        assert_eq!(
+            controller
+                .request_template(DiagramTemplate::Decision)
+                .unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            controller.pending_transition(),
+            Some(&PendingDiagramTransition::ApplyTemplate(
+                DiagramTemplate::Decision
+            ))
+        );
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Cancel)
+                .unwrap(),
+            TransitionOutcome::Cancelled
+        );
+        assert_eq!(controller.session().unwrap().draft(), original);
+        assert!(controller.is_dirty());
+        assert_eq!(controller.path(), Some(native_path.as_path()));
+
+        controller
+            .request_template(DiagramTemplate::Decision)
+            .unwrap();
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Discard)
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        let session = controller.session().unwrap();
+        assert_eq!(session.draft(), DiagramTemplate::Decision.source());
+        assert_eq!(session.status().preview, PreviewState::Current);
+        assert_eq!(session.revision(), 1);
+        assert_eq!(session.undo_depth(), 1);
+        assert_eq!(controller.path(), None);
+        assert_eq!(controller.disk_digest(), None);
+    }
+
+    #[test]
+    fn diagram_document_pending_import_rereads_after_single_save_as_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let import_path = directory.path().join("target.mmd");
+        let save_as_path = directory.path().join("before-import.native");
+        fs::write(&import_path, b"flowchart LR\nInitial\n").unwrap();
+
+        let mut controller = DiagramDocumentController::new();
+        controller.replace_source(SUPPORTED).unwrap();
+        assert_eq!(
+            controller
+                .request_mermaid_import(MermaidFile::new(&import_path).unwrap())
+                .unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        let reread_source = "\u{feff}%% changed after request\r\nflowchart TD\r\nA --> B\r\n";
+        fs::write(&import_path, reread_source.as_bytes()).unwrap();
+
+        assert!(matches!(
+            controller.resolve_pending_save_as_with_writer(&save_as_path, |_path, _bytes| {
+                anyhow::bail!("injected Save As failure")
+            }),
+            Err(DiagramDocumentError::Persistence(
+                DiagramPersistenceError::AtomicWrite { .. }
+            ))
+        ));
+        assert!(!save_as_path.exists());
+        assert_eq!(controller.session().unwrap().draft(), SUPPORTED);
+        assert_eq!(
+            controller.pending_transition(),
+            Some(&PendingDiagramTransition::ImportMermaid(
+                MermaidFile::new(&import_path).unwrap()
+            ))
+        );
+        assert!(controller.is_dirty());
+
+        let mut writes = 0;
+        assert_eq!(
+            controller
+                .resolve_pending_save_as_with_writer(&save_as_path, |path, bytes| {
+                    writes += 1;
+                    crate::common::atomic_file::save_atomic(path, bytes)
+                })
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(writes, 1);
+        let saved_before_import =
+            DiagramSession::decode(&fs::read(&save_as_path).unwrap()).unwrap();
+        assert_eq!(saved_before_import.draft(), SUPPORTED);
+
+        let imported = controller.session().unwrap();
+        assert_eq!(imported.draft(), reread_source);
+        assert_eq!(imported.status().preview, PreviewState::NoPreview);
+        assert_eq!(imported.revision(), 1);
+        assert_eq!(imported.undo_depth(), 1);
+        assert_eq!(controller.path(), None);
+        assert!(controller.is_dirty());
+        assert_eq!(controller.pending_transition(), None);
+    }
+
+    #[test]
+    fn diagram_document_pending_import_reread_failure_keeps_active_draft_and_decision() {
+        let directory = tempfile::tempdir().unwrap();
+        let import_path = directory.path().join("temporary.mmd");
+        fs::write(&import_path, b"flowchart LR\nCandidate\n").unwrap();
+
+        let mut controller = DiagramDocumentController::new();
+        controller.replace_source(SUPPORTED).unwrap();
+        controller
+            .request_mermaid_import(MermaidFile::new(&import_path).unwrap())
+            .unwrap();
+        let pending = controller.pending_transition().cloned();
+        fs::remove_file(&import_path).unwrap();
+
+        assert!(matches!(
+            controller.resolve_pending(TransitionDecision::Discard),
+            Err(DiagramDocumentError::MermaidImport(MermaidImportError::NotFound(path)))
+                if path == import_path
+        ));
+        assert_eq!(controller.session().unwrap().draft(), SUPPORTED);
         assert!(controller.is_dirty());
         assert_eq!(controller.pending_transition(), pending.as_ref());
     }

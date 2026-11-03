@@ -1,6 +1,7 @@
 //! Bounded, explicit-path persistence for native Diagram Studio documents.
 
 use super::codec::{DiagramCodecError, MAX_DIAGRAM_SESSION_BYTES};
+use super::mermaid::MAX_MERMAID_SOURCE_BYTES;
 use super::session::DiagramSession;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -8,6 +9,97 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 pub const MAX_DIAGRAM_DOCUMENT_BYTES: usize = MAX_DIAGRAM_SESSION_BYTES;
+
+/// An explicitly selected UTF-8 Mermaid source file with the `.mmd` extension.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MermaidFile(PathBuf);
+
+impl MermaidFile {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, MermaidImportError> {
+        let path = path.as_ref();
+        if !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mmd"))
+        {
+            return Err(MermaidImportError::WrongExtension(path.to_path_buf()));
+        }
+        Ok(Self(path.to_path_buf()))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[derive(Debug)]
+pub enum MermaidImportError {
+    WrongExtension(PathBuf),
+    UnsafePath(PathBuf),
+    NotFound(PathBuf),
+    Oversized {
+        path: PathBuf,
+        max_bytes: usize,
+    },
+    InvalidUtf8(PathBuf),
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+}
+
+impl std::fmt::Display for MermaidImportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongExtension(path) => write!(
+                formatter,
+                "Mermaid import requires a .mmd file: {}",
+                path.display()
+            ),
+            Self::UnsafePath(path) => write!(
+                formatter,
+                "Mermaid source is not a regular file: {}",
+                path.display()
+            ),
+            Self::NotFound(path) => {
+                write!(
+                    formatter,
+                    "Mermaid source was not found: {}",
+                    path.display()
+                )
+            }
+            Self::Oversized { path, max_bytes } => write!(
+                formatter,
+                "Mermaid source at {} exceeds the {max_bytes}-byte limit",
+                path.display()
+            ),
+            Self::InvalidUtf8(path) => write!(
+                formatter,
+                "Mermaid source is not valid UTF-8: {}",
+                path.display()
+            ),
+            Self::Io {
+                operation,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "failed to {operation} Mermaid source {}: {source}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MermaidImportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiskConflictKind {
@@ -130,6 +222,66 @@ pub(super) struct LoadedDiagramDocument {
 pub(super) struct DiagramDocumentStore;
 
 impl DiagramDocumentStore {
+    pub(super) fn read_mermaid(&self, file: &MermaidFile) -> Result<String, MermaidImportError> {
+        let path = file.path();
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(MermaidImportError::NotFound(path.to_path_buf()));
+            }
+            Err(source) => {
+                return Err(MermaidImportError::Io {
+                    operation: "inspect",
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        if !metadata.file_type().is_file() {
+            return Err(MermaidImportError::UnsafePath(path.to_path_buf()));
+        }
+        if metadata.len() > MAX_MERMAID_SOURCE_BYTES as u64 {
+            return Err(MermaidImportError::Oversized {
+                path: path.to_path_buf(),
+                max_bytes: MAX_MERMAID_SOURCE_BYTES,
+            });
+        }
+
+        let file_handle = File::open(path).map_err(|source| MermaidImportError::Io {
+            operation: "read",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let opened_metadata = file_handle
+            .metadata()
+            .map_err(|source| MermaidImportError::Io {
+                operation: "inspect opened file",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if !opened_metadata.file_type().is_file() {
+            return Err(MermaidImportError::UnsafePath(path.to_path_buf()));
+        }
+
+        let mut bytes =
+            Vec::with_capacity(metadata.len().min(MAX_MERMAID_SOURCE_BYTES as u64) as usize);
+        file_handle
+            .take((MAX_MERMAID_SOURCE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|source| MermaidImportError::Io {
+                operation: "read",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if bytes.len() > MAX_MERMAID_SOURCE_BYTES {
+            return Err(MermaidImportError::Oversized {
+                path: path.to_path_buf(),
+                max_bytes: MAX_MERMAID_SOURCE_BYTES,
+            });
+        }
+        String::from_utf8(bytes).map_err(|_| MermaidImportError::InvalidUtf8(path.to_path_buf()))
+    }
+
     pub(super) fn open(
         &self,
         path: impl AsRef<Path>,
@@ -288,7 +440,8 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagramDocumentStore, DiagramPersistenceError, DiskConflictKind, MAX_DIAGRAM_DOCUMENT_BYTES,
+        DiagramDocumentStore, DiagramPersistenceError, DiskConflictKind,
+        MAX_DIAGRAM_DOCUMENT_BYTES, MAX_MERMAID_SOURCE_BYTES, MermaidFile, MermaidImportError,
     };
     use crate::common::atomic_file::save_atomic;
     use crate::diagram::DiagramSession;
@@ -374,5 +527,43 @@ mod tests {
             Err(DiagramPersistenceError::AtomicWrite { .. })
         ));
         assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn diagram_mermaid_import_reads_exact_utf8_and_rejects_bad_paths_and_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DiagramDocumentStore;
+        let source = "\u{feff}%% preserve BOM and CRLF\r\nflowchart TD\r\nA --> B\r\n";
+        let path = directory.path().join("draft.mmd");
+        fs::write(&path, source.as_bytes()).unwrap();
+        let file = MermaidFile::new(&path).unwrap();
+        assert_eq!(store.read_mermaid(&file).unwrap(), source);
+
+        assert!(matches!(
+            MermaidFile::new(directory.path().join("draft.txt")),
+            Err(MermaidImportError::WrongExtension(_))
+        ));
+
+        let invalid_utf8 = directory.path().join("invalid.mmd");
+        fs::write(&invalid_utf8, [0x66_u8, 0x6c, 0xff]).unwrap();
+        assert!(matches!(
+            store.read_mermaid(&MermaidFile::new(&invalid_utf8).unwrap()),
+            Err(MermaidImportError::InvalidUtf8(path)) if path == invalid_utf8
+        ));
+
+        let oversized = directory.path().join("oversized.mmd");
+        fs::write(&oversized, vec![b'x'; MAX_MERMAID_SOURCE_BYTES + 1]).unwrap();
+        assert!(matches!(
+            store.read_mermaid(&MermaidFile::new(&oversized).unwrap()),
+            Err(MermaidImportError::Oversized { max_bytes, .. })
+                if max_bytes == MAX_MERMAID_SOURCE_BYTES
+        ));
+
+        let directory_path = directory.path().join("folder.mmd");
+        fs::create_dir(&directory_path).unwrap();
+        assert!(matches!(
+            store.read_mermaid(&MermaidFile::new(&directory_path).unwrap()),
+            Err(MermaidImportError::UnsafePath(_))
+        ));
     }
 }

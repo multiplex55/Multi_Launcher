@@ -1575,6 +1575,12 @@ impl DiagramStudioDialog {
                             PendingDiagramTransition::Open(path) => {
                                 format!("opening {}", path.display())
                             }
+                            PendingDiagramTransition::ImportMermaid(file) => {
+                                format!("importing {}", file.path().display())
+                            }
+                            PendingDiagramTransition::ApplyTemplate(template) => {
+                                format!("using the {} template", template.name())
+                            }
                             PendingDiagramTransition::Close => "closing this diagram".to_owned(),
                         };
                         ui.label(format!("Save changes before {description}?"));

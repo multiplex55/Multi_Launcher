@@ -2,11 +2,13 @@
 
 mod codec;
 mod document;
+mod layout;
 mod mermaid;
 mod model;
 mod persistence;
 mod scene;
 mod session;
+mod templates;
 
 pub use codec::{
     DIAGRAM_SESSION_FORMAT_VERSION, DiagramCodecError, MAX_DIAGRAM_SESSION_BYTES, decode_session,
@@ -17,6 +19,7 @@ pub use document::{
     TransitionOutcome,
 };
 
+pub use layout::{DiagramLayoutError, layout_positions};
 pub use mermaid::{
     MAX_MERMAID_LINE_BYTES, MAX_MERMAID_SOURCE_BYTES, MAX_MERMAID_SOURCE_LINES, MermaidDiagnostic,
     MermaidDiagnosticKind, MermaidFormatError, SourceSpan, format_mermaid, parse_mermaid,
@@ -27,7 +30,10 @@ pub use model::{
     MAX_GROUP_ID_BYTES, MAX_LABEL_BYTES, MAX_NODE_ID_BYTES, MAX_POSITION_ABS, NodeId, NodeShape,
     Position,
 };
-pub use persistence::{DiagramPersistenceError, DiskConflictKind, MAX_DIAGRAM_DOCUMENT_BYTES};
+pub use persistence::{
+    DiagramPersistenceError, DiskConflictKind, MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile,
+    MermaidImportError,
+};
 pub use scene::{
     ArrowHead, CubicBezier, DiagramScene, MAX_SCENE_COORDINATE_ABS, PreparedText, PreparedTextLine,
     SceneEdge, SceneError, SceneGroup, SceneMetrics, SceneNode, ScenePoint, SceneRect,
@@ -38,3 +44,4 @@ pub use session::{
     MAX_DIAGRAM_HISTORY_ENTRIES, MAX_DIAGRAM_TRANSACTION_OPERATIONS, NodePosition, PreviewState,
     SavedContentSnapshot, SessionStatus,
 };
+pub use templates::{DiagramTemplate, DiagramTemplateError};
