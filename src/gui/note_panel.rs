@@ -11,9 +11,12 @@ use crate::gui::note_find_preview::{
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::notes_markdown::{
-    MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
-    PlainLinkConversionReport, analyze_markdown, convert_plain_links,
-    task_list::toggle_task_marker,
+    MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout, MarkdownEditError, MarkdownHeading,
+    MarkdownInlineFormat, MarkdownSection, MarkdownTaskItem, ParsedMarkdownTable,
+    PlainLinkConversionReport, PreparedMarkdownEdit, analyze_markdown, convert_plain_links,
+    prepare_block_snippet, prepare_inline_format, prepare_insert_column, prepare_insert_row,
+    prepare_insert_table, prepare_remove_column, prepare_remove_row, prepare_set_cell,
+    table_at_byte, task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
     Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
@@ -1239,6 +1242,16 @@ enum FindNavigation {
 enum FindReplacementAction {
     Current,
     All,
+}
+
+#[derive(Clone, Copy)]
+enum TableEditOperation {
+    InsertTable,
+    InsertRowBelow,
+    RemoveRow,
+    InsertColumnRight,
+    RemoveColumn,
+    ReplaceCellWithSelection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3041,6 +3054,219 @@ impl NotePanel {
                 before_revision,
                 after_revision: self.note_find.content_revision(),
             });
+    }
+
+    fn current_editor_byte_range(
+        &self,
+        ctx: &egui::Context,
+        id: egui::Id,
+    ) -> std::ops::Range<usize> {
+        if let Some((start, end)) = self.resolve_selection(ctx, id) {
+            let (start, end) = char_range_to_byte_range(&self.note.content, start, end);
+            return start..end;
+        }
+
+        let char_index = egui::widgets::text_edit::TextEditState::load(ctx, id)
+            .and_then(|state| state.cursor.char_range())
+            .map(|range| range.primary.index.0)
+            .unwrap_or_else(|| self.note.content.chars().count());
+        let byte_index = char_to_byte_index(&self.note.content, char_index);
+        byte_index..byte_index
+    }
+
+    fn apply_prepared_markdown_edit(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        prepared: PreparedMarkdownEdit,
+    ) -> Result<bool, MarkdownEditError> {
+        self.apply_prepared_markdown_edit_with_selection(ctx, id, prepared, None)
+    }
+
+    fn apply_prepared_markdown_edit_with_selection(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        prepared: PreparedMarkdownEdit,
+        selection_after: Option<std::ops::Range<usize>>,
+    ) -> Result<bool, MarkdownEditError> {
+        if self.last_textedit_id != Some(id) {
+            return Err(MarkdownEditError::InvalidParameter(
+                "the active note editor changed before the edit was applied",
+            ));
+        }
+        let before_content = self.note.content.clone();
+        let applied = prepared.apply(&before_content)?;
+        if applied.source == before_content {
+            return Ok(false);
+        }
+
+        let before_revision = self.note_find.content_revision();
+        let selection_after = selection_after.filter(|range| {
+            range.start <= range.end
+                && range.end <= applied.source.len()
+                && applied.source.is_char_boundary(range.start)
+                && applied.source.is_char_boundary(range.end)
+        });
+        let after_cursor = selection_after.as_ref().map_or_else(
+            || {
+                egui::text::CCursorRange::one(egui::text::CCursor::new(byte_to_char_index(
+                    &applied.source,
+                    applied.selection.end,
+                )))
+            },
+            |range| {
+                egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(byte_to_char_index(&applied.source, range.start)),
+                    egui::text::CCursor::new(byte_to_char_index(&applied.source, range.end)),
+                )
+            },
+        );
+        self.replacement_history_mutation =
+            Some(ReplacementHistoryMutation::Record { before_revision });
+        self.replace_content_from_mutation(applied.source.clone(), ctx.input(|input| input.time));
+        self.add_replacement_undo_history(
+            ctx,
+            &before_content,
+            &applied.source,
+            after_cursor,
+            before_revision,
+        );
+        self.pending_selection = selection_after.map(|range| {
+            (
+                byte_to_char_index(&applied.source, range.start),
+                byte_to_char_index(&applied.source, range.end),
+            )
+        });
+        self.pending_cursor_position = None;
+        self.focus_textedit_next_frame = true;
+        Ok(true)
+    }
+
+    fn apply_wrapped_markdown_format(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        app: &mut LauncherApp,
+        format: MarkdownInlineFormat,
+        opening_marker_bytes: usize,
+    ) {
+        let range = self.current_editor_byte_range(ctx, id);
+        if range.is_empty() {
+            // Bold and Italic have historically been selection-only actions.
+            return;
+        }
+        let selection_after = range.start + opening_marker_bytes..range.end + opening_marker_bytes;
+        let prepared = prepare_inline_format(&self.note.content, range, format);
+        match prepared {
+            Ok(prepared) => {
+                if let Err(error) = self.apply_prepared_markdown_edit_with_selection(
+                    ctx,
+                    id,
+                    prepared,
+                    Some(selection_after),
+                ) {
+                    app.report_error("notes.markdown", error.to_string());
+                }
+            }
+            Err(error) => app.report_error("notes.markdown", error.to_string()),
+        }
+    }
+
+    fn report_markdown_edit_result<E: std::fmt::Display>(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        app: &mut LauncherApp,
+        prepared: Result<PreparedMarkdownEdit, E>,
+    ) {
+        match prepared {
+            Ok(prepared) => {
+                if let Err(error) = self.apply_prepared_markdown_edit(ctx, id, prepared) {
+                    app.report_error("notes.markdown", error.to_string());
+                }
+            }
+            Err(error) => app.report_error("notes.markdown", error.to_string()),
+        }
+    }
+
+    fn current_table_context(
+        &self,
+        ctx: &egui::Context,
+        id: egui::Id,
+    ) -> Option<(ParsedMarkdownTable, usize, usize)> {
+        let range = self.current_editor_byte_range(ctx, id);
+        let table = table_at_byte(&self.note.content, range.start)
+            .ok()
+            .flatten()?;
+        let cursor = range.start;
+        let (row_index, row) = table.rows().iter().enumerate().find(|(_, row)| {
+            let range = row.byte_range();
+            cursor >= range.start && cursor <= range.end
+        })?;
+        let column_index = row
+            .cell_ranges()
+            .iter()
+            .position(|cell| cursor >= cell.start && cursor <= cell.end)?;
+        Some((table, row_index, column_index))
+    }
+
+    fn prepare_current_table_edit(
+        &self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        operation: TableEditOperation,
+    ) -> Result<PreparedMarkdownEdit, crate::notes_markdown::TableEditError> {
+        match operation {
+            TableEditOperation::InsertTable => {
+                let range = self.current_editor_byte_range(ctx, id);
+                prepare_insert_table(
+                    &self.note.content,
+                    range.start,
+                    &["Column 1".into(), "Column 2".into()],
+                )
+            }
+            TableEditOperation::ReplaceCellWithSelection => {
+                let range = self.current_editor_byte_range(ctx, id);
+                let Some((table, row, column)) = self.current_table_context(ctx, id) else {
+                    return Err(crate::notes_markdown::TableEditError::NotFound);
+                };
+                let Some(value) = self
+                    .note
+                    .content
+                    .get(range)
+                    .filter(|value| !value.is_empty())
+                else {
+                    return Err(crate::notes_markdown::TableEditError::InvalidCellText);
+                };
+                prepare_set_cell(&self.note.content, &table, row, column, value)
+            }
+            TableEditOperation::InsertRowBelow => {
+                let (table, row, _) = self
+                    .current_table_context(ctx, id)
+                    .ok_or(crate::notes_markdown::TableEditError::NotFound)?;
+                let cells = vec![String::new(); table.alignments().len()];
+                prepare_insert_row(&self.note.content, &table, row, &cells)
+            }
+            TableEditOperation::RemoveRow => {
+                let (table, row, _) = self
+                    .current_table_context(ctx, id)
+                    .ok_or(crate::notes_markdown::TableEditError::NotFound)?;
+                prepare_remove_row(&self.note.content, &table, row)
+            }
+            TableEditOperation::InsertColumnRight => {
+                let (table, _, column) = self
+                    .current_table_context(ctx, id)
+                    .ok_or(crate::notes_markdown::TableEditError::NotFound)?;
+                prepare_insert_column(&self.note.content, &table, column + 1, "New column")
+            }
+            TableEditOperation::RemoveColumn => {
+                let (table, _, column) = self
+                    .current_table_context(ctx, id)
+                    .ok_or(crate::notes_markdown::TableEditError::NotFound)?;
+                prepare_remove_column(&self.note.content, &table, column)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -6180,13 +6406,126 @@ impl NotePanel {
                 ui.close();
             }
             if ui.button("Bold Selection").clicked() {
-                self.wrap_selection(ctx, id, "**", "**");
+                self.apply_wrapped_markdown_format(ctx, id, app, MarkdownInlineFormat::Strong, 2);
                 ui.close();
             }
             if ui.button("Italic Selection").clicked() {
-                self.wrap_selection(ctx, id, "*", "*");
+                self.apply_wrapped_markdown_format(ctx, id, app, MarkdownInlineFormat::Emphasis, 1);
                 ui.close();
             }
+            if ui.button("Strikethrough Selection").clicked() {
+                let range = self.current_editor_byte_range(ctx, id);
+                let prepared =
+                    prepare_inline_format(&self.note.content, range, MarkdownInlineFormat::Strike);
+                self.report_markdown_edit_result(ctx, id, app, prepared);
+                ui.close();
+            }
+            if ui.button("Inline Code").clicked() {
+                let range = self.current_editor_byte_range(ctx, id);
+                let prepared =
+                    prepare_inline_format(&self.note.content, range, MarkdownInlineFormat::Code);
+                self.report_markdown_edit_result(ctx, id, app, prepared);
+                ui.close();
+            }
+            ui.menu_button("Block snippet", |ui| {
+                for (label, level) in [("Heading 1", 1), ("Heading 2", 2), ("Heading 3", 3)] {
+                    if ui.button(label).clicked() {
+                        let range = self.current_editor_byte_range(ctx, id);
+                        let prepared = prepare_block_snippet(
+                            &self.note.content,
+                            range,
+                            MarkdownBlockSnippet::Heading { level },
+                        );
+                        self.report_markdown_edit_result(ctx, id, app, prepared);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                for (label, snippet) in [
+                    ("Quote", MarkdownBlockSnippet::Quote),
+                    ("Bullet list", MarkdownBlockSnippet::Bullet),
+                    ("Task item", MarkdownBlockSnippet::Task { checked: false }),
+                    (
+                        "Code fence",
+                        MarkdownBlockSnippet::CodeFence {
+                            language: "text".into(),
+                        },
+                    ),
+                    ("Wiki link", MarkdownBlockSnippet::WikiLink),
+                ] {
+                    if ui.button(label).clicked() {
+                        let range = self.current_editor_byte_range(ctx, id);
+                        let prepared = prepare_block_snippet(&self.note.content, range, snippet);
+                        self.report_markdown_edit_result(ctx, id, app, prepared);
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button("Table", |ui| {
+                if ui.button("Insert 2-column table").clicked() {
+                    let prepared =
+                        self.prepare_current_table_edit(ctx, id, TableEditOperation::InsertTable);
+                    self.report_markdown_edit_result(ctx, id, app, prepared);
+                    ui.close();
+                }
+                let table_context = self.current_table_context(ctx, id);
+                if let Some((table, row, _column)) = table_context {
+                    ui.separator();
+                    if ui.button("Insert row below").clicked() {
+                        let prepared = self.prepare_current_table_edit(
+                            ctx,
+                            id,
+                            TableEditOperation::InsertRowBelow,
+                        );
+                        self.report_markdown_edit_result(ctx, id, app, prepared);
+                        ui.close();
+                    }
+                    let remove_row = ui.add_enabled(row > 0, egui::Button::new("Remove row"));
+                    if remove_row.clicked() {
+                        let prepared =
+                            self.prepare_current_table_edit(ctx, id, TableEditOperation::RemoveRow);
+                        self.report_markdown_edit_result(ctx, id, app, prepared);
+                        ui.close();
+                    }
+                    if ui.button("Insert column right").clicked() {
+                        let prepared = self.prepare_current_table_edit(
+                            ctx,
+                            id,
+                            TableEditOperation::InsertColumnRight,
+                        );
+                        self.report_markdown_edit_result(ctx, id, app, prepared);
+                        ui.close();
+                    }
+                    let remove_column = ui.add_enabled(
+                        table.alignments().len() > 1,
+                        egui::Button::new("Remove column"),
+                    );
+                    if remove_column.clicked() {
+                        let prepared = self.prepare_current_table_edit(
+                            ctx,
+                            id,
+                            TableEditOperation::RemoveColumn,
+                        );
+                        self.report_markdown_edit_result(ctx, id, app, prepared);
+                        ui.close();
+                    }
+                    let range = self.current_editor_byte_range(ctx, id);
+                    let has_cell_selection = range.start < range.end;
+                    let replace_cell = ui.add_enabled(
+                        has_cell_selection,
+                        egui::Button::new("Set current cell from selection"),
+                    );
+                    if replace_cell.clicked() {
+                        let prepared = self.prepare_current_table_edit(
+                            ctx,
+                            id,
+                            TableEditOperation::ReplaceCellWithSelection,
+                        );
+                        self.report_markdown_edit_result(ctx, id, app, prepared);
+                        ui.close();
+                    }
+                }
+            });
             ui.separator();
             if ui.button("Insert NOTE callout").clicked() {
                 self.insert_callout(ctx, id, "note");
@@ -14908,6 +15247,152 @@ More text.
         state.store(&ctx, id);
         panel.wrap_selection(&ctx, id, "*", "*");
         assert_eq!(panel.note.content, "*hello* world");
+    }
+
+    #[test]
+    fn prepared_markdown_tool_edit_is_one_unicode_safe_note_undo_boundary() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let id = egui::Id::new("prepared_markdown_tool_edit");
+        let original = "alpha 😀 beta";
+        let mut panel = NotePanel::from_note(empty_note(original));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
+
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(6),
+                egui::text::CCursor::new(7),
+            )));
+        state.store(&ctx, id);
+        panel.pending_selection = Some((6, 7));
+
+        let prepared = prepare_inline_format(original, 6..10, MarkdownInlineFormat::Strong)
+            .expect("the selected emoji has a valid UTF-8 source range");
+        assert!(
+            panel
+                .apply_prepared_markdown_edit_with_selection(&ctx, id, prepared, Some(8..12))
+                .expect("the prepared source still matches the note")
+        );
+        assert_eq!(panel.note_content(), "alpha **😀** beta");
+        assert!(panel.has_unsaved_changes());
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+        assert!(panel.fast_derived_dirty);
+        assert_eq!(panel.pending_selection, Some((8, 9)));
+
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id)
+            .expect("the active Note TextEdit retains its native undo owner");
+        let current_cursor = state
+            .cursor
+            .char_range()
+            .expect("the prepared edit restores the selected Unicode text");
+        let mut undoer = state.undoer();
+        let (undo_cursor, undo_source) = panel
+            .replacement_history_step(&mut undoer, current_cursor, ReplacementUndoDirection::Undo)
+            .expect("the authored edit is one native undo boundary");
+        assert_eq!(undo_source, original);
+        panel.replacement_history_mutation = Some(ReplacementHistoryMutation::Undo);
+        panel.replace_content_from_mutation(undo_source, 1.0);
+        state.set_undoer(undoer);
+        state.cursor.set_char_range(Some(undo_cursor));
+        state.store(&ctx, id);
+        assert_eq!(panel.note_content(), original);
+        assert!(panel.replacement_undo_boundaries.is_empty());
+        assert_eq!(panel.replacement_redo_boundaries.len(), 1);
+
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id)
+            .expect("the replacement history remains installed after Undo");
+        let mut undoer = state.undoer();
+        let (_, redo_source) = panel
+            .replacement_history_step(&mut undoer, undo_cursor, ReplacementUndoDirection::Redo)
+            .expect("the same boundary is available for redo");
+        assert_eq!(redo_source, "alpha **😀** beta");
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn prepared_bold_and_italic_preserve_selection_and_ignore_empty_selection() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let mut app = new_app(&ctx);
+        let id = egui::Id::new("prepared_wrapped_format");
+        let mut panel = NotePanel::from_note(empty_note("hello world"));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(6),
+                egui::text::CCursor::new(11),
+            )));
+        state.store(&ctx, id);
+        panel.pending_selection = Some((6, 11));
+
+        panel.apply_wrapped_markdown_format(&ctx, id, &mut app, MarkdownInlineFormat::Strong, 2);
+        assert_eq!(panel.note_content(), "hello **world**");
+        assert_eq!(panel.pending_selection, Some((8, 13)));
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let cursor = state.cursor.char_range().unwrap();
+        let [start, end] = cursor.sorted_cursors();
+        assert_eq!((start.index.0, end.index.0), (8, 13));
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(0),
+            )));
+        state.store(&ctx, id);
+        panel.pending_selection = None;
+        panel.apply_wrapped_markdown_format(&ctx, id, &mut app, MarkdownInlineFormat::Emphasis, 1);
+        assert_eq!(panel.note_content(), "hello **world**");
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn contextual_table_edit_uses_parser_cell_position_and_note_history() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let id = egui::Id::new("contextual_table_edit");
+        let original = "Before\n\n| Name | Value |\n| --- | --- |\n| A | 1 |\n\nAfter";
+        let mut panel = NotePanel::from_note(empty_note(original));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
+        let caret = original.find("A | 1").expect("body row exists") + 1;
+        let char_index = original[..caret].chars().count();
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(char_index),
+            )));
+        state.store(&ctx, id);
+
+        let prepared = panel
+            .prepare_current_table_edit(&ctx, id, TableEditOperation::InsertRowBelow)
+            .expect("the caret resolves to a parsed table body row");
+        assert!(
+            panel
+                .apply_prepared_markdown_edit(&ctx, id, prepared)
+                .expect("the table edit applies to the exact note source")
+        );
+        assert!(
+            panel
+                .note_content()
+                .starts_with("Before\n\n| Name | Value |")
+        );
+        assert!(panel.note_content().ends_with("\n\nAfter"));
+        let tables = crate::notes_markdown::parse_markdown_tables(panel.note_content())
+            .expect("the surrounding Markdown remains a valid table");
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].rows().len(), 3);
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
