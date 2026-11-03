@@ -4519,7 +4519,11 @@ impl NotePanel {
                 }
                 if edit.clicked() {
                     self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Edit);
-                    self.focus_textedit_next_frame = true;
+                    // The activation key still belongs to this toolbar button.
+                    // Finish this action before publishing editor focus after
+                    // the retained ROOT completion.
+                    self.focus_textedit_next_frame = false;
+                    self.focus_textedit_after_toolbar_action = true;
                 }
             }
             if !matches!(self.view_mode, NoteViewMode::Preview) {
@@ -6477,7 +6481,15 @@ impl NotePanel {
             pending_state.store(ctx, resp.id);
             self.pending_cursor_position = None;
         }
-        if request_initial_focus && first_edit_frame && !self.note_find.is_open() {
+        let toolbar_focus_restore_pending = self.focus_textedit_after_toolbar_action
+            || self
+                .pending_toolbar_focus_restore
+                .is_some_and(|pending| pending.editor_id == resp.id);
+        if request_initial_focus
+            && first_edit_frame
+            && !self.note_find.is_open()
+            && !toolbar_focus_restore_pending
+        {
             self.focus_textedit_next_frame = true;
         }
         // egui lays out a new Window invisibly with disabled widgets first.

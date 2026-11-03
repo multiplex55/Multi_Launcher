@@ -45313,6 +45313,197 @@ mod tests {
         (passes, staged)
     }
 
+    fn activate_note_toolbar_key(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        key: egui::Key,
+        include_space_text: bool,
+        discard_first_pass: bool,
+    ) -> usize {
+        let modifiers = egui::Modifiers::NONE;
+        let mut press = actual_query_input(true);
+        press.events = vec![
+            egui::Event::ModifiersChanged(modifiers),
+            key_press(key, modifiers),
+        ];
+        if include_space_text {
+            press.events.push(egui::Event::Text(" ".into()));
+        }
+        let (output, passes) = app.run_root_frame_for_test(ctx, press, discard_first_pass);
+        output.drop_without_applying_deltas();
+
+        let mut release = actual_query_input(true);
+        release.events = vec![
+            egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: false,
+                repeat: false,
+                modifiers,
+            },
+            egui::Event::ModifiersChanged(modifiers),
+        ];
+        app.run_root_frame_for_test(ctx, release, false)
+            .0
+            .drop_without_applying_deltas();
+        passes
+    }
+
+    #[test]
+    fn note_toolbar_enter_and_space_text_preserve_saved_markdown_source() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        for (key, include_space_text, discard_first_pass) in [
+            (egui::Key::Enter, false, true),
+            (egui::Key::Space, true, false),
+        ] {
+            let ctx = egui::Context::default();
+            let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            prepare_tool_dialog_root(&ctx, &mut app);
+            app.note_external_open = crate::plugins::note::NoteExternalOpen::Neither;
+            let source_path = workspace.root().join("notes/keyboard-preview.md");
+            let source = "# Preview Ω\r\nExact draft.\n";
+            std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+            std::fs::write(&source_path, source.as_bytes()).unwrap();
+            let note = crate::plugins::note::Note {
+                title: "Keyboard preview".into(),
+                path: source_path.clone(),
+                content: source.into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "keyboard-preview-source".into(),
+                alias: None,
+                aliases: Vec::new(),
+                entity_refs: Vec::new(),
+            };
+            let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+            panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+            panel.request_activation_handoff();
+            app.push_note_panel(panel);
+            for _ in 0..4 {
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                    .drop_without_applying_deltas();
+            }
+
+            let (edit_id, edit_rect, edit_clip) = app.note_panels[0]
+                .test_note_toolbar_edit_button()
+                .expect("Preview mode exposes the real Edit toolbar button");
+            assert!(edit_clip.contains_rect(edit_rect));
+            assert!(ctx.content_rect().contains_rect(edit_rect));
+            let before_revision = app.note_panels[0].test_content_revision();
+            let before_history = app.note_panels[0].test_replacement_history_counts();
+            assert_eq!(app.note_panels[0].test_saved_content_baseline(), source);
+            assert!(!app.note_panels[0].has_unsaved_changes());
+
+            ctx.memory_mut(|memory| memory.request_focus(edit_id));
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+            assert!(ctx.memory(|memory| memory.has_focus(edit_id)));
+            let activation_passes = activate_note_toolbar_key(
+                &ctx,
+                &mut app,
+                key,
+                include_space_text,
+                discard_first_pass,
+            );
+            if discard_first_pass {
+                assert!(
+                    activation_passes > 1,
+                    "Edit activation crosses a discarded ROOT pass"
+                );
+            }
+            for _ in 0..2 {
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                    .drop_without_applying_deltas();
+            }
+
+            assert_eq!(
+                app.note_panels[0].test_view_mode(),
+                crate::settings::NoteViewMode::Edit
+            );
+            assert_eq!(app.note_panels[0].note_content(), source);
+            assert_eq!(std::fs::read(&source_path).unwrap(), source.as_bytes());
+            assert_eq!(app.note_panels[0].test_saved_content_baseline(), source);
+            assert!(!app.note_panels[0].has_unsaved_changes());
+            assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+            assert_eq!(
+                app.note_panels[0].test_replacement_history_counts(),
+                before_history
+            );
+            let editor_id = app.note_panels[0]
+                .test_editor_widget_id()
+                .expect("Edit mode renders its actual TextEdit");
+            assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
+            assert!(
+                !egui::Popup::is_any_open(&ctx),
+                "keyboard activation does not trigger an unrelated toolbar popup"
+            );
+
+            if key == egui::Key::Space {
+                let (menu_id, menu_rect, menu_clip) = app.note_panels[0]
+                    .test_markdown_toolbar_menu()
+                    .expect("Edit mode exposes the collapsed Markdown menu");
+                assert!(menu_clip.contains_rect(menu_rect));
+                ctx.memory_mut(|memory| memory.request_focus(menu_id));
+                run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                    .drop_without_applying_deltas();
+                assert!(ctx.memory(|memory| memory.has_focus(menu_id)));
+
+                activate_note_toolbar_key(&ctx, &mut app, egui::Key::Space, true, false);
+                for _ in 0..2 {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                }
+                let (_, item_rect, item_clip) = app.note_panels[0]
+                    .test_markdown_tool_rect("Bold Selection")
+                    .expect("the real keyboard activation opens the Markdown menu");
+                assert!(item_clip.contains_rect(item_rect));
+                assert_eq!(app.note_panels[0].note_content(), source);
+
+                run_note_panel_key(&ctx, &mut app, egui::Key::Escape, egui::Modifiers::NONE);
+                assert_eq!(app.note_panels[0].note_content(), source);
+                assert_eq!(app.note_panels[0].test_saved_content_baseline(), source);
+                assert!(!app.note_panels[0].has_unsaved_changes());
+                assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+                assert_eq!(
+                    app.note_panels[0].test_replacement_history_counts(),
+                    before_history
+                );
+            } else {
+                let mut character_press = actual_query_input(true);
+                character_press.events = vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                    key_press(egui::Key::Z, egui::Modifiers::NONE),
+                    egui::Event::Text("z".into()),
+                ];
+                app.run_root_frame_for_test(&ctx, character_press, false)
+                    .0
+                    .drop_without_applying_deltas();
+                app.run_root_frame_for_test(
+                    &ctx,
+                    egui::RawInput {
+                        events: vec![
+                            key_release(egui::Key::Z, egui::Modifiers::NONE),
+                            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                        ],
+                        ..actual_query_input(true)
+                    },
+                    false,
+                )
+                .0
+                .drop_without_applying_deltas();
+                let edited = app.note_panels[0].note_content().to_owned();
+                assert_eq!(edited.len(), source.len() + 1);
+                let z_index = edited
+                    .find('z')
+                    .expect("the fresh typed character is accepted");
+                let mut without_z = edited;
+                without_z.replace_range(z_index..z_index + 1, "");
+                assert_eq!(without_z, source);
+                assert!(app.note_panels[0].has_unsaved_changes());
+            }
+            drop(workspace);
+        }
+    }
+
     #[test]
     fn note_markdown_tools_export_exact_unsaved_source_once_after_retained_root() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
