@@ -10147,14 +10147,71 @@ pub(crate) fn persist_launcher_close_preferences(
 }
 
 impl LauncherApp {
-    fn complete_markdown_diagram_handoff(&mut self) {
+    fn complete_markdown_diagram_handoff(&mut self, ctx: &egui::Context) {
+        let note_open_effects = self
+            .note_panels
+            .iter_mut()
+            .filter_map(|panel| panel.on_ui_frame_complete(ctx))
+            .collect::<Vec<_>>();
+        for note_open_effect in note_open_effects {
+            let super::note_panel::NotePanelEffect::OpenDiagram { source, origin } =
+                note_open_effect;
+            let open_result = self
+                .note_panels
+                .iter()
+                .find(|panel| panel.tracks_diagram_source_origin(&origin.identity))
+                .map(|panel| panel.can_open_diagram_source_copy(ctx, &origin))
+                .unwrap_or(Err("The originating Note is no longer open."));
+            match open_result {
+                Err(error) => self.report_error("notes.mermaid", error),
+                Ok(()) => {
+                    if self
+                        .diagram_studio_dialog
+                        .open_source_copy(source)
+                        .is_some()
+                    {
+                        if let Some(panel) = self
+                            .note_panels
+                            .iter_mut()
+                            .find(|panel| panel.tracks_diagram_source_origin(&origin.identity))
+                        {
+                            panel.track_diagram_source_origin(origin);
+                        }
+                        self.focus_panel(super::Panel::DiagramStudioDialog);
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    }
+                }
+            }
+        }
+
         let active = self.diagram_studio_dialog.active_source_copy_origin();
         let pending = self.diagram_studio_dialog.pending_source_copy_origin();
         self.markdown_studio_dialog
-            .reconcile_diagram_source_origin(active, pending);
+            .reconcile_diagram_source_origin(active.clone(), pending.clone());
+        for panel in &mut self.note_panels {
+            panel.reconcile_diagram_source_origin(active.clone(), pending.clone());
+        }
         if let Some(handoff) = self.diagram_studio_dialog.take_markdown_source_handoff() {
-            self.markdown_studio_dialog
-                .apply_diagram_source_handoff(handoff);
+            if self
+                .markdown_studio_dialog
+                .owns_active_diagram_source_origin(&handoff.origin)
+            {
+                self.markdown_studio_dialog
+                    .apply_diagram_source_handoff(handoff);
+            } else if let Some(index) = self
+                .note_panels
+                .iter()
+                .position(|panel| panel.owns_active_diagram_source_origin(&handoff.origin))
+            {
+                let mut panel = self.note_panels.remove(index);
+                panel.apply_diagram_source_handoff(ctx, handoff, self);
+                self.note_panels.insert(index, panel);
+            } else {
+                self.report_error(
+                    "notes.mermaid",
+                    "The originating Note or Markdown document is no longer open; source was not applied.",
+                );
+            }
         }
     }
 
@@ -10346,7 +10403,7 @@ impl eframe::App for LauncherApp {
                 _ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
         }
-        self.complete_markdown_diagram_handoff();
+        self.complete_markdown_diagram_handoff(_ctx);
         self.regex_tester_dialog.on_ui_frame_complete(_ctx);
         let effects = self.complete_retained_tool_dialogs(_ctx);
         self.dispatch_root_dialog_effects(_ctx, effects);
@@ -10544,7 +10601,7 @@ impl LauncherApp {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
         }
-        self.complete_markdown_diagram_handoff();
+        self.complete_markdown_diagram_handoff(ctx);
         self.regex_tester_dialog.on_ui_frame_complete(ctx);
         let effects = self.complete_retained_tool_dialogs(ctx);
         self.dispatch_root_dialog_effects(ctx, effects);
@@ -13773,6 +13830,122 @@ mod tests {
         input.events = events;
         app.run_root_frame_for_test(ctx, input, discard_after_render)
             .0
+    }
+
+    fn run_tool_dialog_frame_at_size(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+        discard_after_render: bool,
+        screen_size: egui::Vec2,
+    ) -> egui::FullOutput {
+        let mut input = actual_query_input(true);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size));
+        input.events = events;
+        app.run_root_frame_for_test(ctx, input, discard_after_render)
+            .0
+    }
+
+    fn run_note_panel_key(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) {
+        for pressed in [true, false] {
+            let mut events = vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                },
+            ];
+            if !pressed {
+                events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            }
+            run_tool_dialog_frame(ctx, app, events, false).drop_without_applying_deltas();
+        }
+    }
+
+    fn run_note_panel_key_at_size(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+        screen_size: egui::Vec2,
+    ) {
+        for pressed in [true, false] {
+            let mut events = vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                },
+            ];
+            if !pressed {
+                events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            }
+            run_tool_dialog_frame_at_size(ctx, app, events, false, screen_size)
+                .drop_without_applying_deltas();
+        }
+    }
+
+    fn focus_mermaid_open_by_tab(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        index: usize,
+    ) -> (egui::Id, egui::Rect, egui::Rect) {
+        ctx.global_style_mut(|style| {
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (open_id, _, _) = app.note_panels[0]
+            .test_mermaid_open_rect(index)
+            .expect("the Mermaid card registers its actual Open action");
+        let (edit_id, edit_rect, edit_clip) = app.note_panels[0]
+            .test_note_toolbar_edit_button()
+            .expect("Preview mode exposes the actual Edit toolbar button");
+        assert!(edit_clip.contains_rect(edit_rect));
+        ctx.memory_mut(|memory| memory.request_focus(edit_id));
+        run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(edit_id)));
+
+        for _ in 0..32 {
+            if ctx.memory(|memory| memory.has_focus(open_id)) {
+                break;
+            }
+            run_note_panel_key(ctx, app, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(
+            ctx.memory(|memory| memory.has_focus(open_id)),
+            "ordinary Tab traversal reaches the real Mermaid Open action"
+        );
+        // ScrollArea applies targets after measuring the current response; a
+        // center request plus stale-offset corrections took 15 observations to settle.
+        const MAX_REVEAL_OBSERVATIONS: usize = 16;
+        let mut observations = Vec::with_capacity(MAX_REVEAL_OBSERVATIONS);
+        for observation in 0..MAX_REVEAL_OBSERVATIONS {
+            assert!(ctx.memory(|memory| memory.has_focus(open_id)));
+            let (current_id, rect, clip) = app.note_panels[0]
+                .test_mermaid_open_rect(index)
+                .expect("the focused action remains rendered");
+            assert_eq!(current_id, open_id);
+            let offsets = app.note_panels[0].test_preview_scroll_offsets();
+            observations.push((observation, rect, clip, offsets));
+            let scroll_settled = offsets.is_some_and(|(before, after)| before == after);
+            if clip.contains_rect(rect) && scroll_settled {
+                return (current_id, rect, clip);
+            }
+            run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        panic!(
+            "Tab focus did not produce a fully contained action on a settled scroll frame: {observations:#?}"
+        );
     }
 
     #[test]
@@ -44974,6 +45147,533 @@ mod tests {
         assert!(!app.show_settings, "Escape remains a container command");
         assert!(app.test_activation_trace.is_empty());
         drop(workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_card_opens_and_updates_only_its_originating_fence() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let original = concat!(
+            "# Mermaid handoff\n\nBefore.\n\n",
+            "```mermaid\nflowchart TD\n    A[\"Alpha\"]\n```\n\n",
+            "After.\n",
+        );
+        let note = crate::plugins::note::Note {
+            title: "Mermaid handoff".into(),
+            path: std::path::PathBuf::new(),
+            content: original.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-tools-handoff".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        assert_eq!(app.note_panels[0].test_mermaid_card_count(), 1);
+        let (open_id, open, open_clip) = focus_mermaid_open_by_tab(&ctx, &mut app, 0);
+        assert!(
+            open_clip.contains_rect(open),
+            "card action is clipped: {open:?}"
+        );
+        assert!(open.left() >= 0.0 && open.right() <= 900.0);
+        let mut discarded_activation = actual_query_input(true);
+        discarded_activation.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ];
+        let mut discarded_origin = None;
+        let mut discarded_action = None;
+        let (output, passes) =
+            app.run_root_frame_for_test_with(&ctx, discarded_activation, true, |app, ui| {
+                app.render_root_ui(ui);
+                if discarded_origin.is_none() {
+                    if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
+                        discarded_origin = Some(origin);
+                        discarded_action = app.note_panels[0].test_mermaid_open_rect(0);
+                    }
+                }
+            });
+        output.drop_without_applying_deltas();
+        assert!(
+            passes > 1,
+            "the real keyboard activation crossed a discarded ROOT pass"
+        );
+        let discarded_origin = discarded_origin
+            .expect("Enter on the focused card action stages its exact source origin");
+        let (discarded_id, discarded_rect, discarded_clip) =
+            discarded_action.expect("the activated Open action has real response geometry");
+        assert_eq!(discarded_id, open_id);
+        assert!(
+            discarded_clip.contains_rect(discarded_rect),
+            "the discarded activation occurred on a fully visible action: {discarded_rect:?} in {discarded_clip:?}"
+        );
+        let mut discarded_release = actual_query_input(true);
+        discarded_release.events = vec![
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ];
+        app.run_root_frame_for_test(&ctx, discarded_release, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(
+            !app.diagram_studio_dialog.open,
+            "a discarded ROOT pass cannot open Diagram Studio from a Note card"
+        );
+        assert_eq!(app.note_panels[0].note_content(), original);
+        assert!(
+            !app.note_panels[0].tracks_diagram_source_origin(&discarded_origin),
+            "the abandoned card activation does not retain a pending source origin"
+        );
+
+        let (retried_open_id, open, open_clip) = focus_mermaid_open_by_tab(&ctx, &mut app, 0);
+        assert_eq!(retried_open_id, open_id);
+        assert!(open_clip.contains_rect(open));
+        let mut accepted_activation = actual_query_input(true);
+        accepted_activation.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ];
+        let mut accepted_origin = None;
+        let mut accepted_action = None;
+        app.run_root_frame_for_test_with(&ctx, accepted_activation, false, |app, ui| {
+            app.render_root_ui(ui);
+            if accepted_origin.is_none() {
+                if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
+                    accepted_origin = Some(origin);
+                    accepted_action = app.note_panels[0].test_mermaid_open_rect(0);
+                }
+            }
+        })
+        .0
+        .drop_without_applying_deltas();
+        let accepted_origin = accepted_origin.expect("the accepted Enter activated the card");
+        let (accepted_id, accepted_rect, accepted_clip) =
+            accepted_action.expect("the accepted Open action has real response geometry");
+        assert_eq!(accepted_id, open_id);
+        assert!(
+            accepted_clip.contains_rect(accepted_rect),
+            "the accepted activation occurred on a fully visible action: {accepted_rect:?} in {accepted_clip:?}"
+        );
+        let mut accepted_release = actual_query_input(true);
+        accepted_release.events = vec![
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ];
+        app.run_root_frame_for_test(&ctx, accepted_release, false)
+            .0
+            .drop_without_applying_deltas();
+
+        let copied_source = "flowchart TD\n    A[\"Alpha\"]\n";
+        assert!(app.diagram_studio_dialog.open);
+        assert_eq!(
+            app.diagram_studio_dialog.test_session().draft(),
+            copied_source
+        );
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            original,
+            "opening a card copies source without editing its Markdown fence"
+        );
+        let origin = app
+            .diagram_studio_dialog
+            .active_source_copy_origin()
+            .expect("the Diagram keeps the exact Note/fence origin");
+        assert_eq!(origin, accepted_origin);
+        assert!(app.note_panels[0].owns_active_diagram_source_origin(&origin));
+
+        let changed_source = "flowchart LR\n    A[\"Edited in Diagram\"]\n";
+        app.diagram_studio_dialog
+            .test_replace_source(changed_source);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (use_source, use_source_clip) = app
+            .diagram_studio_dialog
+            .test_action_rect("use_source_in_markdown")
+            .expect("the linked Diagram exposes its source handoff action");
+        assert!(use_source_clip.contains_rect(use_source));
+        for pressed in [true, false] {
+            let (rect, clip) = app
+                .diagram_studio_dialog
+                .test_action_rect("use_source_in_markdown")
+                .expect("the same handoff action remains available");
+            assert!(clip.contains_rect(rect));
+            super::with_immediate_viewport_test_events(
+                tool_dialog_pointer_events(rect, pressed),
+                || run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false),
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            concat!(
+                "# Mermaid handoff\n\nBefore.\n\n",
+                "```mermaid\nflowchart LR\n    A[\"Edited in Diagram\"]\n```\n\n",
+                "After.\n",
+            )
+        );
+        assert!(app.note_panels[0].has_unsaved_changes());
+        assert!(
+            !app.note_panels[0].tracks_diagram_source_origin(&origin),
+            "a completed source handoff retires its one-use Note origin"
+        );
+        drop(_workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_handoff_rechecks_note_modal_after_card_draw() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.show_inline_errors = true;
+        app.error = None;
+        let original = "```mermaid\nflowchart TD\n    A --> B\n```\n";
+        let note = crate::plugins::note::Note {
+            title: "Protected Mermaid handoff".into(),
+            path: std::path::PathBuf::new(),
+            content: original.into(),
+            links: Vec::new(),
+            tags: Vec::new(),
+            slug: "markdown-tools-protected-handoff".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Preview);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        let (open_id, _, _) = focus_mermaid_open_by_tab(&ctx, &mut app, 0);
+        let mut input = actual_query_input(true);
+        input.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ];
+        let mut staged_origin = None;
+        let mut staged_action = None;
+        let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            // Simulate a protected Note dialog becoming active after the card
+            // staged its effect but before ROOT accepts and dispatches it.
+            if staged_origin.is_none() {
+                if let Some(origin) = app.note_panels[0].test_pending_mermaid_origin() {
+                    staged_origin = Some(origin);
+                    staged_action = app.note_panels[0].test_mermaid_open_rect(0);
+                }
+            }
+            app.note_panels[0].test_set_link_dialog_open(true);
+        });
+        output.drop_without_applying_deltas();
+        let staged_origin = staged_origin.expect("Enter on the card stages its exact origin");
+        let (staged_id, staged_rect, staged_clip) =
+            staged_action.expect("the activated action has real response geometry");
+        assert_eq!(staged_id, open_id);
+        assert!(
+            staged_clip.contains_rect(staged_rect),
+            "the protected activation occurred on a fully visible action: {staged_rect:?} in {staged_clip:?}"
+        );
+        let mut input_release = actual_query_input(true);
+        input_release.events = vec![
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ];
+        app.run_root_frame_for_test(&ctx, input_release, false)
+            .0
+            .drop_without_applying_deltas();
+
+        assert!(
+            !app.diagram_studio_dialog.open,
+            "completion rechecks protected Note state after rendering"
+        );
+        assert_eq!(app.note_panels[0].note_content(), original);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|message| message.contains("Resolve the open Note dialog")),
+            "the rejected handoff reports one root-level explanation"
+        );
+        assert!(
+            !app.note_panels[0].tracks_diagram_source_origin(&staged_origin),
+            "the rejected pending origin is retired"
+        );
+        drop(_workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_toolbar_menu_is_keyboard_accessible_and_uses_one_undo() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let note = crate::plugins::note::Note {
+            title: "Markdown tools".into(),
+            path: std::path::PathBuf::new(),
+            content: "éclair".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-tools-toolbar".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        assert!(
+            app.note_panels[0]
+                .test_markdown_tool_rect("Bold Selection")
+                .is_none(),
+            "the contextual Markdown menu starts collapsed"
+        );
+        let editor_id = app.note_panels[0]
+            .test_editor_widget_id()
+            .expect("Edit mode rendered the real Note TextEdit");
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the editor has actual selection state");
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new("éclair".chars().count()),
+            )));
+        state.store(&ctx, editor_id);
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+
+        let (menu_id, menu_rect, menu_clip) = app.note_panels[0]
+            .test_markdown_toolbar_menu()
+            .expect("the existing Note toolbar contains the collapsed Markdown menu");
+        assert!(menu_clip.contains_rect(menu_rect));
+        ctx.memory_mut(|memory| memory.request_focus(menu_id));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(menu_id)));
+
+        run_note_panel_key(&ctx, &mut app, egui::Key::Space, egui::Modifiers::NONE);
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (bold_id, bold_rect, bold_clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Bold Selection")
+            .expect("keyboard opening exposes the actual Bold menu item");
+        assert!(bold_clip.contains_rect(bold_rect));
+        assert_eq!(app.note_panels[0].note_content(), "éclair");
+
+        for _ in 0..16 {
+            if ctx.memory(|memory| memory.has_focus(bold_id)) {
+                break;
+            }
+            run_note_panel_key(&ctx, &mut app, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(ctx.memory(|memory| memory.has_focus(bold_id)));
+        let mut enter_press = actual_query_input(true);
+        enter_press.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let (output, passes) = app.run_root_frame_for_test(&ctx, enter_press, true);
+        output.drop_without_applying_deltas();
+        assert!(passes > 1, "the action crossed a discarded ROOT pass");
+
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "**éclair**",
+            "menu activation does not leak Space/Enter into the source editor"
+        );
+        assert!(app.note_panels[0].has_unsaved_changes());
+        assert!(
+            ctx.memory(|memory| memory.has_focus(editor_id)),
+            "toolbar focus is restored only after the accepted ROOT pass"
+        );
+        let editor_state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the retained editor keeps the prepared selection");
+        let selected = editor_state
+            .cursor
+            .char_range()
+            .expect("the prepared text remains selected")
+            .as_sorted_char_range();
+        assert_eq!((selected.start.0, selected.end.0), (2, 8));
+
+        let mut enter_release = actual_query_input(true);
+        enter_release.events = vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        app.run_root_frame_for_test(&ctx, enter_release, false)
+            .0
+            .drop_without_applying_deltas();
+        run_note_panel_key(&ctx, &mut app, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "éclair",
+            "the toolbar action is one undo step in the existing Note editor history"
+        );
+        drop(_workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_collapsed_toolbar_is_reachable_in_constrained_window() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.note_panel_default_size = (420.0, 320.0);
+        let screen = egui::vec2(480.0, 360.0);
+        let note = crate::plugins::note::Note {
+            title: "Constrained Markdown tools".into(),
+            path: std::path::PathBuf::new(),
+            content: "hello".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-tools-constrained".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..5 {
+            run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, screen)
+                .drop_without_applying_deltas();
+        }
+
+        let (menu_id, menu_rect, menu_clip) = app.note_panels[0]
+            .test_markdown_toolbar_menu()
+            .expect("the collapsed Markdown menu renders in the constrained Note window");
+        assert!(menu_clip.contains_rect(menu_rect));
+        assert!(egui::Rect::from_min_size(egui::Pos2::ZERO, screen).contains_rect(menu_rect));
+        assert!(
+            app.note_panels[0]
+                .test_markdown_tool_rect("Add Checkbox")
+                .is_none()
+        );
+
+        let editor_id = app.note_panels[0]
+            .test_editor_widget_id()
+            .expect("the constrained Edit view renders its source editor");
+        let mut editor = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the source editor has cursor state");
+        editor
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(0),
+            )));
+        editor.store(&ctx, editor_id);
+        run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, screen)
+            .drop_without_applying_deltas();
+
+        ctx.memory_mut(|memory| memory.request_focus(menu_id));
+        run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, screen)
+            .drop_without_applying_deltas();
+        run_note_panel_key_at_size(
+            &ctx,
+            &mut app,
+            egui::Key::Space,
+            egui::Modifiers::NONE,
+            screen,
+        );
+        for _ in 0..2 {
+            run_tool_dialog_frame_at_size(&ctx, &mut app, Vec::new(), false, screen)
+                .drop_without_applying_deltas();
+        }
+        let (add_id, add_rect, add_clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Add Checkbox")
+            .expect("opening the collapsed menu exposes a real action");
+        assert!(add_clip.contains_rect(add_rect));
+        assert!(egui::Rect::from_min_size(egui::Pos2::ZERO, screen).contains_rect(add_rect));
+
+        run_tool_dialog_frame_at_size(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(add_rect, true),
+            false,
+            screen,
+        )
+        .drop_without_applying_deltas();
+        let (pressed_add_id, add_rect, add_clip) = app.note_panels[0]
+            .test_markdown_tool_rect("Add Checkbox")
+            .expect("the same action remains enabled after pointer-down");
+        assert_eq!(pressed_add_id, add_id);
+        assert!(add_clip.contains_rect(add_rect));
+        run_tool_dialog_frame_at_size(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(add_rect, false),
+            false,
+            screen,
+        )
+        .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "- [ ] hello",
+            "the constrained menu action applies once without leaking input into the editor"
+        );
+        drop(_workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_unowned_diagram_handoff_reports_one_root_error() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.show_inline_errors = true;
+        let original = app.diagram_studio_dialog.test_session().draft().to_owned();
+        let markdown_before = app.markdown_studio_dialog.test_source().map(str::to_owned);
+        app.diagram_studio_dialog
+            .test_stage_markdown_source_handoff(
+                crate::diagram::DiagramSourceCopyOrigin::fresh(),
+                "flowchart LR\n    A[\"Unowned\"]\n",
+            );
+
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+
+        let error = app
+            .error
+            .as_deref()
+            .expect("an unowned handoff has visible root-level feedback");
+        assert!(error.contains("originating Note or Markdown document"));
+        assert_eq!(app.diagram_studio_dialog.test_session().draft(), original);
+        assert!(app.note_panels.is_empty());
+        assert_eq!(
+            app.markdown_studio_dialog.test_source(),
+            markdown_before.as_deref()
+        );
+        drop(_workspace);
     }
 
     #[test]

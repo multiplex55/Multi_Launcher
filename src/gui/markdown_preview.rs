@@ -28,10 +28,81 @@ const MAX_PREVIEW_PARSER_EVENTS: usize = 1_000_000;
 static NEXT_IMAGE_LOADER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
-struct MermaidCard {
+pub(super) struct MermaidCard {
     raw_source: String,
     status: MermaidFenceStatus,
     texture: Option<egui::TextureHandle>,
+}
+
+impl MermaidCard {
+    pub(super) fn raw_source(&self) -> &str {
+        &self.raw_source
+    }
+
+    pub(super) fn status(&self) -> &MermaidFenceStatus {
+        &self.status
+    }
+}
+
+/// A card-only bounded analysis for the existing Notes preview. It shares the
+/// exact fence parser and accepted Diagram rasterizer without replacing the
+/// Notes-specific CommonMark rendering path.
+pub(super) struct MermaidCardsCache {
+    revision: u64,
+    source: Option<String>,
+    status: Result<MarkdownPreviewStatus, String>,
+    fences: Vec<MermaidFencePreview>,
+    cards: Vec<MermaidCard>,
+}
+
+impl MermaidCardsCache {
+    pub(super) fn new(ctx: &egui::Context, revision: u64, source: &str) -> Self {
+        match MarkdownPreview::analyze(source) {
+            Ok(preview) => {
+                let fences = preview.mermaid_fences().to_vec();
+                let cards = build_mermaid_cards(&fences, |fence, remaining_pixels| {
+                    render_mermaid_fence(ctx, fence, remaining_pixels)
+                });
+                Self {
+                    revision,
+                    source: Some(source.to_owned()),
+                    status: Ok(preview.status().clone()),
+                    fences,
+                    cards,
+                }
+            }
+            Err(error) => Self {
+                revision,
+                // Oversized Notes remain fully owned by the legacy Note
+                // renderer; do not duplicate an unbounded document merely to
+                // cache a bounded Mermaid-preview failure.
+                source: None,
+                status: Err(error.to_string()),
+                fences: Vec::new(),
+                cards: Vec::new(),
+            },
+        }
+    }
+
+    pub(super) fn matches(&self, revision: u64, source: &str) -> bool {
+        self.revision == revision && self.source.as_deref().is_none_or(|cached| cached == source)
+    }
+
+    pub(super) fn status(&self) -> Result<&MarkdownPreviewStatus, &str> {
+        self.status.as_ref().map_err(String::as_str)
+    }
+
+    pub(super) fn fences(&self) -> &[MermaidFencePreview] {
+        &self.fences
+    }
+
+    pub(super) fn fence(&self, index: usize) -> Option<&MermaidFencePreview> {
+        self.fences.get(index)
+    }
+
+    pub(super) fn card(&self, index: usize) -> Option<&MermaidCard> {
+        self.cards.get(index)
+    }
 }
 
 /// A bounded in-memory image loader used only for already-validated local
@@ -390,40 +461,44 @@ fn render_mermaid_fence(
     Ok((texture, pixels))
 }
 
-fn draw_mermaid_card(ui: &mut egui::Ui, card: &MermaidCard) {
+pub(super) fn draw_mermaid_card(ui: &mut egui::Ui, card: &MermaidCard) {
     ui.group(|ui| {
-        ui.horizontal(|ui| {
-            ui.strong("Mermaid diagram");
-            match &card.status {
-                MermaidFenceStatus::Current if card.texture.is_some() => {
-                    ui.colored_label(ui.visuals().warn_fg_color, "Current");
-                }
-                MermaidFenceStatus::Invalid(diagnostic)
-                | MermaidFenceStatus::Unsupported(diagnostic) => {
-                    ui.colored_label(ui.visuals().error_fg_color, diagnostic.to_string());
-                }
-                MermaidFenceStatus::Unclosed => {
-                    ui.colored_label(ui.visuals().warn_fg_color, "Fence is not closed");
-                }
-                MermaidFenceStatus::PreviewEncodingFailed(error) => {
-                    ui.colored_label(ui.visuals().warn_fg_color, error);
-                }
-                other => {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        format!("Preview unavailable: {other:?}"),
-                    );
-                }
+        draw_mermaid_card_contents(ui, card);
+    });
+}
+
+pub(super) fn draw_mermaid_card_contents(ui: &mut egui::Ui, card: &MermaidCard) {
+    ui.horizontal(|ui| {
+        ui.strong("Mermaid diagram");
+        match &card.status {
+            MermaidFenceStatus::Current if card.texture.is_some() => {
+                ui.colored_label(ui.visuals().warn_fg_color, "Current");
             }
-        });
-        if let Some(texture) = &card.texture {
-            let size = texture.size_vec2();
-            let scale = (ui.available_width() / size.x.max(1.0)).min(1.0);
-            ui.image((texture.id(), size * scale));
-        } else {
-            ui.monospace(&card.raw_source);
+            MermaidFenceStatus::Invalid(diagnostic)
+            | MermaidFenceStatus::Unsupported(diagnostic) => {
+                ui.colored_label(ui.visuals().error_fg_color, diagnostic.to_string());
+            }
+            MermaidFenceStatus::Unclosed => {
+                ui.colored_label(ui.visuals().warn_fg_color, "Fence is not closed");
+            }
+            MermaidFenceStatus::PreviewEncodingFailed(error) => {
+                ui.colored_label(ui.visuals().warn_fg_color, error);
+            }
+            other => {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("Preview unavailable: {other:?}"),
+                );
+            }
         }
     });
+    if let Some(texture) = &card.texture {
+        let size = texture.size_vec2();
+        let scale = (ui.available_width() / size.x.max(1.0)).min(1.0);
+        ui.image((texture.id(), size * scale));
+    } else {
+        ui.monospace(&card.raw_source);
+    }
 }
 
 fn prepare_safe_display_source(

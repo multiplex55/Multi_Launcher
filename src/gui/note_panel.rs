@@ -1,9 +1,11 @@
 use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
+use crate::diagram::{DiagramSourceCopy, DiagramSourceCopyOrigin};
 use crate::file_search::actions::{
     ExplorerAction, execute_explorer_action, resolve_explorer_action,
 };
 use crate::gui::LauncherApp;
+use crate::gui::markdown_preview::{MermaidCardsCache, draw_mermaid_card_contents};
 use crate::gui::note_find::{NoteFindMatch, NoteFindState};
 use crate::gui::note_find_preview::{
     NoteFindPreviewBlock, NoteFindPreviewIndex, inline_note_visible_ranges,
@@ -12,11 +14,11 @@ use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::notes_markdown::{
     MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout, MarkdownEditError, MarkdownHeading,
-    MarkdownInlineFormat, MarkdownSection, MarkdownTaskItem, ParsedMarkdownTable,
-    PlainLinkConversionReport, PreparedMarkdownEdit, analyze_markdown, convert_plain_links,
-    prepare_block_snippet, prepare_inline_format, prepare_insert_column, prepare_insert_row,
-    prepare_insert_table, prepare_remove_column, prepare_remove_row, prepare_set_cell,
-    table_at_byte, task_list::toggle_task_marker,
+    MarkdownInlineFormat, MarkdownPreview, MarkdownPreviewStatus, MarkdownSection,
+    MarkdownTaskItem, ParsedMarkdownTable, PlainLinkConversionReport, PreparedMarkdownEdit,
+    analyze_markdown, convert_plain_links, prepare_block_snippet, prepare_inline_format,
+    prepare_insert_column, prepare_insert_row, prepare_insert_table, prepare_remove_column,
+    prepare_remove_row, prepare_set_cell, table_at_byte, task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
     Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
@@ -1089,6 +1091,10 @@ pub struct NotePanel {
     tag_search: String,
     view_mode: NoteViewMode,
     markdown_cache: CommonMarkCache,
+    mermaid_cards_cache: Option<MermaidCardsCache>,
+    pending_mermaid_origin: Option<NoteMermaidOrigin>,
+    active_mermaid_origin: Option<NoteMermaidOrigin>,
+    pending_root_effect: Option<PendingNoteRootEffect>,
     markdown_analysis: Option<MarkdownAnalysis>,
     markdown_analysis_source_hash: Option<u64>,
     collapsed_sections: HashSet<String>,
@@ -1141,6 +1147,11 @@ pub struct NotePanel {
     // an existing widget in the current frame. This prevents AccessKit from seeing
     // a focused node that is not present in the accessibility tree.
     focus_textedit_next_frame: bool,
+    markdown_toolbar_popup_was_open: bool,
+    markdown_toolbar_owns_selection: bool,
+    applying_toolbar_markdown_action: bool,
+    focus_textedit_after_toolbar_action: bool,
+    pending_toolbar_focus_restore: Option<PendingNoteToolbarFocusRestore>,
     last_textedit_id: Option<egui::Id>,
     derived: NoteDerivedView,
     fast_derived_dirty: bool,
@@ -1178,6 +1189,18 @@ pub struct NotePanel {
     test_markdown_fragment_ids: Vec<(String, egui::Id, egui::Id)>,
     #[cfg(test)]
     test_capture_markdown_fragment_ids: bool,
+    #[cfg(test)]
+    test_markdown_toolbar_menu: Option<(egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_note_toolbar_edit_button: Option<(egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_markdown_tool_rects: Vec<(String, egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_mermaid_open_rects: Vec<(usize, egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_preview_scroll_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_preview_scroll_offsets: Option<(egui::Vec2, egui::Vec2)>,
     #[cfg(test)]
     last_preview_fallback_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -1252,6 +1275,35 @@ enum TableEditOperation {
     InsertColumnRight,
     RemoveColumn,
     ReplaceCellWithSelection,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NoteMermaidOrigin {
+    pub(crate) identity: DiagramSourceCopyOrigin,
+    note_slug: String,
+    note_path: PathBuf,
+    source_snapshot: String,
+    fence_index: usize,
+}
+
+struct PendingNoteRootEffect {
+    frame_nr: u64,
+    pass_nr: u64,
+    effect: NotePanelEffect,
+}
+
+#[derive(Clone, Copy)]
+struct PendingNoteToolbarFocusRestore {
+    frame_nr: u64,
+    pass_nr: u64,
+    editor_id: egui::Id,
+}
+
+pub(crate) enum NotePanelEffect {
+    OpenDiagram {
+        source: DiagramSourceCopy,
+        origin: NoteMermaidOrigin,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1551,6 +1603,10 @@ impl NotePanel {
             tag_search: String::new(),
             view_mode,
             markdown_cache: CommonMarkCache::default(),
+            mermaid_cards_cache: None,
+            pending_mermaid_origin: None,
+            active_mermaid_origin: None,
+            pending_root_effect: None,
             markdown_analysis: None,
             markdown_analysis_source_hash: None,
             collapsed_sections: HashSet::new(),
@@ -1599,6 +1655,11 @@ impl NotePanel {
             alias_rename_inputs: HashMap::new(),
             native_paste_detector: NativePasteDetector::default(),
             focus_textedit_next_frame: false,
+            markdown_toolbar_popup_was_open: false,
+            markdown_toolbar_owns_selection: false,
+            applying_toolbar_markdown_action: false,
+            focus_textedit_after_toolbar_action: false,
+            pending_toolbar_focus_restore: None,
             last_textedit_id: None,
             derived: NoteDerivedView::default(),
             fast_derived_dirty: true,
@@ -1636,6 +1697,18 @@ impl NotePanel {
             test_markdown_fragment_ids: Vec::new(),
             #[cfg(test)]
             test_capture_markdown_fragment_ids: false,
+            #[cfg(test)]
+            test_markdown_toolbar_menu: None,
+            #[cfg(test)]
+            test_note_toolbar_edit_button: None,
+            #[cfg(test)]
+            test_markdown_tool_rects: Vec::new(),
+            #[cfg(test)]
+            test_mermaid_open_rects: Vec::new(),
+            #[cfg(test)]
+            test_preview_scroll_id: None,
+            #[cfg(test)]
+            test_preview_scroll_offsets: None,
             #[cfg(test)]
             last_preview_fallback_rect: None,
             #[cfg(test)]
@@ -2250,6 +2323,218 @@ impl NotePanel {
         &self.note.slug
     }
 
+    pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> Option<NotePanelEffect> {
+        self.complete_toolbar_focus_restore(ctx);
+
+        let Some(staged) = self.pending_root_effect.take() else {
+            return None;
+        };
+        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
+            == staged.frame_nr.saturating_add(1)
+            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
+                == staged.pass_nr.saturating_add(1);
+        let NotePanelEffect::OpenDiagram { origin, .. } = &staged.effect;
+        let source_still_matches = self.open
+            && self.note.slug == origin.note_slug
+            && self.note.path == origin.note_path
+            && self.note.content == origin.source_snapshot;
+        if retained && source_still_matches {
+            Some(staged.effect)
+        } else {
+            if self
+                .pending_mermaid_origin
+                .as_ref()
+                .is_some_and(|pending| pending.identity == origin.identity)
+            {
+                self.pending_mermaid_origin = None;
+            }
+            None
+        }
+    }
+
+    fn complete_toolbar_focus_restore(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_toolbar_focus_restore else {
+            return;
+        };
+        if !self.open
+            || self.last_textedit_id != Some(pending.editor_id)
+            || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+        {
+            self.pending_toolbar_focus_restore = None;
+            return;
+        }
+
+        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
+            == pending.frame_nr.saturating_add(1)
+            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
+                == pending.pass_nr.saturating_add(1);
+        if !retained {
+            // The source action has already been applied by the established
+            // Note editing path. Keep its focus intent until a retained ROOT
+            // pass can publish it without replaying the activation key.
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+
+        self.pending_toolbar_focus_restore = None;
+        let modal_allows_focus = ctx
+            .memory(|memory| memory.top_modal_layer())
+            .is_none_or(|modal| modal == self.show_query_focus_layer());
+        let editor_is_available = ctx
+            .read_response(pending.editor_id)
+            .is_some_and(|response| response.enabled());
+        if self.query_focus_protected_state_blocks() || !modal_allows_focus || !editor_is_available
+        {
+            return;
+        }
+
+        ctx.memory_mut(|memory| memory.request_focus(pending.editor_id));
+    }
+
+    pub(crate) fn track_diagram_source_origin(&mut self, origin: NoteMermaidOrigin) {
+        self.pending_mermaid_origin = Some(origin);
+    }
+
+    pub(crate) fn reconcile_diagram_source_origin(
+        &mut self,
+        active: Option<DiagramSourceCopyOrigin>,
+        pending: Option<DiagramSourceCopyOrigin>,
+    ) {
+        let pending_matches_active = self
+            .pending_mermaid_origin
+            .as_ref()
+            .is_some_and(|origin| active.as_ref() == Some(&origin.identity));
+        if pending_matches_active {
+            self.active_mermaid_origin = self.pending_mermaid_origin.take();
+        } else if self
+            .pending_mermaid_origin
+            .as_ref()
+            .is_some_and(|origin| pending.as_ref() != Some(&origin.identity))
+        {
+            self.pending_mermaid_origin = None;
+        }
+
+        if self
+            .active_mermaid_origin
+            .as_ref()
+            .is_some_and(|origin| active.as_ref() != Some(&origin.identity))
+        {
+            self.active_mermaid_origin = None;
+        }
+    }
+
+    pub(crate) fn owns_active_diagram_source_origin(
+        &self,
+        identity: &DiagramSourceCopyOrigin,
+    ) -> bool {
+        self.open
+            && self
+                .active_mermaid_origin
+                .as_ref()
+                .is_some_and(|origin| origin.identity == *identity)
+    }
+
+    pub(crate) fn tracks_diagram_source_origin(&self, identity: &DiagramSourceCopyOrigin) -> bool {
+        self.pending_mermaid_origin
+            .as_ref()
+            .or(self.active_mermaid_origin.as_ref())
+            .is_some_and(|origin| origin.identity == *identity)
+    }
+
+    pub(crate) fn can_open_diagram_source_copy(
+        &self,
+        ctx: &egui::Context,
+        origin: &NoteMermaidOrigin,
+    ) -> Result<(), &'static str> {
+        if !self.open
+            || self.note.slug != origin.note_slug
+            || self.note.path != origin.note_path
+            || self.note.content != origin.source_snapshot
+            || !self.tracks_diagram_source_origin(&origin.identity)
+        {
+            return Err("The originating Note changed before Diagram Studio could open.");
+        }
+        self.diagram_handoff_block_reason(ctx).map_or(Ok(()), Err)
+    }
+
+    fn diagram_handoff_block_reason(&self, ctx: &egui::Context) -> Option<&'static str> {
+        if self.query_focus_protected_state_blocks() {
+            return Some("Resolve the open Note dialog or decision before using this Diagram.");
+        }
+        let note_layer = self.show_query_focus_layer();
+        if ctx
+            .memory(|memory| memory.top_modal_layer())
+            .is_some_and(|modal_layer| modal_layer != note_layer)
+        {
+            return Some("Resolve the active dialog before using this Diagram.");
+        }
+        None
+    }
+
+    pub(crate) fn apply_diagram_source_handoff(
+        &mut self,
+        ctx: &egui::Context,
+        handoff: super::DiagramMarkdownSource,
+        app: &mut LauncherApp,
+    ) {
+        let Some(origin) = self
+            .active_mermaid_origin
+            .as_ref()
+            .filter(|origin| origin.identity == handoff.origin)
+            .cloned()
+        else {
+            return;
+        };
+        if !self.open {
+            app.report_error("notes.mermaid", "The originating Note is no longer open.");
+            return;
+        }
+        if let Some(reason) = self.diagram_handoff_block_reason(ctx) {
+            app.report_error("notes.mermaid", reason);
+            return;
+        }
+        if self.note.slug != origin.note_slug || self.note.path != origin.note_path {
+            self.active_mermaid_origin = None;
+            app.report_error("notes.mermaid", "The originating note is no longer open.");
+            return;
+        }
+        if self.note.content != origin.source_snapshot {
+            self.active_mermaid_origin = None;
+            app.report_error(
+                "notes.mermaid",
+                "The note source changed after this Diagram was opened.",
+            );
+            return;
+        }
+
+        let prepared = MarkdownPreview::analyze(&origin.source_snapshot)
+            .map_err(|error| error.to_string())
+            .and_then(|preview| {
+                preview
+                    .prepare_fence_replacement(origin.fence_index, &handoff.source)
+                    .map_err(|error| error.to_string())
+            });
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                app.report_error("notes.mermaid", error);
+                return;
+            }
+        };
+        let editor_id = matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+            .then_some(self.last_textedit_id)
+            .flatten();
+        match self.apply_prepared_source_edit(ctx, editor_id, prepared, None) {
+            Ok(true) => {
+                self.active_mermaid_origin = None;
+                self.pending_mermaid_origin = None;
+                self.mermaid_cards_cache = None;
+            }
+            Ok(false) => {}
+            Err(error) => app.report_error("notes.mermaid", error.to_string()),
+        }
+    }
+
     #[cfg(feature = "qa-framebuffer-capture")]
     pub(super) fn qa_note_replace_layer_id(&self) -> egui::LayerId {
         self.show_query_focus_layer()
@@ -2725,6 +3010,64 @@ impl NotePanel {
         self.last_textedit_id
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_markdown_toolbar_menu(&self) -> Option<(egui::Id, egui::Rect, egui::Rect)> {
+        self.test_markdown_toolbar_menu
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_note_toolbar_edit_button(
+        &self,
+    ) -> Option<(egui::Id, egui::Rect, egui::Rect)> {
+        self.test_note_toolbar_edit_button
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_markdown_tool_rect(
+        &self,
+        label: &str,
+    ) -> Option<(egui::Id, egui::Rect, egui::Rect)> {
+        self.test_markdown_tool_rects
+            .iter()
+            .find(|(name, _, _, _)| name == label)
+            .map(|(_, id, rect, clip)| (*id, *rect, *clip))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_link_dialog_open(&mut self, open: bool) {
+        self.link_dialog_open = open;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_mermaid_open_rect(
+        &self,
+        index: usize,
+    ) -> Option<(egui::Id, egui::Rect, egui::Rect)> {
+        self.test_mermaid_open_rects
+            .iter()
+            .find(|(candidate, _, _, _)| *candidate == index)
+            .map(|(_, id, rect, clip)| (*id, *rect, *clip))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_preview_scroll_offsets(&self) -> Option<(egui::Vec2, egui::Vec2)> {
+        self.test_preview_scroll_offsets
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_mermaid_card_count(&self) -> usize {
+        self.mermaid_cards_cache
+            .as_ref()
+            .map_or(0, |cache| cache.fences().len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pending_mermaid_origin(&self) -> Option<DiagramSourceCopyOrigin> {
+        self.pending_mermaid_origin
+            .as_ref()
+            .map(|origin| origin.identity.clone())
+    }
+
     fn set_view_mode(&mut self, view_mode: NoteViewMode) {
         if self.view_mode != view_mode {
             self.view_mode = view_mode;
@@ -3095,6 +3438,21 @@ impl NotePanel {
                 "the active note editor changed before the edit was applied",
             ));
         }
+        self.apply_prepared_source_edit(ctx, Some(id), prepared, selection_after)
+    }
+
+    fn apply_prepared_source_edit(
+        &mut self,
+        ctx: &egui::Context,
+        editor_id: Option<egui::Id>,
+        prepared: PreparedMarkdownEdit,
+        selection_after: Option<std::ops::Range<usize>>,
+    ) -> Result<bool, MarkdownEditError> {
+        if editor_id.is_some_and(|id| self.last_textedit_id != Some(id)) {
+            return Err(MarkdownEditError::InvalidParameter(
+                "the active note editor changed before the edit was applied",
+            ));
+        }
         let before_content = self.note.content.clone();
         let applied = prepared.apply(&before_content)?;
         if applied.source == before_content {
@@ -3139,8 +3497,26 @@ impl NotePanel {
             )
         });
         self.pending_cursor_position = None;
-        self.focus_textedit_next_frame = true;
+        let should_focus_editor = editor_id.is_some()
+            || matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split);
+        if self.applying_toolbar_markdown_action {
+            // The top toolbar menu renders before TextEdit. Let the current
+            // key event finish in the menu, then request editor focus from its
+            // response handler after TextEdit has processed this frame.
+            self.focus_textedit_next_frame = false;
+            self.focus_textedit_after_toolbar_action = should_focus_editor;
+        } else {
+            self.focus_textedit_next_frame = should_focus_editor;
+        }
         Ok(true)
+    }
+
+    fn defer_toolbar_editor_focus(&mut self) {
+        if self.applying_toolbar_markdown_action {
+            self.focus_textedit_next_frame = false;
+            self.focus_textedit_after_toolbar_action =
+                matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split);
+        }
     }
 
     fn apply_wrapped_markdown_format(
@@ -3399,10 +3775,18 @@ impl NotePanel {
         ctx: &egui::Context,
         mut note: Note,
     ) {
-        let slug_changed = self.note.slug != note.slug;
+        let note_identity_changed = self.note.slug != note.slug || self.note.path != note.path;
         let content = std::mem::take(&mut note.content);
         self.note = note;
-        if slug_changed {
+        if note_identity_changed {
+            self.active_mermaid_origin = None;
+            self.pending_mermaid_origin = None;
+            self.pending_root_effect = None;
+            self.markdown_toolbar_popup_was_open = false;
+            self.markdown_toolbar_owns_selection = false;
+            self.applying_toolbar_markdown_action = false;
+            self.focus_textedit_after_toolbar_action = false;
+            self.pending_toolbar_focus_restore = None;
             self.surrender_find_focus(ctx);
             if let Some(id) = self.last_textedit_id {
                 ctx.memory_mut(|memory| memory.surrender_focus(id));
@@ -3507,6 +3891,10 @@ impl NotePanel {
                         self.last_outline_rect = None;
                         self.last_preview_heading_rects.clear();
                         self.last_preview_heading_font_sizes.clear();
+                        self.test_markdown_toolbar_menu = None;
+                        self.test_note_toolbar_edit_button = None;
+                        self.test_markdown_tool_rects.clear();
+                        self.test_mermaid_open_rects.clear();
                         self.last_inline_note_font_size = None;
                     }
                     if ui
@@ -3824,6 +4212,12 @@ impl NotePanel {
     }
 
     fn render_toolbar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) -> bool {
+        self.markdown_toolbar_owns_selection = false;
+        if !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+            || self.last_textedit_id.is_none()
+        {
+            self.markdown_toolbar_popup_was_open = false;
+        }
         let mut save_now = false;
         let _toolbar = ui.horizontal_wrapped(|ui| {
             // Keep native button labels intact; the wrapping layout moves whole
@@ -3841,6 +4235,12 @@ impl NotePanel {
             self.record_note_replace_control(NoteReplaceControl::FindToggle, &find);
             if find.clicked() {
                 self.open_find();
+            }
+            if matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+                && let Some(editor_id) = self.last_textedit_id
+            {
+                let ctx = ui.ctx().clone();
+                self.build_toolbar_markdown_menu(ui, &ctx, editor_id, app);
             }
             let open_resp = ui.button("Open Externally");
             let popup_id = open_resp.id.with("open_with_menu");
@@ -3911,6 +4311,10 @@ impl NotePanel {
                 let edit = ui.button("Edit");
                 #[cfg(feature = "qa-framebuffer-capture")]
                 self.record_note_replace_control(NoteReplaceControl::Edit, &edit);
+                #[cfg(test)]
+                if ui.is_visible() && !ui.is_sizing_pass() {
+                    self.test_note_toolbar_edit_button = Some((edit.id, edit.rect, ui.clip_rect()));
+                }
                 if edit.clicked() {
                     self.set_view_mode_with_context(ui.ctx(), NoteViewMode::Edit);
                     self.focus_textedit_next_frame = true;
@@ -4492,7 +4896,11 @@ impl NotePanel {
                 // Keep the native edge detector synchronized even though Preview
                 // never performs clipboard inspection.
                 let _ = self.native_paste_detector.sample();
-                egui::ScrollArea::vertical()
+                #[cfg(test)]
+                let scroll_offset_before = self.test_preview_scroll_id.and_then(|id| {
+                    egui::scroll_area::State::load(ctx, id).map(|state| state.offset)
+                });
+                let preview_scroll = egui::ScrollArea::vertical()
                     .id_salt(scroll_id_source)
                     .max_height(available_size.y)
                     .auto_shrink([false, false])
@@ -4504,6 +4912,14 @@ impl NotePanel {
                         let _ = self.markdown_analysis();
                         self.render_preview(ui, app, ctx);
                     });
+                #[cfg(test)]
+                {
+                    self.test_preview_scroll_id = Some(preview_scroll.id);
+                    self.test_preview_scroll_offsets =
+                        scroll_offset_before.map(|before| (before, preview_scroll.state.offset));
+                }
+                #[cfg(not(test))]
+                let _ = preview_scroll;
             }
             NoteViewMode::Split => {
                 self.render_split(ui, app, ctx, available_size);
@@ -5060,14 +5476,25 @@ impl NotePanel {
         } else {
             None
         };
+        let toolbar_selection = if !response.has_focus() && self.markdown_toolbar_owns_selection {
+            self.pending_selection
+                .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
+                .map(|(start, end)| start..end)
+        } else {
+            None
+        };
         // TextEdit collapses an unfocused cursor range while it renders. Keep
-        // Find's active source selection stored while the query owns focus,
-        // without overriding a caret or selection in an editor the user chose.
-        let selection_range = navigation_range.as_ref().or_else(|| {
-            (!response.has_focus())
-                .then_some(active_match.as_ref())
-                .flatten()
-        });
+        // Find's active source selection and the toolbar's logical selection
+        // stored while those controls own focus, without overriding an editor
+        // the user chose directly.
+        let selection_range = navigation_range
+            .as_ref()
+            .or(toolbar_selection.as_ref())
+            .or_else(|| {
+                (!response.has_focus())
+                    .then_some(active_match.as_ref())
+                    .flatten()
+            });
         if let Some(range) = selection_range {
             let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
                 .unwrap_or_default();
@@ -5129,6 +5556,162 @@ impl NotePanel {
         ui.set_min_width(preview_width);
         ui.set_max_width(preview_width);
         self.render_preview_document(ui, app, ctx);
+        self.render_note_mermaid_cards(ui, app, ctx);
+    }
+
+    fn render_note_mermaid_cards(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        ctx: &egui::Context,
+    ) {
+        let revision = self.note_find.content_revision();
+        let sections = if app.note_settings.collapsible_sections_enabled {
+            self.markdown_analysis().sections.clone()
+        } else {
+            Vec::new()
+        };
+        let hidden = Self::collapsed_body_ranges(
+            &self.note.slug,
+            &sections,
+            &self.collapsed_sections,
+            app.note_settings.collapsible_sections_enabled,
+        );
+        if !self
+            .mermaid_cards_cache
+            .as_ref()
+            .is_some_and(|cache| cache.matches(revision, &self.note.content))
+        {
+            self.mermaid_cards_cache =
+                Some(MermaidCardsCache::new(ctx, revision, &self.note.content));
+        }
+        let Some(cache) = self.mermaid_cards_cache.as_ref() else {
+            return;
+        };
+        let status = match cache.status() {
+            Ok(status) => Ok(status.clone()),
+            Err(error) => Err(error.to_owned()),
+        };
+        let card_rows = cache
+            .fences()
+            .iter()
+            .enumerate()
+            .filter(|(_, fence)| !Self::range_is_hidden(&fence.full_range(), &hidden))
+            .filter_map(|(index, fence)| Some((index, fence.clone(), cache.card(index)?.clone())))
+            .collect::<Vec<_>>();
+        if card_rows.is_empty() {
+            match &status {
+                Err(error) => {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("Mermaid cards are unavailable: {error}"),
+                    );
+                }
+                Ok(MarkdownPreviewStatus::LimitExceeded(limit)) => {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("Mermaid cards are limited ({limit:?}); note source is unchanged."),
+                    );
+                }
+                Ok(MarkdownPreviewStatus::Complete) => {}
+            }
+            return;
+        }
+        if let Ok(MarkdownPreviewStatus::LimitExceeded(limit)) = &status {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Some Mermaid cards are limited ({limit:?}); note source is unchanged."),
+            );
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.heading("Mermaid diagrams");
+        let mut open_fence = None;
+        for (index, fence, card) in card_rows {
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(format!("Mermaid block {}", index + 1));
+                    let open = ui.add_enabled(
+                        self.pending_root_effect.is_none() && !self.discard_unsaved_prompt,
+                        egui::Button::new("Open in Diagram"),
+                    );
+                    let gained_focus = open.gained_focus();
+                    let has_focus = open.has_focus();
+                    let is_clipped = !open.interact_rect.contains_rect(open.rect);
+                    if gained_focus {
+                        open.scroll_to_me(Some(egui::Align::Center));
+                    } else if has_focus && is_clipped {
+                        open.scroll_to_me(None);
+                    }
+                    #[cfg(test)]
+                    if ui.is_visible() && !ui.is_sizing_pass() {
+                        self.test_mermaid_open_rects.push((
+                            index,
+                            open.id,
+                            open.rect,
+                            ui.clip_rect(),
+                        ));
+                    }
+                    if open.clicked() {
+                        open_fence = Some(index);
+                    }
+                });
+                draw_mermaid_card_contents(ui, &card);
+                let raw = fence.raw_source();
+                if !raw.is_empty() {
+                    ui.small(format!("{} bytes of source", raw.len()));
+                }
+            });
+        }
+        if let Some(index) = open_fence {
+            self.stage_mermaid_diagram_open(ctx, index, app);
+        }
+    }
+
+    fn stage_mermaid_diagram_open(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        app: &mut LauncherApp,
+    ) {
+        if self.pending_root_effect.is_some() || self.discard_unsaved_prompt || !self.open {
+            return;
+        }
+        let revision = self.note_find.content_revision();
+        let Some(cache) = self
+            .mermaid_cards_cache
+            .as_ref()
+            .filter(|cache| cache.matches(revision, &self.note.content))
+        else {
+            return;
+        };
+        let Some(fence) = cache.fence(index) else {
+            return;
+        };
+        let source_snapshot = self.note.content.clone();
+        let identity = DiagramSourceCopyOrigin::fresh();
+        let origin = NoteMermaidOrigin {
+            identity: identity.clone(),
+            note_slug: self.note.slug.clone(),
+            note_path: self.note.path.clone(),
+            source_snapshot: source_snapshot.clone(),
+            fence_index: index,
+        };
+        match fence.to_diagram_source_copy() {
+            Ok(source) => {
+                self.pending_mermaid_origin = Some(origin.clone());
+                self.pending_root_effect = Some(PendingNoteRootEffect {
+                    frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
+                    pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                    effect: NotePanelEffect::OpenDiagram {
+                        source: source.with_origin(identity),
+                        origin,
+                    },
+                });
+            }
+            Err(error) => app.report_error("notes.mermaid", error.to_string()),
+        }
     }
 
     fn render_preview_document(
@@ -5682,7 +6265,16 @@ impl NotePanel {
         }
         let mut state =
             egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
-        if !resp.secondary_clicked() {
+        if self.markdown_toolbar_owns_selection && !resp.has_focus() {
+            if let Some(cached) = self
+                .pending_selection
+                .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
+            {
+                restore_char_range(&mut state, cached);
+                state.store(ctx, resp.id);
+                self.pending_selection = Some(cached);
+            }
+        } else if !resp.secondary_clicked() {
             let selection = selected_char_range(&state)
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()));
             let find_selection = self
@@ -5747,6 +6339,24 @@ impl NotePanel {
         if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             let modifiers = ctx.input(|i| i.modifiers);
             ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
+        }
+        if self.focus_textedit_after_toolbar_action && !self.note_find.is_open() && resp.enabled() {
+            self.focus_textedit_after_toolbar_action = false;
+            self.pending_toolbar_focus_restore = Some(PendingNoteToolbarFocusRestore {
+                frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
+                pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                editor_id: resp.id,
+            });
+        } else if resp.enabled()
+            && self
+                .pending_toolbar_focus_restore
+                .is_some_and(|pending| pending.editor_id == resp.id)
+        {
+            self.pending_toolbar_focus_restore = Some(PendingNoteToolbarFocusRestore {
+                frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
+                pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                editor_id: resp.id,
+            });
         }
     }
 
@@ -6364,8 +6974,43 @@ impl NotePanel {
         id: egui::Id,
         app: &mut LauncherApp,
     ) {
-        ui.menu_button("Markdown", |ui| {
-            if ui.button("Add Checkbox").clicked() {
+        self.build_markdown_menu(ui, ctx, id, app, true, false);
+    }
+
+    fn build_toolbar_markdown_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        id: egui::Id,
+        app: &mut LauncherApp,
+    ) {
+        self.build_markdown_menu(ui, ctx, id, app, false, true);
+    }
+
+    fn build_markdown_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        id: egui::Id,
+        app: &mut LauncherApp,
+        include_context_menus: bool,
+        capture_toolbar_widgets: bool,
+    ) {
+        if capture_toolbar_widgets {
+            self.applying_toolbar_markdown_action = true;
+        }
+        let markdown_menu = ui.menu_button("Markdown", |ui| {
+            let add_checkbox = ui.button("Add Checkbox");
+            #[cfg(test)]
+            if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
+                self.test_markdown_tool_rects.push((
+                    "Add Checkbox".into(),
+                    add_checkbox.id,
+                    add_checkbox.rect,
+                    ui.clip_rect(),
+                ));
+            }
+            if add_checkbox.clicked() {
                 let mut state =
                     egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
                 let idx = state
@@ -6382,6 +7027,8 @@ impl NotePanel {
                         egui::text::CCursor::new(idx + 6),
                     )));
                 state.store(ctx, id);
+                self.pending_selection = None;
+                self.defer_toolbar_editor_focus();
                 ui.close();
             }
             if ui.button("Insert Timestamp").clicked() {
@@ -6405,7 +7052,17 @@ impl NotePanel {
                 }
                 ui.close();
             }
-            if ui.button("Bold Selection").clicked() {
+            let bold = ui.button("Bold Selection");
+            #[cfg(test)]
+            if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
+                self.test_markdown_tool_rects.push((
+                    "Bold Selection".into(),
+                    bold.id,
+                    bold.rect,
+                    ui.clip_rect(),
+                ));
+            }
+            if bold.clicked() {
                 self.apply_wrapped_markdown_format(ctx, id, app, MarkdownInlineFormat::Strong, 2);
                 ui.close();
             }
@@ -6544,7 +7201,36 @@ impl NotePanel {
                 ui.close();
             }
         });
+        #[cfg(test)]
+        if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
+            self.test_markdown_toolbar_menu = Some((
+                markdown_menu.response.id,
+                markdown_menu.response.rect,
+                ui.clip_rect(),
+            ));
+        }
+        if capture_toolbar_widgets {
+            let popup_id = egui::Popup::default_response_id(&markdown_menu.response);
+            let popup_open =
+                markdown_menu.inner.is_some() || egui::Popup::is_id_open(ctx, popup_id);
+            self.markdown_toolbar_owns_selection = markdown_menu.response.has_focus()
+                || popup_open
+                || self.markdown_toolbar_popup_was_open
+                || self.focus_textedit_after_toolbar_action
+                || self
+                    .pending_toolbar_focus_restore
+                    .is_some_and(|pending| pending.editor_id == id);
+            self.markdown_toolbar_popup_was_open = popup_open;
+            self.applying_toolbar_markdown_action = false;
+        }
+        if !include_context_menus {
+            return;
+        }
 
+        #[cfg(not(test))]
+        let _ = markdown_menu;
+
+        ui.separator();
         ui.menu_button("Insert link", |ui| {
             ui.set_min_width(200.0);
             ui.horizontal(|ui| {
@@ -6706,27 +7392,6 @@ impl NotePanel {
             })
     }
 
-    pub fn wrap_selection(
-        &mut self,
-        ctx: &egui::Context,
-        id: egui::Id,
-        start_marker: &str,
-        end_marker: &str,
-    ) {
-        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-        if let Some((start, end)) = self.resolve_selection(ctx, id) {
-            let (start_byte, end_byte) = char_range_to_byte_range(&self.note.content, start, end);
-            self.note.content.insert_str(end_byte, end_marker);
-            self.note.content.insert_str(start_byte, start_marker);
-            self.mark_content_changed(ctx.input(|i| i.time));
-            let new_start = start + start_marker.chars().count();
-            let new_end = end + start_marker.chars().count();
-            restore_char_range(&mut state, (new_start, new_end));
-            state.store(ctx, id);
-            self.pending_selection = Some((new_start, new_end));
-        }
-    }
-
     fn insert_callout(&mut self, ctx: &egui::Context, id: egui::Id, kind: &str) {
         let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
         let idx = state
@@ -6794,6 +7459,7 @@ impl NotePanel {
             state.store(ctx, id);
             self.pending_selection = None;
             self.mark_content_changed(ctx.input(|i| i.time));
+            self.defer_toolbar_editor_focus();
             return TextInsertionOutcome {
                 kind: TextInsertionKind::ReplacedSelection,
                 resulting_char_index: cursor,
@@ -6813,6 +7479,7 @@ impl NotePanel {
         state.store(ctx, id);
         self.pending_selection = None;
         self.mark_content_changed(ctx.input(|i| i.time));
+        self.defer_toolbar_editor_focus();
         TextInsertionOutcome {
             kind: TextInsertionKind::InsertedAtCaret,
             resulting_char_index: cursor,
@@ -14893,10 +15560,12 @@ More text.
     }
 
     #[test]
-    fn wrap_selection_preserves_range() {
+    fn note_markdown_tools_prepared_wrap_preserves_selected_range() {
         let ctx = egui::Context::default();
         let mut panel = NotePanel::from_note(empty_note("hello world"));
         let id = egui::Id::new("note_content");
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
         let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
         state
             .cursor
@@ -14905,7 +15574,14 @@ More text.
                 egui::text::CCursor::new(5),
             )));
         state.store(&ctx, id);
-        panel.wrap_selection(&ctx, id, "**", "**");
+        let prepared =
+            prepare_inline_format(panel.note_content(), 0..5, MarkdownInlineFormat::Strong)
+                .unwrap();
+        assert!(
+            panel
+                .apply_prepared_markdown_edit_with_selection(&ctx, id, prepared, Some(2..7))
+                .unwrap()
+        );
         assert_eq!(panel.note.content, "**hello** world");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
         let range = state.cursor.char_range().unwrap();
@@ -15218,10 +15894,12 @@ More text.
     }
 
     #[test]
-    fn formatting_wraps_current_selection() {
+    fn note_markdown_tools_prepared_bold_and_italic_wrap_selections() {
         let ctx = egui::Context::default();
         let id = egui::Id::new("note_content");
         let mut panel = NotePanel::from_note(empty_note("hello world"));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
 
         // Bold selection
         let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
@@ -15232,7 +15910,14 @@ More text.
                 egui::text::CCursor::new(11),
             )));
         state.store(&ctx, id);
-        panel.wrap_selection(&ctx, id, "**", "**");
+        let prepared =
+            prepare_inline_format(panel.note_content(), 6..11, MarkdownInlineFormat::Strong)
+                .unwrap();
+        assert!(
+            panel
+                .apply_prepared_markdown_edit_with_selection(&ctx, id, prepared, Some(8..13))
+                .unwrap()
+        );
         assert_eq!(panel.note.content, "hello **world**");
 
         // Italic selection
@@ -15245,8 +15930,196 @@ More text.
                 egui::text::CCursor::new(5),
             )));
         state.store(&ctx, id);
-        panel.wrap_selection(&ctx, id, "*", "*");
+        let prepared =
+            prepare_inline_format(panel.note_content(), 0..5, MarkdownInlineFormat::Emphasis)
+                .unwrap();
+        assert!(
+            panel
+                .apply_prepared_markdown_edit_with_selection(&ctx, id, prepared, Some(1..6))
+                .unwrap()
+        );
         assert_eq!(panel.note.content, "*hello* world");
+    }
+
+    #[test]
+    fn note_markdown_tools_preview_adds_cards_and_retains_unsupported_fence_source() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let source = concat!(
+            "# Mermaid cards\n\n",
+            "Before the diagrams.\n\n",
+            "```mermaid\nflowchart TD\n    A[\"Supported\"]\n```\n\n",
+            "Between the diagrams.\n\n",
+            "~~~mermaid\nflowchart TD\n%% retained directive\nA --> B\n~~~\n\n",
+            "After the diagrams.\n",
+        );
+        let mut panel = NotePanel::from_note(empty_note(source));
+        panel.test_set_view_mode(NoteViewMode::Preview);
+
+        render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(900.0, 650.0));
+
+        let cache = panel
+            .mermaid_cards_cache
+            .as_ref()
+            .expect("the existing Note preview adds its bounded Mermaid cards");
+        assert_eq!(cache.fences().len(), 2);
+        assert_eq!(panel.test_mermaid_card_count(), 2);
+        assert!(matches!(
+            cache.card(1).expect("second fence has a card").status(),
+            crate::notes_markdown::MermaidFenceStatus::Unsupported(_)
+        ));
+        assert_eq!(
+            cache
+                .fence(1)
+                .expect("second fence remains indexed")
+                .raw_source(),
+            "flowchart TD\n%% retained directive\nA --> B\n"
+        );
+        assert_eq!(
+            panel.note_content(),
+            source,
+            "card analysis is additive and never rewrites Note source"
+        );
+    }
+
+    #[test]
+    fn note_markdown_tools_diagram_handoff_is_exact_one_undo_and_rejects_stale_origin() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let mut app = new_app(&ctx);
+        let original = concat!(
+            "# Handoff\n\nBefore.\n\n",
+            "```mermaid\nflowchart TD\n    A[\"First\"]\n```\n\n",
+            "Middle.\n\n",
+            "~~~mermaid\nflowchart TD\n    B[\"Second\"]\n~~~\n\n",
+            "After.\n",
+        );
+        let expected = concat!(
+            "# Handoff\n\nBefore.\n\n",
+            "```mermaid\nflowchart TD\n    A[\"First\"]\n```\n\n",
+            "Middle.\n\n",
+            "~~~mermaid\nflowchart LR\n    B[\"Updated\"]\n~~~\n\n",
+            "After.\n",
+        );
+        let mut panel = NotePanel::from_note(empty_note(original));
+        panel.test_set_view_mode(NoteViewMode::Preview);
+        let identity = DiagramSourceCopyOrigin::fresh();
+        panel.active_mermaid_origin = Some(NoteMermaidOrigin {
+            identity: identity.clone(),
+            note_slug: panel.note.slug.clone(),
+            note_path: panel.note.path.clone(),
+            source_snapshot: original.to_owned(),
+            fence_index: 1,
+        });
+
+        panel.apply_diagram_source_handoff(
+            &ctx,
+            super::super::DiagramMarkdownSource {
+                origin: identity.clone(),
+                source: "flowchart LR\n    B[\"Updated\"]".into(),
+            },
+            &mut app,
+        );
+
+        assert_eq!(panel.note_content(), expected);
+        assert!(panel.has_unsaved_changes());
+        assert_eq!(panel.replacement_undo_boundaries.len(), 1);
+        let mut retained = panel
+            .retained_text_edit_history
+            .take()
+            .expect("Diagram handoff uses the Note's existing undo owner");
+        let (undo_cursor, undo_source) = panel
+            .replacement_history_step(
+                &mut retained.undoer,
+                retained.cursor,
+                ReplacementUndoDirection::Undo,
+            )
+            .expect("one undo restores the exact original Note source");
+        assert_eq!(undo_source, original);
+        panel.replacement_history_mutation = Some(ReplacementHistoryMutation::Undo);
+        panel.replace_content_from_mutation(undo_source, 1.0);
+        retained.cursor = undo_cursor;
+        panel.retained_text_edit_history = Some(retained);
+        assert_eq!(panel.note_content(), original);
+        assert!(!panel.has_unsaved_changes());
+
+        let unrelated = DiagramSourceCopyOrigin::fresh();
+        panel.active_mermaid_origin = Some(NoteMermaidOrigin {
+            identity: identity.clone(),
+            note_slug: panel.note.slug.clone(),
+            note_path: panel.note.path.clone(),
+            source_snapshot: original.to_owned(),
+            fence_index: 1,
+        });
+        panel.apply_diagram_source_handoff(
+            &ctx,
+            super::super::DiagramMarkdownSource {
+                origin: unrelated,
+                source: "flowchart LR\n    B[\"Unrelated\"]\n".into(),
+            },
+            &mut app,
+        );
+        assert_eq!(panel.note_content(), original);
+
+        let mut stale_panel = NotePanel::from_note(empty_note(original));
+        stale_panel.test_set_view_mode(NoteViewMode::Preview);
+        let stale_identity = DiagramSourceCopyOrigin::fresh();
+        stale_panel.active_mermaid_origin = Some(NoteMermaidOrigin {
+            identity: stale_identity.clone(),
+            note_slug: stale_panel.note.slug.clone(),
+            note_path: stale_panel.note.path.clone(),
+            source_snapshot: original.to_owned(),
+            fence_index: 1,
+        });
+        let changed = format!("{original}changed outside the fence\n");
+        stale_panel.replace_content_from_mutation(changed, 2.0);
+        let changed = stale_panel.note_content().to_owned();
+        stale_panel.apply_diagram_source_handoff(
+            &ctx,
+            super::super::DiagramMarkdownSource {
+                origin: stale_identity,
+                source: "flowchart LR\n    B[\"Stale\"]\n".into(),
+            },
+            &mut app,
+        );
+        assert_eq!(stale_panel.note_content(), changed);
+        assert!(stale_panel.active_mermaid_origin.is_none());
+
+        let mut protected_panel = NotePanel::from_note(empty_note(original));
+        protected_panel.test_set_view_mode(NoteViewMode::Preview);
+        let protected_identity = DiagramSourceCopyOrigin::fresh();
+        protected_panel.active_mermaid_origin = Some(NoteMermaidOrigin {
+            identity: protected_identity.clone(),
+            note_slug: protected_panel.note.slug.clone(),
+            note_path: protected_panel.note.path.clone(),
+            source_snapshot: original.to_owned(),
+            fence_index: 0,
+        });
+        protected_panel.link_dialog_open = true;
+        app.show_inline_errors = true;
+        assert!(
+            protected_panel
+                .can_open_diagram_source_copy(
+                    &ctx,
+                    protected_panel.active_mermaid_origin.as_ref().unwrap(),
+                )
+                .is_err()
+        );
+        protected_panel.apply_diagram_source_handoff(
+            &ctx,
+            super::super::DiagramMarkdownSource {
+                origin: protected_identity,
+                source: "flowchart LR\n    A[\"Blocked\"]\n".into(),
+            },
+            &mut app,
+        );
+        assert_eq!(protected_panel.note_content(), original);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("Resolve the open Note dialog"))
+        );
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]

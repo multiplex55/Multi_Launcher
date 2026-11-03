@@ -1,6 +1,6 @@
 # Shared Markdown authoring and export boundary
 
-`notes_markdown` remains the shared owner for Markdown structure and source edits. Its authoring helpers keep byte ranges UTF-8 safe and return `PreparedMarkdownEdit` values bound to the complete source snapshot. Applying a prepared edit to changed Markdown returns a conflict instead of applying a stale range. Existing Note UI and checklist behavior are unchanged.
+`notes_markdown` remains the shared owner for Markdown structure and source edits. Its authoring helpers keep byte ranges UTF-8 safe and return `PreparedMarkdownEdit` values bound to the complete source snapshot. Applying a prepared edit to changed Markdown returns a conflict instead of applying a stale range. Notes retains its custom preview, task, callout, image, wiki-link, and Find behavior while exposing the same source-bound authoring tools from a collapsed Markdown menu in the editor toolbar.
 
 ## Bounds
 
@@ -19,6 +19,8 @@
 ## Mermaid fences
 
 `MarkdownPreview` retains the full original source and records exact parser-derived byte ranges for each Mermaid fence and body. It asks the accepted Diagram parser and scene exporter for a current SVG. Invalid, unsupported, unclosed, or over-limit fences retain their exact source and carry a status; no partial Mermaid source is treated as a valid preview. Replacing a fence body produces a source-bound edit and ensures nonempty replacement text ends on its own line before the existing closing fence. If copied source could close the surrounding fence, that fence is lengthened without changing bytes outside the exact fence range.
+
+The existing Notes preview adds cached cards for these fences without replacing its Note-specific renderer. **Open in Diagram** copies the exact fence source into Diagram Studio and leaves the Note unchanged. **Use source in Markdown** returns an edit only to the Note and fence that opened that Diagram, after confirming the original Note source is still current; the replacement uses the Note's existing undo history.
 
 ## HTML safety
 

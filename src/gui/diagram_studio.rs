@@ -1671,6 +1671,18 @@ impl DiagramStudioDialog {
         self.refresh_cache();
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_stage_markdown_source_handoff(
+        &mut self,
+        origin: DiagramSourceCopyOrigin,
+        source: impl Into<String>,
+    ) {
+        self.pending_markdown_source = Some(DiagramMarkdownSource {
+            origin,
+            source: source.into(),
+        });
+    }
+
     fn reset_document_presentation(&mut self) {
         self.cache = None;
         self.selection = None;
@@ -1754,6 +1766,14 @@ impl DiagramStudioDialog {
     #[cfg(test)]
     pub(crate) fn test_file_picker_calls(&self) -> usize {
         self.test_file_picker_calls
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_action_rect(&self, name: &str) -> Option<(egui::Rect, egui::Rect)> {
+        self.test_action_rects
+            .iter()
+            .find(|(action, _, _)| action == name)
+            .map(|(_, rect, clip)| (*rect, *clip))
     }
 
     #[cfg(test)]

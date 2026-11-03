@@ -235,6 +235,17 @@ impl MarkdownStudioDialog {
         self.pending_diagram_origin = Some(origin);
     }
 
+    pub(crate) fn owns_active_diagram_source_origin(
+        &self,
+        identity: &DiagramSourceCopyOrigin,
+    ) -> bool {
+        self.open
+            && self
+                .active_diagram_origin
+                .as_ref()
+                .is_some_and(|origin| origin.identity == *identity)
+    }
+
     pub(crate) fn apply_diagram_source_handoff(&mut self, handoff: super::DiagramMarkdownSource) {
         if !self.open {
             self.set_error("Markdown Studio is closed; reopen the originating document before applying Diagram source.".into());
