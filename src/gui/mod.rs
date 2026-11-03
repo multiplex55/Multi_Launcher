@@ -1406,9 +1406,10 @@ struct PendingShowQueryFocus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct QueryFocusNotesContext {
+struct QueryFocusOrdinaryContext {
     notes_dialog_open: bool,
     note_panel_layers: std::collections::HashSet<egui::LayerId>,
+    ordinary_panel_layers: std::collections::HashSet<egui::LayerId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1416,7 +1417,7 @@ struct QueryFocusSession {
     origin: QueryFocusOrigin,
     visibility_revision: u64,
     root_identity: (usize, u64),
-    notes_context: QueryFocusNotesContext,
+    ordinary_context: QueryFocusOrdinaryContext,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

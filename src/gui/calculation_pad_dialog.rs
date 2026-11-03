@@ -883,6 +883,11 @@ impl CalculationPadDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_editor_rect(&self) -> Option<egui::Rect> {
+        self.test_editor_rect
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_editor_has_focus(&self, ctx: &egui::Context) -> bool {
         self.test_editor_id
             .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id)))

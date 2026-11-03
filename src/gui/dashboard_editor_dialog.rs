@@ -163,6 +163,8 @@ pub struct DashboardEditorDialog {
     pub(crate) native_combo_anchors: Vec<crate::dashboard::widgets::WidgetNativeComboAnchor>,
     #[cfg(test)]
     test_scroll_metrics: Option<(egui::Id, f32)>,
+    #[cfg(test)]
+    test_grid_rows_response: Option<(egui::Id, egui::Rect)>,
 }
 
 impl Default for DashboardEditorDialog {
@@ -195,6 +197,8 @@ impl Default for DashboardEditorDialog {
             native_combo_anchors: Vec::new(),
             #[cfg(test)]
             test_scroll_metrics: None,
+            #[cfg(test)]
+            test_grid_rows_response: None,
         }
     }
 }
@@ -213,6 +217,21 @@ impl DashboardEditorDialog {
     #[cfg(test)]
     pub(crate) fn test_scroll_area_max_offset(&self) -> Option<(egui::Id, f32)> {
         self.test_scroll_metrics
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_grid_rows_response(&self) -> Option<(egui::Id, egui::Rect)> {
+        self.test_grid_rows_response
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_grid_rows(&self) -> u8 {
+        self.config.grid.rows
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_grid_rows(&mut self, rows: u8) {
+        self.config.grid.rows = rows.clamp(1, 12);
     }
 
     #[cfg(test)]
@@ -421,6 +440,10 @@ impl DashboardEditorDialog {
         }
         settings_ctx.begin_native_combo_anchor_pass();
         self.ensure_slot_tokens();
+        #[cfg(test)]
+        {
+            self.test_grid_rows_response = None;
+        }
         let mut should_reload = false;
         let mut open = self.open;
         let mut authorized_visible_pass = false;
@@ -452,6 +475,10 @@ impl DashboardEditorDialog {
                         let response = ui.add(
                             egui::DragValue::new(&mut self.config.grid.rows).range(1..=12),
                         );
+                        #[cfg(test)]
+                        {
+                            self.test_grid_rows_response = Some((response.id, response.rect));
+                        }
                         register_editor_target(jump_scope, ui, &response, "grid/rows", "Grid rows", crate::gui::jump_mode::TargetKind::Slider, &mut visual_order);
                         if response.changed() {
                             self.clamp_all_slots();

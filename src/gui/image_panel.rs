@@ -20,6 +20,13 @@ impl ImagePanel {
         }
     }
 
+    pub(crate) fn query_focus_layer_id(&self) -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(("image-viewer", self.path.clone())),
+        )
+    }
+
     fn load_texture(&mut self, ctx: &egui::Context) {
         if self.texture.is_some() {
             return;
