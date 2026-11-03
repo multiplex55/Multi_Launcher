@@ -353,6 +353,25 @@ pub(crate) enum ConvertPanelEffect {
     SavePreferences,
 }
 
+struct RootEffects {
+    frame_nr: u64,
+    pass_nr: u64,
+    input: String,
+    from_filter: String,
+    to_filter: String,
+    category: PanelCategory,
+    from: Option<PanelUnit>,
+    targets: Vec<Option<PanelUnit>>,
+    preferences: DisplayPreferences,
+    focus_requested: bool,
+    input_id: Option<egui::Id>,
+    focus_add_target: bool,
+    add_target_id: Option<egui::Id>,
+    favorite_limit_hit: bool,
+    window_open: bool,
+    effect: Option<ConvertPanelEffect>,
+}
+
 /// Unit conversion controls and presentation state. Preference IO is configured
 /// only by production construction; `Default` remains filesystem-free.
 pub struct ConvertPanel {
@@ -366,6 +385,8 @@ pub struct ConvertPanel {
     focus_input: bool,
     preferences: PreferencesState,
     copy_feedback: Option<Result<(), String>>,
+    pending_root_effects: Option<RootEffects>,
+    host_close_requested: bool,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -411,6 +432,8 @@ impl Default for ConvertPanel {
             focus_input: false,
             preferences: PreferencesState::default(),
             copy_feedback: None,
+            pending_root_effects: None,
+            host_close_requested: false,
             #[cfg(test)]
             test_window_rect: None,
             #[cfg(test)]
@@ -459,7 +482,15 @@ impl ConvertPanel {
     /// Open the panel and focus the value input once.
     pub fn open(&mut self) {
         self.open = true;
+        self.host_close_requested = false;
         self.focus_input = true;
+    }
+
+    /// Stage a host close request for the next retained ROOT frame.
+    pub(crate) fn request_close(&mut self) {
+        if self.open {
+            self.host_close_requested = true;
+        }
     }
 
     /// Draw the panel and return deferred clipboard or preference effects.
@@ -468,9 +499,17 @@ impl ConvertPanel {
         ctx: &egui::Context,
         first_ui_pass: bool,
     ) -> Option<ConvertPanelEffect> {
+        #[cfg(test)]
+        {
+            self.test_window_rect = None;
+            self.test_input_rect = None;
+        }
         if !self.open {
             return None;
         }
+
+        let frame_nr = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        let pass_nr = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
 
         let mut window_open = self.open;
         let mut input = self.input.clone();
@@ -535,41 +574,115 @@ impl ConvertPanel {
         {
             self.test_window_rect = output.as_ref().map(|output| output.response.rect);
         }
-        #[cfg(not(test))]
-        let _ = output;
-
-        let effects_authorized = authorized_pass && !ctx.will_discard();
-        if effects_authorized {
-            self.input = input;
-            self.from_filter = from_filter;
-            self.to_filter = to_filter;
-            self.category = category;
-            self.from = from;
-            self.targets = targets;
-            self.preferences.current = preferences;
-            if favorite_limit_hit {
-                self.preferences.feedback = Some(format!(
-                    "Converter favorites are limited to {} units",
-                    preferences::MAX_FAVORITES
-                ));
-            }
-            if focus_requested {
-                if let Some(input_id) = input_id {
-                    ctx.memory_mut(|memory| memory.request_focus(input_id));
-                    ctx.request_repaint();
-                }
-                self.focus_input = false;
-            }
-            if focus_add_target {
-                if let Some(add_target_id) = add_target_id {
-                    ctx.memory_mut(|memory| memory.request_focus(add_target_id));
-                    ctx.request_repaint();
-                }
-            }
-            self.open = window_open;
+        let content_authorized = authorized_pass && !ctx.will_discard();
+        let window_lifecycle_authorized = first_ui_pass
+            && !ctx.will_discard()
+            && output
+                .as_ref()
+                .is_some_and(|output| output.response.rect.intersects(ctx.content_rect()));
+        let state_changed = input != self.input
+            || from_filter != self.from_filter
+            || to_filter != self.to_filter
+            || category != self.category
+            || from != self.from
+            || targets != self.targets
+            || preferences != self.preferences.current;
+        let close_requested = (window_lifecycle_authorized && self.host_close_requested)
+            || (window_lifecycle_authorized && !window_open);
+        if (content_authorized
+            && (state_changed
+                || focus_requested
+                || focus_add_target
+                || favorite_limit_hit
+                || effect.is_some()))
+            || close_requested
+        {
+            self.pending_root_effects = Some(RootEffects {
+                frame_nr,
+                pass_nr,
+                input,
+                from_filter,
+                to_filter,
+                category,
+                from,
+                targets,
+                preferences,
+                focus_requested,
+                input_id,
+                focus_add_target,
+                add_target_id,
+                favorite_limit_hit,
+                window_open: window_open && !close_requested,
+                effect,
+            });
         }
 
-        effects_authorized.then_some(effect).flatten()
+        None
+    }
+
+    /// Commit staged controls and actions only after the ROOT frame has been
+    /// retained. Filesystem and clipboard effects are dispatched by the owner.
+    pub(crate) fn on_ui_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Option<ConvertPanelEffect> {
+        let Some(effects) = self.pending_root_effects.take() else {
+            return None;
+        };
+        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
+            == effects.frame_nr.saturating_add(1)
+            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
+                == effects.pass_nr.saturating_add(1);
+        if !retained {
+            return None;
+        }
+
+        let needs_repaint = effects.input != self.input
+            || effects.from_filter != self.from_filter
+            || effects.to_filter != self.to_filter
+            || effects.category != self.category
+            || effects.from != self.from
+            || effects.targets != self.targets
+            || effects.preferences != self.preferences.current
+            || effects.focus_requested
+            || effects.focus_add_target
+            || effects.effect.is_some()
+            || effects.favorite_limit_hit
+            || !effects.window_open;
+        self.input = effects.input;
+        self.from_filter = effects.from_filter;
+        self.to_filter = effects.to_filter;
+        self.category = effects.category;
+        self.from = effects.from;
+        self.targets = effects.targets;
+        self.preferences.current = effects.preferences;
+        if effects.favorite_limit_hit {
+            self.preferences.feedback = Some(format!(
+                "Converter favorites are limited to {} units",
+                preferences::MAX_FAVORITES
+            ));
+        }
+        if effects.focus_requested {
+            if let Some(input_id) = effects.input_id {
+                ctx.memory_mut(|memory| memory.request_focus(input_id));
+                ctx.request_repaint();
+            }
+            self.focus_input = false;
+        }
+        if effects.focus_add_target {
+            if let Some(add_target_id) = effects.add_target_id {
+                ctx.memory_mut(|memory| memory.request_focus(add_target_id));
+                ctx.request_repaint();
+            }
+        }
+        self.open = effects.window_open;
+        if !effects.window_open {
+            self.host_close_requested = false;
+        }
+        if needs_repaint {
+            ctx.request_repaint();
+        }
+        effects.effect
     }
 
     fn contents_ui(
@@ -1121,6 +1234,22 @@ impl ConvertPanel {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_set_fixed_preferences(&mut self) {
+        self.preferences.current.number_format = NumberFormat::Fixed;
+        self.preferences.current.decimal_places = 4;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_save_preferences_button_rect(&self) -> Option<egui::Rect> {
+        self.test_save_preferences_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_preferences_are_dirty(&self) -> bool {
+        self.preferences.has_unsaved_changes()
+    }
+
+    #[cfg(test)]
     fn add_target(&mut self) {
         if self.targets.len() < MAX_TARGETS {
             self.targets.push(next_target(self.category, &self.targets));
@@ -1250,10 +1379,10 @@ mod tests {
         size: egui::Vec2,
         events: Vec<egui::Event>,
     ) -> Option<ConvertPanelEffect> {
-        let mut effect = None;
         let output = ctx.run_ui(input(size, events), |ui| {
-            effect = panel.ui(ui.ctx(), ui.ctx().current_pass_index() == 0);
+            let _ = panel.ui(ui.ctx(), ui.ctx().current_pass_index() == 0);
         });
+        let effect = panel.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         effect
     }
@@ -1264,7 +1393,6 @@ mod tests {
         size: egui::Vec2,
         events: Vec<egui::Event>,
     ) -> (Option<ConvertPanelEffect>, bool) {
-        let mut effect = None;
         let mut first_ui_pass_seen = false;
         let output = ctx.run_ui(input(size, events), |ui| {
             let first_ui_pass = ui.ctx().current_pass_index() == 0;
@@ -1273,10 +1401,30 @@ mod tests {
                 ui.ctx()
                     .request_discard("Converter discarded-pass regression");
             }
-            effect = panel.ui(ui.ctx(), first_ui_pass);
+            let _ = panel.ui(ui.ctx(), first_ui_pass);
         });
+        let effect = panel.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         (effect, first_ui_pass_seen)
+    }
+
+    fn frame_requesting_late_discard(
+        panel: &mut ConvertPanel,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> Option<ConvertPanelEffect> {
+        let output = ctx.run_ui(input(size, events), |ui| {
+            let first_ui_pass = ui.ctx().current_pass_index() == 0;
+            let _ = panel.ui(ui.ctx(), first_ui_pass);
+            if first_ui_pass {
+                ui.ctx()
+                    .request_discard("Converter late ROOT discard regression");
+            }
+        });
+        let effect = panel.on_ui_frame_complete(ctx);
+        output.drop_without_applying_deltas();
+        effect
     }
 
     fn key(key: egui::Key, pressed: bool) -> egui::Event {
@@ -2105,5 +2253,82 @@ mod tests {
         );
         assert!(!preferences_path.exists());
         assert!(stored_panel.preferences.has_unsaved_changes());
+    }
+
+    #[test]
+    fn converter_late_root_discard_does_not_publish_preferences_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(directory.path().join("app-data"));
+        let path = root.path().join("converter_preferences.json");
+        let mut panel = ConvertPanel::with_data_root(&root);
+        panel.open();
+        panel.test_set_fixed_preferences();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(900.0, 680.0);
+        for _ in 0..3 {
+            frame(&mut panel, &ctx, size, Vec::new());
+        }
+        let save = panel
+            .test_save_preferences_button_rect()
+            .expect("the actual Save Preferences button is visible");
+        frame(&mut panel, &ctx, size, click_events(save.center(), true));
+
+        assert_eq!(
+            frame_requesting_late_discard(
+                &mut panel,
+                &ctx,
+                size,
+                click_events(save.center(), false),
+            ),
+            None,
+            "a late ROOT discard must not publish the preference-save effect"
+        );
+        assert!(
+            !path.exists(),
+            "discarded preference saves do not write files"
+        );
+        assert!(panel.test_preferences_are_dirty());
+
+        frame(&mut panel, &ctx, size, Vec::new());
+        let save = panel
+            .test_save_preferences_button_rect()
+            .expect("an enabled Save control is republished after the discarded pass");
+        assert_eq!(
+            click(&mut panel, &ctx, size, save.center()),
+            Some(ConvertPanelEffect::SavePreferences)
+        );
+        panel.save_preferences();
+        assert!(path.exists(), "the retained explicit save remains usable");
+        assert!(!panel.test_preferences_are_dirty());
+    }
+
+    #[test]
+    fn collapsed_converter_host_close_is_applied_without_contents_ui() {
+        let mut panel = ConvertPanel::default();
+        panel.open();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let size = egui::vec2(960.0, 720.0);
+        for _ in 0..3 {
+            frame(&mut panel, &ctx, size, Vec::new());
+        }
+
+        let mut collapsing = egui::collapsing_header::CollapsingState::load_with_default_open(
+            &ctx,
+            egui::Id::new("convert-panel-window").with("collapsing"),
+            true,
+        );
+        collapsing.set_open(false);
+        collapsing.store(&ctx);
+        frame(&mut panel, &ctx, size, Vec::new());
+        assert!(
+            panel.test_input_rect.is_none(),
+            "collapsed Converter skips its contents"
+        );
+
+        panel.request_close();
+        frame(&mut panel, &ctx, size, Vec::new());
+        assert!(!panel.open);
+        assert!(panel.test_window_rect.is_some());
     }
 }

@@ -16,6 +16,28 @@ type SourceStateBeforeFrame = (
     Option<usize>,
 );
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DialogCopyOwner {
+    CalculationPad,
+    Converter,
+    DateTimeStudio,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RootDialogEffect {
+    CopyText {
+        owner: DialogCopyOwner,
+        text: String,
+    },
+    SaveConverterPreferences,
+    PrepareCalendar {
+        instant_utc: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+#[cfg(test)]
+const ROOT_DIALOG_EFFECTS_TEST_ID: &str = "retained-root-dialog-effects-test-sink";
+
 #[derive(Clone, Copy)]
 struct QueryShowGeometry {
     rect: egui::Rect,
@@ -9683,48 +9705,14 @@ impl LauncherApp {
         #[cfg(not(feature = "qa-framebuffer-capture"))]
         self.qr_dialog.show(&ctx);
         self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        if let Some(super::CalculationPadDialogEffect::CopyText(text)) =
-            self.calculation_pad_dialog.show(&ctx, first_ui_pass)
-        {
-            let result =
-                crate::actions::clipboard::set_text(&text).map_err(|error| error.to_string());
-            self.calculation_pad_dialog.copy_completed(result);
-        }
+        let _ = self.calculation_pad_dialog.show(&ctx, first_ui_pass);
         self.markdown_studio_dialog.show(&ctx, first_ui_pass);
         let calendar_editor_open = self.calendar_editor_open;
-        let date_time_studio_effect =
-            self.date_time_studio_dialog
-                .show(&ctx, first_ui_pass, calendar_editor_open);
-        if first_ui_pass && !ctx.will_discard() {
-            match date_time_studio_effect {
-                Some(super::DateTimeStudioEffect::CopyText(text)) => {
-                    let result = crate::actions::clipboard::set_text(&text)
-                        .map_err(|error| error.to_string());
-                    self.date_time_studio_dialog.copy_completed(result);
-                }
-                Some(super::DateTimeStudioEffect::PrepareCalendar { instant_utc }) => {
-                    let result = self.prepare_calendar_event_at(instant_utc);
-                    self.date_time_studio_dialog
-                        .calendar_prepare_completed(result);
-                }
-                None => {}
-            }
-        }
+        let _ = self
+            .date_time_studio_dialog
+            .show(&ctx, first_ui_pass, calendar_editor_open);
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
-        let converter_effect = conv_panel.ui(&ctx, first_ui_pass);
-        if first_ui_pass && !ctx.will_discard() {
-            match converter_effect {
-                Some(super::ConvertPanelEffect::CopyText(text)) => {
-                    let result = crate::actions::clipboard::set_text(&text)
-                        .map_err(|error| error.to_string());
-                    conv_panel.copy_completed(result);
-                }
-                Some(super::ConvertPanelEffect::SavePreferences) => {
-                    conv_panel.save_preferences();
-                }
-                None => {}
-            }
-        }
+        let _ = conv_panel.ui(&ctx, first_ui_pass);
         self.convert_panel = conv_panel;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
         vol_dlg.ui(&ctx, self);
@@ -10170,6 +10158,121 @@ impl LauncherApp {
         }
     }
 
+    fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
+        let mut effects = Vec::new();
+        if let Some(super::CalculationPadDialogEffect::CopyText(text)) =
+            self.calculation_pad_dialog.on_ui_frame_complete(ctx)
+        {
+            effects.push(RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::CalculationPad,
+                text,
+            });
+        }
+        match self.date_time_studio_dialog.on_ui_frame_complete(ctx) {
+            Some(super::DateTimeStudioEffect::CopyText(text)) => {
+                effects.push(RootDialogEffect::CopyText {
+                    owner: DialogCopyOwner::DateTimeStudio,
+                    text,
+                });
+            }
+            Some(super::DateTimeStudioEffect::PrepareCalendar { instant_utc }) => {
+                effects.push(RootDialogEffect::PrepareCalendar { instant_utc });
+            }
+            None => {}
+        }
+        match self.convert_panel.on_ui_frame_complete(ctx) {
+            Some(super::ConvertPanelEffect::CopyText(text)) => {
+                effects.push(RootDialogEffect::CopyText {
+                    owner: DialogCopyOwner::Converter,
+                    text,
+                });
+            }
+            Some(super::ConvertPanelEffect::SavePreferences) => {
+                effects.push(RootDialogEffect::SaveConverterPreferences);
+            }
+            None => {}
+        }
+
+        if !self.calculation_pad_dialog.open {
+            self.panel_states.calculation_pad_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::CalculationPadDialog);
+        }
+        if !self.date_time_studio_dialog.open {
+            self.panel_states.date_time_studio_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::DateTimeStudioDialog);
+        }
+        if !self.convert_panel.open {
+            self.panel_states.convert_panel = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::ConvertPanel);
+        }
+        effects
+    }
+
+    fn dispatch_root_dialog_effects(
+        &mut self,
+        ctx: &egui::Context,
+        effects: Vec<RootDialogEffect>,
+    ) {
+        #[cfg(test)]
+        if !effects.is_empty() {
+            ctx.data_mut(|data| {
+                let key = egui::Id::new(ROOT_DIALOG_EFFECTS_TEST_ID);
+                let mut captured = data
+                    .get_temp::<Vec<RootDialogEffect>>(key)
+                    .unwrap_or_default();
+                captured.extend(effects.iter().cloned());
+                data.insert_temp(key, captured);
+            });
+        }
+
+        for effect in effects {
+            match effect {
+                RootDialogEffect::CopyText { owner, text } => {
+                    #[cfg(test)]
+                    let result = {
+                        let _ = (&owner, &text);
+                        Ok(())
+                    };
+                    #[cfg(not(test))]
+                    let result = crate::actions::clipboard::set_text(&text)
+                        .map_err(|error| error.to_string());
+                    match owner {
+                        DialogCopyOwner::CalculationPad => {
+                            self.calculation_pad_dialog.copy_completed(result)
+                        }
+                        DialogCopyOwner::Converter => self.convert_panel.copy_completed(result),
+                        DialogCopyOwner::DateTimeStudio => {
+                            self.date_time_studio_dialog.copy_completed(result)
+                        }
+                    }
+                }
+                RootDialogEffect::SaveConverterPreferences => {
+                    self.convert_panel.save_preferences();
+                }
+                RootDialogEffect::PrepareCalendar { instant_utc } => {
+                    let result = self.prepare_calendar_event_at(instant_utc);
+                    self.date_time_studio_dialog
+                        .calendar_prepare_completed(result);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn take_test_root_dialog_effects(ctx: &egui::Context) -> Vec<RootDialogEffect> {
+        ctx.data_mut(|data| {
+            let key = egui::Id::new(ROOT_DIALOG_EFFECTS_TEST_ID);
+            let effects = data
+                .get_temp::<Vec<RootDialogEffect>>(key)
+                .unwrap_or_default();
+            data.insert_temp(key, Vec::<RootDialogEffect>::new());
+            effects
+        })
+    }
+
     fn guard_overlay_app_exit(&mut self, ctx: &egui::Context) {
         let requested = ctx.input(|input| input.viewport().close_requested());
         if requested && !self.sequence_exit_requested {
@@ -10245,6 +10348,8 @@ impl eframe::App for LauncherApp {
         }
         self.complete_markdown_diagram_handoff();
         self.regex_tester_dialog.on_ui_frame_complete(_ctx);
+        let effects = self.complete_retained_tool_dialogs(_ctx);
+        self.dispatch_root_dialog_effects(_ctx, effects);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
     }
@@ -10441,6 +10546,8 @@ impl LauncherApp {
         }
         self.complete_markdown_diagram_handoff();
         self.regex_tester_dialog.on_ui_frame_complete(ctx);
+        let effects = self.complete_retained_tool_dialogs(ctx);
+        self.dispatch_root_dialog_effects(ctx, effects);
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();
@@ -13628,6 +13735,383 @@ mod tests {
         let workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let app = root_list_app_at(ctx, results, workspace.root());
         (workspace, app)
+    }
+
+    fn prepare_tool_dialog_root(ctx: &egui::Context, app: &mut LauncherApp) {
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.focus_query = false;
+        app.follow_mouse = false;
+        for _ in 0..3 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+        let _ = LauncherApp::take_test_root_dialog_effects(ctx);
+    }
+
+    fn tool_dialog_pointer_events(rect: egui::Rect, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(rect.center()),
+            egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn run_tool_dialog_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+        discard_after_render: bool,
+    ) -> egui::FullOutput {
+        let mut input = actual_query_input(true);
+        input.events = events;
+        app.run_root_frame_for_test(ctx, input, discard_after_render)
+            .0
+    }
+
+    #[test]
+    fn retained_root_copy_effect_is_typed_once_and_discarded_copy_never_reaches_clipboard() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog
+            .test_replace_source("answer = 40 + 2");
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let copy = app
+            .calculation_pad_dialog
+            .test_copy_all_button_rect()
+            .expect("Copy all is an actual rendered Pad action");
+
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(copy, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(copy, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        assert!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
+            "a ROOT discard drops the typed clipboard effect"
+        );
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("answer = 40 + 2")
+        );
+
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let copy = app
+            .calculation_pad_dialog
+            .test_copy_all_button_rect()
+            .expect("an enabled Copy all action is republished after the discarded pass");
+
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(copy, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(copy, false),
+            false,
+        )
+        .drop_without_applying_deltas();
+        let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            &effects[0],
+            RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::CalculationPad,
+                text,
+            } if text.contains("r1 answer = 42")
+        ));
+        let repeated = app.complete_retained_tool_dialogs(&ctx);
+        app.dispatch_root_dialog_effects(&ctx, repeated);
+        assert!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
+            "a second completion does not emit the same copy twice"
+        );
+    }
+
+    #[test]
+    fn retained_root_converter_preferences_save_is_suppressed_on_discard_and_written_once() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::ConvertPanel);
+        app.convert_panel.test_set_fixed_preferences();
+        let path = workspace.root().join("converter_preferences.json");
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let save = app
+            .convert_panel
+            .test_save_preferences_button_rect()
+            .expect("the preference-save action is visible");
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(save, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(save, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        assert!(!path.exists());
+        assert!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
+            "the discarded Save Preferences action is not dispatched"
+        );
+
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let save = app
+            .convert_panel
+            .test_save_preferences_button_rect()
+            .expect("the explicit action remains available after discard");
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(save, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(save, false),
+            false,
+        )
+        .drop_without_applying_deltas();
+        assert!(path.exists());
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::SaveConverterPreferences]
+        ));
+    }
+
+    #[test]
+    fn retained_root_date_prepare_waits_for_acceptance_and_rechecks_calendar_owner() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| {
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::DateTimeStudioDialog);
+        app.date_time_studio_dialog
+            .test_set_schedule_preview("2026-11-02", "09:00", "UTC");
+
+        let prepare_target = |app: &LauncherApp| {
+            app.date_time_studio_dialog
+                .test_focusable_control("schedule_prepare_calendar")
+                .expect("Prepare is a real focusable schedule action")
+        };
+        let reveal_prepare = |app: &mut LauncherApp| {
+            // Publish the control again in an ordinary enabled ROOT frame
+            // before reading geometry from a discarded interaction pass.
+            run_tool_dialog_frame(&ctx, app, Vec::new(), false).drop_without_applying_deltas();
+            let (_, _, enabled, _, _) = app
+                .date_time_studio_dialog
+                .test_prepare_observation()
+                .expect("Prepare is republished by an ordinary enabled frame");
+            assert!(enabled);
+            // The focus transition can change content geometry once more; use
+            // the action only after two consecutive visible measurements.
+            let mut previous_visible_geometry = None;
+            for _ in 0..128 {
+                let (id, rect, clip) = prepare_target(app);
+                let focused = ctx.memory(|memory| memory.focused()) == Some(id);
+                let visible = clip.contains_rect(rect) && ctx.content_rect().contains_rect(rect);
+                if focused && visible {
+                    if previous_visible_geometry == Some((rect, clip)) {
+                        return (id, rect, clip);
+                    }
+                    previous_visible_geometry = Some((rect, clip));
+                } else {
+                    previous_visible_geometry = None;
+                }
+                if focused {
+                    run_tool_dialog_frame(&ctx, app, Vec::new(), false)
+                        .drop_without_applying_deltas();
+                } else {
+                    run_tool_dialog_frame(
+                        &ctx,
+                        app,
+                        vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                    run_tool_dialog_frame(
+                        &ctx,
+                        app,
+                        vec![key_release(egui::Key::Tab, egui::Modifiers::NONE)],
+                        false,
+                    )
+                    .drop_without_applying_deltas();
+                }
+            }
+            let (id, rect, clip) = prepare_target(app);
+            panic!(
+                "Tab focus should reveal the actual Prepare response: focused={:?}, id={id:?}, rect={rect:?}, clip={clip:?}, root={:?}, latest_observation={:?}",
+                ctx.memory(|memory| memory.focused()),
+                ctx.content_rect(),
+                app.date_time_studio_dialog.test_prepare_observation()
+            );
+        };
+
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (prepare_id, prepare, prepare_clip) = reveal_prepare(&mut app);
+        assert!(prepare_clip.contains_rect(prepare));
+        assert!(ctx.content_rect().contains_rect(prepare));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        let (_, prepare_after_press, clip_after_press) = prepare_target(&app);
+        assert_eq!(prepare_id, prepare_target(&app).0);
+        assert!(clip_after_press.contains_rect(prepare_after_press));
+        assert!(ctx.content_rect().contains_rect(prepare_after_press));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(prepare_id));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare_after_press, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        let (prepare_rect, prepare_clip, enabled, clicked, pointer_pos) = app
+            .date_time_studio_dialog
+            .test_prepare_observation()
+            .expect("the actual Prepare response was observed");
+        assert!(
+            ctx.content_rect().contains_rect(prepare_rect)
+                && prepare_clip.contains_rect(prepare_rect),
+            "Prepare must be fully visible and hit-testable before the discarded release: rect={prepare_rect:?}, clip={prepare_clip:?}, root={:?}",
+            ctx.content_rect()
+        );
+        assert!(enabled, "Prepare must be enabled for the discarded click");
+        assert!(
+            clicked && pointer_pos.is_some(),
+            "the discarded release must click the actual Prepare response: observation={:?}",
+            app.date_time_studio_dialog.test_prepare_observation()
+        );
+        assert!(app.date_time_studio_dialog.test_prepare_effect_staged());
+        assert!(!app.date_time_studio_dialog.test_prepare_effect_retained());
+        assert!(!app.calendar_editor_open);
+        assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+
+        // Simulate another accepted ROOT owner opening the calendar editor
+        // after the Date window drew Prepare but before effects are completed.
+        let (prepare_id_after_discard, prepare, prepare_clip) = reveal_prepare(&mut app);
+        assert_eq!(prepare_id, prepare_id_after_discard);
+        assert!(prepare_clip.contains_rect(prepare));
+        assert!(ctx.content_rect().contains_rect(prepare));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        let (_, prepare_after_press, clip_after_press) = prepare_target(&app);
+        assert!(clip_after_press.contains_rect(prepare_after_press));
+        assert!(ctx.content_rect().contains_rect(prepare_after_press));
+        let mut input = actual_query_input(true);
+        input.events = tool_dialog_pointer_events(prepare_after_press, false);
+        let (output, passes) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            app.calendar_editor_open = true;
+        });
+        assert_eq!(passes, 1, "the accepted action frame is retained once");
+        output.drop_without_applying_deltas();
+        let (prepare_rect, prepare_clip, enabled, clicked, pointer_pos) = app
+            .date_time_studio_dialog
+            .test_prepare_observation()
+            .expect("the accepted Prepare response was observed");
+        assert!(
+            ctx.content_rect().contains_rect(prepare_rect)
+                && prepare_clip.contains_rect(prepare_rect),
+            "accepted Prepare geometry must be visible: rect={prepare_rect:?}, clip={prepare_clip:?}, root={:?}",
+            ctx.content_rect()
+        );
+        assert!(enabled && clicked && pointer_pos.is_some());
+        assert!(app.date_time_studio_dialog.test_prepare_effect_staged());
+        assert!(app.date_time_studio_dialog.test_prepare_effect_retained());
+        assert!(app.calendar_editor_open);
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::PrepareCalendar { .. }]
+        ));
+        assert!(
+            app.date_time_studio_dialog
+                .test_notice()
+                .is_some_and(|notice| notice.contains("already open"))
+        );
+
+        app.calendar_editor_open = false;
+        let (prepare_id_after_close, prepare, prepare_clip) = reveal_prepare(&mut app);
+        assert_eq!(prepare_id, prepare_id_after_close);
+        assert!(prepare_clip.contains_rect(prepare));
+        assert!(ctx.content_rect().contains_rect(prepare));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        let (_, prepare_after_press, clip_after_press) = prepare_target(&app);
+        assert!(clip_after_press.contains_rect(prepare_after_press));
+        assert!(ctx.content_rect().contains_rect(prepare_after_press));
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(prepare_after_press, false),
+            false,
+        )
+        .drop_without_applying_deltas();
+        assert!(app.date_time_studio_dialog.test_prepare_effect_staged());
+        assert!(app.date_time_studio_dialog.test_prepare_effect_retained());
+        assert!(app.calendar_editor_open);
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::PrepareCalendar { .. }]
+        ));
     }
 
     #[test]

@@ -39,7 +39,7 @@ impl StudioMode {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct StudioDraft {
     mode: StudioMode,
     reference_now: Option<NaiveDateTime>,
@@ -162,17 +162,47 @@ enum StudioIntent {
     RefreshReference,
 }
 
+struct RootEffects {
+    frame_nr: u64,
+    pass_nr: u64,
+    draft: Option<StudioDraft>,
+    changed: bool,
+    focus_id: Option<egui::Id>,
+    consume_focus_pending: bool,
+    intent: Option<StudioIntent>,
+    effect: Option<DateTimeStudioEffect>,
+    window_open: Option<bool>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct TestPrepareUiObservation {
+    rect: egui::Rect,
+    clip_rect: egui::Rect,
+    enabled: bool,
+    clicked: bool,
+    interact_pointer_pos: Option<egui::Pos2>,
+}
+
 pub(crate) struct DateTimeStudioDialog {
     pub(crate) open: bool,
     focus_pending: bool,
     draft: StudioDraft,
     notice: Option<String>,
+    pending_root_effects: Option<RootEffects>,
+    host_close_requested: bool,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_controls: Vec<(String, egui::Rect)>,
     #[cfg(test)]
     test_focusable_controls: Vec<(String, egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_prepare_observation: Option<TestPrepareUiObservation>,
+    #[cfg(test)]
+    test_prepare_effect_staged: bool,
+    #[cfg(test)]
+    test_prepare_effect_retained: bool,
 }
 
 impl Default for DateTimeStudioDialog {
@@ -182,12 +212,20 @@ impl Default for DateTimeStudioDialog {
             focus_pending: false,
             draft: StudioDraft::default(),
             notice: None,
+            pending_root_effects: None,
+            host_close_requested: false,
             #[cfg(test)]
             test_window_rect: None,
             #[cfg(test)]
             test_controls: Vec::new(),
             #[cfg(test)]
             test_focusable_controls: Vec::new(),
+            #[cfg(test)]
+            test_prepare_observation: None,
+            #[cfg(test)]
+            test_prepare_effect_staged: false,
+            #[cfg(test)]
+            test_prepare_effect_retained: false,
         }
     }
 }
@@ -196,6 +234,7 @@ impl DateTimeStudioDialog {
     pub(crate) fn open(&mut self) {
         self.initialize_reference_if_needed();
         self.open = true;
+        self.host_close_requested = false;
         self.focus_pending = true;
     }
 
@@ -205,8 +244,9 @@ impl DateTimeStudioDialog {
     }
 
     pub(crate) fn request_close(&mut self) {
-        self.open = false;
-        self.focus_pending = false;
+        if self.open {
+            self.host_close_requested = true;
+        }
     }
 
     pub(crate) fn copy_completed(&mut self, result: Result<(), String>) {
@@ -244,6 +284,66 @@ impl DateTimeStudioDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_set_schedule_preview(&mut self, date: &str, time: &str, zone: &str) {
+        self.draft.mode = StudioMode::SchedulePreview;
+        self.draft.schedule_date = date.to_owned();
+        self.draft.schedule_time = time.to_owned();
+        self.draft.schedule_zone = zone.to_owned();
+        self.draft.schedule_count = "1".into();
+        self.draft.selected_schedule_index = Some(0);
+        self.open = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_control_rect(&self, id: &str) -> Option<egui::Rect> {
+        self.test_controls
+            .iter()
+            .find(|(control, _)| control == id)
+            .map(|(_, rect)| *rect)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_focusable_control(
+        &self,
+        id: &str,
+    ) -> Option<(egui::Id, egui::Rect, egui::Rect)> {
+        self.test_focusable_controls
+            .iter()
+            .find(|(control, _, _, _)| control == id)
+            .map(|(_, response_id, rect, clip)| (*response_id, *rect, *clip))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_prepare_observation(
+        &self,
+    ) -> Option<(egui::Rect, egui::Rect, bool, bool, Option<egui::Pos2>)> {
+        self.test_prepare_observation.map(|observation| {
+            (
+                observation.rect,
+                observation.clip_rect,
+                observation.enabled,
+                observation.clicked,
+                observation.interact_pointer_pos,
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_prepare_effect_staged(&self) -> bool {
+        self.test_prepare_effect_staged
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_prepare_effect_retained(&self) -> bool {
+        self.test_prepare_effect_retained
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_was_rendered(&self) -> bool {
         self.test_window_rect.is_some()
     }
@@ -267,10 +367,18 @@ impl DateTimeStudioDialog {
             self.test_window_rect = None;
             self.test_controls.clear();
             self.test_focusable_controls.clear();
+            if first_ui_pass {
+                self.test_prepare_observation = None;
+                self.test_prepare_effect_staged = false;
+                self.test_prepare_effect_retained = false;
+            }
         }
         if !self.open {
             return None;
         }
+
+        let frame_nr = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        let pass_nr = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
 
         let content_size = ctx.content_rect().size();
         let mut draft = self.draft.clone();
@@ -313,38 +421,104 @@ impl DateTimeStudioDialog {
             && output
                 .as_ref()
                 .is_some_and(|output| output.response.rect.intersects(ctx.content_rect()));
-        let effects_authorized = authorized_pass && !ctx.will_discard();
-        if !effects_authorized {
-            // Collapsed windows do not run the content closure, so it cannot
-            // authorize a title-bar close. Publish that lifecycle change from
-            // the returned, visible Window response instead.
-            if window_lifecycle_authorized && !window_open {
-                self.open = false;
-                self.focus_pending = false;
-            }
+        let content_authorized = authorized_pass && !ctx.will_discard();
+        let close_requested = (window_lifecycle_authorized && self.host_close_requested)
+            || (window_lifecycle_authorized && !window_open);
+        let draft_changed = draft != self.draft;
+        #[cfg(test)]
+        if matches!(
+            effect.as_ref(),
+            Some(DateTimeStudioEffect::PrepareCalendar { .. })
+        ) {
+            self.test_prepare_effect_staged = true;
+        }
+        if (content_authorized
+            && (draft_changed
+                || changed
+                || intent.is_some()
+                || effect.is_some()
+                || self.focus_pending))
+            || close_requested
+        {
+            self.pending_root_effects = Some(RootEffects {
+                frame_nr,
+                pass_nr,
+                draft: content_authorized.then_some(draft),
+                changed,
+                focus_id: content_authorized.then_some(focus_id).flatten(),
+                consume_focus_pending: content_authorized && self.focus_pending,
+                intent: content_authorized.then_some(intent).flatten(),
+                effect: content_authorized.then_some(effect).flatten(),
+                window_open: (!window_open || close_requested).then_some(false),
+            });
+        }
+        None
+    }
+
+    /// Apply draft, focus, and host effects only after ROOT has retained the
+    /// exact frame/pass that produced them.
+    pub(crate) fn on_ui_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Option<DateTimeStudioEffect> {
+        let Some(effects) = self.pending_root_effects.take() else {
+            return None;
+        };
+        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
+            == effects.frame_nr.saturating_add(1)
+            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
+                == effects.pass_nr.saturating_add(1);
+        if !retained {
             return None;
         }
 
-        self.draft = draft;
-        if changed {
-            self.notice = None;
+        #[cfg(test)]
+        if matches!(
+            effects.effect.as_ref(),
+            Some(DateTimeStudioEffect::PrepareCalendar { .. })
+        ) {
+            self.test_prepare_effect_retained = true;
         }
-        if let Some(StudioIntent::RefreshReference) = intent {
+
+        let draft_changed = effects
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft != &self.draft);
+        let needs_repaint = draft_changed
+            || effects.changed
+            || effects.intent.is_some()
+            || effects.effect.is_some()
+            || effects.consume_focus_pending
+            || effects.window_open == Some(false);
+
+        if let Some(draft) = effects.draft {
+            self.draft = draft;
+            if effects.changed {
+                self.notice = None;
+            }
+        }
+        if let Some(StudioIntent::RefreshReference) = effects.intent {
             self.draft.refresh_reference(Local::now().naive_local());
             self.notice = Some("Reference refreshed. Existing inputs are unchanged.".into());
         }
-        if self.focus_pending {
-            if let Some(focus_id) = focus_id {
+        if effects.consume_focus_pending {
+            if let Some(focus_id) = effects.focus_id {
                 ctx.memory_mut(|memory| memory.request_focus(focus_id));
                 ctx.request_repaint();
             }
             self.focus_pending = false;
         }
-        if !window_open {
-            self.open = false;
-            self.focus_pending = false;
+        if let Some(window_open) = effects.window_open {
+            self.open = window_open;
+            if !window_open {
+                self.host_close_requested = false;
+                self.focus_pending = false;
+            }
         }
-        effect
+        if needs_repaint {
+            ctx.request_repaint();
+        }
+        effects.effect
     }
 
     fn initialize_reference_if_needed(&mut self) {
@@ -1448,6 +1622,15 @@ impl DateTimeStudioDialog {
         response: &egui::Response,
     ) {
         let id = id.into();
+        if id == "schedule_prepare_calendar" && response.enabled() {
+            self.test_prepare_observation = Some(TestPrepareUiObservation {
+                rect: response.rect,
+                clip_rect: ui.clip_rect(),
+                enabled: response.enabled(),
+                clicked: response.clicked(),
+                interact_pointer_pos: response.interact_pointer_pos(),
+            });
+        }
         self.test_controls.push((id.clone(), response.rect));
         self.test_focusable_controls
             .push((id, response.id, response.rect, ui.clip_rect()));
@@ -1758,6 +1941,8 @@ fn show_error(ui: &mut egui::Ui, error: &str) {
 fn reveal_when_focused(response: &egui::Response) {
     if response.gained_focus() {
         response.scroll_to_me(Some(egui::Align::Center));
+    } else if response.has_focus() && !response.interact_rect.contains_rect(response.rect) {
+        response.scroll_to_me(None);
     }
 }
 
@@ -1794,10 +1979,10 @@ mod tests {
         size: egui::Vec2,
         events: Vec<egui::Event>,
     ) -> Option<DateTimeStudioEffect> {
-        let mut effect = None;
         let output = ctx.run_ui(input(size, events), |ui| {
-            effect = dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, false);
+            let _ = dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, false);
         });
+        let effect = dialog.on_ui_frame_complete(ctx);
         output.drop_without_applying_deltas();
         effect
     }
@@ -2278,6 +2463,30 @@ mod tests {
         assert!(!dialog.open, "titlebar X should close a collapsed window");
         assert!(frame(&mut dialog, &ctx, size, Vec::new()).is_none());
         assert!(!dialog.test_was_rendered());
+    }
+
+    #[test]
+    fn date_time_studio_collapsed_host_close_is_applied_without_contents_ui() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        settle(&mut dialog, &ctx, size);
+
+        let mut collapsing = egui::collapsing_header::CollapsingState::load_with_default_open(
+            &ctx,
+            egui::Id::new("date-time-studio-window").with("collapsing"),
+            true,
+        );
+        collapsing.set_open(false);
+        collapsing.store(&ctx);
+        settle(&mut dialog, &ctx, size);
+        assert!(dialog.test_controls.is_empty());
+
+        dialog.request_close();
+        frame(&mut dialog, &ctx, size, Vec::new());
+        assert!(!dialog.open);
+        assert!(dialog.test_was_rendered());
     }
 
     #[test]
