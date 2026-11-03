@@ -3,11 +3,15 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::explanation::analyze_syntax;
+use super::visualization::{
+    RegexSyntaxVisualizationResult, VisualizationUnavailable, project_analysis,
+};
 use super::{
     EvaluationPolicy, EvaluationResult, ExplanationResult, RegexDraft, RegexFlags, RegexMatch,
     RegexTestCaseEvaluation, RegexTestCaseSummary, SubstitutionEvaluationResult,
     TestCaseEvaluationPolicy, evaluate_substitution_with_policy, evaluate_test_cases,
-    evaluate_with_policy, explain,
+    evaluate_with_policy,
 };
 
 pub const EVALUATION_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -25,6 +29,8 @@ pub struct RegexSession {
     selected_index: Option<usize>,
     evaluated_source: Option<Arc<str>>,
     explanation_cache: Option<ExplanationCache>,
+    syntax_generation: u64,
+    next_syntax_node_id: u64,
     substitution_enabled: bool,
     substitution_result: Option<SubstitutionEvaluationResult>,
     test_case_revision: u64,
@@ -54,6 +60,7 @@ struct ExplanationCache {
     pattern: String,
     flags: RegexFlags,
     result: Arc<ExplanationResult>,
+    visualization: Arc<RegexSyntaxVisualizationResult>,
 }
 
 impl ExplanationCache {
@@ -139,10 +146,51 @@ impl RegexSession {
                     .as_ref()
                     .is_some_and(|cache| cache.matches(&self.draft))
             {
+                let generation = self.syntax_generation.checked_add(1);
+                let previous = self
+                    .explanation_cache
+                    .as_ref()
+                    .and_then(|cache| cache.visualization.tree());
+                let mut next_node_id = self.next_syntax_node_id.max(1);
+                let (explanation, visualization) =
+                    match analyze_syntax(&self.draft.pattern, &self.draft.flags) {
+                        Ok(analysis) => {
+                            let visualization = match generation {
+                                Some(generation) => project_analysis(
+                                    &self.draft.pattern,
+                                    self.draft.flags,
+                                    &analysis,
+                                    previous,
+                                    generation,
+                                    &mut next_node_id,
+                                ),
+                                None => RegexSyntaxVisualizationResult::Unavailable(
+                                    VisualizationUnavailable::IdentitySpaceExhausted,
+                                ),
+                            };
+                            (
+                                ExplanationResult::Success {
+                                    explanations: analysis.explanations,
+                                },
+                                visualization,
+                            )
+                        }
+                        Err(error) => (
+                            ExplanationResult::InvalidPattern(error.clone()),
+                            RegexSyntaxVisualizationResult::Unavailable(
+                                VisualizationUnavailable::InvalidPattern(error),
+                            ),
+                        ),
+                    };
+                if let Some(generation) = generation {
+                    self.syntax_generation = generation;
+                }
+                self.next_syntax_node_id = next_node_id;
                 self.explanation_cache = Some(ExplanationCache {
                     pattern: self.draft.pattern.clone(),
                     flags: self.draft.flags,
-                    result: Arc::new(explain(&self.draft.pattern, &self.draft.flags)),
+                    result: Arc::new(explanation),
+                    visualization: Arc::new(visualization),
                 });
             }
             let count = self.matches().len();
@@ -335,6 +383,21 @@ impl RegexSession {
             .map(|cache| cache.result.as_ref())
     }
 
+    /// Expose syntax only for the currently accepted pattern and flags.
+    /// Pending, invalid, and suspended revisions never expose a stale tree.
+    /// Text-only edits and idle frames reuse the accepted projection.
+    pub fn visualization(&self) -> Option<&RegexSyntaxVisualizationResult> {
+        if self.evaluated_revision != Some(self.revision)
+            || !matches!(self.result, Some(EvaluationResult::Success { .. }))
+        {
+            return None;
+        }
+        self.explanation_cache
+            .as_ref()
+            .filter(|cache| cache.matches(&self.draft))
+            .map(|cache| cache.visualization.as_ref())
+    }
+
     pub fn matches(&self) -> &[RegexMatch] {
         match self.result.as_ref() {
             Some(EvaluationResult::Success { matches, .. }) => matches,
@@ -419,7 +482,10 @@ mod tests {
             1,
             "an edit exposes Pending instead of retaining stale results"
         );
-        assert!(!session.tick(now + EVALUATION_DEBOUNCE));
+        assert!(
+            !session.tick(now + EVALUATION_DEBOUNCE),
+            "case-only work must not signal completion of the main evaluation"
+        );
         assert!(session.tick_test_cases(now + EVALUATION_DEBOUNCE));
         assert_eq!(
             session.test_case_evaluation().unwrap().results[0].status,
@@ -640,8 +706,27 @@ mod tests {
         session.draft.pattern = "(?i:é)+".into();
         session.mark_changed(now);
         assert!(session.explanation().is_none());
+        assert!(session.visualization().is_none());
         session.tick(now + EVALUATION_DEBOUNCE);
         let cached = session.explanation_cache.as_ref().unwrap().result.clone();
+        let cached_visualization = session
+            .explanation_cache
+            .as_ref()
+            .unwrap()
+            .visualization
+            .clone();
+        let original_tree = cached_visualization.tree().unwrap();
+        let original_literal = original_tree
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == super::super::visualization::RegexSyntaxKind::Literal
+                    && original_tree.source_for(&original_tree.node_ref(node.id()).unwrap())
+                        == Some("é")
+            })
+            .unwrap();
+        let original_literal_ref = original_tree.node_ref(original_literal.id()).unwrap();
+        assert!(session.visualization().is_some());
         let ExplanationResult::Success { explanations } = session.explanation().unwrap() else {
             panic!("valid syntax must have structured explanations");
         };
@@ -660,28 +745,90 @@ mod tests {
         session.draft.test_text = "Éé".into();
         session.mark_changed(now);
         assert!(session.explanation().is_none());
+        assert!(session.visualization().is_none());
         session.tick(now + EVALUATION_DEBOUNCE);
         assert!(Arc::ptr_eq(
             &cached,
             &session.explanation_cache.as_ref().unwrap().result
+        ));
+        assert!(Arc::ptr_eq(
+            &cached_visualization,
+            &session.explanation_cache.as_ref().unwrap().visualization
+        ));
+        assert!(
+            session
+                .visualization()
+                .unwrap()
+                .tree()
+                .unwrap()
+                .resolve(&original_literal_ref)
+                .is_some()
+        );
+
+        session.set_substitution_enabled(true, now);
+        session.draft.replacement = "$0".into();
+        session.mark_replacement_changed(now);
+        assert!(session.tick(now + EVALUATION_DEBOUNCE));
+        assert!(Arc::ptr_eq(
+            &cached_visualization,
+            &session.explanation_cache.as_ref().unwrap().visualization
+        ));
+
+        session
+            .draft
+            .test_cases
+            .add(
+                None,
+                "Éé".into(),
+                super::super::model::RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
+        session.mark_test_cases_changed(now);
+        assert!(session.tick_test_cases(now + EVALUATION_DEBOUNCE));
+        assert!(Arc::ptr_eq(
+            &cached_visualization,
+            &session.explanation_cache.as_ref().unwrap().visualization
         ));
         assert!(!session.tick(now + Duration::from_secs(1)));
         assert!(Arc::ptr_eq(
             &cached,
             &session.explanation_cache.as_ref().unwrap().result
         ));
+        assert!(Arc::ptr_eq(
+            &cached_visualization,
+            &session.explanation_cache.as_ref().unwrap().visualization
+        ));
         session.draft.flags.multi_line = true;
         session.mark_changed(now);
         assert!(session.explanation().is_none());
+        assert!(session.visualization().is_none());
         session.tick(now + EVALUATION_DEBOUNCE);
         let changed_flags = session.explanation_cache.as_ref().unwrap().result.clone();
+        let changed_visualization = session
+            .explanation_cache
+            .as_ref()
+            .unwrap()
+            .visualization
+            .clone();
         assert!(!Arc::ptr_eq(&cached, &changed_flags));
+        assert!(!Arc::ptr_eq(&cached_visualization, &changed_visualization));
+        assert!(
+            changed_visualization
+                .tree()
+                .unwrap()
+                .resolve(&original_literal_ref)
+                .is_none()
+        );
         session.draft.pattern = "🦀".into();
         session.mark_changed(now);
         session.tick(now + EVALUATION_DEBOUNCE);
         assert!(!Arc::ptr_eq(
             &changed_flags,
             &session.explanation_cache.as_ref().unwrap().result
+        ));
+        assert!(!Arc::ptr_eq(
+            &changed_visualization,
+            &session.explanation_cache.as_ref().unwrap().visualization
         ));
     }
 
@@ -693,23 +840,36 @@ mod tests {
         session.mark_changed(now);
         session.tick(now + EVALUATION_DEBOUNCE);
         let cached = session.explanation_cache.as_ref().unwrap().result.clone();
+        let cached_visualization = session
+            .explanation_cache
+            .as_ref()
+            .unwrap()
+            .visualization
+            .clone();
         session.draft.pattern = "[".into();
         session.mark_changed(now);
         assert!(session.explanation().is_none());
+        assert!(session.visualization().is_none());
         session.tick(now + EVALUATION_DEBOUNCE);
         assert!(matches!(
             session.result(),
             Some(EvaluationResult::InvalidPattern(_))
         ));
         assert!(session.explanation().is_none());
+        assert!(session.visualization().is_none());
         assert!(Arc::ptr_eq(
             &cached,
             &session.explanation_cache.as_ref().unwrap().result
+        ));
+        assert!(Arc::ptr_eq(
+            &cached_visualization,
+            &session.explanation_cache.as_ref().unwrap().visualization
         ));
         session.draft.pattern = "x".repeat(session.policy().pattern_bytes + 1);
         session.mark_changed(now);
         assert!(!session.tick(now + EVALUATION_DEBOUNCE));
         assert!(session.explanation().is_none());
+        assert!(session.visualization().is_none());
         assert!(Arc::ptr_eq(
             &cached,
             &session.explanation_cache.as_ref().unwrap().result
@@ -719,10 +879,82 @@ mod tests {
         assert!(session.explanation().is_none());
         session.tick(now + EVALUATION_DEBOUNCE);
         assert!(session.explanation().is_some());
+        assert!(session.visualization().is_some());
         assert!(Arc::ptr_eq(
             &cached,
             &session.explanation_cache.as_ref().unwrap().result
         ));
+        assert!(Arc::ptr_eq(
+            &cached_visualization,
+            &session.explanation_cache.as_ref().unwrap().visualization
+        ));
+    }
+
+    #[test]
+    fn syntax_identity_reconciles_unique_unchanged_nodes_and_rejects_old_generation_refs() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "a(?P<word>b)c".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let before = session.visualization().unwrap().tree().unwrap();
+        let old_a = before
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == super::super::visualization::RegexSyntaxKind::Literal
+                    && before.source_for(&before.node_ref(node.id()).unwrap()) == Some("a")
+            })
+            .unwrap();
+        let old_group = before
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == super::super::visualization::RegexSyntaxKind::NamedGroup)
+            .unwrap();
+        let old_a_id = old_a.id();
+        let old_group_id = old_group.id();
+        let stale_ref = before.node_ref(old_a_id).unwrap();
+
+        session.draft.pattern = "xa(?P<word>b)c".into();
+        session.mark_changed(now);
+        assert!(session.visualization().is_none());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let after = session.visualization().unwrap().tree().unwrap();
+        assert!(after.nodes().iter().any(|node| node.id() == old_a_id));
+        assert!(after.nodes().iter().any(|node| node.id() == old_group_id));
+        assert!(after.resolve(&stale_ref).is_none());
+    }
+
+    #[test]
+    fn ambiguous_duplicate_syntax_does_not_reuse_a_stable_id() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "a".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let before = session.visualization().unwrap().tree().unwrap();
+        let old_literal = before
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == super::super::visualization::RegexSyntaxKind::Literal)
+            .unwrap();
+        let old_id = old_literal.id();
+        let stale_ref = before.node_ref(old_id).unwrap();
+
+        session.draft.pattern = "aa".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let after = session.visualization().unwrap().tree().unwrap();
+        let literal_ids = after
+            .nodes()
+            .iter()
+            .filter(|node| node.kind() == super::super::visualization::RegexSyntaxKind::Literal)
+            .map(|node| node.id())
+            .collect::<Vec<_>>();
+        assert_eq!(literal_ids.len(), 2);
+        assert_ne!(literal_ids[0], literal_ids[1]);
+        assert!(!literal_ids.contains(&old_id));
+        assert!(after.resolve(&stale_ref).is_none());
     }
 
     #[test]

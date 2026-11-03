@@ -8,6 +8,7 @@ pub mod persistence;
 pub mod policy;
 pub mod reference;
 pub mod session;
+pub mod visualization;
 
 pub use engine::{
     evaluate, evaluate_substitution, evaluate_substitution_with_policy, evaluate_test_cases,
@@ -35,3 +36,8 @@ pub use reference::{
     search_reference,
 };
 pub use session::RegexSession;
+pub use visualization::{
+    MAX_SYNTAX_DEPTH, MAX_SYNTAX_NODES, RegexSyntaxKind, RegexSyntaxNode, RegexSyntaxNodeId,
+    RegexSyntaxNodeRef, RegexSyntaxTree, RegexSyntaxVisualizationResult, VisualizationUnavailable,
+    visualize,
+};
