@@ -2341,6 +2341,9 @@ impl DiagramStudioDialog {
                             PendingDiagramTransition::ImportMermaid(file) => {
                                 format!("importing {}", file.path().display())
                             }
+                            PendingDiagramTransition::CopySource(_) => {
+                                "copying Mermaid source from Markdown".to_owned()
+                            }
                             PendingDiagramTransition::ApplyTemplate(template) => {
                                 format!("using the {} template", template.name())
                             }

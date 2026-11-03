@@ -16,8 +16,8 @@ pub use codec::{
     encode_session,
 };
 pub use document::{
-    DiagramDocumentController, DiagramDocumentError, PendingDiagramTransition, TransitionDecision,
-    TransitionOutcome,
+    DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy, PendingDiagramTransition,
+    TransitionDecision, TransitionOutcome,
 };
 pub use export::{
     DiagramExportArtifact, DiagramExportError, DiagramExportFormat, DiagramExportWarnings,

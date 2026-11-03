@@ -15,8 +15,34 @@ pub enum PendingDiagramTransition {
     New,
     Open(PathBuf),
     ImportMermaid(MermaidFile),
+    CopySource(DiagramSourceCopy),
     ApplyTemplate(DiagramTemplate),
     Close,
+}
+
+/// A bounded exact Mermaid source copied into an untitled Diagram document.
+/// It is an in-memory handoff; constructing or applying it performs no IO.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagramSourceCopy {
+    source: String,
+}
+
+impl DiagramSourceCopy {
+    pub fn new(source: impl Into<String>) -> Result<Self, DiagramDocumentError> {
+        let source = source.into();
+        if source.len() > super::mermaid::MAX_MERMAID_SOURCE_BYTES {
+            return Err(DiagramDocumentError::Session(
+                DiagramSessionError::SourceTooLarge {
+                    max_bytes: super::mermaid::MAX_MERMAID_SOURCE_BYTES,
+                },
+            ));
+        }
+        Ok(Self { source })
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,6 +329,26 @@ impl DiagramDocumentController {
         Ok(TransitionOutcome::Applied)
     }
 
+    /// Requests an exact in-memory Mermaid source copy as a new untitled
+    /// document. Dirty drafts use the same Save/Discard/Cancel transition as
+    /// every other document replacement; no temporary file is created.
+    pub fn request_source_copy(
+        &mut self,
+        source: DiagramSourceCopy,
+    ) -> Result<TransitionOutcome, DiagramDocumentError> {
+        let requested = PendingDiagramTransition::CopySource(source.clone());
+        if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
+            return Ok(outcome);
+        }
+        let candidate = DiagramSession::from_fresh_source(&source.source)?;
+        if self.is_dirty() {
+            self.pending = Some(requested);
+            return Ok(TransitionOutcome::DecisionRequired);
+        }
+        self.active = Some(ActiveDocument::untitled(candidate));
+        Ok(TransitionOutcome::Applied)
+    }
+
     /// Requests a built-in validated template as a new untitled session.
     pub fn request_template(
         &mut self,
@@ -413,6 +459,10 @@ impl DiagramDocumentController {
                 let session = DiagramSession::from_fresh_source(source)?;
                 self.active = Some(ActiveDocument::untitled(session));
             }
+            PendingDiagramTransition::CopySource(source) => {
+                let session = DiagramSession::from_fresh_source(&source.source)?;
+                self.active = Some(ActiveDocument::untitled(session));
+            }
             PendingDiagramTransition::ApplyTemplate(template) => {
                 self.active = Some(ActiveDocument::untitled(template.create_session()?));
             }
@@ -497,13 +547,13 @@ impl DiagramDocumentController {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagramDocumentController, DiagramDocumentError, PendingDiagramTransition,
-        TransitionDecision, TransitionOutcome,
+        DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
+        PendingDiagramTransition, TransitionDecision, TransitionOutcome,
     };
     use crate::diagram::{
-        DiagramPersistenceError, DiagramSession, DiagramTemplate, DiskConflictKind, FlowDirection,
-        GraphOperation, MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile, MermaidImportError, NodeId,
-        NodePosition, Position, PreviewState,
+        DiagramPersistenceError, DiagramSession, DiagramSessionError, DiagramTemplate,
+        DiskConflictKind, FlowDirection, GraphOperation, MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile,
+        MermaidImportError, NodeId, NodePosition, Position, PreviewState,
     };
     use std::fs;
 
@@ -1054,6 +1104,57 @@ mod tests {
         assert!(session.is_dirty());
         assert_eq!(controller.path(), None);
         assert_eq!(controller.disk_digest(), None);
+    }
+
+    #[test]
+    fn diagram_document_source_copy_is_in_memory_bounded_and_uses_dirty_decisions() {
+        let source = "\u{feff}%% exact copied draft\r\nflowchart TD\r\nA -->\r\n";
+        let request = DiagramSourceCopy::new(source).unwrap();
+        let mut controller = DiagramDocumentController::new();
+        controller.replace_source("flowchart LR\nDirty\n").unwrap();
+        let original = controller.session().unwrap().draft().to_owned();
+        assert_eq!(
+            controller.request_source_copy(request.clone()).unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(controller.session().unwrap().draft(), original);
+        assert!(matches!(
+            controller.pending_transition(),
+            Some(PendingDiagramTransition::CopySource(pending)) if pending == &request
+        ));
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Cancel)
+                .unwrap(),
+            TransitionOutcome::Cancelled
+        );
+        assert_eq!(controller.session().unwrap().draft(), original);
+        assert_eq!(controller.pending_transition(), None);
+
+        assert_eq!(
+            controller.request_source_copy(request).unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Discard)
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        let copied = controller.session().unwrap();
+        assert_eq!(copied.draft(), source);
+        assert_eq!(copied.status().preview, PreviewState::NoPreview);
+        assert_eq!(copied.revision(), 1);
+        assert_eq!(copied.undo_depth(), 1);
+        assert!(copied.is_dirty());
+        assert_eq!(controller.path(), None);
+        assert_eq!(controller.disk_digest(), None);
+        assert!(matches!(
+            DiagramSourceCopy::new("x".repeat(super::super::mermaid::MAX_MERMAID_SOURCE_BYTES + 1)),
+            Err(DiagramDocumentError::Session(
+                DiagramSessionError::SourceTooLarge { .. }
+            ))
+        ));
     }
 
     #[test]
