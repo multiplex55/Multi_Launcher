@@ -4482,6 +4482,24 @@ impl LauncherApp {
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
                 == NavigationDialogKind::RegexTester.layer_id();
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if self.qa_framebuffer_needs_regex_observation() {
+            let observation = self.regex_tester_dialog.show_with_jump_mode_observation(
+                ctx,
+                root_scope.as_ref(),
+                instance,
+                application_input_allowed,
+                root_native_owner_current,
+                self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            );
+            self.qa_framebuffer_after_regex_show(
+                ctx,
+                root_visible,
+                self.regex_tester_dialog.open,
+                observation,
+            );
+            return;
+        }
         self.regex_tester_dialog.show_with_jump_mode(
             ctx,
             root_scope.as_ref(),
@@ -10194,6 +10212,7 @@ impl eframe::App for LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
         }
+        self.regex_tester_dialog.on_ui_frame_complete(_ctx);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
     }
@@ -10369,6 +10388,7 @@ impl LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
         }
+        self.regex_tester_dialog.on_ui_frame_complete(ctx);
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();

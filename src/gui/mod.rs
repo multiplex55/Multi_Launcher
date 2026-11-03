@@ -38,6 +38,8 @@ pub(crate) mod hotfolder_dialog;
 pub(crate) mod hotfolder_dispatch;
 pub(crate) mod hotfolder_runtime;
 mod hotkey_directory_dialog;
+#[cfg(windows)]
+mod native_keyboard;
 #[cfg(feature = "perf-harness")]
 pub use hotfolder_runtime::HotFolderIdleFixture;
 mod image_compare_dialog;
