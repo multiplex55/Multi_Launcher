@@ -55,6 +55,7 @@ mod m7_startup_measurement;
 pub use jump_mode::ui::JumpModeScope;
 mod macro_dialog;
 mod markdown_preview;
+mod markdown_export;
 mod markdown_studio;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;

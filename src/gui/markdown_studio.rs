@@ -17,11 +17,11 @@ use eframe::egui;
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use std::collections::HashSet;
 use std::fs;
-use std::io;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use super::markdown_export::{ensure_extension, publish_export};
 use super::markdown_preview::{MarkdownAssetImageLoader, MarkdownPreviewCache};
 
 const STUDIO_WINDOW_ID: &str = "markdown-studio-window";
@@ -1409,17 +1409,6 @@ fn byte_to_char(source: &str, index: usize) -> usize {
     source[..index.min(source.len())].chars().count()
 }
 
-fn ensure_extension(mut path: PathBuf, extension: &str) -> PathBuf {
-    if !path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
-    {
-        path.set_extension(extension);
-    }
-    path
-}
-
 struct OwnedAsset {
     destination: String,
     bytes: Vec<u8>,
@@ -1512,94 +1501,6 @@ impl crate::notes_markdown::LocalRasterResolver for LocalAssets {
     }
 }
 
-fn publish_export(
-    artifact: &MarkdownExportArtifact,
-    destination: &Path,
-    active_path: Option<&Path>,
-) -> Result<(), String> {
-    if let Some(active) = active_path {
-        if paths_equal(active, destination).map_err(|error| error.to_string())? {
-            return Err("Export cannot overwrite the active Markdown document.".into());
-        }
-    }
-    match fs::symlink_metadata(destination) {
-        Ok(_) => {
-            return Err(format!(
-                "Refusing to overwrite occupied export destination {}.",
-                destination.display()
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "Could not inspect export destination {}: {error}",
-                destination.display()
-            ));
-        }
-    }
-    crate::common::atomic_file::save_atomic(destination, artifact.bytes())
-        .map_err(|error| format!("Could not write export {}: {error}", destination.display()))
-}
-
-fn paths_equal(left: &Path, right: &Path) -> io::Result<bool> {
-    let left = resolved_path(left)?;
-    let right = resolved_path(right)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Foundation::BOOL;
-        use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
-        let left = left.as_os_str().encode_wide().collect::<Vec<_>>();
-        let right = right.as_os_str().encode_wide().collect::<Vec<_>>();
-        if left.len() > i32::MAX as usize || right.len() > i32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path is too long",
-            ));
-        }
-        let result = unsafe { CompareStringOrdinal(&left, &right, BOOL(1)) };
-        if result.0 == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(result == CSTR_EQUAL)
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(left == right)
-    }
-}
-
-fn resolved_path(path: &Path) -> io::Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut current = absolute;
-    let mut missing = Vec::new();
-    loop {
-        match fs::canonicalize(&current) {
-            Ok(mut resolved) => {
-                for component in missing.iter().rev() {
-                    resolved.push(component);
-                }
-                return Ok(resolved);
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let Some(name) = current.file_name() else {
-                    return Err(error);
-                };
-                missing.push(name.to_os_string());
-                let Some(parent) = current.parent() else {
-                    return Err(error);
-                };
-                current = parent.to_path_buf();
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1650,6 +1551,36 @@ mod tests {
         let (effect, closed) = dialog.on_ui_frame_complete(ctx);
         assert!(effect.is_none());
         assert!(!closed || !dialog.open);
+    }
+
+    #[test]
+    fn markdown_studio_export_publication_preserves_dirty_document_and_history() {
+        let source = "# Studio draft Ω\r\n\r\nbody\r\n";
+        let mut dialog = dialog_with_source(source);
+        let output_directory = tempfile::tempdir().unwrap();
+        let output_path = output_directory.path().join("studio-export.md");
+        dialog.test_set_next_picker_result(Some(output_path.clone()));
+
+        let revision = dialog.document.revision();
+        let path = dialog.document.path().map(Path::to_path_buf);
+        let undo_depth = dialog.document.undo_depth();
+        let redo_depth = dialog.document.redo_depth();
+        let was_dirty = dialog.document.is_dirty();
+        assert!(was_dirty);
+
+        dialog.export_current(MarkdownExportFormat::Markdown);
+
+        assert_eq!(std::fs::read(&output_path).unwrap(), source.as_bytes());
+        assert_eq!(dialog.document.source(), Some(source));
+        assert_eq!(dialog.document.path(), path.as_deref());
+        assert_eq!(dialog.document.is_dirty(), was_dirty);
+        assert_eq!(dialog.document.revision(), revision);
+        assert_eq!(dialog.document.undo_depth(), undo_depth);
+        assert_eq!(dialog.document.redo_depth(), redo_depth);
+        assert_eq!(dialog.test_picker_calls(), 1);
+
+        assert!(dialog.document.undo().unwrap());
+        assert_eq!(dialog.document.source(), Some(""));
     }
 
     fn pointer_frame_event(point: egui::Pos2, pressed: bool) -> Vec<egui::Event> {

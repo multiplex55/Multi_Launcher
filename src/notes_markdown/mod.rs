@@ -17,8 +17,9 @@ pub use authoring::{
 };
 pub use html::{
     LocalRasterAsset, LocalRasterFormat, LocalRasterResolver, MAX_LOCAL_RASTER_AGGREGATE_BYTES,
-    MAX_LOCAL_RASTER_BYTES, MAX_MARKDOWN_HTML_BYTES, MarkdownExportArtifact, MarkdownExportFormat,
-    MarkdownExportWarnings, MarkdownHtmlError, export_html, export_markdown,
+    MAX_LOCAL_RASTER_BYTES, MAX_MARKDOWN_HTML_BYTES, MAX_MARKDOWN_HTML_IMAGES,
+    MarkdownExportArtifact, MarkdownExportFormat, MarkdownExportWarnings, MarkdownHtmlError,
+    export_html, export_markdown,
 };
 pub use links::{PlainLinkConversionReport, WrapLinksReport, convert_plain_links, wrap_plain_urls};
 pub use parse::{analyze_markdown, analyze_markdown_with_max_outline_depth};

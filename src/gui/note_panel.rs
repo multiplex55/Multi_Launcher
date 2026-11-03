@@ -5,6 +5,7 @@ use crate::file_search::actions::{
     ExplorerAction, execute_explorer_action, resolve_explorer_action,
 };
 use crate::gui::LauncherApp;
+use crate::gui::markdown_export::{ensure_extension, export_note_html, parse_note_image_target};
 use crate::gui::markdown_preview::{MermaidCardsCache, draw_mermaid_card_contents};
 use crate::gui::note_find::{NoteFindMatch, NoteFindState};
 use crate::gui::note_find_preview::{
@@ -13,12 +14,13 @@ use crate::gui::note_find_preview::{
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::notes_markdown::{
-    MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout, MarkdownEditError, MarkdownHeading,
-    MarkdownInlineFormat, MarkdownPreview, MarkdownPreviewStatus, MarkdownSection,
-    MarkdownTaskItem, ParsedMarkdownTable, PlainLinkConversionReport, PreparedMarkdownEdit,
-    analyze_markdown, convert_plain_links, prepare_block_snippet, prepare_inline_format,
-    prepare_insert_column, prepare_insert_row, prepare_insert_table, prepare_remove_column,
-    prepare_remove_row, prepare_set_cell, table_at_byte, task_list::toggle_task_marker,
+    MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout, MarkdownEditError,
+    MarkdownExportArtifact, MarkdownExportFormat, MarkdownHeading, MarkdownInlineFormat,
+    MarkdownPreview, MarkdownPreviewStatus, MarkdownSection, MarkdownTaskItem, ParsedMarkdownTable,
+    PlainLinkConversionReport, PreparedMarkdownEdit, analyze_markdown, convert_plain_links,
+    prepare_block_snippet, prepare_inline_format, prepare_insert_column, prepare_insert_row,
+    prepare_insert_table, prepare_remove_column, prepare_remove_row, prepare_set_cell,
+    table_at_byte, task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
     Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
@@ -823,31 +825,6 @@ fn preprocess_preview_markdown(
     preprocess_note_links(content, current_slug, todo_labels)
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct ParsedImageTarget {
-    rel: String,
-    full: PathBuf,
-    width: Option<f32>,
-}
-
-fn parse_note_image_target(target: &str) -> ParsedImageTarget {
-    let (rel, width) = if let Some((path, width)) = target.split_once('|') {
-        (path.trim(), width.trim().parse::<f32>().ok())
-    } else {
-        (target.trim(), None)
-    };
-    let full = if let Some(stripped) = rel.strip_prefix("assets/") {
-        assets_dir().join(stripped)
-    } else {
-        PathBuf::from(rel)
-    };
-    ParsedImageTarget {
-        rel: rel.to_string(),
-        full,
-        width,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum MarkdownLinkAction {
     NoteReference(String),
@@ -1095,6 +1072,7 @@ pub struct NotePanel {
     pending_mermaid_origin: Option<NoteMermaidOrigin>,
     active_mermaid_origin: Option<NoteMermaidOrigin>,
     pending_root_effect: Option<PendingNoteRootEffect>,
+    markdown_export_feedback: Option<(bool, String)>,
     markdown_analysis: Option<MarkdownAnalysis>,
     markdown_analysis_source_hash: Option<u64>,
     collapsed_sections: HashSet<String>,
@@ -1191,6 +1169,10 @@ pub struct NotePanel {
     test_capture_markdown_fragment_ids: bool,
     #[cfg(test)]
     test_markdown_toolbar_menu: Option<(egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_next_markdown_export_path: Option<Option<PathBuf>>,
+    #[cfg(test)]
+    test_markdown_export_picker_calls: usize,
     #[cfg(test)]
     test_note_toolbar_edit_button: Option<(egui::Id, egui::Rect, egui::Rect)>,
     #[cfg(test)]
@@ -1304,6 +1286,15 @@ pub(crate) enum NotePanelEffect {
         source: DiagramSourceCopy,
         origin: NoteMermaidOrigin,
     },
+    Export(NoteExportRequest),
+}
+
+pub(crate) struct NoteExportRequest {
+    pub(crate) format: MarkdownExportFormat,
+    pub(crate) note_slug: String,
+    pub(crate) note_path: PathBuf,
+    pub(crate) content_revision: u64,
+    pub(crate) source: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1607,6 +1598,7 @@ impl NotePanel {
             pending_mermaid_origin: None,
             active_mermaid_origin: None,
             pending_root_effect: None,
+            markdown_export_feedback: None,
             markdown_analysis: None,
             markdown_analysis_source_hash: None,
             collapsed_sections: HashSet::new(),
@@ -1699,6 +1691,10 @@ impl NotePanel {
             test_capture_markdown_fragment_ids: false,
             #[cfg(test)]
             test_markdown_toolbar_menu: None,
+            #[cfg(test)]
+            test_next_markdown_export_path: None,
+            #[cfg(test)]
+            test_markdown_export_picker_calls: 0,
             #[cfg(test)]
             test_note_toolbar_edit_button: None,
             #[cfg(test)]
@@ -2333,23 +2329,163 @@ impl NotePanel {
             == staged.frame_nr.saturating_add(1)
             && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
                 == staged.pass_nr.saturating_add(1);
-        let NotePanelEffect::OpenDiagram { origin, .. } = &staged.effect;
-        let source_still_matches = self.open
-            && self.note.slug == origin.note_slug
-            && self.note.path == origin.note_path
-            && self.note.content == origin.source_snapshot;
-        if retained && source_still_matches {
+        let still_matches = match &staged.effect {
+            NotePanelEffect::OpenDiagram { origin, .. } => {
+                self.open
+                    && self.note.slug == origin.note_slug
+                    && self.note.path == origin.note_path
+                    && self.note.content == origin.source_snapshot
+            }
+            NotePanelEffect::Export(request) => self.export_snapshot_matches(request),
+        };
+        if retained && still_matches {
             Some(staged.effect)
         } else {
-            if self
-                .pending_mermaid_origin
-                .as_ref()
-                .is_some_and(|pending| pending.identity == origin.identity)
-            {
-                self.pending_mermaid_origin = None;
+            if let NotePanelEffect::OpenDiagram { origin, .. } = &staged.effect {
+                if self
+                    .pending_mermaid_origin
+                    .as_ref()
+                    .is_some_and(|pending| pending.identity == origin.identity)
+                {
+                    self.pending_mermaid_origin = None;
+                }
             }
             None
         }
+    }
+
+    fn export_snapshot_matches(&self, request: &NoteExportRequest) -> bool {
+        self.open
+            && self.note.slug == request.note_slug
+            && self.note.path == request.note_path
+            && self.note_find.content_revision() == request.content_revision
+            && self.note.content == request.source
+    }
+
+    pub(crate) fn validate_export_request(
+        &self,
+        ctx: &egui::Context,
+        request: &NoteExportRequest,
+    ) -> Result<(), String> {
+        if !self.export_snapshot_matches(request) {
+            return Err("The Note changed before its export could be completed.".into());
+        }
+        if self.query_focus_protected_state_blocks() {
+            return Err("Resolve the open Note dialog or decision before exporting.".into());
+        }
+        let note_layer = self.show_query_focus_layer();
+        if ctx
+            .memory(|memory| memory.top_modal_layer())
+            .is_some_and(|modal_layer| modal_layer != note_layer)
+        {
+            return Err("Resolve the active dialog before exporting this Note.".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encode_export_request(
+        &self,
+        request: &NoteExportRequest,
+    ) -> Result<MarkdownExportArtifact, String> {
+        match request.format {
+            MarkdownExportFormat::Markdown => {
+                crate::notes_markdown::export_markdown(&request.source)
+                    .map_err(|error| error.to_string())
+            }
+            MarkdownExportFormat::Html => export_note_html(
+                &request.source,
+                &crate::plugins::note::notes_dir().join("assets"),
+            ),
+        }
+    }
+
+    pub(crate) fn pick_markdown_export_path(
+        &mut self,
+        format: MarkdownExportFormat,
+    ) -> Option<PathBuf> {
+        let extension = match format {
+            MarkdownExportFormat::Markdown => "md",
+            MarkdownExportFormat::Html => "html",
+        };
+        #[cfg(test)]
+        {
+            self.test_markdown_export_picker_calls =
+                self.test_markdown_export_picker_calls.saturating_add(1);
+            return self
+                .test_next_markdown_export_path
+                .take()
+                .unwrap_or(None)
+                .map(|path| ensure_extension(path, extension));
+        }
+        #[cfg(not(test))]
+        {
+            let default_directory = self
+                .note
+                .path
+                .parent()
+                .filter(|directory| directory.is_dir())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(crate::plugins::note::notes_dir);
+            let stem = self
+                .note
+                .path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or_else(|| {
+                    if self.note.slug.is_empty() {
+                        "note"
+                    } else {
+                        &self.note.slug
+                    }
+                });
+            FileDialog::new()
+                .add_filter("Markdown export", &[extension])
+                .set_directory(default_directory)
+                .set_file_name(format!("{stem}.{extension}"))
+                .save_file()
+                .map(|path| ensure_extension(path, extension))
+        }
+    }
+
+    pub(crate) fn export_active_path(&self) -> Option<&Path> {
+        (!self.note.path.as_os_str().is_empty()).then_some(self.note.path.as_path())
+    }
+
+    pub(crate) fn set_markdown_export_feedback(&mut self, is_error: bool, message: String) {
+        self.markdown_export_feedback = Some((is_error, message));
+    }
+
+    fn stage_markdown_export(&mut self, ctx: &egui::Context, format: MarkdownExportFormat) {
+        if !self.can_stage_markdown_export(ctx) || ctx.will_discard() {
+            return;
+        }
+        let request = NoteExportRequest {
+            format,
+            note_slug: self.note.slug.clone(),
+            note_path: self.note.path.clone(),
+            content_revision: self.note_find.content_revision(),
+            source: self.note.content.clone(),
+        };
+        self.markdown_export_feedback = None;
+        self.pending_root_effect = Some(PendingNoteRootEffect {
+            frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
+            pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+            effect: NotePanelEffect::Export(request),
+        });
+    }
+
+    fn can_stage_markdown_export(&self, ctx: &egui::Context) -> bool {
+        if self.pending_root_effect.is_some()
+            || self.query_focus_protected_state_blocks()
+            || !self.open
+            || self.note.content.len() > crate::notes_markdown::MAX_MARKDOWN_SOURCE_BYTES
+        {
+            return false;
+        }
+        let note_layer = self.show_query_focus_layer();
+        !ctx.memory(|memory| memory.top_modal_layer())
+            .is_some_and(|modal_layer| modal_layer != note_layer)
     }
 
     fn complete_toolbar_focus_restore(&mut self, ctx: &egui::Context) {
@@ -3034,6 +3170,30 @@ impl NotePanel {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_set_next_markdown_export_path(&mut self, path: Option<PathBuf>) {
+        self.test_next_markdown_export_path = Some(path);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_markdown_export_picker_calls(&self) -> usize {
+        self.test_markdown_export_picker_calls
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_markdown_export_feedback(&self) -> Option<(bool, &str)> {
+        self.markdown_export_feedback
+            .as_ref()
+            .map(|(is_error, message)| (*is_error, message.as_str()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_pending_markdown_export(&self) -> bool {
+        self.pending_root_effect
+            .as_ref()
+            .is_some_and(|pending| matches!(&pending.effect, NotePanelEffect::Export(_)))
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_set_link_dialog_open(&mut self, open: bool) {
         self.link_dialog_open = open;
     }
@@ -3650,6 +3810,29 @@ impl NotePanel {
         self.last_edit_at_secs
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_content_revision(&self) -> u64 {
+        self.note_find.content_revision()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_saved_content_baseline(&self) -> &str {
+        &self.saved_content_baseline
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_note_path(&self) -> &Path {
+        &self.note.path
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_replacement_history_counts(&self) -> (usize, usize) {
+        (
+            self.replacement_undo_boundaries.len(),
+            self.replacement_redo_boundaries.len(),
+        )
+    }
+
     pub(crate) fn has_unsaved_changes(&self) -> bool {
         self.note.content != self.saved_content_baseline
     }
@@ -4241,6 +4424,16 @@ impl NotePanel {
             {
                 let ctx = ui.ctx().clone();
                 self.build_toolbar_markdown_menu(ui, &ctx, editor_id, app);
+                if let Some((is_error, message)) = &self.markdown_export_feedback {
+                    ui.colored_label(
+                        if *is_error {
+                            ui.visuals().error_fg_color
+                        } else {
+                            ui.visuals().weak_text_color()
+                        },
+                        message,
+                    );
+                }
             }
             let open_resp = ui.button("Open Externally");
             let popup_id = open_resp.id.with("open_with_menu");
@@ -5837,7 +6030,7 @@ impl NotePanel {
             }
             let alt = cap.get(1).unwrap().as_str();
             let target = cap.get(2).unwrap().as_str();
-            let parsed = parse_note_image_target(target);
+            let parsed = parse_note_image_target(target, &assets_dir());
             let rel = parsed.rel.as_str();
             let full = parsed.full;
             let width = parsed.width;
@@ -7050,6 +7243,40 @@ impl NotePanel {
                 if !self.start_plain_link_conversion() {
                     Self::show_no_plain_links_toast(app);
                 }
+                ui.close();
+            }
+            ui.separator();
+            if self.note.content.len() > crate::notes_markdown::MAX_MARKDOWN_SOURCE_BYTES {
+                ui.weak("Markdown exports are limited to 1 MiB.");
+            }
+            let export_allowed = self.can_stage_markdown_export(ctx);
+            let export_markdown =
+                ui.add_enabled(export_allowed, egui::Button::new("Export Markdown…"));
+            #[cfg(test)]
+            if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
+                self.test_markdown_tool_rects.push((
+                    "Export Markdown…".into(),
+                    export_markdown.id,
+                    export_markdown.rect,
+                    ui.clip_rect(),
+                ));
+            }
+            if export_markdown.clicked() {
+                self.stage_markdown_export(ctx, MarkdownExportFormat::Markdown);
+                ui.close();
+            }
+            let export_html = ui.add_enabled(export_allowed, egui::Button::new("Export HTML…"));
+            #[cfg(test)]
+            if capture_toolbar_widgets && ui.is_visible() && !ui.is_sizing_pass() {
+                self.test_markdown_tool_rects.push((
+                    "Export HTML…".into(),
+                    export_html.id,
+                    export_html.rect,
+                    ui.clip_rect(),
+                ));
+            }
+            if export_html.clicked() {
+                self.stage_markdown_export(ctx, MarkdownExportFormat::Html);
                 ui.close();
             }
             let bold = ui.button("Bold Selection");
@@ -11608,6 +11835,19 @@ mod tests {
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn markdown_export_does_not_stage_an_oversized_note_snapshot() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let oversized = "x".repeat(crate::notes_markdown::MAX_MARKDOWN_SOURCE_BYTES + 1);
+        let mut panel = NotePanel::from_note(empty_note(&oversized));
+        let ctx = egui::Context::default();
+
+        panel.stage_markdown_export(&ctx, MarkdownExportFormat::Markdown);
+
+        assert!(panel.pending_root_effect.is_none());
+        assert_eq!(panel.note.content.len(), oversized.len());
     }
 
     #[test]
@@ -18521,17 +18761,18 @@ body"
         let prev = std::env::var("ML_NOTES_DIR").ok();
         unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
-        let parsed = parse_note_image_target("assets/image.png|320");
+        let assets_root = dir.path().join("assets");
+        let parsed = parse_note_image_target("assets/image.png|320", &assets_root);
         assert_eq!(parsed.rel, "assets/image.png");
-        assert_eq!(parsed.full, dir.path().join("assets").join("image.png"));
+        assert_eq!(parsed.full, assets_root.join("image.png"));
         assert_eq!(parsed.width, Some(320.0));
 
-        let parsed_no_width = parse_note_image_target("relative/image.png");
+        let parsed_no_width = parse_note_image_target("relative/image.png", &assets_root);
         assert_eq!(parsed_no_width.rel, "relative/image.png");
         assert_eq!(parsed_no_width.full, PathBuf::from("relative/image.png"));
         assert_eq!(parsed_no_width.width, None);
 
-        let parsed_bad_width = parse_note_image_target("assets/image.png|wide");
+        let parsed_bad_width = parse_note_image_target("assets/image.png|wide", &assets_root);
         assert_eq!(parsed_bad_width.rel, "assets/image.png");
         assert_eq!(parsed_bad_width.width, None);
 

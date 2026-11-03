@@ -10151,34 +10151,42 @@ impl LauncherApp {
         let note_open_effects = self
             .note_panels
             .iter_mut()
-            .filter_map(|panel| panel.on_ui_frame_complete(ctx))
+            .enumerate()
+            .filter_map(|(index, panel)| {
+                panel
+                    .on_ui_frame_complete(ctx)
+                    .map(|effect| (index, effect))
+            })
             .collect::<Vec<_>>();
-        for note_open_effect in note_open_effects {
-            let super::note_panel::NotePanelEffect::OpenDiagram { source, origin } =
-                note_open_effect;
-            let open_result = self
-                .note_panels
-                .iter()
-                .find(|panel| panel.tracks_diagram_source_origin(&origin.identity))
-                .map(|panel| panel.can_open_diagram_source_copy(ctx, &origin))
-                .unwrap_or(Err("The originating Note is no longer open."));
-            match open_result {
-                Err(error) => self.report_error("notes.mermaid", error),
-                Ok(()) => {
-                    if self
-                        .diagram_studio_dialog
-                        .open_source_copy(source)
-                        .is_some()
-                    {
-                        if let Some(panel) = self
-                            .note_panels
-                            .iter_mut()
-                            .find(|panel| panel.tracks_diagram_source_origin(&origin.identity))
-                        {
-                            panel.track_diagram_source_origin(origin);
+        for (panel_index, note_effect) in note_open_effects {
+            match note_effect {
+                super::note_panel::NotePanelEffect::Export(request) => {
+                    self.complete_note_markdown_export(ctx, panel_index, &request);
+                }
+                super::note_panel::NotePanelEffect::OpenDiagram { source, origin } => {
+                    let open_result = self
+                        .note_panels
+                        .iter()
+                        .find(|panel| panel.tracks_diagram_source_origin(&origin.identity))
+                        .map(|panel| panel.can_open_diagram_source_copy(ctx, &origin))
+                        .unwrap_or(Err("The originating Note is no longer open."));
+                    match open_result {
+                        Err(error) => self.report_error("notes.mermaid", error),
+                        Ok(()) => {
+                            if self
+                                .diagram_studio_dialog
+                                .open_source_copy(source)
+                                .is_some()
+                            {
+                                if let Some(panel) = self.note_panels.iter_mut().find(|panel| {
+                                    panel.tracks_diagram_source_origin(&origin.identity)
+                                }) {
+                                    panel.track_diagram_source_origin(origin);
+                                }
+                                self.focus_panel(super::Panel::DiagramStudioDialog);
+                                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                            }
                         }
-                        self.focus_panel(super::Panel::DiagramStudioDialog);
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                 }
             }
@@ -10213,6 +10221,84 @@ impl LauncherApp {
                 );
             }
         }
+    }
+
+    fn complete_note_markdown_export(
+        &mut self,
+        ctx: &egui::Context,
+        panel_index: usize,
+        request: &super::note_panel::NoteExportRequest,
+    ) {
+        let Some(panel) = self.note_panels.get(panel_index) else {
+            return;
+        };
+        if let Err(error) = panel.validate_export_request(ctx, request) {
+            self.note_panels[panel_index].set_markdown_export_feedback(true, error);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+        let artifact = match self.note_panels[panel_index].encode_export_request(request) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                self.note_panels[panel_index].set_markdown_export_feedback(true, error);
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                return;
+            }
+        };
+        // Encoding can be expensive for HTML with local assets. Recheck the
+        // exact Note snapshot before exposing a native file chooser.
+        if let Err(error) = self.note_panels[panel_index].validate_export_request(ctx, request) {
+            self.note_panels[panel_index].set_markdown_export_feedback(true, error);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+        let Some(destination) =
+            self.note_panels[panel_index].pick_markdown_export_path(request.format)
+        else {
+            return;
+        };
+        // The chooser is a boundary where the owner may have changed. Validate
+        // again before checking paths or publishing any bytes.
+        if let Err(error) = self.note_panels[panel_index].validate_export_request(ctx, request) {
+            self.note_panels[panel_index].set_markdown_export_feedback(true, error);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+        let active_path = self.note_panels[panel_index].export_active_path();
+        match super::markdown_export::publish_export(&artifact, &destination, active_path) {
+            Ok(()) => {
+                let warnings = artifact.warnings();
+                let mut warning_parts = Vec::new();
+                for (count, label) in [
+                    (warnings.unsafe_links(), "unsafe links omitted"),
+                    (warnings.unavailable_images(), "images unavailable"),
+                    (warnings.blocked_remote_images(), "remote images blocked"),
+                    (
+                        warnings.unavailable_mermaid_previews(),
+                        "Mermaid previews unavailable",
+                    ),
+                ] {
+                    if count > 0 {
+                        warning_parts.push(format!("{count} {label}"));
+                    }
+                }
+                let suffix = if warning_parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", warning_parts.join(", "))
+                };
+                self.note_panels[panel_index].set_markdown_export_feedback(
+                    false,
+                    format!(
+                        "Exported {} bytes to {}{suffix}.",
+                        artifact.bytes().len(),
+                        destination.display()
+                    ),
+                );
+            }
+            Err(error) => self.note_panels[panel_index].set_markdown_export_feedback(true, error),
+        }
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
@@ -45146,6 +45232,388 @@ mod tests {
 
         assert!(!app.show_settings, "Escape remains a container command");
         assert!(app.test_activation_trace.is_empty());
+        drop(workspace);
+    }
+
+    fn focus_note_markdown_export_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        label: &str,
+    ) -> (egui::Id, egui::Rect, egui::Rect) {
+        const SIZE: egui::Vec2 = egui::vec2(1200.0, 1000.0);
+        let (menu_id, menu_rect, menu_clip) = app.note_panels[0]
+            .test_markdown_toolbar_menu()
+            .expect("the Note toolbar contains its collapsed Markdown menu");
+        assert!(menu_clip.contains_rect(menu_rect));
+        ctx.memory_mut(|memory| memory.request_focus(menu_id));
+        run_tool_dialog_frame_at_size(ctx, app, Vec::new(), false, SIZE)
+            .drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(menu_id)));
+        run_note_panel_key_at_size(ctx, app, egui::Key::Space, egui::Modifiers::NONE, SIZE);
+
+        for _ in 0..8 {
+            if let Some((id, rect, clip)) = app.note_panels[0].test_markdown_tool_rect(label)
+                && clip.contains_rect(rect)
+            {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                run_tool_dialog_frame_at_size(ctx, app, Vec::new(), false, SIZE)
+                    .drop_without_applying_deltas();
+                let (id, rect, clip) = app.note_panels[0]
+                    .test_markdown_tool_rect(label)
+                    .expect("the menu item remains registered after focus");
+                assert!(clip.contains_rect(rect));
+                assert!(ctx.memory(|memory| memory.has_focus(id)));
+                return (id, rect, clip);
+            }
+            run_tool_dialog_frame_at_size(ctx, app, Vec::new(), false, SIZE)
+                .drop_without_applying_deltas();
+        }
+        panic!("the visible Markdown export action was not rendered: {label}");
+    }
+
+    fn note_export_input(events: Vec<egui::Event>) -> egui::RawInput {
+        let mut input = actual_query_input(true);
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1200.0, 1000.0),
+        ));
+        input.events = events;
+        input
+    }
+
+    fn activate_note_export_with_enter(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        discard_after_render: bool,
+    ) -> usize {
+        let input = note_export_input(vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ]);
+        let (output, passes) = app.run_root_frame_for_test(ctx, input, discard_after_render);
+        output.drop_without_applying_deltas();
+        passes
+    }
+
+    fn activate_note_export_with_enter_observing_stage(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        discard_after_render: bool,
+    ) -> (usize, bool) {
+        let input = note_export_input(vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ]);
+        let mut staged = false;
+        let (output, passes) =
+            app.run_root_frame_for_test_with(ctx, input, discard_after_render, |app, ui| {
+                app.render_root_ui(ui);
+                staged |= app.note_panels[0].test_has_pending_markdown_export();
+            });
+        output.drop_without_applying_deltas();
+        (passes, staged)
+    }
+
+    #[test]
+    fn note_markdown_tools_export_exact_unsaved_source_once_after_retained_root() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let note_path = workspace.root().join("notes/export-draft.md");
+        let disk_source = "# On disk\r\n";
+        let source = "# Unsaved Ω\r\n\r\nExact draft.\r\n";
+        std::fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        std::fs::write(&note_path, disk_source).unwrap();
+        let note = crate::plugins::note::Note {
+            title: "Export draft".into(),
+            path: note_path.clone(),
+            content: disk_source.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-export-draft".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.replace_content_from_mutation(source.into(), 15.0);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..3 {
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                Vec::new(),
+                false,
+                egui::vec2(1200.0, 1000.0),
+            )
+            .drop_without_applying_deltas();
+        }
+
+        let discarded_export = workspace.root().join("exports/discarded.md");
+        std::fs::create_dir_all(discarded_export.parent().unwrap()).unwrap();
+        app.note_panels[0].test_set_next_markdown_export_path(Some(discarded_export.clone()));
+        let (item_id, item_rect, item_clip) =
+            focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        assert!(item_clip.contains_rect(item_rect));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(item_id));
+        let before_revision = app.note_panels[0].test_content_revision();
+        let before_history = app.note_panels[0].test_replacement_history_counts();
+        let before_edit_time = app.note_panels[0].test_last_edit_at_secs();
+        let before_baseline = app.note_panels[0].test_saved_content_baseline().to_owned();
+
+        let (passes, staged_before_discard) =
+            activate_note_export_with_enter_observing_stage(&ctx, &mut app, true);
+        assert!(
+            passes > 1,
+            "the real menu activation crossed a discarded ROOT pass"
+        );
+        assert!(
+            staged_before_discard,
+            "the actual menu action staged its export"
+        );
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 0);
+        assert!(!discarded_export.exists());
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(!app.note_panels[0].test_has_pending_markdown_export());
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_replacement_history_counts(),
+            before_history
+        );
+        assert_eq!(
+            app.note_panels[0].test_last_edit_at_secs(),
+            before_edit_time
+        );
+        assert_eq!(
+            app.note_panels[0].test_saved_content_baseline(),
+            before_baseline
+        );
+
+        let enter_release = note_export_input(vec![
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ]);
+        app.run_root_frame_for_test(&ctx, enter_release, false)
+            .0
+            .drop_without_applying_deltas();
+
+        let accepted_export = workspace.root().join("exports/accepted.md");
+        app.note_panels[0].test_set_next_markdown_export_path(Some(accepted_export.clone()));
+        focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        assert_eq!(
+            activate_note_export_with_enter(&ctx, &mut app, false),
+            1,
+            "the accepted export is handled once"
+        );
+        assert_eq!(
+            std::fs::read(&accepted_export).unwrap(),
+            source.as_bytes(),
+            "export uses the unsaved Unicode/CRLF draft rather than disk contents"
+        );
+        assert_eq!(std::fs::read(&note_path).unwrap(), disk_source.as_bytes());
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_note_path(), note_path);
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_replacement_history_counts(),
+            before_history
+        );
+        assert_eq!(
+            app.note_panels[0].test_last_edit_at_secs(),
+            before_edit_time
+        );
+        assert_eq!(
+            app.note_panels[0].test_saved_content_baseline(),
+            before_baseline
+        );
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 1);
+        assert!(
+            app.note_panels[0]
+                .test_markdown_export_feedback()
+                .is_some_and(|(is_error, message)| !is_error && message.contains("accepted.md"))
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_export_cancel_and_active_path_refusal_preserve_note() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let note_path = workspace.root().join("notes/current.md");
+        let source = "# current\r\n";
+        std::fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        std::fs::write(&note_path, source).unwrap();
+        let note = crate::plugins::note::Note {
+            title: "Current note".into(),
+            path: note_path.clone(),
+            content: source.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-export-current".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..3 {
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                Vec::new(),
+                false,
+                egui::vec2(1200.0, 1000.0),
+            )
+            .drop_without_applying_deltas();
+        }
+
+        let before_revision = app.note_panels[0].test_content_revision();
+        let before_history = app.note_panels[0].test_replacement_history_counts();
+        let before_edit_time = app.note_panels[0].test_last_edit_at_secs();
+        app.note_panels[0].test_set_next_markdown_export_path(None);
+        focus_note_markdown_export_action(&ctx, &mut app, "Export HTML…");
+        activate_note_export_with_enter(&ctx, &mut app, false);
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 1);
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(!app.note_panels[0].has_unsaved_changes());
+
+        app.note_panels[0].test_set_next_markdown_export_path(Some(note_path.clone()));
+        focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        activate_note_export_with_enter(&ctx, &mut app, false);
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 2);
+        assert_eq!(std::fs::read(&note_path).unwrap(), source.as_bytes());
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(!app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_replacement_history_counts(),
+            before_history
+        );
+        assert_eq!(
+            app.note_panels[0].test_last_edit_at_secs(),
+            before_edit_time
+        );
+        assert!(
+            app.note_panels[0]
+                .test_markdown_export_feedback()
+                .is_some_and(|(is_error, message)| is_error && message.contains("active Markdown"))
+        );
+
+        let successful_path = workspace.root().join("exports/current.html");
+        std::fs::create_dir_all(successful_path.parent().unwrap()).unwrap();
+        app.note_panels[0].test_set_next_markdown_export_path(Some(successful_path.clone()));
+        focus_note_markdown_export_action(&ctx, &mut app, "Export HTML…");
+        activate_note_export_with_enter(&ctx, &mut app, false);
+        let html = std::fs::read_to_string(&successful_path).unwrap();
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("<h1>current</h1>"));
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 3);
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert!(!app.note_panels[0].has_unsaved_changes());
+        assert_eq!(app.note_panels[0].test_content_revision(), before_revision);
+        assert_eq!(
+            app.note_panels[0].test_replacement_history_counts(),
+            before_history
+        );
+        assert_eq!(
+            app.note_panels[0].test_last_edit_at_secs(),
+            before_edit_time
+        );
+        drop(workspace);
+    }
+
+    #[test]
+    fn note_markdown_tools_export_rechecks_source_and_modal_after_draw() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let source = "# snapshot\r\n";
+        let note = crate::plugins::note::Note {
+            title: "Snapshot note".into(),
+            path: workspace.root().join("notes/snapshot.md"),
+            content: source.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "markdown-export-snapshot".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let mut panel = crate::gui::note_panel::NotePanel::from_note(note);
+        panel.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        panel.request_activation_handoff();
+        app.push_note_panel(panel);
+        for _ in 0..3 {
+            run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                Vec::new(),
+                false,
+                egui::vec2(1200.0, 1000.0),
+            )
+            .drop_without_applying_deltas();
+        }
+
+        let stale_path = workspace.root().join("exports/stale.md");
+        std::fs::create_dir_all(stale_path.parent().unwrap()).unwrap();
+        app.note_panels[0].test_set_next_markdown_export_path(Some(stale_path.clone()));
+        let _ = focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        let mut changed_after_draw = false;
+        let mut input = note_export_input(vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ]);
+        let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            if !changed_after_draw && app.note_panels[0].test_has_pending_markdown_export() {
+                app.note_panels[0]
+                    .replace_content_from_mutation("# changed after draw\n".into(), 9.0);
+                changed_after_draw = true;
+            }
+        });
+        output.drop_without_applying_deltas();
+        assert!(
+            changed_after_draw,
+            "the actual menu action staged a snapshot"
+        );
+        assert!(!stale_path.exists());
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 0);
+        assert_eq!(app.note_panels[0].note_content(), "# changed after draw\n");
+        let modal_path = workspace.root().join("exports/modal.md");
+        app.note_panels[0].test_set_next_markdown_export_path(Some(modal_path.clone()));
+        focus_note_markdown_export_action(&ctx, &mut app, "Export Markdown…");
+        let mut modal_after_draw = false;
+        input = note_export_input(vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+        ]);
+        let (output, _) = app.run_root_frame_for_test_with(&ctx, input, false, |app, ui| {
+            app.render_root_ui(ui);
+            if !modal_after_draw && app.note_panels[0].test_has_pending_markdown_export() {
+                app.note_panels[0].test_set_link_dialog_open(true);
+                modal_after_draw = true;
+            }
+        });
+        output.drop_without_applying_deltas();
+        assert!(modal_after_draw);
+        assert!(!modal_path.exists());
+        assert_eq!(app.note_panels[0].test_markdown_export_picker_calls(), 0);
+        assert_eq!(app.note_panels[0].note_content(), "# changed after draw\n");
+        assert!(
+            app.note_panels[0]
+                .test_markdown_export_feedback()
+                .is_some_and(|(is_error, message)| is_error
+                    && message.contains("Resolve the open Note dialog"))
+        );
         drop(workspace);
     }
 

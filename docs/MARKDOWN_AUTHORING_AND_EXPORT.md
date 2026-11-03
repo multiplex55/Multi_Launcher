@@ -28,6 +28,8 @@ The static HTML exporter uses pulldown-cmark's HTML event writer. Raw HTML event
 
 The document contains fixed CSS and a restrictive Content Security Policy, and adds no scripts, remote resources, embedded objects, or caller-supplied markup. Only current accepted Diagram SVG is embedded, each as a separate data image so generated SVG IDs cannot collide between fences. Unsupported Mermaid remains escaped source with a diagnostic. Markdown export returns the exact source bytes without newline normalization.
 
+The Notes editor's collapsed Markdown menu exports the current unsaved source. HTML export resolves only canonical regular files under the Notes `assets` directory, reads no more than 4 MiB in total, and keeps accepted images below the 2 MiB per-image limit. It never fetches remote images. An authored `|width` suffix accepts a finite width from 1 to 4,096 CSS pixels; missing, unsafe, malformed, or oversized images remain visible through their alt text and are reported in the export feedback. Export publication refuses occupied destinations and any path that resolves to the active Markdown file, including when that file has been deleted. Export does not save or otherwise change the Note.
+
 The Diagram source-copy request is an in-memory typed transition to a new untitled document. It uses the Diagram controller's existing dirty Save/Discard/Cancel policy and never writes a temporary file or changes the Markdown source.
 
 ## Markdown document state

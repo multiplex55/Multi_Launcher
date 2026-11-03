@@ -13,10 +13,11 @@ use super::{
 pub const MAX_MARKDOWN_HTML_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_LOCAL_RASTER_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_LOCAL_RASTER_AGGREGATE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_MARKDOWN_HTML_IMAGES: usize = 512;
 const MAX_LOCAL_RASTER_DIMENSION: u32 = 8_192;
 const MAX_LOCAL_RASTER_PIXELS: u64 = 16_777_216;
 const MAX_MARKDOWN_HTML_EVENTS: usize = 1_000_000;
-const MAX_MARKDOWN_HTML_IMAGES: usize = 512;
+const MAX_LOCAL_RASTER_DISPLAY_WIDTH: f32 = 4_096.0;
 const MAX_MERMAID_SVG_AGGREGATE_BYTES: usize = 2 * 1024 * 1024;
 const BASE_URL: &str = "https://markdown.invalid/";
 
@@ -112,7 +113,33 @@ pub struct LocalRasterAsset<'a> {
 
 /// Optional caller-supplied local-only resolver. This interface performs no IO.
 pub trait LocalRasterResolver {
+    /// Resolve the complete parser destination. Caller-specific suffixes, such
+    /// as an authored `|width` hint, remain part of this string.
     fn resolve<'a>(&'a self, relative_destination: &str) -> Option<LocalRasterAsset<'a>>;
+
+    /// Optional bounded CSS-pixel display width for a resolved image, queried
+    /// with the same complete destination. The HTML exporter accepts only
+    /// finite values in the range 1..=4096.
+    fn width_hint_px(&self, _relative_destination: &str) -> Option<f32> {
+        None
+    }
+}
+
+enum ImageOutput {
+    PassThrough,
+    Skipped,
+    Sized {
+        source: String,
+        width_px: f32,
+        title: Option<String>,
+        alt: String,
+        nested_image_depth: usize,
+    },
+}
+
+struct ResolvedRaster {
+    data_url: String,
+    width_px: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,7 +209,7 @@ pub fn export_html(
     let mut image_count = 0usize;
     let mut skipped_code_block = false;
     let mut skipped_links = Vec::<bool>::new();
-    let mut skipped_images = Vec::<bool>::new();
+    let mut image_outputs = Vec::<ImageOutput>::new();
 
     while let Some((event, range)) = source_events.next() {
         event_count = event_count.saturating_add(1);
@@ -192,6 +219,62 @@ pub fn export_html(
         if skipped_code_block {
             if matches!(event, Event::End(TagEnd::CodeBlock)) {
                 skipped_code_block = false;
+            }
+            continue;
+        }
+        if let Some(ImageOutput::Sized { .. }) = image_outputs.last_mut() {
+            match event {
+                Event::Start(Tag::Image { .. }) => {
+                    if let Some(ImageOutput::Sized {
+                        nested_image_depth, ..
+                    }) = image_outputs.last_mut()
+                    {
+                        *nested_image_depth = nested_image_depth.saturating_add(1);
+                    }
+                }
+                Event::End(TagEnd::Image) => {
+                    let closes_nested_image = match image_outputs.last_mut() {
+                        Some(ImageOutput::Sized {
+                            nested_image_depth, ..
+                        }) if *nested_image_depth > 0 => {
+                            *nested_image_depth -= 1;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !closes_nested_image {
+                        let Some(ImageOutput::Sized {
+                            source,
+                            width_px,
+                            title,
+                            alt,
+                            ..
+                        }) = image_outputs.pop()
+                        else {
+                            unreachable!("the image stack was checked immediately above")
+                        };
+                        let title = title.map_or_else(String::new, |title| {
+                            format!(" title=\"{}\"", escape_html(&title))
+                        });
+                        events.push(Event::Html(CowStr::from(format!(
+                            "<img src=\"{source}\" alt=\"{}\" width=\"{width_px}px\"{title}>",
+                            escape_html(&alt)
+                        ))));
+                    }
+                }
+                Event::Text(text) | Event::Code(text) => {
+                    if let Some(ImageOutput::Sized { alt, .. }) = image_outputs.last_mut() {
+                        alt.push_str(&text);
+                    }
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    if let Some(ImageOutput::Sized { alt, .. }) = image_outputs.last_mut() {
+                        alt.push(' ');
+                    }
+                }
+                // Inline formatting inside an image's alternative text is
+                // flattened to text, matching HTML's alt attribute model.
+                _ => {}
             }
             continue;
         }
@@ -254,13 +337,27 @@ pub fn export_html(
                     &mut aggregate_assets,
                 );
                 if let Some(data_url) = resolved {
-                    skipped_images.push(false);
-                    events.push(Event::Start(Tag::Image {
-                        link_type,
-                        dest_url: CowStr::from(data_url),
-                        title,
-                        id,
-                    }));
+                    if let Some(width_px) = data_url.width_px {
+                        image_outputs.push(ImageOutput::Sized {
+                            source: data_url.data_url,
+                            width_px,
+                            title: if title.is_empty() {
+                                None
+                            } else {
+                                Some(title.to_string())
+                            },
+                            alt: String::new(),
+                            nested_image_depth: 0,
+                        });
+                    } else {
+                        image_outputs.push(ImageOutput::PassThrough);
+                        events.push(Event::Start(Tag::Image {
+                            link_type,
+                            dest_url: CowStr::from(data_url.data_url),
+                            title,
+                            id,
+                        }));
+                    }
                 } else {
                     if is_remote_destination(&dest_url) {
                         warnings.blocked_remote_images =
@@ -268,11 +365,11 @@ pub fn export_html(
                     } else {
                         warnings.unavailable_images = warnings.unavailable_images.saturating_add(1);
                     }
-                    skipped_images.push(true);
+                    image_outputs.push(ImageOutput::Skipped);
                 }
             }
             Event::End(TagEnd::Image) => {
-                if !skipped_images.pop().unwrap_or(false) {
+                if matches!(image_outputs.pop(), Some(ImageOutput::PassThrough)) {
                     events.push(Event::End(TagEnd::Image));
                 }
             }
@@ -414,11 +511,12 @@ fn resolve_local_asset(
     destination: &str,
     resolver: Option<&dyn LocalRasterResolver>,
     aggregate_bytes: &mut usize,
-) -> Option<String> {
+) -> Option<ResolvedRaster> {
     if !is_local_relative_destination(destination) {
         return None;
     }
-    let asset = resolver?.resolve(destination)?;
+    let resolver = resolver?;
+    let asset = resolver.resolve(destination)?;
     if asset.bytes.is_empty()
         || asset.bytes.len() > MAX_LOCAL_RASTER_BYTES
         || aggregate_bytes.saturating_add(asset.bytes.len()) > MAX_LOCAL_RASTER_AGGREGATE_BYTES
@@ -429,10 +527,13 @@ fn resolve_local_asset(
     }
     *aggregate_bytes += asset.bytes.len();
     let encoded = encode_base64(asset.bytes);
-    Some(format!(
-        "data:{};base64,{encoded}",
-        asset.format.mime_type()
-    ))
+    let width_px = resolver.width_hint_px(destination).filter(|width| {
+        width.is_finite() && (1.0..=MAX_LOCAL_RASTER_DISPLAY_WIDTH).contains(width)
+    });
+    Some(ResolvedRaster {
+        data_url: format!("data:{};base64,{encoded}", asset.format.mime_type()),
+        width_px,
+    })
 }
 
 fn raster_dimensions_within_limits(format: LocalRasterFormat, bytes: &[u8]) -> bool {
@@ -559,6 +660,7 @@ mod tests {
 
     struct TestAssets {
         bytes: Vec<u8>,
+        width_px: Option<f32>,
     }
 
     impl TestAssets {
@@ -574,22 +676,32 @@ mod tests {
                 .expect("PNG fixture should encode");
             Self {
                 bytes: bytes.into_inner(),
+                width_px: None,
             }
         }
 
         fn malformed_png() -> Self {
             Self {
                 bytes: b"\x89PNG\r\n\x1a\nsmall test".to_vec(),
+                width_px: None,
             }
         }
     }
 
     impl LocalRasterResolver for TestAssets {
         fn resolve<'a>(&'a self, destination: &str) -> Option<LocalRasterAsset<'a>> {
-            (destination == "images/pixel.png").then_some(LocalRasterAsset {
-                format: LocalRasterFormat::Png,
-                bytes: &self.bytes,
-            })
+            matches!(destination, "images/pixel.png" | "images/pixel.png|120.5").then_some(
+                LocalRasterAsset {
+                    format: LocalRasterFormat::Png,
+                    bytes: &self.bytes,
+                },
+            )
+        }
+
+        fn width_hint_px(&self, destination: &str) -> Option<f32> {
+            (destination == "images/pixel.png|120.5")
+                .then_some(self.width_px)
+                .flatten()
         }
     }
 
@@ -631,6 +743,40 @@ mod tests {
         assert!(output.contains("Mermaid preview unavailable"));
         assert!(!output.contains("flowchart TD\nA --&gt; B"));
         assert_eq!(html.warnings().unavailable_mermaid_previews(), 1);
+    }
+
+    #[test]
+    fn markdown_html_applies_only_bounded_local_width_hints() {
+        let source = "![a \"quoted\" alt](images/pixel.png|120.5)";
+        let preview = MarkdownPreview::analyze(source).unwrap();
+        let mut assets = TestAssets::png(2, 2);
+        assets.width_px = Some(120.5);
+        let html = export_html(&preview, Some(&assets)).unwrap();
+        let output = std::str::from_utf8(html.bytes()).unwrap();
+        assert!(output.contains("alt=\"a &quot;quoted&quot; alt\""));
+        assert!(output.contains("width=\"120.5px\""));
+
+        assets.width_px = Some(f32::INFINITY);
+        let html = export_html(&preview, Some(&assets)).unwrap();
+        assert!(
+            !std::str::from_utf8(html.bytes())
+                .unwrap()
+                .contains("width=\"")
+        );
+    }
+
+    #[test]
+    fn markdown_html_sized_image_flattens_nested_image_alt_without_leaking_text() {
+        let source = "![before ![inner](images/inner.png) after](images/pixel.png|120.5)";
+        let preview = MarkdownPreview::analyze(source).unwrap();
+        let mut assets = TestAssets::png(2, 2);
+        assets.width_px = Some(120.5);
+
+        let html = export_html(&preview, Some(&assets)).unwrap();
+        let output = std::str::from_utf8(html.bytes()).unwrap();
+
+        assert!(output.contains("alt=\"before inner after\""));
+        assert_eq!(output.matches("after").count(), 1);
     }
 
     #[test]
