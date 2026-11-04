@@ -5,12 +5,13 @@ use std::{error::Error, fmt, ops::Range, sync::Arc};
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 
 use super::authoring::{
-    MAX_MARKDOWN_SOURCE_BYTES, MarkdownEditError, PreparedMarkdownEdit, dominant_newline,
-    validate_source,
+    MAX_MARKDOWN_SNIPPET_BYTES, MAX_MARKDOWN_SOURCE_BYTES, MarkdownEditError, PreparedMarkdownEdit,
+    dominant_newline, validate_source,
 };
 
 pub const MAX_MARKDOWN_TABLES: usize = 256;
 pub const MAX_MARKDOWN_TABLE_CELLS: usize = 16_384;
+pub const MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION: usize = 256;
 const MAX_MARKDOWN_TABLE_EVENTS: usize = 1_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +265,184 @@ pub fn prepare_insert_table(
         });
     }
     PreparedMarkdownEdit::prepare(source, byte_index..byte_index, insertion).map_err(Into::into)
+}
+
+/// Prepares a bounded table with one header row, one separator row, and the
+/// requested number of empty body rows. `data_rows` excludes the header.
+pub fn prepare_insert_table_with_rows(
+    source: &str,
+    byte_index: usize,
+    header_cells: &[String],
+    data_rows: usize,
+) -> Result<PreparedMarkdownEdit, TableEditError> {
+    validate_source(source).map_err(map_source_error)?;
+    if byte_index > source.len() || !source.is_char_boundary(byte_index) {
+        return Err(TableEditError::InvalidRow);
+    }
+    if header_cells.is_empty() || header_cells.len() > MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION {
+        return Err(TableEditError::InvalidColumn);
+    }
+    if data_rows == 0 || data_rows > MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION {
+        return Err(TableEditError::InvalidRow);
+    }
+    validate_cells(header_cells)?;
+
+    let row_count = data_rows
+        .checked_add(2)
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })?;
+    let total_cells =
+        header_cells
+            .len()
+            .checked_mul(row_count)
+            .ok_or(TableEditError::TooManyCells {
+                max: MAX_MARKDOWN_TABLE_CELLS,
+            })?;
+    if total_cells > MAX_MARKDOWN_TABLE_CELLS {
+        return Err(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        });
+    }
+
+    let newline = dominant_newline(source);
+    let newline_bytes = newline.len();
+    let escaped_header_bytes = header_cells
+        .iter()
+        .try_fold(0usize, |sum, cell| {
+            cell.chars().try_fold(sum, |sum, character| {
+                sum.checked_add(escaped_cell_len(character))
+            })
+        })
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })?;
+    let header_bytes = row_bytes(header_cells.len(), escaped_header_bytes)?;
+    let separator_bytes = 1usize
+        .checked_add(
+            header_cells
+                .len()
+                .checked_mul(6)
+                .ok_or(TableEditError::TooManyCells {
+                    max: MAX_MARKDOWN_TABLE_CELLS,
+                })?,
+        )
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })?;
+    let empty_row_bytes = row_bytes(header_cells.len(), 0)?;
+    let body_rows_bytes = data_rows
+        .checked_mul(newline_bytes.checked_add(empty_row_bytes).ok_or(
+            TableEditError::TooManyCells {
+                max: MAX_MARKDOWN_TABLE_CELLS,
+            },
+        )?)
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })?;
+    let table_bytes = header_bytes
+        .checked_add(newline_bytes)
+        .and_then(|bytes| bytes.checked_add(separator_bytes))
+        .and_then(|bytes| bytes.checked_add(body_rows_bytes))
+        .and_then(|bytes| bytes.checked_add(newline_bytes))
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })?;
+
+    let prefix = &source[..byte_index];
+    let prefix_bytes = if prefix.is_empty() {
+        0
+    } else {
+        let line_break = (if prefix.ends_with('\n') { 0usize } else { 1 })
+            .checked_mul(newline_bytes)
+            .ok_or(TableEditError::TooManyCells {
+                max: MAX_MARKDOWN_TABLE_CELLS,
+            })?;
+        let blank_line = (if prefix.ends_with(&format!("{newline}{newline}")) {
+            0usize
+        } else {
+            1
+        })
+        .checked_mul(newline_bytes)
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })?;
+        line_break
+            .checked_add(blank_line)
+            .ok_or(TableEditError::TooManyCells {
+                max: MAX_MARKDOWN_TABLE_CELLS,
+            })?
+    };
+    let suffix_bytes =
+        (if byte_index < source.len() && !source[byte_index..].starts_with(newline) {
+            1usize
+        } else {
+            0usize
+        })
+        .checked_mul(newline_bytes)
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })?;
+    let insertion_bytes = prefix_bytes
+        .checked_add(table_bytes)
+        .and_then(|bytes| bytes.checked_add(suffix_bytes))
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })?;
+    if insertion_bytes > MAX_MARKDOWN_SNIPPET_BYTES {
+        return Err(TableEditError::Edit(MarkdownEditError::SnippetTooLarge {
+            max_bytes: MAX_MARKDOWN_SNIPPET_BYTES,
+        }));
+    }
+    if source
+        .len()
+        .checked_add(insertion_bytes)
+        .is_none_or(|bytes| bytes > MAX_MARKDOWN_SOURCE_BYTES)
+    {
+        return Err(TableEditError::SourceTooLarge {
+            max_bytes: MAX_MARKDOWN_SOURCE_BYTES,
+        });
+    }
+
+    let mut insertion = String::with_capacity(insertion_bytes);
+    if !prefix.is_empty() {
+        if !prefix.ends_with('\n') {
+            insertion.push_str(newline);
+        }
+        if !prefix.ends_with(&format!("{newline}{newline}")) {
+            insertion.push_str(newline);
+        }
+    }
+    let escaped_headers: Vec<_> = header_cells.iter().map(|cell| escape_cell(cell)).collect();
+    write_row(&mut insertion, &escaped_headers, newline);
+    insertion.push_str(newline);
+    write_separator(
+        &mut insertion,
+        &vec![MarkdownTableAlignment::None; header_cells.len()],
+        newline,
+    );
+    let empty_cells = vec![String::new(); header_cells.len()];
+    for _ in 0..data_rows {
+        insertion.push_str(newline);
+        write_row(&mut insertion, &empty_cells, newline);
+    }
+    insertion.push_str(newline);
+    if suffix_bytes > 0 {
+        insertion.push_str(newline);
+    }
+
+    debug_assert_eq!(insertion.len(), insertion_bytes);
+    PreparedMarkdownEdit::prepare(source, byte_index..byte_index, insertion).map_err(Into::into)
+}
+
+fn row_bytes(columns: usize, escaped_cells_bytes: usize) -> Result<usize, TableEditError> {
+    columns
+        .checked_mul(3)
+        .and_then(|overhead| escaped_cells_bytes.checked_add(overhead))
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or(TableEditError::TooManyCells {
+            max: MAX_MARKDOWN_TABLE_CELLS,
+        })
 }
 
 pub fn prepare_insert_row(
@@ -658,6 +837,116 @@ mod tests {
         let tables = parse_markdown_tables(&updated).unwrap();
         assert_eq!(tables.len(), 1);
         assert_eq!(tables[0].alignments.len(), 2);
+    }
+
+    #[test]
+    fn custom_table_insertion_creates_requested_shapes_and_headers() {
+        for (headers, data_rows) in [
+            (vec!["Name".to_owned(), "Value".to_owned()], 3),
+            (
+                vec![
+                    "A".to_owned(),
+                    "B".to_owned(),
+                    "C".to_owned(),
+                    "D".to_owned(),
+                    "E".to_owned(),
+                ],
+                2,
+            ),
+        ] {
+            let source = "Before\n\nAfter";
+            let insert_at = source.find("After").unwrap();
+            let edit = prepare_insert_table_with_rows(source, insert_at, &headers, data_rows)
+                .expect("requested dimensions are bounded");
+            let updated = edit
+                .apply(source)
+                .expect("prepared table remains source-bound")
+                .source;
+            let table = parse_markdown_tables(&updated)
+                .expect("generated Markdown is valid")
+                .remove(0);
+            assert_eq!(table.alignments().len(), headers.len());
+            assert_eq!(table.rows().len(), data_rows + 1);
+            for (range, header) in table.rows()[0].cell_ranges().iter().zip(headers) {
+                assert_eq!(updated[range.clone()].trim(), header);
+            }
+            assert!(updated.starts_with("Before\n\n"));
+            assert!(updated.ends_with("\n\nAfter"));
+        }
+    }
+
+    #[test]
+    fn custom_table_insertion_escapes_names_and_preserves_crlf() {
+        let source = "Intro\r\n\r\nAfter\r\n";
+        let headers = vec!["Café".into(), "A|B & C".into()];
+        let insert_at = source.find("After").unwrap();
+        let edit = prepare_insert_table_with_rows(source, insert_at, &headers, 1).unwrap();
+        let updated = edit.apply(source).unwrap().source;
+        assert!(updated.contains("| Café | A&#124;B &amp; C |\r\n"));
+        assert!(updated.contains("| --- | --- |\r\n|  |  |\r\n\r\nAfter\r\n"));
+        let tables = parse_markdown_tables(&updated).unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].rows().len(), 2);
+    }
+
+    #[test]
+    fn custom_table_insertion_rejects_invalid_dimensions_and_excess_bytes() {
+        let source = "";
+        let headers = vec!["A".to_owned(), "B".to_owned()];
+        assert_eq!(
+            prepare_insert_table_with_rows(source, 0, &headers, 0),
+            Err(TableEditError::InvalidRow)
+        );
+        assert_eq!(
+            prepare_insert_table_with_rows(source, 0, &headers, usize::MAX),
+            Err(TableEditError::InvalidRow)
+        );
+        assert!(matches!(
+            prepare_insert_table_with_rows(
+                source,
+                0,
+                &vec![String::new(); MAX_MARKDOWN_TABLE_CELLS],
+                1
+            ),
+            Err(TableEditError::InvalidColumn)
+        ));
+        assert!(matches!(
+            prepare_insert_table_with_rows(
+                source,
+                0,
+                &vec![String::new(); MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION],
+                MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION
+            ),
+            Err(TableEditError::TooManyCells { .. })
+        ));
+        assert!(matches!(
+            prepare_insert_table_with_rows(source, 0, &["line 1\nline 2".into()], 1),
+            Err(TableEditError::InvalidCellText)
+        ));
+
+        let oversized_header = "&".repeat(MAX_MARKDOWN_SNIPPET_BYTES / 2);
+        assert!(matches!(
+            prepare_insert_table_with_rows(source, 0, &[oversized_header], 1),
+            Err(TableEditError::Edit(
+                MarkdownEditError::SnippetTooLarge { .. }
+            ))
+        ));
+        let oversized_source = "x".repeat(MAX_MARKDOWN_SOURCE_BYTES);
+        assert!(matches!(
+            prepare_insert_table_with_rows(
+                &oversized_source,
+                oversized_source.len(),
+                &["A".into()],
+                1
+            ),
+            Err(TableEditError::SourceTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn custom_table_preparation_rejects_a_changed_source() {
+        let edit = prepare_insert_table_with_rows("old", 0, &["Name".into()], 1).unwrap();
+        assert_eq!(edit.apply("new"), Err(MarkdownEditError::SourceChanged));
     }
 
     #[test]

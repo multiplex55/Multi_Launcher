@@ -14,12 +14,13 @@ use crate::gui::note_find_preview::{
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::notes_markdown::{
-    MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout, MarkdownEditError,
-    MarkdownExportArtifact, MarkdownExportFormat, MarkdownHeading, MarkdownInlineFormat,
-    MarkdownPreview, MarkdownPreviewStatus, MarkdownSection, MarkdownTaskItem, ParsedMarkdownTable,
-    PlainLinkConversionReport, PreparedMarkdownEdit, analyze_markdown, convert_plain_links,
-    prepare_block_snippet, prepare_inline_format, prepare_insert_column, prepare_insert_row,
-    prepare_insert_table, prepare_remove_column, prepare_remove_row, prepare_set_cell,
+    MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION, MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout,
+    MarkdownEditError, MarkdownExportArtifact, MarkdownExportFormat, MarkdownHeading,
+    MarkdownInlineFormat, MarkdownPreview, MarkdownPreviewStatus, MarkdownSection,
+    MarkdownTaskItem, ParsedMarkdownTable, PlainLinkConversionReport, PreparedMarkdownEdit,
+    analyze_markdown, convert_plain_links, prepare_block_snippet, prepare_inline_format,
+    prepare_insert_column, prepare_insert_row, prepare_insert_table,
+    prepare_insert_table_with_rows, prepare_remove_column, prepare_remove_row, prepare_set_cell,
     table_at_byte, task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
@@ -1072,6 +1073,7 @@ pub struct NotePanel {
     pending_mermaid_origin: Option<NoteMermaidOrigin>,
     active_mermaid_origin: Option<NoteMermaidOrigin>,
     pending_root_effect: Option<PendingNoteRootEffect>,
+    custom_table_builder: Option<CustomTableBuilder>,
     markdown_export_feedback: Option<(bool, String)>,
     markdown_analysis: Option<MarkdownAnalysis>,
     markdown_analysis_source_hash: Option<u64>,
@@ -1171,6 +1173,14 @@ pub struct NotePanel {
     test_capture_markdown_fragment_ids: bool,
     #[cfg(test)]
     test_markdown_toolbar_menu: Option<(egui::Id, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_custom_table_insert_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_custom_table_builder_insert_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_custom_table_builder_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_custom_table_builder_cancel_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_next_markdown_export_path: Option<Option<PathBuf>>,
     #[cfg(test)]
@@ -1285,7 +1295,31 @@ struct PendingNoteToolbarFocusRestore {
     editor_id: egui::Id,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NoteTableBuilderOrigin {
+    note_slug: String,
+    note_path: PathBuf,
+    source_snapshot: String,
+    editor_id: egui::Id,
+    insert_at: usize,
+}
+
+struct CustomTableBuilder {
+    origin: NoteTableBuilderOrigin,
+    columns: usize,
+    data_rows: usize,
+    header_cells: Vec<String>,
+    pending_insert: bool,
+    error: Option<String>,
+}
+
+pub(crate) struct PendingCustomTableInsertion {
+    origin: NoteTableBuilderOrigin,
+    prepared: PreparedMarkdownEdit,
+}
+
 pub(crate) enum NotePanelEffect {
+    InsertCustomTable(PendingCustomTableInsertion),
     OpenDiagram {
         source: DiagramSourceCopy,
         origin: NoteMermaidOrigin,
@@ -1602,6 +1636,7 @@ impl NotePanel {
             pending_mermaid_origin: None,
             active_mermaid_origin: None,
             pending_root_effect: None,
+            custom_table_builder: None,
             markdown_export_feedback: None,
             markdown_analysis: None,
             markdown_analysis_source_hash: None,
@@ -1697,6 +1732,14 @@ impl NotePanel {
             test_capture_markdown_fragment_ids: false,
             #[cfg(test)]
             test_markdown_toolbar_menu: None,
+            #[cfg(test)]
+            test_custom_table_insert_rect: None,
+            #[cfg(test)]
+            test_custom_table_builder_insert_rect: None,
+            #[cfg(test)]
+            test_custom_table_builder_rect: None,
+            #[cfg(test)]
+            test_custom_table_builder_cancel_rect: None,
             #[cfg(test)]
             test_next_markdown_export_path: None,
             #[cfg(test)]
@@ -2345,10 +2388,24 @@ impl NotePanel {
                     && self.note.content == origin.source_snapshot
             }
             NotePanelEffect::Export(request) => self.export_snapshot_matches(request),
+            NotePanelEffect::InsertCustomTable(request) => {
+                self.custom_table_origin_is_current(&request.origin)
+            }
         };
         if retained && still_matches {
             Some(staged.effect)
         } else {
+            if let NotePanelEffect::InsertCustomTable(request) = &staged.effect
+                && let Some(builder) = self.custom_table_builder.as_mut()
+                && builder.origin == request.origin
+            {
+                builder.pending_insert = false;
+                if retained {
+                    builder.error = Some(
+                        "The note or editor changed before the table could be inserted. Reopen the builder to use the current source.".into(),
+                    );
+                }
+            }
             if let NotePanelEffect::OpenDiagram { origin, .. } = &staged.effect
                 && self
                     .pending_mermaid_origin
@@ -2888,6 +2945,10 @@ impl NotePanel {
         )
     }
 
+    fn custom_table_builder_layer(&self) -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, self.custom_table_builder_id())
+    }
+
     pub(crate) fn query_focus_protected_state_blocks(&self) -> bool {
         if !self.open {
             return false;
@@ -3151,6 +3212,79 @@ impl NotePanel {
     #[cfg(test)]
     pub(crate) fn test_editor_widget_id(&self) -> Option<egui::Id> {
         self.last_textedit_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_begin_custom_table_builder(&mut self, ctx: &egui::Context) {
+        if let Some(editor_id) = self.last_textedit_id {
+            self.begin_custom_table_builder(ctx, editor_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_builder_insert_rect(&self) -> Option<egui::Rect> {
+        self.test_custom_table_builder_insert_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_builder_rect(&self) -> Option<egui::Rect> {
+        self.test_custom_table_builder_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_builder_cancel_rect(&self) -> Option<egui::Rect> {
+        self.test_custom_table_builder_cancel_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_origin_insert_at(&self) -> Option<usize> {
+        self.custom_table_builder
+            .as_ref()
+            .map(|builder| builder.origin.insert_at)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_builder_layer(&self) -> Option<egui::LayerId> {
+        self.custom_table_builder
+            .as_ref()
+            .map(|_| self.custom_table_builder_layer())
+    }
+
+    #[cfg(test)]
+    fn test_custom_table_history_step(
+        &mut self,
+        ctx: &egui::Context,
+        direction: ReplacementUndoDirection,
+    ) -> Option<String> {
+        let editor_id = self.last_textedit_id?;
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, editor_id)?;
+        let cursor = state.cursor.char_range().unwrap_or_else(|| {
+            egui::text::CCursorRange::one(egui::text::CCursor::new(
+                self.note.content.chars().count(),
+            ))
+        });
+        let mut undoer = state.undoer();
+        let (next_cursor, next_source) =
+            self.replacement_history_step(&mut undoer, cursor, direction)?;
+        self.replacement_history_mutation = Some(match direction {
+            ReplacementUndoDirection::Undo => ReplacementHistoryMutation::Undo,
+            ReplacementUndoDirection::Redo => ReplacementHistoryMutation::Redo,
+        });
+        self.replace_content_from_mutation(next_source.clone(), ctx.input(|input| input.time));
+        state.set_undoer(undoer);
+        state.cursor.set_char_range(Some(next_cursor));
+        state.store(ctx, editor_id);
+        Some(next_source)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_undo(&mut self, ctx: &egui::Context) -> Option<String> {
+        self.test_custom_table_history_step(ctx, ReplacementUndoDirection::Undo)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_redo(&mut self, ctx: &egui::Context) -> Option<String> {
+        self.test_custom_table_history_step(ctx, ReplacementUndoDirection::Redo)
     }
 
     #[cfg(test)]
@@ -3822,6 +3956,265 @@ impl NotePanel {
         }
     }
 
+    fn begin_custom_table_builder(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
+        if !self.open
+            || self.last_textedit_id != Some(editor_id)
+            || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+        {
+            return;
+        }
+        let range = self.current_editor_byte_range(ctx, editor_id);
+        self.custom_table_builder = Some(CustomTableBuilder {
+            origin: NoteTableBuilderOrigin {
+                note_slug: self.note.slug.clone(),
+                note_path: self.note.path.clone(),
+                source_snapshot: self.note.content.clone(),
+                editor_id,
+                insert_at: range.start,
+            },
+            columns: 2,
+            data_rows: 1,
+            header_cells: vec!["Column 1".into(), "Column 2".into()],
+            pending_insert: false,
+            error: None,
+        });
+    }
+
+    fn custom_table_builder_id(&self) -> egui::Id {
+        egui::Id::new((
+            "note-custom-table-builder",
+            self.note.slug.clone(),
+            self.note.path.clone(),
+        ))
+    }
+
+    pub(crate) fn query_focus_ordinary_layers(&self) -> impl Iterator<Item = egui::LayerId> {
+        std::iter::once(self.show_query_focus_layer()).chain(
+            self.custom_table_builder
+                .as_ref()
+                .map(|_| self.custom_table_builder_layer()),
+        )
+    }
+
+    fn custom_table_origin_is_current(&self, origin: &NoteTableBuilderOrigin) -> bool {
+        self.open
+            && self.note.slug == origin.note_slug
+            && self.note.path == origin.note_path
+            && self.note.content == origin.source_snapshot
+            && self.last_textedit_id == Some(origin.editor_id)
+            && matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+            && self
+                .custom_table_builder
+                .as_ref()
+                .is_some_and(|builder| builder.origin == *origin)
+    }
+
+    fn stage_custom_table_insertion(&mut self, ctx: &egui::Context) {
+        if ctx.will_discard() || self.pending_root_effect.is_some() {
+            return;
+        }
+        let Some(builder) = self.custom_table_builder.as_ref() else {
+            return;
+        };
+        if builder.pending_insert {
+            return;
+        }
+        if !self.custom_table_origin_is_current(&builder.origin) {
+            if let Some(builder) = self.custom_table_builder.as_mut() {
+                builder.error = Some(
+                    "The note or editor changed. Cancel and reopen the builder to insert at the current caret.".into(),
+                );
+            }
+            return;
+        }
+        let origin = builder.origin.clone();
+        let prepared = match prepare_insert_table_with_rows(
+            &origin.source_snapshot,
+            origin.insert_at,
+            &builder.header_cells,
+            builder.data_rows,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(builder) = self.custom_table_builder.as_mut() {
+                    builder.error = Some(error.to_string());
+                }
+                return;
+            }
+        };
+        if let Some(builder) = self.custom_table_builder.as_mut() {
+            builder.pending_insert = true;
+            builder.error = None;
+        }
+        self.pending_root_effect = Some(PendingNoteRootEffect {
+            frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
+            pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+            effect: NotePanelEffect::InsertCustomTable(PendingCustomTableInsertion {
+                origin,
+                prepared,
+            }),
+        });
+    }
+
+    pub(crate) fn complete_custom_table_insertion(
+        &mut self,
+        ctx: &egui::Context,
+        request: PendingCustomTableInsertion,
+    ) -> Result<(), String> {
+        if !self.custom_table_origin_is_current(&request.origin) {
+            if let Some(builder) = self.custom_table_builder.as_mut() {
+                builder.pending_insert = false;
+                builder.error = Some(
+                    "The note or editor changed before the table could be inserted. Reopen the builder to use the current source.".into(),
+                );
+            }
+            return Err("The originating note or editor changed before insertion.".into());
+        }
+        match self.apply_prepared_markdown_edit_with_selection(
+            ctx,
+            request.origin.editor_id,
+            request.prepared,
+            None,
+        ) {
+            Ok(true) => {
+                self.custom_table_builder = None;
+                Ok(())
+            }
+            Ok(false) => {
+                if let Some(builder) = self.custom_table_builder.as_mut() {
+                    builder.pending_insert = false;
+                    builder.error = Some("The table did not change the note.".into());
+                }
+                Err("The table did not change the note.".into())
+            }
+            Err(error) => {
+                if let Some(builder) = self.custom_table_builder.as_mut() {
+                    builder.pending_insert = false;
+                    builder.error = Some(error.to_string());
+                }
+                Err(error.to_string())
+            }
+        }
+    }
+
+    fn show_custom_table_builder(&mut self, ctx: &egui::Context) {
+        if !self.open || self.custom_table_builder.is_none() {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.test_custom_table_builder_insert_rect = None;
+            self.test_custom_table_builder_rect = None;
+            self.test_custom_table_builder_cancel_rect = None;
+        }
+        let id = self.custom_table_builder_id();
+        let screen_rect = ctx.content_rect();
+        let available_size =
+            (screen_rect.size() - egui::vec2(40.0, 40.0)).max(egui::vec2(320.0, 280.0));
+        let default_size = egui::vec2(460.0, 460.0).min(available_size);
+        let default_pos = egui::pos2(
+            screen_rect.left() + 20.0,
+            (screen_rect.bottom() - default_size.y - 20.0).max(screen_rect.top() + 20.0),
+        );
+        let mut window_open = true;
+        let mut submit = false;
+        let mut cancel = false;
+        let mut authorized = false;
+        let mut insert_rect = None;
+        let mut cancel_rect = None;
+        let output = egui::Window::new("Insert custom Markdown table")
+            .id(id)
+            .order(egui::Order::Middle)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(default_size)
+            .default_pos(default_pos)
+            .min_size(egui::vec2(320.0, 280.0))
+            .open(&mut window_open)
+            .show(ctx, |ui| {
+                authorized = !ctx.will_discard() && ui.is_visible() && !ui.is_sizing_pass();
+                let builder = self
+                    .custom_table_builder
+                    .as_mut()
+                    .expect("the builder remains present while its window is shown");
+                let mut changed = false;
+                let pending_insert = builder.pending_insert;
+                ui.add_enabled_ui(authorized && !builder.pending_insert, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Columns");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut builder.columns)
+                                    .range(1..=MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Data rows (excluding header)");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut builder.data_rows)
+                                    .range(1..=MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION),
+                            )
+                            .changed();
+                    });
+                    builder
+                        .header_cells
+                        .resize_with(builder.columns, || String::new());
+                    ui.separator();
+                    let rows_max_height = (ui.available_height() - 48.0).max(64.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("custom-table-columns", id))
+                        .max_height(rows_max_height)
+                        .show(ui, |ui| {
+                            for (index, name) in builder.header_cells.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Column {}", index + 1));
+                                    changed |= ui.text_edit_singleline(name).changed();
+                                });
+                            }
+                        });
+                    if changed {
+                        builder.error = None;
+                    }
+                    ui.separator();
+                    if let Some(error) = &builder.error {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                    ui.horizontal(|ui| {
+                        let insert = ui.button("Insert");
+                        #[cfg(test)]
+                        if authorized && ui.is_visible() && !ui.is_sizing_pass() {
+                            insert_rect = Some(insert.rect);
+                        }
+                        submit = insert.clicked();
+                        let cancel_response = ui.button("Cancel");
+                        #[cfg(test)]
+                        if authorized && ui.is_visible() && !ui.is_sizing_pass() {
+                            cancel_rect = Some(cancel_response.rect);
+                        }
+                        cancel = cancel_response.clicked();
+                    });
+                });
+                if pending_insert {
+                    ui.label("Inserting table…");
+                }
+            });
+        #[cfg(test)]
+        {
+            self.test_custom_table_builder_insert_rect = insert_rect;
+            self.test_custom_table_builder_rect =
+                output.as_ref().map(|output| output.response.rect);
+            self.test_custom_table_builder_cancel_rect = cancel_rect;
+        }
+        if authorized && submit {
+            self.stage_custom_table_insertion(ctx);
+        }
+        if authorized && (cancel || !window_open) {
+            self.custom_table_builder = None;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_last_edit_at_secs(&self) -> Option<f64> {
         self.last_edit_at_secs
@@ -3867,10 +4260,12 @@ impl NotePanel {
             self.save(app);
             if !self.overwrite_prompt {
                 self.open = false;
+                self.custom_table_builder = None;
             }
         } else if !app.note_confirm_discard_unsaved_changes || !self.has_unsaved_changes() {
             self.open = false;
             self.discard_unsaved_prompt = false;
+            self.custom_table_builder = None;
         } else {
             self.open = true;
             self.discard_unsaved_prompt = true;
@@ -3886,6 +4281,7 @@ impl NotePanel {
     fn discard_changes(&mut self) {
         self.discard_unsaved_prompt = false;
         self.open = false;
+        self.custom_table_builder = None;
     }
 
     pub(crate) fn replace_content_after_saved_external_mutation(
@@ -3982,6 +4378,7 @@ impl NotePanel {
             self.active_mermaid_origin = None;
             self.pending_mermaid_origin = None;
             self.pending_root_effect = None;
+            self.custom_table_builder = None;
             self.markdown_toolbar_popup_was_open = false;
             self.markdown_toolbar_owns_selection = false;
             self.applying_toolbar_markdown_action = false;
@@ -4093,6 +4490,7 @@ impl NotePanel {
                         self.last_preview_heading_rects.clear();
                         self.last_preview_heading_font_sizes.clear();
                         self.test_markdown_toolbar_menu = None;
+                        self.test_custom_table_insert_rect = None;
                         self.test_markdown_export_feedback_rect = None;
                         self.test_note_toolbar_edit_button = None;
                         self.test_markdown_tool_rects.clear();
@@ -4168,6 +4566,8 @@ impl NotePanel {
             }
             ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, window_id));
         }
+
+        self.show_custom_table_builder(ctx);
 
         // If the panel is closing, ensure we don't leave egui focus on a widget
         // that will no longer exist this frame. This avoids AccessKit panics
@@ -7392,6 +7792,15 @@ impl NotePanel {
                     let prepared =
                         self.prepare_current_table_edit(ctx, id, TableEditOperation::InsertTable);
                     self.report_markdown_edit_result(ctx, id, app, prepared);
+                    ui.close();
+                }
+                let custom_table = ui.button("Insert custom table…");
+                #[cfg(test)]
+                if ui.is_visible() && !ui.is_sizing_pass() {
+                    self.test_custom_table_insert_rect = Some(custom_table.rect);
+                }
+                if custom_table.clicked() {
+                    self.begin_custom_table_builder(ctx, id);
                     ui.close();
                 }
                 let table_context = self.current_table_context(ctx, id);
@@ -16548,6 +16957,159 @@ More text.
         assert_eq!(tables[0].rows().len(), 3);
         assert_eq!(panel.replacement_undo_boundaries.len(), 1);
         ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn custom_table_builder_refuses_a_changed_origin_source() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let id = egui::Id::new("custom_table_stale_source");
+        let original = "Before selected text After";
+        let mut panel = NotePanel::from_note(empty_note(original));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
+        let selection_start = original.find("selected").unwrap();
+        let selection_end = selection_start + "selected text".len();
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(original[..selection_start].chars().count()),
+                egui::text::CCursor::new(original[..selection_end].chars().count()),
+            )));
+        state.store(&ctx, id);
+        panel.begin_custom_table_builder(&ctx, id);
+        assert_eq!(
+            panel.test_custom_table_origin_insert_at(),
+            Some(selection_start)
+        );
+
+        panel.replace_content_after_external_mutation("Changed by another editor".into());
+        panel.stage_custom_table_insertion(&ctx);
+
+        assert_eq!(panel.note_content(), "Changed by another editor");
+        assert!(panel.pending_root_effect.is_none());
+        assert_eq!(panel.replacement_undo_boundaries.len(), 0);
+        assert!(
+            panel
+                .custom_table_builder
+                .as_ref()
+                .and_then(|builder| builder.error.as_ref())
+                .is_some_and(|error| error.contains("changed"))
+        );
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn discarded_custom_table_insert_leaves_builder_retryable() {
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("discarded_custom_table_editor");
+        let source = "Before table After";
+        let mut panel = NotePanel::from_note(empty_note(source));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(editor_id);
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new("Before ".chars().count()),
+            )));
+        state.store(&ctx, editor_id);
+        panel.begin_custom_table_builder(&ctx, editor_id);
+
+        let mut discard_requested = false;
+        ctx.run_ui(Default::default(), |ctx| {
+            panel.stage_custom_table_insertion(ctx);
+            if !discard_requested {
+                ctx.request_discard("discard the pending custom table insertion");
+                discard_requested = true;
+            }
+        })
+        .drop_without_applying_deltas();
+
+        assert!(panel.on_ui_frame_complete(&ctx).is_none());
+        assert!(panel.pending_root_effect.is_none());
+        assert!(
+            panel
+                .custom_table_builder
+                .as_ref()
+                .is_some_and(|builder| !builder.pending_insert && builder.error.is_none())
+        );
+        assert_eq!(panel.note_content(), source);
+
+        ctx.run_ui(Default::default(), |ctx| {
+            panel.stage_custom_table_insertion(ctx)
+        })
+        .drop_without_applying_deltas();
+        let effect = panel
+            .on_ui_frame_complete(&ctx)
+            .expect("the retry is retained by its root frame");
+        let NotePanelEffect::InsertCustomTable(request) = effect else {
+            panic!("retry produces a custom table insertion effect");
+        };
+        panel
+            .complete_custom_table_insertion(&ctx, request)
+            .expect("the retry applies to the captured source");
+
+        assert!(
+            panel
+                .note_content()
+                .starts_with("Before \n\n| Column 1 | Column 2 |")
+        );
+        assert!(panel.note_content().ends_with("\n\ntable After"));
+        assert_eq!(panel.test_replacement_history_counts(), (1, 0));
+        assert!(panel.custom_table_builder.is_none());
+    }
+
+    #[test]
+    fn custom_table_builder_keeps_insert_and_cancel_visible_in_a_small_window() {
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("Small screen draft"));
+        panel.view_mode = NoteViewMode::Edit;
+        let editor_id = egui::Id::new("small_screen_custom_table_editor");
+        panel.last_textedit_id = Some(editor_id);
+        let mut editor_state = egui::widgets::text_edit::TextEditState::default();
+        editor_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(0),
+            )));
+        editor_state.store(&ctx, editor_id);
+        panel.begin_custom_table_builder(&ctx, editor_id);
+        let builder = panel
+            .custom_table_builder
+            .as_mut()
+            .expect("the builder opens from the active editor");
+        builder.columns = 24;
+        builder.header_cells = (1..=24).map(|column| format!("Column {column}")).collect();
+        builder.data_rows = 12;
+
+        for _ in 0..3 {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(420.0, 360.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| panel.show_custom_table_builder(ctx),
+            )
+            .drop_without_applying_deltas();
+        }
+
+        let window = panel
+            .test_custom_table_builder_rect()
+            .expect("the resizable builder fits the constrained screen");
+        let insert = panel
+            .test_custom_table_builder_insert_rect()
+            .expect("Insert remains reachable below the scrolling names");
+        let cancel = panel
+            .test_custom_table_builder_cancel_rect()
+            .expect("Cancel remains reachable below the scrolling names");
+        assert!(window.contains_rect(insert));
+        assert!(window.contains_rect(cancel));
     }
 
     #[test]

@@ -2060,7 +2060,7 @@ impl LauncherApp {
                 self.note_panels
                     .iter()
                     .filter(|panel| panel.open)
-                    .map(|panel| panel.show_query_focus_layer()),
+                    .flat_map(|panel| panel.query_focus_ordinary_layers()),
             )
             .chain(
                 self.image_panels
@@ -10677,6 +10677,16 @@ impl LauncherApp {
             .collect::<Vec<_>>();
         for (panel_index, note_effect) in note_open_effects {
             match note_effect {
+                super::note_panel::NotePanelEffect::InsertCustomTable(request) => {
+                    let result = self
+                        .note_panels
+                        .get_mut(panel_index)
+                        .map(|panel| panel.complete_custom_table_insertion(ctx, request))
+                        .unwrap_or_else(|| Err("The originating Note is no longer open.".into()));
+                    if let Err(error) = result {
+                        self.report_error("notes.markdown", error);
+                    }
+                }
                 super::note_panel::NotePanelEffect::Export(request) => {
                     self.complete_note_markdown_export(ctx, panel_index, &request);
                 }
@@ -48789,6 +48799,170 @@ mod tests {
                 assert_eq!(app.calculation_pad_dialog.open, !dashboard_owner);
             }
         }
+    }
+
+    #[test]
+    fn studio_usability_custom_table_keeps_note_and_caret_owner_across_query_and_second_note() {
+        let query_id = egui::Id::new("query_input");
+        let screen_size = egui::vec2(1600.0, 1200.0);
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "table owner query");
+        app.set_jump_mode_enabled(false);
+        app.note_panel_default_size = (560.0, 480.0);
+
+        let source = "# Table A\n\nbefore selected prose after\n\nend";
+        let mut note_a = launcher_show_owner_note("table-origin-a");
+        note_a.replace_content_after_external_mutation(source.into());
+        note_a.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        let layer_a = note_a.show_query_focus_layer();
+
+        let mut note_b = launcher_show_owner_note("table-target-b");
+        note_b.replace_content_after_external_mutation("# Table B\n\nuntouched draft".into());
+        note_b.test_set_view_mode(crate::settings::NoteViewMode::Edit);
+        let layer_b = note_b.show_query_focus_layer();
+
+        launcher_show_owner_seed_window_position_at(
+            &ctx,
+            layer_a,
+            "Note A placement",
+            screen_size,
+            egui::pos2(700.0, 700.0),
+        );
+        launcher_show_owner_seed_window_position_at(
+            &ctx,
+            layer_b,
+            "Note B placement",
+            screen_size,
+            egui::pos2(1050.0, 700.0),
+        );
+        app.push_note_panel(note_a);
+        app.push_note_panel(note_b);
+        launcher_show_owner_prime_visible_layout(&mut app, &ctx, screen_size);
+
+        let editor_id = app.note_panels[0]
+            .test_editor_widget_id()
+            .expect("Note A renders its source editor");
+        let insert_at = source
+            .find("selected")
+            .expect("the selected prose is present");
+        let select_end = insert_at + "selected prose".len();
+        let mut editor_state = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("Note A has current TextEdit state");
+        editor_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(source[..insert_at].chars().count()),
+                egui::text::CCursor::new(source[..select_end].chars().count()),
+            )));
+        editor_state.store(&ctx, editor_id);
+        app.note_panels[0].test_begin_custom_table_builder(&ctx);
+        assert_eq!(
+            app.note_panels[0].test_custom_table_origin_insert_at(),
+            Some(insert_at),
+            "the builder captures the original selection start"
+        );
+
+        app.run_root_frame_for_test(&ctx, launcher_show_owner_input(true, screen_size), false)
+            .0
+            .drop_without_applying_deltas();
+        let builder_layer = app.note_panels[0]
+            .test_custom_table_builder_layer()
+            .expect("the custom builder owns a distinct window layer");
+        let ordinary = app
+            .query_focus_ordinary_context()
+            .expect("the two notes expose ordinary query ownership");
+        assert!(ordinary.ordinary_panel_layers.contains(&builder_layer));
+        assert!(!ordinary.note_panel_layers.contains(&builder_layer));
+        let builder_rect = app.note_panels[0]
+            .test_custom_table_builder_rect()
+            .expect("the builder is rendered as a reachable nonmodal window");
+        let query_rect_before = ctx
+            .read_response(query_id)
+            .expect("the real query response remains rendered")
+            .rect;
+        assert!(!builder_rect.intersects(query_rect_before));
+
+        notes_query_mouse_prepare_interactive(&mut app, &ctx, screen_size, false);
+        let query_rect = ctx
+            .read_response(query_id)
+            .expect("the actual query response is prepared for mouse input")
+            .rect;
+        assert!(!builder_rect.intersects(query_rect));
+        notes_query_mouse_click(&mut app, &ctx, screen_size, query_rect);
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+        notes_query_mouse_type(&mut app, &ctx, screen_size, " λ");
+        let query_after_edit = app.query.clone();
+        assert!(query_after_edit.contains('λ'));
+
+        let note_b_editor = app.note_panels[1]
+            .test_last_editor_geometry()
+            .expect("Note B source editor remains available")
+            .0;
+        notes_query_mouse_click(&mut app, &ctx, screen_size, note_b_editor);
+        notes_query_mouse_type(&mut app, &ctx, screen_size, " changed");
+        let note_b_after_edit = app.note_panels[1].note_content().to_owned();
+        assert!(note_b_after_edit.ends_with("untouched draft changed"));
+
+        let insert_button = app.note_panels[0]
+            .test_custom_table_builder_insert_rect()
+            .expect("Insert remains reachable while Note B owns focus");
+        let insert_pos = insert_button.center();
+        notes_query_mouse_run_frame(
+            &mut app,
+            &ctx,
+            screen_size,
+            vec![
+                egui::Event::PointerMoved(insert_pos),
+                egui::Event::PointerButton {
+                    pos: insert_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let mut release = launcher_show_owner_input(true, screen_size);
+        release.events = vec![egui::Event::PointerButton {
+            pos: insert_pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        let (_, passes) = app.run_root_frame_for_test(&ctx, release, true);
+        assert_eq!(
+            passes, 2,
+            "the insertion event is replayed through an accepted pass"
+        );
+
+        let updated = app.note_panels[0].note_content().to_owned();
+        assert!(updated.starts_with("# Table A\n\nbefore \n\n"));
+        assert!(updated.ends_with("|  |  |\n\nselected prose after\n\nend"));
+        assert_eq!(
+            crate::notes_markdown::parse_markdown_tables(&updated)
+                .expect("custom table parses")
+                .first()
+                .expect("one table was inserted")
+                .rows()
+                .len(),
+            2
+        );
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (1, 0));
+        assert_eq!(app.note_panels[1].note_content(), note_b_after_edit);
+        assert_eq!(app.query, query_after_edit);
+
+        assert_eq!(
+            app.note_panels[0].test_custom_table_undo(&ctx),
+            Some(source.into())
+        );
+        assert_eq!(app.note_panels[0].note_content(), source);
+        assert_eq!(app.note_panels[0].test_replacement_history_counts(), (0, 1));
+        assert_eq!(
+            app.note_panels[0].test_custom_table_redo(&ctx),
+            Some(updated.clone())
+        );
+        assert_eq!(app.note_panels[0].note_content(), updated);
+        assert_eq!(app.note_panels[1].note_content(), note_b_after_edit);
+        assert_eq!(app.query, query_after_edit);
     }
 
     #[test]
