@@ -163,15 +163,21 @@ mod tests {
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    fn new_app(ctx: &egui::Context) -> LauncherApp {
+    fn new_app(ctx: &egui::Context, data_dir: &std::path::Path) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
             0,
             PluginManager::new(),
-            "actions.json".into(),
-            "settings.json".into(),
-            Settings::default(),
+            data_dir.join("actions.json").to_string_lossy().into_owned(),
+            data_dir
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
             None,
             None,
             None,
@@ -204,7 +210,7 @@ mod tests {
         unsafe { std::env::set_var("HOME", dir.path()) };
         save_notes(&[]).unwrap();
         let ctx = egui::Context::default();
-        let app = new_app(&ctx);
+        let app = new_app(&ctx, dir.path());
         (dir, ctx, app)
     }
 
