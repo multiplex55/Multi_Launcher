@@ -1,6 +1,6 @@
 use crate::calculation_pad::{
-    CalculationPadSession, DocumentId, LineOutcome, PadDocumentSummary, PadStoreError,
-    PendingTransition, SessionError, TransitionDecision, TransitionOutcome,
+    CalculationPadSession, DocumentId, EXAMPLE_GROUPS, LineOutcome, PadDocumentSummary,
+    PadStoreError, PendingTransition, SessionError, TransitionDecision, TransitionOutcome,
 };
 use crate::platform::app_data::AppDataRoot;
 use eframe::egui;
@@ -11,6 +11,7 @@ pub(crate) struct CalculationPadDialog {
     session: CalculationPadSession,
     open_chooser: bool,
     saved_documents: Vec<PadDocumentSummary>,
+    examples_open: bool,
     save_as_open: bool,
     save_as_name: String,
     error: Option<String>,
@@ -32,6 +33,12 @@ pub(crate) struct CalculationPadDialog {
     test_window_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_discard_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_examples_button_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_examples_window_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_examples_copy_rect: Option<egui::Rect>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -63,10 +70,21 @@ enum DialogIntent {
     CancelSaveAs,
     Save,
     SaveAs(String),
+    OpenExamples,
+    CloseExamples,
     Decision(TransitionDecision),
 }
 
 impl CalculationPadDialog {
+    fn examples_window_id() -> egui::Id {
+        egui::Id::new("calculation-pad-examples-window")
+    }
+
+    pub(super) fn examples_layer_if_root(&self) -> Option<egui::LayerId> {
+        (self.open && self.examples_open)
+            .then(|| egui::LayerId::new(egui::Order::Middle, Self::examples_window_id()))
+    }
+
     pub(crate) fn new(root: &AppDataRoot) -> Self {
         Self {
             open: false,
@@ -74,6 +92,7 @@ impl CalculationPadDialog {
             session: CalculationPadSession::new(root),
             open_chooser: false,
             saved_documents: Vec::new(),
+            examples_open: false,
             save_as_open: false,
             save_as_name: String::new(),
             error: None,
@@ -95,6 +114,12 @@ impl CalculationPadDialog {
             test_window_rect: None,
             #[cfg(test)]
             test_discard_rect: None,
+            #[cfg(test)]
+            test_examples_button_rect: None,
+            #[cfg(test)]
+            test_examples_window_rect: None,
+            #[cfg(test)]
+            test_examples_copy_rect: None,
         }
     }
 
@@ -183,6 +208,9 @@ impl CalculationPadDialog {
             self.test_save_rect = None;
             self.test_editor_id = None;
             self.test_editor_rect = None;
+            self.test_examples_button_rect = None;
+            self.test_examples_window_rect = None;
+            self.test_examples_copy_rect = None;
         }
         if !self.open {
             return None;
@@ -242,6 +270,46 @@ impl CalculationPadDialog {
                 });
             });
 
+        let mut examples_window_open = self.examples_open;
+        let mut examples_authorized = false;
+        let examples_output = if self.examples_open {
+            egui::Window::new("Calculation Pad Examples & Reference")
+                .id(Self::examples_window_id())
+                .order(egui::Order::Middle)
+                .open(&mut examples_window_open)
+                .resizable(true)
+                .default_size(egui::vec2(620.0, 540.0))
+                .min_size(egui::vec2(360.0, 280.0))
+                .show(ctx, |ui| {
+                    examples_authorized = first_ui_pass
+                        && !ctx.will_discard()
+                        && ui.is_visible()
+                        && !ui.is_sizing_pass();
+                    ui.add_enabled_ui(examples_authorized, |ui| {
+                        self.examples_ui(ui, &mut effect);
+                    });
+                })
+        } else {
+            None
+        };
+
+        #[cfg(test)]
+        {
+            self.test_examples_window_rect =
+                examples_output.as_ref().map(|output| output.response.rect);
+        }
+
+        let close_examples_requested = self.examples_open
+            && !examples_window_open
+            && first_ui_pass
+            && !ctx.will_discard()
+            && examples_output
+                .as_ref()
+                .is_some_and(|output| output.response.rect.intersects(ctx.content_rect()));
+        if close_examples_requested {
+            intent = Some(DialogIntent::CloseExamples);
+        }
+
         #[cfg(test)]
         {
             self.test_window_rect = output.as_ref().map(|output| output.response.rect);
@@ -256,7 +324,8 @@ impl CalculationPadDialog {
             && self.host_close_requested
             && self.session.pending_transition().is_none())
             || (window_lifecycle_authorized && !window_open);
-        if content_authorized || close_requested {
+        if content_authorized || examples_authorized || close_examples_requested || close_requested
+        {
             let save_as_changed = staged_save_as_name != self.save_as_name;
             let has_effects = edited_source.is_some()
                 || save_as_changed
@@ -264,6 +333,7 @@ impl CalculationPadDialog {
                 || editor_history_action.is_some()
                 || intent.is_some()
                 || effect.is_some()
+                || close_examples_requested
                 || close_requested;
             if has_effects {
                 self.pending_root_effects = Some(RootEffects {
@@ -390,6 +460,14 @@ impl CalculationPadDialog {
             if ui.button("Save As…").clicked() {
                 *intent = Some(DialogIntent::OpenSaveAs);
             }
+            let examples = ui.button("Examples & reference");
+            #[cfg(test)]
+            if ui.is_visible() && !ui.is_sizing_pass() {
+                self.test_examples_button_rect = Some(examples.rect);
+            }
+            if examples.clicked() {
+                *intent = Some(DialogIntent::OpenExamples);
+            }
             ui.separator();
             let title = self.session.current_name().unwrap_or("Untitled");
             ui.label(title);
@@ -421,16 +499,6 @@ impl CalculationPadDialog {
         if self.save_as_open {
             Self::save_as_ui(ui, staged_save_as_name, intent);
         }
-
-        egui::CollapsingHeader::new("Calculation Pad grammar")
-            .id_salt("calculation-pad-grammar")
-            .show(ui, |ui| {
-                ui.label("One expression or name = expression per line; # starts a comment.");
-                ui.label("Use earlier names or rN physical-line references (blank lines count).");
-                ui.label("Conversions: 6 ft 2 in to cm; exact unsigned bases: 9007199254740993 dec to hex.");
-                ui.label("Scalar math supports +, −, ×, ÷, ^, parentheses, named functions and constants.");
-                ui.label("Units use the shared catalog; values are not combined with unit algebra.");
-            });
 
         if let Some(pending) = self.session.pending_transition() {
             self.pending_transition_ui(ui, pending, intent);
@@ -470,6 +538,63 @@ impl CalculationPadDialog {
                 effect,
             );
         }
+    }
+
+    fn examples_ui(&mut self, ui: &mut egui::Ui, effect: &mut Option<CalculationPadDialogEffect>) {
+        ui.label(
+            "One expression or name = expression per physical line; # starts a full-line comment.",
+        );
+        ui.label(
+            "Results are finite f64 scalars, physical quantities, or exact unsigned base values.",
+        );
+
+        ui.collapsing("Operator and function reference", |ui| {
+            ui.label("Operators: +, -, *, /, ^, and % (remainder keeps the dividend sign). Unary + and - are supported; scientific notation accepts e or E, such as 1.25e-2.");
+            ui.label("mod(a, b) gives a non-negative Euclidean remainder. Division and remainder by zero are errors.");
+            ui.label("Functions: abs, signum, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, floor, round, ceil, trunc, fract, exp, sqrt, cbrt, ln, log, log2, log10, atan2, min, and max.");
+            ui.label("Constants: PI, π, E, e, TAU, and τ. Trigonometric functions use radians.");
+        });
+        ui.collapsing("Names, lines, units, and limits", |ui| {
+            ui.label("Use earlier assignments by name. Braced names may contain spaces and Unicode.");
+            ui.label("rN refers to the one-based physical source line N; blank and comment lines count.");
+            ui.label("Unit conversions use the shared catalog. Quantities cannot be combined with scalar arithmetic.");
+            ui.label("0x, 0b, and 0o are scalar integer prefixes, accepted only through 2^53. Exact base conversion remains a separate u128 path.");
+            ui.label("Finite f64 operands and intermediate results are required; source expressions are limited to 2,048 bytes, normalized expressions to 8 KiB, and nesting to 32 parentheses.");
+            ui.label("Documents are limited to 64 KiB and 256 physical lines; names to 128 UTF-8 bytes; identifiers to 64 per line and 512 per document.");
+        });
+
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("calculation-pad-example-catalog")
+            .max_height(ui.available_height())
+            .show(ui, |ui| {
+                for (group_index, group) in EXAMPLE_GROUPS.iter().enumerate() {
+                    egui::CollapsingHeader::new(group.title)
+                        .id_salt(("calculation-pad-example-group", group_index))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for example in group.examples {
+                                ui.group(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.strong(example.title);
+                                        let copy = ui.small_button("Copy example");
+                                        #[cfg(test)]
+                                        if self.test_examples_copy_rect.is_none() {
+                                            self.test_examples_copy_rect = Some(copy.rect);
+                                        }
+                                        if copy.clicked() {
+                                            *effect = Some(CalculationPadDialogEffect::CopyText(
+                                                example.source.to_owned(),
+                                            ));
+                                        }
+                                    });
+                                    ui.code(example.source);
+                                    ui.weak(example.explanation);
+                                });
+                            }
+                        });
+                }
+            });
     }
 
     fn editor_ui(
@@ -716,6 +841,8 @@ impl CalculationPadDialog {
             DialogIntent::CancelSaveAs => self.save_as_open = false,
             DialogIntent::Save => self.save_current(),
             DialogIntent::SaveAs(name) => self.save_as(&name),
+            DialogIntent::OpenExamples => self.examples_open = true,
+            DialogIntent::CloseExamples => self.examples_open = false,
             DialogIntent::Decision(decision) => self.decide_pending(decision),
         }
     }
@@ -795,6 +922,7 @@ impl CalculationPadDialog {
 
     fn reset_transient_ui(&mut self) {
         self.open_chooser = false;
+        self.examples_open = false;
         self.saved_documents.clear();
         self.save_as_open = false;
         self.save_as_name.clear();
@@ -901,6 +1029,26 @@ impl CalculationPadDialog {
     #[cfg(test)]
     pub(crate) fn test_can_undo(&self) -> bool {
         self.session.can_undo()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_examples(&mut self) {
+        self.examples_open = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_examples_button_rect(&self) -> Option<egui::Rect> {
+        self.test_examples_button_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_examples_window_rect(&self) -> Option<egui::Rect> {
+        self.test_examples_window_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_examples_copy_rect(&self) -> Option<egui::Rect> {
+        self.test_examples_copy_rect
     }
 
     #[cfg(test)]
@@ -1241,6 +1389,57 @@ mod tests {
         assert!(summary.find("r1 total = 5").unwrap() < summary.find("r2 = 20").unwrap());
         assert!(summary.contains("r3: error:"));
         assert_eq!(dialog.test_source(), Some("total = 2 + 3\nr1 * 4\n1 / 0"));
+    }
+
+    #[test]
+    fn studio_usability_calculation_help_open_copy_preserves_draft_dirty_and_history() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        let draft = "draft = 7\ndraft * 3";
+        dialog.test_replace_source(draft);
+        let ctx = egui::Context::default();
+        let size = egui::vec2(1200.0, 900.0);
+
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let examples_button = dialog
+            .test_examples_button_rect()
+            .expect("the main pad has an Examples & reference action");
+        assert_eq!(
+            click(&mut dialog, &ctx, size, examples_button.center()),
+            None
+        );
+        assert!(dialog.examples_open);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        assert!(
+            dialog
+                .test_examples_window_rect()
+                .is_some_and(|rect| rect.is_positive())
+        );
+
+        let copy_button = dialog
+            .test_examples_copy_rect()
+            .expect("the shared catalog exposes a copy button");
+        let source_before = dialog.test_source().unwrap().to_owned();
+        let revision_before = dialog.session.revision();
+        let can_undo_before = dialog.test_can_undo();
+        let dirty_before = dialog.test_is_dirty();
+        assert!(can_undo_before);
+        assert!(dirty_before);
+
+        assert_eq!(
+            click(&mut dialog, &ctx, size, copy_button.center()),
+            Some(CalculationPadDialogEffect::CopyText(
+                "radius = 3\nPI * radius ^ 2".into()
+            ))
+        );
+        assert_eq!(dialog.test_source(), Some(source_before.as_str()));
+        assert_eq!(dialog.session.revision(), revision_before);
+        assert_eq!(dialog.test_can_undo(), can_undo_before);
+        assert_eq!(dialog.test_is_dirty(), dirty_before);
     }
 
     #[test]

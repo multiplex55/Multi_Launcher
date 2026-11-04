@@ -2071,6 +2071,7 @@ impl LauncherApp {
                 egui::Order::Middle,
                 egui::Id::new("Plugin Settings"),
             )))
+            .chain(self.calculation_pad_dialog.examples_layer_if_root())
             .chain(self.diagram_studio_dialog.embedded_viewer_layer_if_root())
             .collect::<std::collections::HashSet<_>>();
         (Self::TRACKED_PANELS
@@ -14677,6 +14678,41 @@ mod tests {
         assert!(
             LauncherApp::take_test_root_dialog_effects(&ctx).is_empty(),
             "a second completion does not emit the same copy twice"
+        );
+    }
+
+    #[test]
+    fn studio_usability_calculation_help_layer_is_owned_by_the_ordinary_root_context() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_open_examples();
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        let help_layer = app
+            .calculation_pad_dialog
+            .examples_layer_if_root()
+            .expect("open Calculation Pad help publishes its ordinary ROOT layer");
+        let help_rect = ctx
+            .memory(|memory| memory.area_rect(help_layer.id))
+            .expect("the ROOT help window publishes its actual egui area");
+        assert_eq!(ctx.layer_id_at(help_rect.center()), Some(help_layer));
+
+        let ordinary_context = app
+            .query_focus_ordinary_context()
+            .expect("the open Calculation Pad has an ordinary query owner");
+        assert!(ordinary_context.ordinary_panel_layers.contains(&help_layer));
+        assert!(
+            ordinary_context
+                .ordinary_panel_layers
+                .contains(&egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("calculation-pad-window"),
+                ))
         );
     }
 

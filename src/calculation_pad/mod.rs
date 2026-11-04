@@ -4,6 +4,7 @@
 //! `README.md`.
 
 mod document;
+mod examples;
 mod operators;
 mod persistence;
 mod session;
@@ -14,6 +15,7 @@ pub use document::{
     MAX_DEPENDENCIES_PER_LINE, MAX_DOCUMENT_BYTES, MAX_EXPRESSION_BYTES, MAX_EXPRESSION_NESTING,
     MAX_NAME_BYTES, MAX_SOURCE_LINES,
 };
+pub(crate) use examples::{CalculationExampleGroup, EXAMPLE_GROUPS};
 
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, DocumentId, LineId, MAX_SAVED_DOCUMENTS,

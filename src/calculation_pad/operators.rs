@@ -3,6 +3,9 @@ use exmex::{BinOp, MakeOperators, Operator};
 #[derive(Clone, Debug)]
 pub(super) struct CheckedOperators;
 
+#[derive(Clone, Debug)]
+pub(super) struct ModuloOperators;
+
 fn apply_unary(value: f64, operation: fn(f64) -> f64) -> f64 {
     if !value.is_finite() {
         return f64::NAN;
@@ -43,6 +46,20 @@ checked_binary!(atan2, |left, right| left.atan2(right));
 checked_binary!(minimum, |left, right| left.min(right));
 checked_binary!(maximum, |left, right| left.max(right));
 
+fn remainder(left: f64, right: f64) -> f64 {
+    if right == 0.0 {
+        return f64::NAN;
+    }
+    apply_binary(left, right, |left, right| left % right)
+}
+
+fn euclidean_remainder(left: f64, right: f64) -> f64 {
+    if right == 0.0 {
+        return f64::NAN;
+    }
+    apply_binary(left, right, |left, right| left.rem_euclid(right))
+}
+
 fn divide(left: f64, right: f64) -> f64 {
     if right == 0.0 {
         return f64::NAN;
@@ -80,105 +97,186 @@ checked_unary!(log10, |value| value.log10());
 
 impl MakeOperators<f64> for CheckedOperators {
     fn make<'a>() -> Vec<Operator<'a, f64>> {
-        vec![
+        make_operators(false)
+    }
+}
+
+impl MakeOperators<f64> for ModuloOperators {
+    fn make<'a>() -> Vec<Operator<'a, f64>> {
+        make_operators(true)
+    }
+}
+
+fn make_operators<'a>(left_to_right_multiplicative: bool) -> Vec<Operator<'a, f64>> {
+    let mut operators = vec![
+        Operator::make_bin(
+            "^",
+            BinOp {
+                apply: power,
+                prio: 4,
+                is_commutative: false,
+            },
+        ),
+        Operator::make_bin(
+            "*",
+            BinOp {
+                apply: multiply,
+                prio: 2,
+                is_commutative: !left_to_right_multiplicative,
+            },
+        ),
+        Operator::make_bin(
+            "/",
+            BinOp {
+                apply: divide,
+                prio: if left_to_right_multiplicative { 2 } else { 3 },
+                is_commutative: false,
+            },
+        ),
+        Operator::make_bin_unary(
+            "+",
+            BinOp {
+                apply: add,
+                prio: 0,
+                is_commutative: true,
+            },
+            positive,
+        ),
+        Operator::make_bin_unary(
+            "-",
+            BinOp {
+                apply: subtract,
+                prio: 1,
+                is_commutative: false,
+            },
+            negative,
+        ),
+        Operator::make_bin(
+            "atan2",
+            BinOp {
+                apply: atan2,
+                prio: 0,
+                is_commutative: false,
+            },
+        ),
+        Operator::make_bin(
+            "min",
+            BinOp {
+                apply: minimum,
+                prio: 0,
+                is_commutative: false,
+            },
+        ),
+        Operator::make_bin(
+            "max",
+            BinOp {
+                apply: maximum,
+                prio: 0,
+                is_commutative: false,
+            },
+        ),
+        Operator::make_unary("abs", absolute),
+        Operator::make_unary("signum", signum),
+        Operator::make_unary("sin", sine),
+        Operator::make_unary("cos", cosine),
+        Operator::make_unary("tan", tangent),
+        Operator::make_unary("asin", arcsine),
+        Operator::make_unary("acos", arccosine),
+        Operator::make_unary("atan", arctangent),
+        Operator::make_unary("sinh", sinh),
+        Operator::make_unary("cosh", cosh),
+        Operator::make_unary("tanh", tanh),
+        Operator::make_unary("asinh", asinh),
+        Operator::make_unary("acosh", acosh),
+        Operator::make_unary("atanh", atanh),
+        Operator::make_unary("floor", floor),
+        Operator::make_unary("round", round),
+        Operator::make_unary("ceil", ceil),
+        Operator::make_unary("trunc", trunc),
+        Operator::make_unary("fract", fract),
+        Operator::make_unary("exp", exponential),
+        Operator::make_unary("sqrt", square_root),
+        Operator::make_unary("cbrt", cube_root),
+        Operator::make_unary("ln", natural_log),
+        Operator::make_unary("log2", log2),
+        Operator::make_unary("log10", log10),
+        Operator::make_unary("log", natural_log),
+        Operator::make_constant("PI", std::f64::consts::PI),
+        Operator::make_constant("π", std::f64::consts::PI),
+        Operator::make_constant("E", std::f64::consts::E),
+        Operator::make_constant("e", std::f64::consts::E),
+        Operator::make_constant("TAU", std::f64::consts::TAU),
+        Operator::make_constant("τ", std::f64::consts::TAU),
+    ];
+
+    if left_to_right_multiplicative {
+        operators.extend([
             Operator::make_bin(
-                "^",
+                "%",
                 BinOp {
-                    apply: power,
-                    prio: 4,
-                    is_commutative: false,
-                },
-            ),
-            Operator::make_bin(
-                "*",
-                BinOp {
-                    apply: multiply,
+                    apply: remainder,
                     prio: 2,
-                    is_commutative: true,
+                    is_commutative: false,
                 },
             ),
+            // This token is introduced only while hygienically lowering mod(a, b).
+            // The document lexer rejects it in user source.
             Operator::make_bin(
-                "/",
+                "@",
                 BinOp {
-                    apply: divide,
-                    prio: 3,
+                    apply: euclidean_remainder,
+                    prio: 2,
                     is_commutative: false,
                 },
             ),
-            Operator::make_bin_unary(
-                "+",
-                BinOp {
-                    apply: add,
-                    prio: 0,
-                    is_commutative: true,
-                },
-                positive,
-            ),
-            Operator::make_bin_unary(
-                "-",
-                BinOp {
-                    apply: subtract,
-                    prio: 1,
-                    is_commutative: false,
-                },
-                negative,
-            ),
-            Operator::make_bin(
-                "atan2",
-                BinOp {
-                    apply: atan2,
-                    prio: 0,
-                    is_commutative: false,
-                },
-            ),
-            Operator::make_bin(
-                "min",
-                BinOp {
-                    apply: minimum,
-                    prio: 0,
-                    is_commutative: false,
-                },
-            ),
-            Operator::make_bin(
-                "max",
-                BinOp {
-                    apply: maximum,
-                    prio: 0,
-                    is_commutative: false,
-                },
-            ),
-            Operator::make_unary("abs", absolute),
-            Operator::make_unary("signum", signum),
-            Operator::make_unary("sin", sine),
-            Operator::make_unary("cos", cosine),
-            Operator::make_unary("tan", tangent),
-            Operator::make_unary("asin", arcsine),
-            Operator::make_unary("acos", arccosine),
-            Operator::make_unary("atan", arctangent),
-            Operator::make_unary("sinh", sinh),
-            Operator::make_unary("cosh", cosh),
-            Operator::make_unary("tanh", tanh),
-            Operator::make_unary("asinh", asinh),
-            Operator::make_unary("acosh", acosh),
-            Operator::make_unary("atanh", atanh),
-            Operator::make_unary("floor", floor),
-            Operator::make_unary("round", round),
-            Operator::make_unary("ceil", ceil),
-            Operator::make_unary("trunc", trunc),
-            Operator::make_unary("fract", fract),
-            Operator::make_unary("exp", exponential),
-            Operator::make_unary("sqrt", square_root),
-            Operator::make_unary("cbrt", cube_root),
-            Operator::make_unary("ln", natural_log),
-            Operator::make_unary("log2", log2),
-            Operator::make_unary("log10", log10),
-            Operator::make_unary("log", natural_log),
-            Operator::make_constant("PI", std::f64::consts::PI),
-            Operator::make_constant("π", std::f64::consts::PI),
-            Operator::make_constant("E", std::f64::consts::E),
-            Operator::make_constant("e", std::f64::consts::E),
-            Operator::make_constant("TAU", std::f64::consts::TAU),
-            Operator::make_constant("τ", std::f64::consts::TAU),
-        ]
+        ]);
+    }
+
+    operators
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CheckedOperators, ModuloOperators};
+    use exmex::{Express, FlatEx};
+
+    #[test]
+    fn checked_remainder_and_euclidean_remainder_keep_their_sign_contracts() {
+        let remainder = FlatEx::<f64, ModuloOperators>::parse_wo_compile("-7 % 3").unwrap();
+        let euclidean = FlatEx::<f64, ModuloOperators>::parse_wo_compile("(-7) @ 3").unwrap();
+
+        assert_eq!(remainder.eval(&[]).unwrap(), -1.0);
+        assert_eq!(euclidean.eval(&[]).unwrap(), 2.0);
+    }
+
+    #[test]
+    fn remainder_expressions_group_multiplication_and_division_left_to_right() {
+        let cases = [
+            ("20 % 6 / 2", 1.0),
+            ("2 * 5 % 3", 1.0),
+            ("20 / 6 % 2", 1.3333333333333335),
+            ("2 % 5 * 3", 6.0),
+        ];
+
+        for (source, expected) in cases {
+            let expression = FlatEx::<f64, ModuloOperators>::parse_wo_compile(source).unwrap();
+            assert_eq!(expression.eval(&[]).unwrap(), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn modulo_operator_keeps_zero_and_non_finite_arithmetic_invalid() {
+        for source in ["1 % 0", "(1 / 0) % 2", "1 % (1 / 0)"] {
+            let expression = FlatEx::<f64, ModuloOperators>::parse_wo_compile(source).unwrap();
+            assert!(!expression.eval(&[]).unwrap().is_finite(), "{source}");
+        }
+    }
+
+    #[test]
+    fn operators_without_remainder_keep_the_existing_precedence_table() {
+        let huge = format!("1{}", "0".repeat(308));
+        let source = format!("{huge} * {huge} / {huge}");
+        let expression = FlatEx::<f64, CheckedOperators>::parse_wo_compile(&source).unwrap();
+        assert_eq!(expression.eval(&[]).unwrap(), 1e308);
     }
 }
