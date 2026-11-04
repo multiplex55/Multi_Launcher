@@ -7,6 +7,7 @@ mod layout;
 mod mermaid;
 mod model;
 mod persistence;
+mod rendering;
 mod scene;
 mod session;
 mod templates;
@@ -40,6 +41,12 @@ pub use persistence::{
     DiagramExportPublicationError, DiagramPersistenceError, DiskConflictKind,
     MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile, MermaidImportError,
 };
+pub use rendering::{
+    DiagramFamily, DiagramRenderError, DiagramRenderOutput, RasterImage, RasterSize,
+    RenderDocumentIdentity, RenderKey, RenderOptions, RenderTheme, render_mermaid_preview,
+    render_mermaid_preview_with_options,
+};
+pub(crate) use rendering::{GenericPreviewStatus, RendererService, is_generic_preview_candidate};
 pub use scene::{
     ArrowHead, CubicBezier, DiagramScene, MAX_SCENE_COORDINATE_ABS, PreparedText, PreparedTextLine,
     SceneEdge, SceneError, SceneGroup, SceneMetrics, SceneNode, ScenePoint, SceneRect,

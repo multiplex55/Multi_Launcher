@@ -2,8 +2,8 @@
 
 Canonical execution state: [EXECUTION.md](EXECUTION.md). Contract and bounded packets remain in the Goal and [PACKETS.md](PACKETS.md).
 
-- Branch: `feat/studio-launcher-usability`; M0-A and M1-A complete and pushed.
-- Last accepted checkpoint: M1-A `b3073917a0b5f41d278c233a875ed1f69ae40084`.
+- Branch: `feat/studio-launcher-usability`; M0-A, M1-A and M2-A complete and pushed.
+- Last accepted checkpoint: M2-A `46fba31e60446490ed210373d187544fc3b1a263` (Diagram presentation, 8/8 focused tests).
 - M1-B partial: real-note Enter workflow verified in both Jump states, background Enter/dashboard/cache checks 4/4 passed; Root-hint startup beside ordinary tools remains defective after its bounded attempts.
-- [Root-hint bounded-stop report](stalls/20261104T003517Z.md). Independent checkpoints continue after preserving the compiled partial implementation.
+- [Root-hint bounded-stop report](stalls/20261104T003517Z.md). Partial query implementation preserved/pushed as `98b5d67723a4fc0de277eae66a491c1cbbb00c3d`; M2-B offline renderer work is now in progress.
 - Goal remains active and incomplete. No final integration merge authorized or performed.

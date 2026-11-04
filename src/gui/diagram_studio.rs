@@ -3,11 +3,12 @@ use super::native_keyboard::reserve_windows_system_menu_alt_space;
 use crate::diagram::{
     DiagramDocument, DiagramDocumentController, DiagramDocumentError, DiagramExportFormat,
     DiagramImageSnapshot, DiagramScene, DiagramSession, DiagramSourceCopy, DiagramSourceCopyOrigin,
-    DiagramSourceSnapshot, DiagramTemplate, EdgeId, FlowDirection, GraphOperation, GroupId,
-    MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, MermaidFile, NodeId, NodePosition, NodeShape,
-    PendingDiagramTransition, Position, PreparedText, PreviewState, SceneMetrics, ScenePoint,
-    SceneRect, SessionStatus, TextHorizontalAlignment, TransitionDecision, TransitionOutcome,
-    build_scene,
+    DiagramSourceSnapshot, DiagramTemplate, EdgeId, FlowDirection, GenericPreviewStatus,
+    GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, MermaidFile, NodeId,
+    NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText, PreviewState,
+    RasterSize, RenderDocumentIdentity, RenderKey, RenderOptions, RendererService, SceneMetrics,
+    ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment, TransitionDecision,
+    TransitionOutcome, build_scene, is_generic_preview_candidate,
 };
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -505,7 +506,11 @@ pub(crate) struct DiagramStudioDialog {
     inspector_canvas_split_ratio: f32,
     export_scale: ExportScale,
     cache: Option<RevisionCache>,
+    renderer: Option<RendererService>,
     camera: Camera,
+    render_document: RenderDocumentIdentity,
+    render_options: RenderOptions,
+    generic_preview: GenericPreviewStatus,
     selection: Option<DiagramElement>,
     selected_nodes: BTreeSet<NodeId>,
     property_draft: Option<PropertyDraft>,
@@ -587,7 +592,11 @@ impl DiagramStudioDialog {
             inspector_canvas_split_ratio: DEFAULT_INSPECTOR_CANVAS_RATIO,
             export_scale: ExportScale::default(),
             cache: None,
+            renderer: None,
             camera: Camera::default(),
+            render_document: RenderDocumentIdentity::fresh(),
+            render_options: RenderOptions::default(),
+            generic_preview: GenericPreviewStatus::Idle,
             selection: None,
             selected_nodes: BTreeSet::new(),
             property_draft: None,
@@ -1165,13 +1174,24 @@ impl DiagramStudioDialog {
             ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
             self.focus_viewport = false;
         }
+        let source_mutation_requested = effects.mutation.is_some();
         let mutation_succeeded = effects
             .mutation
             .is_none_or(|mutation| self.apply_pending(mutation));
+        let debounce_accepted_source = source_mutation_requested && mutation_succeeded;
         let accepted_close = mutation_succeeded
             && effects
                 .document_intent
                 .is_some_and(|intent| self.apply_document_intent(intent));
+        if self.open {
+            let repaint_target = child_viewport_id.unwrap_or(egui::ViewportId::ROOT);
+            self.sync_generic_preview_after_accepted_pass(
+                ctx,
+                repaint_target,
+                debounce_accepted_source,
+            );
+            self.publish_generic_preview_completion();
+        }
         if effects.close_viewport && accepted_close {
             ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
         } else if effects.os_close_requested && !accepted_close {
@@ -1647,6 +1667,92 @@ impl DiagramStudioDialog {
         self.drag = None;
     }
 
+    fn sync_generic_preview_after_accepted_pass(
+        &mut self,
+        ctx: &egui::Context,
+        repaint_target: egui::ViewportId,
+        debounce_source_edit: bool,
+    ) {
+        const RASTER_WIDTH: u32 = 1_024;
+        const RASTER_HEIGHT: u32 = 768;
+
+        let Some(session) = self.documents.session() else {
+            if !matches!(&self.generic_preview, GenericPreviewStatus::Idle) {
+                if let Some(renderer) = &self.renderer {
+                    renderer.retire(&self.render_document);
+                }
+                self.generic_preview = GenericPreviewStatus::Idle;
+            }
+            return;
+        };
+        let revision = session.revision();
+        let source = session.draft();
+        if source.is_empty() || !is_generic_preview_candidate(source) {
+            if !matches!(&self.generic_preview, GenericPreviewStatus::Idle) {
+                if let Some(renderer) = &self.renderer {
+                    renderer.retire(&self.render_document);
+                }
+                self.generic_preview = GenericPreviewStatus::Idle;
+            }
+            return;
+        }
+
+        let raster_size = RasterSize::new(RASTER_WIDTH, RASTER_HEIGHT)
+            .expect("Studio preview raster bounds are valid");
+        let key = RenderKey::new(self.render_document.clone(), revision, self.render_options);
+        let request_matches_status = match &self.generic_preview {
+            GenericPreviewStatus::Pending {
+                key: current_key,
+                raster_size: current_size,
+            }
+            | GenericPreviewStatus::Ready {
+                key: current_key,
+                raster_size: current_size,
+                ..
+            }
+            | GenericPreviewStatus::Failed {
+                key: current_key,
+                raster_size: current_size,
+                ..
+            } => current_key == &key && current_size == &raster_size,
+            GenericPreviewStatus::Idle => false,
+        };
+        if request_matches_status {
+            return;
+        }
+
+        self.generic_preview = GenericPreviewStatus::Pending {
+            key: key.clone(),
+            raster_size,
+        };
+        let repaint_context = ctx.clone();
+        let wake = std::sync::Arc::new(move || {
+            repaint_context.request_repaint_of(repaint_target);
+        });
+        let renderer = self.renderer.get_or_insert_with(RendererService::default);
+        if let Err(error) = renderer.submit(
+            key.clone(),
+            std::sync::Arc::from(source),
+            raster_size,
+            debounce_source_edit,
+            wake,
+        ) {
+            self.generic_preview = GenericPreviewStatus::Failed {
+                key,
+                raster_size,
+                error,
+            };
+        }
+    }
+
+    fn publish_generic_preview_completion(&mut self) {
+        if let Some(renderer) = &self.renderer
+            && let Some(completion) = renderer.take_completion()
+        {
+            self.generic_preview.apply(completion);
+        }
+    }
+
     fn revalidate_selection(&mut self) {
         let Some(graph) = self
             .documents
@@ -1740,6 +1846,11 @@ impl DiagramStudioDialog {
     }
 
     fn reset_document_presentation(&mut self) {
+        if let Some(renderer) = &self.renderer {
+            renderer.retire(&self.render_document);
+        }
+        self.render_document = RenderDocumentIdentity::fresh();
+        self.generic_preview = GenericPreviewStatus::Idle;
         self.cache = None;
         self.selection = None;
         self.selected_nodes.clear();
@@ -4429,6 +4540,49 @@ mod tests {
         dialog.test_replace_source("flowchart TD\n    A[\"Alpha\"]");
         dialog.open();
         dialog
+    }
+
+    #[test]
+    fn diagram_studio_submits_generic_preview_only_after_retained_source_acceptance() {
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.open();
+        let ctx = egui::Context::default();
+        let source = "mindmap\n  root((Accepted source))\n    qualified branch";
+        let initial_revision = dialog.test_session().revision();
+
+        dialog.test_pending_mutation = Some(PendingMutation::ReplaceSource(source.to_owned()));
+        dialog.test_request_child_discard();
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_session().revision(), initial_revision);
+        assert!(matches!(
+            &dialog.generic_preview,
+            GenericPreviewStatus::Idle
+        ));
+        assert!(dialog.renderer.is_none());
+
+        for _ in 0..3 {
+            if dialog.test_session().revision() != initial_revision {
+                break;
+            }
+            dialog.test_pending_mutation = Some(PendingMutation::ReplaceSource(source.to_owned()));
+            frame(&mut dialog, &ctx);
+        }
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), initial_revision + 1);
+        let current_key = match &dialog.generic_preview {
+            GenericPreviewStatus::Pending { key, .. }
+            | GenericPreviewStatus::Ready { key, .. }
+            | GenericPreviewStatus::Failed { key, .. } => key,
+            GenericPreviewStatus::Idle => panic!("accepted source was not submitted to renderer"),
+        };
+        assert_eq!(current_key.accepted_revision, initial_revision + 1);
+        assert_eq!(current_key.document, dialog.render_document);
+        assert!(dialog.renderer.is_some());
+
+        dialog.accept_close();
+        assert!(dialog.renderer.is_some());
+        dialog.open();
+        assert!(dialog.renderer.is_some());
     }
 
     fn current_node_count(dialog: &DiagramStudioDialog) -> usize {
