@@ -10831,6 +10831,9 @@ impl LauncherApp {
                         text,
                     });
                 }
+                super::CalculationPadDialogEffect::SaveRecoveryPreference(enabled) => {
+                    self.request_calculation_pad_recovery_preference_save(ctx, enabled);
+                }
             }
         }
         match self.date_time_studio_dialog.on_ui_frame_complete(ctx) {
@@ -11091,6 +11094,9 @@ impl eframe::App for LauncherApp {
         self.unregister_all_hotkeys();
         self.request_launcher_visibility(false);
         self.last_visible = false;
+        if let Err(error) = self.calculation_pad_dialog.shutdown_recovery() {
+            self.report_error_message("calculation_pad.recovery.shutdown", error.to_string());
+        }
         self.prepare_settings_save_shutdown();
         if let Some(mut client) = self.target_repair_client.take() {
             client.shutdown();

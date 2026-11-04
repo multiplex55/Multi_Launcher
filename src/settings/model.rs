@@ -715,6 +715,8 @@ pub struct Settings {
     #[serde(default)]
     pub note_always_overwrite: bool,
     #[serde(default)]
+    pub calculation_pad_remember_source: bool,
+    #[serde(default)]
     pub note_images_as_links: bool,
     #[serde(default = "default_note_show_details")]
     pub note_show_details: bool,
@@ -1160,6 +1162,7 @@ impl Default for Settings {
             note_save_on_close: default_note_save_on_close(),
             note_confirm_discard_unsaved_changes: default_note_confirm_discard_unsaved_changes(),
             note_always_overwrite: false,
+            calculation_pad_remember_source: false,
             note_images_as_links: false,
             note_show_details: default_note_show_details(),
             note_more_limit: default_note_more_limit(),
@@ -1290,6 +1293,7 @@ mod tests {
     #[test]
     fn empty_settings_deserializes_with_note_defaults() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+        assert!(!parsed.calculation_pad_remember_source);
         assert_eq!(parsed.note, NoteSettings::default());
         assert_eq!(
             parsed.table_utility_resources,

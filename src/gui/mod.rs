@@ -1079,6 +1079,7 @@ pub struct LauncherApp {
     pub(crate) utility_dialog_size_manager: utility_dialog_size::UtilityDialogSizeManager,
     pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
     pub(crate) settings_save_reconciliation_required: bool,
+    pub(crate) pending_calculation_pad_recovery_preference: Option<bool>,
     /// Persistence failure captured before GUI startup. A later recovery UI can
     /// consume this without re-reading or replacing the damaged settings file.
     pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
@@ -3174,7 +3175,9 @@ impl LauncherApp {
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
-        let calculation_pad_dialog = CalculationPadDialog::new(&data_root);
+        let mut calculation_pad_dialog = CalculationPadDialog::new(&data_root);
+        calculation_pad_dialog
+            .initialize_recovery_preference(settings.calculation_pad_remember_source);
         let convert_panel = ConvertPanel::with_data_root(&data_root);
         let diagram_studio_dialog = DiagramStudioDialog::new(&data_root);
         let markdown_studio_dialog = MarkdownStudioDialog::new(&data_root);
@@ -3683,6 +3686,7 @@ impl LauncherApp {
             utility_dialog_size_manager,
             pending_settings_save: None,
             settings_save_reconciliation_required: false,
+            pending_calculation_pad_recovery_preference: None,
             startup_settings_diagnostic: None,
             actions_persistence_diagnostic: None,
             startup_recovery: Default::default(),

@@ -1,5 +1,6 @@
 use crate::calculation_pad::{
     CalculationPadSession, DocumentId, EXAMPLE_GROUPS, LineId, LineOutcome, PadDocumentSummary,
+    PadRecoverySnapshot, PadRecoveryStore, PadRecoveryWriteFailure, PadRecoveryWriter,
     PadStoreError, PendingTransition, SessionError, TransitionDecision, TransitionOutcome,
 };
 use crate::platform::app_data::AppDataRoot;
@@ -25,6 +26,10 @@ pub(crate) struct CalculationPadDialog {
     pub(crate) open: bool,
     focus_source: bool,
     session: CalculationPadSession,
+    recovery_writer: PadRecoveryWriter,
+    remember_source: bool,
+    recovery_attempted: bool,
+    last_recovery_identity: Option<(DocumentId, u64)>,
     host: PadHost,
     host_generation: u64,
     viewport_bootstrap_pending: bool,
@@ -78,6 +83,7 @@ pub(crate) struct CalculationPadDialog {
 pub(crate) enum CalculationPadDialogEffect {
     CopyText(String),
     ShowRoot,
+    SaveRecoveryPreference(bool),
 }
 
 struct RootEffects {
@@ -154,6 +160,7 @@ enum DialogIntent {
     SaveAs(String),
     OpenExamples,
     Decision(TransitionDecision),
+    SetRememberSource(bool),
 }
 
 impl CalculationPadDialog {
@@ -246,6 +253,10 @@ impl CalculationPadDialog {
             open: false,
             focus_source: false,
             session: CalculationPadSession::new(root),
+            recovery_writer: PadRecoveryWriter::new(PadRecoveryStore::new(root)),
+            remember_source: false,
+            recovery_attempted: false,
+            last_recovery_identity: None,
             host: PadHost::Docked,
             host_generation: 0,
             viewport_bootstrap_pending: false,
@@ -301,6 +312,7 @@ impl CalculationPadDialog {
             self.reset_host_to_docked();
         }
         self.ensure_session_open();
+        self.restore_recovery_on_explicit_open();
         self.open = true;
         self.host_close_requested = false;
         self.request_source_focus();
@@ -349,6 +361,159 @@ impl CalculationPadDialog {
                 Ok(_) => {}
                 Err(error) => self.set_error(error),
             }
+        }
+    }
+
+    pub(crate) fn initialize_recovery_preference(&mut self, enabled: bool) {
+        self.remember_source = enabled;
+    }
+
+    pub(crate) fn apply_committed_recovery_preference(
+        &mut self,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        if self.remember_source == enabled {
+            return Ok(());
+        }
+        self.remember_source = enabled;
+        if enabled {
+            if self.open {
+                self.save_recovery_now(None)
+            } else {
+                Ok(())
+            }
+        } else {
+            self.recovery_attempted = false;
+            let result = self.recovery_writer.clear_now();
+            if result.is_ok() {
+                self.last_recovery_identity = None;
+            }
+            result
+        }
+    }
+
+    fn restore_recovery_on_explicit_open(&mut self) {
+        if !self.remember_source || self.recovery_attempted {
+            return;
+        }
+        self.recovery_attempted = true;
+        match self.recovery_writer.load() {
+            Ok(Some(snapshot)) => {
+                if let Err(error) = self.session.restore_recovered_source(snapshot.source) {
+                    self.set_recovery_error(error.to_string());
+                }
+            }
+            Ok(None) => {}
+            Err(error) => self.set_recovery_error(error.to_string()),
+        }
+    }
+
+    fn recovery_snapshot(&self) -> Option<PadRecoverySnapshot> {
+        Some(PadRecoverySnapshot {
+            document_id: self.session.current_id()?,
+            revision: self.session.revision()?,
+            source: self.session.source()?.to_owned(),
+        })
+    }
+
+    fn schedule_recovery_snapshot(&mut self, ctx: &egui::Context) {
+        if !self.remember_source {
+            return;
+        }
+        let Some(snapshot) = self.recovery_snapshot() else {
+            return;
+        };
+        let identity = (snapshot.document_id, snapshot.revision);
+        if let Err(error) = self.recovery_writer.schedule(snapshot) {
+            self.set_recovery_error(error.to_string());
+        } else {
+            self.last_recovery_identity = Some(identity);
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        }
+    }
+
+    fn save_recovery_now(&mut self, snapshot: Option<PadRecoverySnapshot>) -> anyhow::Result<()> {
+        if !self.remember_source {
+            return Ok(());
+        }
+        let Some(snapshot) = snapshot.or_else(|| self.recovery_snapshot()) else {
+            return Ok(());
+        };
+        let identity = (snapshot.document_id, snapshot.revision);
+        self.recovery_writer.save_now(snapshot)?;
+        self.last_recovery_identity = Some(identity);
+        Ok(())
+    }
+
+    fn report_async_recovery_errors(&mut self) {
+        let failures = self.recovery_writer.take_async_errors();
+        self.publish_recovery_failures(failures);
+    }
+
+    fn recovery_error_identity(&self) -> Option<(DocumentId, u64)> {
+        self.session
+            .current_id()
+            .zip(self.session.revision())
+            .or(self.last_recovery_identity)
+    }
+
+    fn publish_recovery_failures(&mut self, failures: Vec<PadRecoveryWriteFailure>) {
+        let current_identity = self
+            .remember_source
+            .then(|| self.recovery_error_identity())
+            .flatten();
+        let messages = failures
+            .into_iter()
+            .filter(|failure| current_identity == Some((failure.document_id, failure.revision)))
+            .map(|failure| failure.message)
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            self.set_recovery_error(messages.join("; "));
+        }
+    }
+
+    fn set_recovery_error(&mut self, message: String) {
+        self.error = Some(format!("Calculation Pad recovery failed: {message}"));
+        self.notice = None;
+    }
+
+    pub(crate) fn shutdown_recovery(&mut self) -> anyhow::Result<()> {
+        let mut failures = self.recovery_writer.take_async_errors();
+        let mut direct_errors = Vec::new();
+        if self.remember_source && self.open {
+            match self.recovery_snapshot() {
+                Some(snapshot) => {
+                    if let Err(error) = self.save_recovery_now(Some(snapshot)) {
+                        direct_errors.push(error.to_string());
+                    }
+                }
+                None => direct_errors.push("open Calculation Pad has no recoverable source".into()),
+            }
+        }
+        let flush_result = self.recovery_writer.flush();
+        let shutdown_result = self.recovery_writer.shutdown();
+        match flush_result {
+            Ok(mut drained) => failures.append(&mut drained),
+            Err(error) => direct_errors.push(error.to_string()),
+        }
+        match shutdown_result {
+            Ok(mut drained) => failures.append(&mut drained),
+            Err(error) => direct_errors.push(error.to_string()),
+        }
+        let current_identity = self
+            .remember_source
+            .then(|| self.recovery_error_identity())
+            .flatten();
+        direct_errors.extend(
+            failures
+                .into_iter()
+                .filter(|failure| current_identity == Some((failure.document_id, failure.revision)))
+                .map(|failure| failure.message),
+        );
+        if direct_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(direct_errors.join("; ")))
         }
     }
 
@@ -799,6 +964,8 @@ impl CalculationPadDialog {
             || host.focus_viewport
             || self.viewport_bootstrap_pending;
         let host_request_requested = host.host_request.is_some();
+        let accepted_source_or_history =
+            host.edited_source.is_some() || host.editor_history_action.is_some();
 
         if let Some(source) = host.edited_source.take() {
             if let Err(error) = self.session.replace_source(source) {
@@ -828,17 +995,82 @@ impl CalculationPadDialog {
             }
             None => {}
         }
+        if accepted_source_or_history {
+            self.schedule_recovery_snapshot(ctx);
+        }
+
+        let recovery_transition_pending = host.intent.as_ref().is_some_and(|intent| {
+            matches!(
+                intent,
+                DialogIntent::New
+                    | DialogIntent::Open(_)
+                    | DialogIntent::Decision(_)
+                    | DialogIntent::SaveAs(_)
+            )
+        });
+        let before_intent_recovery = (self.remember_source && recovery_transition_pending)
+            .then(|| self.recovery_snapshot())
+            .flatten();
+        let pending_before_intent = self.session.pending_transition();
+        let mut pending_decision = None;
+        let mut transition_intent = false;
         if let Some(intent) = host.intent.take() {
+            transition_intent = matches!(
+                &intent,
+                DialogIntent::New
+                    | DialogIntent::Open(_)
+                    | DialogIntent::Decision(_)
+                    | DialogIntent::SaveAs(_)
+            );
+            if let DialogIntent::Decision(decision) = &intent {
+                pending_decision = Some(*decision);
+            } else if matches!(&intent, DialogIntent::SaveAs(_)) {
+                pending_decision = Some(TransitionDecision::Save);
+            }
             let show_root = matches!(&intent, DialogIntent::OpenExamples);
+            let requested_recovery_preference = match &intent {
+                DialogIntent::SetRememberSource(enabled) => Some(*enabled),
+                _ => None,
+            };
             self.apply_intent(intent);
             if show_root && self.examples_open {
                 delivered.push(CalculationPadDialogEffect::ShowRoot);
+            }
+            if let Some(enabled) = requested_recovery_preference
+                && enabled != self.remember_source
+            {
+                delivered.push(CalculationPadDialogEffect::SaveRecoveryPreference(enabled));
+            }
+        }
+        if transition_intent && self.remember_source {
+            let after_intent_recovery = self.recovery_snapshot();
+            if let Some(snapshot) = after_intent_recovery.clone()
+                && before_intent_recovery.as_ref() != Some(&snapshot)
+            {
+                if let Err(error) = self.save_recovery_now(Some(snapshot)) {
+                    self.set_recovery_error(error.to_string());
+                }
+            } else if after_intent_recovery.is_none()
+                && !self.open
+                && pending_before_intent == Some(PendingTransition::Close)
+                && pending_decision == Some(TransitionDecision::Save)
+                && let Some(snapshot) = before_intent_recovery
+                && let Err(error) = self.save_recovery_now(Some(snapshot))
+            {
+                self.set_recovery_error(error.to_string());
             }
         }
         if host.close_requested {
             self.host_close_requested = false;
             if self.open {
+                let recovery_before_close = self.recovery_snapshot();
                 self.apply_close_request();
+                if !self.open && self.session.source().is_none() {
+                    if let Err(error) = self.save_recovery_now(recovery_before_close) {
+                        self.set_recovery_error(error.to_string());
+                    }
+                    self.recovery_attempted = false;
+                }
             }
         }
 
@@ -902,6 +1134,10 @@ impl CalculationPadDialog {
 
         if needs_repaint {
             ctx.request_repaint_of(host.viewport_id);
+        }
+        self.report_async_recovery_errors();
+        if !self.open {
+            self.recovery_attempted = false;
         }
         if self.viewport_bootstrap_pending || host_request_requested {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -1015,6 +1251,13 @@ impl CalculationPadDialog {
                 *host_request = Some(requested_host);
             }
             ui.separator();
+            let mut remember_source = self.remember_source;
+            if ui
+                .checkbox(&mut remember_source, "Remember last source")
+                .changed()
+            {
+                *intent = Some(DialogIntent::SetRememberSource(remember_source));
+            }
             let title = self.session.current_name().unwrap_or("Untitled");
             ui.label(title);
             if self.session.is_dirty() {
@@ -1417,6 +1660,7 @@ impl CalculationPadDialog {
             DialogIntent::SaveAs(name) => self.save_as(&name),
             DialogIntent::OpenExamples => self.examples_open = true,
             DialogIntent::Decision(decision) => self.decide_pending(decision),
+            DialogIntent::SetRememberSource(_) => {}
         }
     }
 
@@ -1462,6 +1706,18 @@ impl CalculationPadDialog {
     }
 
     fn decide_pending(&mut self, decision: TransitionDecision) {
+        let pending_before = self.session.pending_transition();
+        if decision == TransitionDecision::Discard
+            && pending_before.is_some()
+            && self.remember_source
+            && let Err(error) = self.recovery_writer.clear_now()
+        {
+            self.set_recovery_error(error.to_string());
+            return;
+        }
+        if decision == TransitionDecision::Discard && pending_before.is_some() {
+            self.last_recovery_identity = None;
+        }
         match self.session.resolve_pending(decision) {
             Ok(TransitionOutcome::Applied) => self.after_transition_applied(),
             Ok(TransitionOutcome::DecisionRequired) => self.clear_feedback(),
@@ -1676,6 +1932,7 @@ mod tests {
     use super::{CalculationPadDialog, CalculationPadDialogEffect, DialogIntent, copy_all_results};
     use crate::calculation_pad::{
         CalculationPadSession, CalculationValue, LineOutcome, MAX_DOCUMENT_BYTES, PadDocumentStore,
+        PadRecoverySnapshot, PadRecoveryStore, PadRecoveryWriteFailure, PadRecoveryWriter,
         PendingTransition, TransitionDecision,
     };
     use crate::platform::app_data::AppDataRoot;
@@ -2120,6 +2377,7 @@ mod tests {
     #[test]
     fn save_and_close_follow_an_accepted_same_frame_source_edit() {
         let (_directory, _root, mut dialog) = fixture();
+        dialog.initialize_recovery_preference(true);
         dialog.open();
         dialog.test_replace_source("amount = 1\namount");
         dialog.test_apply_save_as("Accepted edit");
@@ -2134,10 +2392,223 @@ mod tests {
         assert!(complete_host_effects(&mut dialog, &egui::Context::default(), host).is_empty());
         assert!(!dialog.open);
         assert_eq!(dialog.session.source(), None);
+        assert_eq!(
+            dialog
+                .recovery_writer
+                .load()
+                .unwrap()
+                .map(|snapshot| snapshot.source),
+            Some("amount = 9\namount * 2".into()),
+            "same-frame edit is captured before Save and close retire the session"
+        );
 
         dialog.test_open_document(document_id);
         assert_eq!(dialog.test_source(), Some("amount = 9\namount * 2"));
         assert!(!dialog.test_is_dirty());
+    }
+
+    #[test]
+    fn pad_recovery_preference_waits_for_an_accepted_pass_and_settings_commit() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+
+        let mut rejected = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        rejected.intent = Some(DialogIntent::SetRememberSource(true));
+        assert!(complete_host_effects(&mut dialog, &egui::Context::default(), rejected).is_empty());
+        assert!(!dialog.remember_source);
+
+        let mut accepted = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        accepted.pass_accepted = true;
+        accepted.intent = Some(DialogIntent::SetRememberSource(true));
+        assert_eq!(
+            complete_host_effects(&mut dialog, &egui::Context::default(), accepted),
+            vec![CalculationPadDialogEffect::SaveRecoveryPreference(true)]
+        );
+        assert!(
+            !dialog.remember_source,
+            "the runtime preference changes only after the settings-save acknowledgement"
+        );
+    }
+
+    #[test]
+    fn accepted_transition_intents_preserve_or_clear_recovery_at_lifecycle_boundaries() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.initialize_recovery_preference(true);
+        dialog.open();
+        dialog.test_replace_source("persisted draft");
+        dialog.save_recovery_now(None).unwrap();
+
+        let accept_intent = |dialog: &mut CalculationPadDialog, intent| {
+            let mut host = dialog.empty_host_effects(egui::ViewportId::ROOT);
+            host.pass_accepted = true;
+            host.intent = Some(intent);
+            complete_host_effects(dialog, &ctx, host)
+        };
+
+        accept_intent(&mut dialog, DialogIntent::New);
+        assert_eq!(
+            dialog.test_pending_transition(),
+            Some(PendingTransition::New)
+        );
+        accept_intent(
+            &mut dialog,
+            DialogIntent::Decision(TransitionDecision::Cancel),
+        );
+        assert_eq!(dialog.test_source(), Some("persisted draft"));
+        assert_eq!(
+            dialog
+                .recovery_writer
+                .load()
+                .unwrap()
+                .map(|snapshot| snapshot.source),
+            Some("persisted draft".into()),
+            "Cancel retains the prior recoverable draft"
+        );
+
+        accept_intent(&mut dialog, DialogIntent::New);
+        accept_intent(
+            &mut dialog,
+            DialogIntent::Decision(TransitionDecision::Discard),
+        );
+        assert_eq!(dialog.test_source(), Some(""));
+        assert_eq!(
+            dialog
+                .recovery_writer
+                .load()
+                .unwrap()
+                .map(|snapshot| snapshot.source),
+            Some(String::new()),
+            "Discard before New replaces the prior source with a blank recovery record"
+        );
+
+        dialog.test_replace_source("queued close discard draft");
+        dialog.schedule_recovery_snapshot(&ctx);
+        let mut close = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        close.pass_accepted = true;
+        close.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, close);
+        assert_eq!(
+            dialog.test_pending_transition(),
+            Some(PendingTransition::Close)
+        );
+        accept_intent(
+            &mut dialog,
+            DialogIntent::Decision(TransitionDecision::Discard),
+        );
+        assert!(!dialog.open);
+        assert_eq!(dialog.recovery_writer.load().unwrap(), None);
+
+        dialog.open();
+        assert_eq!(dialog.test_source(), Some(""));
+        dialog.test_replace_source("queued disable draft");
+        dialog.schedule_recovery_snapshot(&ctx);
+        dialog.apply_committed_recovery_preference(false).unwrap();
+        assert!(!dialog.remember_source);
+        assert_eq!(dialog.recovery_writer.load().unwrap(), None);
+
+        let mut close_disabled = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        close_disabled.pass_accepted = true;
+        close_disabled.close_requested = true;
+        complete_host_effects(&mut dialog, &ctx, close_disabled);
+        assert_eq!(
+            dialog.test_pending_transition(),
+            Some(PendingTransition::Close)
+        );
+        accept_intent(
+            &mut dialog,
+            DialogIntent::Decision(TransitionDecision::Discard),
+        );
+        dialog.apply_committed_recovery_preference(true).unwrap();
+        dialog.open();
+        assert_eq!(dialog.test_source(), Some(""));
+        assert_eq!(dialog.recovery_writer.load().unwrap(), None);
+    }
+
+    #[test]
+    fn delayed_old_document_recovery_failure_is_not_published_on_the_new_document() {
+        let (_directory, root, mut dialog) = fixture();
+        let store = PadRecoveryStore::new(&root);
+        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let release_receiver = std::sync::Arc::new(std::sync::Mutex::new(release_receiver));
+        dialog
+            .recovery_writer
+            .set_before_write_hook(std::sync::Arc::new(move || {
+                started_sender.send(()).unwrap();
+                release_receiver.lock().unwrap().recv().unwrap();
+            }));
+        dialog.initialize_recovery_preference(true);
+        dialog.open();
+        dialog.test_replace_source("old document draft");
+        let old_document = dialog.test_current_document_id().unwrap();
+        let old_revision = dialog.session.revision().unwrap();
+        std::fs::create_dir(store.path()).unwrap();
+        dialog.schedule_recovery_snapshot(&egui::Context::default());
+
+        started_receiver
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("the background recovery write reached its delayed section");
+        dialog.test_apply_save_as("new document identity");
+        let new_document = dialog.test_current_document_id().unwrap();
+        assert_ne!(new_document, old_document);
+        release_sender.send(()).unwrap();
+
+        let failures = dialog.recovery_writer.flush().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].document_id, old_document);
+        assert_eq!(failures[0].revision, old_revision);
+        assert!(!failures[0].message.is_empty());
+        dialog.publish_recovery_failures(failures);
+        assert!(
+            dialog
+                .error
+                .as_deref()
+                .is_none_or(|message| !message.contains("recovery failed")),
+            "a delayed failure for the old identity must not be shown on the new document"
+        );
+    }
+
+    #[test]
+    fn recovery_load_is_lazy_until_explicit_open_and_preserves_a_live_draft_on_error() {
+        let (_directory, root, mut dialog) = fixture();
+        let mut saved_session = CalculationPadSession::new(&root);
+        saved_session.replace_source("seed").unwrap();
+        saved_session.save_as("identity").unwrap();
+        let saved_id = saved_session.current_id().unwrap();
+        let mut writer = PadRecoveryWriter::new(PadRecoveryStore::new(&root));
+        writer
+            .save_now(PadRecoverySnapshot {
+                document_id: saved_id,
+                revision: 7,
+                source: "π = 2\r\nπ * 3\r\n".into(),
+            })
+            .unwrap();
+        writer.shutdown().unwrap();
+
+        dialog.initialize_recovery_preference(true);
+        dialog.ensure_open();
+        assert_eq!(dialog.test_source(), Some(""));
+        dialog.open();
+        assert_eq!(dialog.test_source(), Some("π = 2\r\nπ * 3\r\n"));
+        assert!(dialog.test_is_dirty());
+        assert!(!dialog.test_can_undo());
+
+        let malformed_store = PadRecoveryStore::new(&root);
+        std::fs::write(malformed_store.path(), b"not-json").unwrap();
+        dialog.recovery_attempted = false;
+        dialog.open();
+        assert_eq!(dialog.test_source(), Some("π = 2\r\nπ * 3\r\n"));
+        assert!(
+            dialog
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("recovery failed"))
+        );
+        dialog.apply_committed_recovery_preference(false).unwrap();
+        assert!(!malformed_store.path().exists());
+        assert_eq!(saved_session.source(), Some("seed"));
     }
 
     #[test]

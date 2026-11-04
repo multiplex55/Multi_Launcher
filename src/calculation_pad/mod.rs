@@ -18,8 +18,10 @@ pub use document::{
 pub(crate) use examples::{CalculationExampleGroup, EXAMPLE_GROUPS};
 
 pub use persistence::{
-    CURRENT_DOCUMENT_FORMAT_VERSION, DocumentId, LineId, MAX_SAVED_DOCUMENTS,
-    MAX_STORED_DOCUMENT_BYTES, PadDocumentStore, PadDocumentSummary, PadStoreError,
+    CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,
+    MAX_SAVED_DOCUMENTS, MAX_STORED_DOCUMENT_BYTES, MAX_STORED_RECOVERY_BYTES, PadDocumentStore,
+    PadDocumentSummary, PadRecoverySnapshot, PadRecoveryStore, PadRecoveryWriteFailure,
+    PadRecoveryWriter, PadStoreError,
 };
 pub use session::{
     CalculationPadSession, PendingTransition, SessionError, SessionEvaluation, SessionLineResult,

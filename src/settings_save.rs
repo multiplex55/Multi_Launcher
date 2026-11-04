@@ -25,6 +25,7 @@ const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) enum SettingsSaveSource {
     General,
     PluginSelection,
+    CalculationPadRecovery,
 }
 
 macro_rules! rollback_field {
@@ -96,6 +97,7 @@ define_general_settings_fields!(
     note_save_on_close,
     note_confirm_discard_unsaved_changes,
     note_always_overwrite,
+    calculation_pad_remember_source,
     note_images_as_links,
     note_show_details,
     note_more_limit,
@@ -144,6 +146,7 @@ enum SaveOwnership {
         plugin_settings: HashMap<String, Option<serde_json::Value>>,
     },
     PluginSelection,
+    CalculationPadRecovery,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -213,6 +216,7 @@ pub(crate) struct SettingsSaveIntent {
     ownership: SaveOwnership,
     source: SettingsSaveSource,
     invocation_baseline: Option<InvocationSettingsBaseline>,
+    calculation_pad_remember_source_baseline: Option<bool>,
 }
 
 impl SettingsSaveIntent {
@@ -236,6 +240,9 @@ impl SettingsSaveIntent {
             ownership: SaveOwnership::General { plugin_settings },
             source: SettingsSaveSource::General,
             invocation_baseline: Some(InvocationSettingsBaseline::from_settings(baseline)),
+            calculation_pad_remember_source_baseline: Some(
+                baseline.calculation_pad_remember_source,
+            ),
         }
     }
 
@@ -251,6 +258,19 @@ impl SettingsSaveIntent {
             ownership: SaveOwnership::PluginSelection,
             source: SettingsSaveSource::PluginSelection,
             invocation_baseline: None,
+            calculation_pad_remember_source_baseline: None,
+        }
+    }
+
+    pub(crate) fn calculation_pad_recovery(enabled: bool) -> Self {
+        let mut desired = Settings::default();
+        desired.calculation_pad_remember_source = enabled;
+        Self {
+            desired,
+            ownership: SaveOwnership::CalculationPadRecovery,
+            source: SettingsSaveSource::CalculationPadRecovery,
+            invocation_baseline: None,
+            calculation_pad_remember_source_baseline: None,
         }
     }
 
@@ -258,10 +278,25 @@ impl SettingsSaveIntent {
         self.source
     }
 
+    fn owns_calculation_pad_recovery_preference(&self) -> bool {
+        match &self.ownership {
+            SaveOwnership::General { .. } => {
+                self.calculation_pad_remember_source_baseline
+                    != Some(self.desired.calculation_pad_remember_source)
+            }
+            SaveOwnership::PluginSelection => false,
+            SaveOwnership::CalculationPadRecovery => true,
+        }
+    }
+
     fn apply(&self, latest: &mut Settings) {
         match &self.ownership {
             SaveOwnership::General { plugin_settings } => {
+                let latest_recovery_preference = latest.calculation_pad_remember_source;
                 copy_general_fields(latest, &self.desired);
+                if !self.owns_calculation_pad_recovery_preference() {
+                    latest.calculation_pad_remember_source = latest_recovery_preference;
+                }
                 for (key, value) in plugin_settings {
                     if let Some(value) = value {
                         latest.plugin_settings.insert(key.clone(), value.clone());
@@ -273,6 +308,10 @@ impl SettingsSaveIntent {
             SaveOwnership::PluginSelection => {
                 latest.enabled_plugins = self.desired.enabled_plugins.clone();
                 latest.enabled_capabilities = self.desired.enabled_capabilities.clone();
+            }
+            SaveOwnership::CalculationPadRecovery => {
+                latest.calculation_pad_remember_source =
+                    self.desired.calculation_pad_remember_source;
             }
         }
     }
@@ -293,7 +332,11 @@ impl SettingsSaveIntent {
     fn overlay_applied(&self, latest: &mut Settings, committed: &Settings) {
         match &self.ownership {
             SaveOwnership::General { plugin_settings } => {
+                let latest_recovery_preference = latest.calculation_pad_remember_source;
                 copy_general_fields(latest, committed);
+                if !self.owns_calculation_pad_recovery_preference() {
+                    latest.calculation_pad_remember_source = latest_recovery_preference;
+                }
                 for key in plugin_settings.keys() {
                     restore_map_value(
                         &mut latest.plugin_settings,
@@ -306,6 +349,9 @@ impl SettingsSaveIntent {
                 latest.enabled_plugins = committed.enabled_plugins.clone();
                 latest.enabled_capabilities = committed.enabled_capabilities.clone();
             }
+            SaveOwnership::CalculationPadRecovery => {
+                latest.calculation_pad_remember_source = committed.calculation_pad_remember_source;
+            }
         }
         overlay_acknowledged_invocation(latest, committed);
     }
@@ -316,10 +362,16 @@ impl SettingsSaveIntent {
         let fields = match &self.ownership {
             SaveOwnership::General { .. } => GENERAL_SETTINGS_FIELDS,
             SaveOwnership::PluginSelection => &["enabled_plugins", "enabled_capabilities"],
+            SaveOwnership::CalculationPadRecovery => &["calculation_pad_remember_source"],
         };
         let mut changed = Vec::new();
         if let (Some(latest_value), Some(committed_value)) = (latest_value, committed_value) {
             for field in fields {
+                if *field == "calculation_pad_remember_source"
+                    && !self.owns_calculation_pad_recovery_preference()
+                {
+                    continue;
+                }
                 if latest_value.get(field) != committed_value.get(field) {
                     changed.push((*field).to_owned());
                 }
@@ -364,6 +416,15 @@ impl SettingsSaveIntent {
             SaveOwnership::PluginSelection => {
                 rollback_field!(latest, before, written, enabled_plugins, conflicts);
                 rollback_field!(latest, before, written, enabled_capabilities, conflicts);
+            }
+            SaveOwnership::CalculationPadRecovery => {
+                rollback_field!(
+                    latest,
+                    before,
+                    written,
+                    calculation_pad_remember_source,
+                    conflicts
+                );
             }
         }
         conflicts
@@ -1044,6 +1105,36 @@ impl LauncherApp {
         });
     }
 
+    pub(crate) fn request_calculation_pad_recovery_preference_save(
+        &mut self,
+        context: &egui::Context,
+        enabled: bool,
+    ) {
+        self.pending_calculation_pad_recovery_preference = Some(enabled);
+        self.start_pending_calculation_pad_recovery_preference_save(context);
+    }
+
+    fn start_pending_calculation_pad_recovery_preference_save(&mut self, context: &egui::Context) {
+        if self.settings_save_pending() {
+            return;
+        }
+        let Some(enabled) = self.pending_calculation_pad_recovery_preference.take() else {
+            return;
+        };
+        if self
+            .settings_editor
+            .baseline_settings
+            .calculation_pad_remember_source
+            == enabled
+        {
+            return;
+        }
+        self.begin_settings_save(
+            context,
+            SettingsSaveIntent::calculation_pad_recovery(enabled),
+        );
+    }
+
     fn begin_settings_save_with_prepare<F>(
         &mut self,
         context: &egui::Context,
@@ -1121,6 +1212,9 @@ impl LauncherApp {
                 match source {
                     SettingsSaveSource::General => "settings_editor.save",
                     SettingsSaveSource::PluginSelection => "plugin_editor.save",
+                    SettingsSaveSource::CalculationPadRecovery => {
+                        "calculation_pad.recovery.preference"
+                    }
                 },
                 format!("Could not start settings save worker: {error}"),
             )),
@@ -1128,6 +1222,9 @@ impl LauncherApp {
     }
 
     pub(crate) fn drain_settings_save(&mut self, context: &egui::Context) {
+        if self.pending_settings_save.is_none() {
+            self.start_pending_calculation_pad_recovery_preference_save(context);
+        }
         let Some(pending) = self.pending_settings_save.as_ref() else {
             return;
         };
@@ -1152,6 +1249,9 @@ impl LauncherApp {
                     match source {
                         SettingsSaveSource::General => "settings_editor.save",
                         SettingsSaveSource::PluginSelection => "plugin_editor.save",
+                        SettingsSaveSource::CalculationPadRecovery => {
+                            "calculation_pad.recovery.preference"
+                        }
                     },
                     message,
                 ));
@@ -1166,17 +1266,27 @@ impl LauncherApp {
             Ok(completion) => {
                 let show_success_toast =
                     result.source == SettingsSaveSource::General && completion.warning.is_none();
-                crate::settings_editor::SettingsEditor::apply_saved_settings(
-                    context,
-                    self,
-                    completion.settings,
-                    show_success_toast,
-                );
+                if result.source == SettingsSaveSource::CalculationPadRecovery {
+                    crate::settings_editor::SettingsEditor::apply_committed_calculation_pad_preference(
+                        self,
+                        completion.settings.calculation_pad_remember_source,
+                    );
+                } else {
+                    crate::settings_editor::SettingsEditor::apply_saved_settings(
+                        context,
+                        self,
+                        completion.settings,
+                        show_success_toast,
+                    );
+                }
                 if let Some(warning) = completion.warning {
                     self.report_ui_error(crate::gui::UiErrorEvent::new(
                         match result.source {
                             SettingsSaveSource::General => "settings_editor.save",
                             SettingsSaveSource::PluginSelection => "plugin_editor.save",
+                            SettingsSaveSource::CalculationPadRecovery => {
+                                "calculation_pad.recovery.preference"
+                            }
                         },
                         warning,
                     ));
@@ -1186,10 +1296,14 @@ impl LauncherApp {
                 match result.source {
                     SettingsSaveSource::General => "settings_editor.save",
                     SettingsSaveSource::PluginSelection => "plugin_editor.save",
+                    SettingsSaveSource::CalculationPadRecovery => {
+                        "calculation_pad.recovery.preference"
+                    }
                 },
                 message,
             )),
         }
+        self.start_pending_calculation_pad_recovery_preference_save(context);
     }
 
     pub(crate) fn prepare_settings_save_shutdown(&mut self) {
@@ -1834,6 +1948,7 @@ mod tests {
             .insert("unrelated".into(), serde_json::json!({"x": 2}));
         latest.mkmacro_properties.master_open = true;
         latest.mkmacro_properties.focus_steps = true;
+        latest.calculation_pad_remember_source = true;
         intent.apply(&mut latest);
 
         assert_eq!(latest.hotkey.as_deref(), Some("F7"));
@@ -1848,6 +1963,61 @@ mod tests {
         );
         assert!(latest.mkmacro_properties.master_open);
         assert!(latest.mkmacro_properties.focus_steps);
+        assert!(
+            latest.calculation_pad_remember_source,
+            "an untouched stale Settings draft preserves the latest Pad recovery preference"
+        );
+
+        let mut committed = baseline.clone();
+        intent.apply(&mut committed);
+        let changed = intent.changed_owned_fields(&latest, &committed);
+        assert!(
+            !changed
+                .iter()
+                .any(|field| field == "calculation_pad_remember_source"),
+            "an unedited preference is not treated as an owned post-commit change"
+        );
+        intent.overlay_applied(&mut latest, &committed);
+        assert!(
+            latest.calculation_pad_remember_source,
+            "general-save reconciliation preserves the latest unedited preference"
+        );
+    }
+
+    #[test]
+    fn general_intent_applies_an_explicit_pad_recovery_preference_change() {
+        let baseline = Settings::default();
+        let mut desired = baseline.clone();
+        desired.calculation_pad_remember_source = true;
+        let intent = SettingsSaveIntent::general(desired, &baseline);
+
+        let mut latest = baseline.clone();
+        intent.apply(&mut latest);
+
+        assert!(latest.calculation_pad_remember_source);
+    }
+
+    #[test]
+    fn pad_recovery_intent_owns_only_its_preference_during_apply_and_rollback() {
+        let before = Settings::default();
+        let intent = SettingsSaveIntent::calculation_pad_recovery(true);
+        let mut written = before.clone();
+        intent.apply(&mut written);
+
+        assert!(written.calculation_pad_remember_source);
+        assert_eq!(written.hotkey, before.hotkey);
+        assert_eq!(
+            intent.changed_owned_fields(&before, &written),
+            vec!["calculation_pad_remember_source"]
+        );
+
+        let mut latest = written.clone();
+        latest.hotkey = Some("F8".into());
+        let conflicts = intent.rollback_owned(&mut latest, &before, &written);
+
+        assert!(conflicts.is_empty());
+        assert!(!latest.calculation_pad_remember_source);
+        assert_eq!(latest.hotkey.as_deref(), Some("F8"));
     }
 
     #[test]

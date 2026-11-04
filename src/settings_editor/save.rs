@@ -9,6 +9,25 @@ use egui_toast::{Toast, ToastKind, ToastOptions};
 use std::sync::Arc;
 
 impl SettingsEditor {
+    pub(crate) fn apply_committed_calculation_pad_preference(app: &mut LauncherApp, enabled: bool) {
+        let previous_baseline = app
+            .settings_editor
+            .baseline_settings
+            .calculation_pad_remember_source;
+        if app.settings_editor.calculation_pad_remember_source == previous_baseline {
+            app.settings_editor.calculation_pad_remember_source = enabled;
+        }
+        app.settings_editor
+            .baseline_settings
+            .calculation_pad_remember_source = enabled;
+        if let Err(error) = app
+            .calculation_pad_dialog
+            .apply_committed_recovery_preference(enabled)
+        {
+            app.report_error_message("calculation_pad.recovery.preference", error.to_string());
+        }
+    }
+
     pub(crate) fn save_settings(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if app.settings_save_pending() {
             return;
@@ -44,6 +63,12 @@ impl SettingsEditor {
         show_success_toast: bool,
     ) {
         crate::gui::theme::publish_committed(ctx, &new_settings.theme);
+        if let Err(error) = app
+            .calculation_pad_dialog
+            .apply_committed_recovery_preference(new_settings.calculation_pad_remember_source)
+        {
+            app.report_error_message("calculation_pad.recovery.preference", error.to_string());
+        }
         app.table_utility_dialog
             .update_resource_policy(new_settings.table_utility_resources.to_policy());
         crate::plugins::macros::configure_search_runtime(&new_settings, &app.actions_path);
@@ -204,6 +229,8 @@ impl SettingsEditor {
         app.plugin_editor
             .sync_committed_settings(&new_settings, app.plugins.plugin_infos());
         app.settings_editor.baseline_settings = new_settings.clone();
+        app.settings_editor.calculation_pad_remember_source =
+            new_settings.calculation_pad_remember_source;
         app.settings_editor
             .sync_paste_sequence_preferences(&new_settings.paste_sequence);
         if let Some(routes) = app.sequence_routes.as_mut() {

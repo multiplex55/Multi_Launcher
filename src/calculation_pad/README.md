@@ -95,6 +95,15 @@ lowercase, with no base prefix or leading zeroes. This conversion syntax is
 separate from scalar prefixes: for example, `0bad hex to dec` means the exact
 hexadecimal value `0x0bad`, while `0x0bad` by itself is a scalar literal.
 
+## Remembered source
+
+**Remember last Calculation Pad source** is off by default in Settings. When
+enabled, an explicit open restores the most recently accepted source as a
+dirty draft. It does not open the pad at application startup. The bounded
+recovery record is separate from named documents; disabling the preference
+clears only that record. A recovered expression may still contain ordinary
+evaluation errors, and remains editable.
+
 ## Resource limits
 
 The evaluator checks these bounds before invoking expression or unit parsers:
