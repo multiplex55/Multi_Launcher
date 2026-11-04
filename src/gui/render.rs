@@ -9012,7 +9012,7 @@ impl LauncherApp {
                 property_slot_token: None,
                 property_mutations_allowed: false,
             };
-            let reload = dlg.ui_with_jump_mode(
+            let _ = dlg.ui_with_jump_mode(
                 &ctx,
                 &registry,
                 settings_ctx,
@@ -9037,9 +9037,6 @@ impl LauncherApp {
             }
             self.show_dashboard_editor = dlg.open;
             self.dashboard_editor = dlg;
-            if first_ui_pass && reload {
-                self.dashboard.reload();
-            }
         }
 
         let mut mm_dlg = std::mem::take(&mut self.multi_manager_dialog);
@@ -10830,6 +10827,28 @@ impl LauncherApp {
 
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
         let mut effects = Vec::new();
+        if let Some(completion) = self.dashboard_editor.on_ui_frame_complete(
+            ctx,
+            self.dashboard.registry(),
+            &self.dashboard_path,
+        ) {
+            self.show_dashboard_editor = completion.editor_open;
+            if completion.dashboard_saved {
+                self.dashboard.reload();
+                if self.enable_toasts {
+                    self.add_toast(Toast {
+                        text: "Dashboard saved.".into(),
+                        kind: ToastKind::Success,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                        style: Default::default(),
+                    });
+                }
+            }
+            if let Some(error) = completion.presentation_error {
+                self.report_error_message("dashboard.editor.presentation", error);
+            }
+        }
         for pad_effect in self.calculation_pad_dialog.on_ui_frame_complete(ctx) {
             match pad_effect {
                 super::CalculationPadDialogEffect::ShowRoot => {
@@ -54345,6 +54364,70 @@ mod tests {
         }
     }
 
+    fn click_dashboard_editor_target_with_discarded_release(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        target: &crate::gui::jump_mode::ui::RegisteredTarget,
+    ) {
+        let position = target.clipped_rect().center();
+        assert!(target.enabled() && target.eligible() && target.clipped_rect().is_positive());
+        for pressed in [true, false] {
+            let input = egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..actual_query_input(true)
+            };
+            let (output, passes) = app.run_root_frame_for_test(ctx, input, !pressed);
+            output.drop_without_applying_deltas();
+            if !pressed {
+                assert!(passes >= 2, "the release crossed a discarded ROOT pass");
+            }
+        }
+    }
+
+    fn click_dashboard_editor_close_button(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        discard_release: bool,
+    ) {
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
+
+        let layer = NavigationDialogKind::DashboardEditor
+            .layer_id()
+            .expect("the Dashboard Editor has a native window layer");
+        let window = ctx
+            .memory(|memory| memory.area_rect(layer.id))
+            .expect("the Dashboard Editor window has a current area");
+        let position = egui::pos2(window.right() - 18.0, window.top() + 17.0);
+        for pressed in [true, false] {
+            let input = egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..actual_query_input(true)
+            };
+            let (output, passes) =
+                app.run_root_frame_for_test(ctx, input, !pressed && discard_release);
+            output.drop_without_applying_deltas();
+            if !pressed && discard_release {
+                assert!(passes >= 2, "the close crossed a discarded ROOT pass");
+            }
+        }
+    }
+
     fn scroll_dashboard_editor_to_bottom(ctx: &egui::Context, app: &mut LauncherApp) {
         let (scroll_id, max_offset) = app
             .dashboard_editor
@@ -54560,6 +54643,214 @@ mod tests {
             "replacement"
         );
         drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn dashboard_editor_fold_and_close_effects_wait_for_retained_root_pass() {
+        use crate::dashboard::config::DashboardConfig;
+        use crate::dashboard::editor_presentation::DashboardEditorPresentationStore;
+
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let dashboard_path = workspace.root().join("dashboard.json");
+        let mut dashboard = DashboardConfig::default();
+        dashboard.grid.rows = 1;
+        dashboard.grid.cols = 1;
+        dashboard.slots = vec![quick_tools_slot(0, 0, &[("fold draft", false)])];
+        std::fs::write(
+            &dashboard_path,
+            serde_json::to_vec(&dashboard).expect("fixture dashboard serializes"),
+        )
+        .expect("write the isolated dashboard fixture");
+        app.dashboard_path = dashboard_path.to_string_lossy().into_owned();
+        app.show_dashboard_editor = true;
+        app.enable_toasts = true;
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        let store = DashboardEditorPresentationStore::for_profile(workspace.root());
+        let original_slot = app
+            .dashboard_editor
+            .test_slot(0)
+            .expect("the fixture slot is loaded")
+            .clone();
+        let collapse = dashboard_editor_target(&app, "Collapse all slots", "slots/collapse-all");
+        click_dashboard_editor_target_with_discarded_release(&ctx, &mut app, &collapse);
+        assert!(app.show_dashboard_editor && app.dashboard_editor.open);
+        assert_eq!(
+            store
+                .load(&dashboard_path, std::slice::from_ref(&original_slot))
+                .unwrap(),
+            vec![true],
+            "a discarded fold does not publish presentation state"
+        );
+
+        app.dashboard_editor.test_set_grid_rows(4);
+        run_dialog_frame(&ctx, &mut app);
+        click_dashboard_editor_close_button(&ctx, &mut app, true);
+        assert!(
+            app.show_dashboard_editor && app.dashboard_editor.open,
+            "a discarded close keeps the ROOT owner attached"
+        );
+        assert_eq!(
+            app.dashboard_editor.test_grid_rows(),
+            4,
+            "a discarded close retains the editable draft"
+        );
+
+        app.test_toast_messages.clear();
+        std::fs::write(&dashboard_path, b"{broken")
+            .expect("replace the fixture with a simulated corrupt save target");
+        let save = dashboard_editor_target(&app, "Save dashboard", "save");
+        click_dashboard_editor_target(&ctx, &mut app, &save);
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            app.dashboard_editor.test_grid_rows(),
+            4,
+            "a failed Save preserves the editable draft"
+        );
+        assert!(
+            app.test_toast_messages
+                .iter()
+                .all(|message| message != "Dashboard saved."),
+            "a failed replacement produces no success toast"
+        );
+        std::fs::write(
+            &dashboard_path,
+            serde_json::to_vec(&dashboard).expect("the fixture dashboard serializes"),
+        )
+        .expect("restore the isolated dashboard fixture for retry");
+        let save = dashboard_editor_target(&app, "Save dashboard", "save");
+        click_dashboard_editor_target(&ctx, &mut app, &save);
+        run_dialog_frame(&ctx, &mut app);
+        let saved = DashboardConfig::load(&dashboard_path, app.dashboard.registry())
+            .expect("the accepted save replaces the fixture document");
+        assert_eq!(
+            saved.grid.rows, 4,
+            "the draft remained retryable after Close"
+        );
+        assert_eq!(
+            app.test_toast_messages
+                .iter()
+                .filter(|message| message.as_str() == "Dashboard saved.")
+                .count(),
+            1,
+            "one accepted replacement produces exactly one success toast"
+        );
+        let saved_slot = app.dashboard_editor.test_slot(0).unwrap().clone();
+        assert_eq!(
+            store
+                .load(&dashboard_path, std::slice::from_ref(&saved_slot))
+                .unwrap(),
+            vec![true],
+            "the discarded fold cannot leak into the later accepted Save"
+        );
+
+        app.enable_toasts = false;
+        app.test_toast_messages.clear();
+        app.dashboard_editor.test_set_grid_rows(5);
+        run_dialog_frame(&ctx, &mut app);
+        let save = dashboard_editor_target(&app, "Save dashboard", "save");
+        click_dashboard_editor_target(&ctx, &mut app, &save);
+        run_dialog_frame(&ctx, &mut app);
+        assert_eq!(
+            DashboardConfig::load(&dashboard_path, app.dashboard.registry())
+                .unwrap()
+                .grid
+                .rows,
+            5,
+            "disabling toasts does not prevent a successful Save"
+        );
+        assert!(
+            app.test_toast_messages
+                .iter()
+                .all(|message| message != "Dashboard saved."),
+            "the success toast follows the settings preference"
+        );
+
+        click_dashboard_editor_close_button(&ctx, &mut app, false);
+        assert!(!app.show_dashboard_editor && !app.dashboard_editor.open);
+        app.dashboard_editor
+            .open(&app.dashboard_path.clone(), app.dashboard.registry());
+        app.show_dashboard_editor = true;
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert_eq!(
+            store
+                .load(
+                    &dashboard_path,
+                    std::slice::from_ref(app.dashboard_editor.test_slot(0).unwrap())
+                )
+                .unwrap(),
+            vec![true],
+            "close and reopen preserve the accepted open state"
+        );
+        assert_eq!(app.dashboard_editor.test_grid_rows(), 5);
+
+        let collapse = dashboard_editor_target(&app, "Collapse all slots", "slots/collapse-all");
+        click_dashboard_editor_target(&ctx, &mut app, &collapse);
+        run_dialog_frame(&ctx, &mut app);
+        let collapsed_slot = app.dashboard_editor.test_slot(0).unwrap().clone();
+        assert_eq!(
+            store
+                .load(&dashboard_path, std::slice::from_ref(&collapsed_slot))
+                .unwrap(),
+            vec![false],
+            "an accepted fold publishes its preference"
+        );
+        click_dashboard_editor_close_button(&ctx, &mut app, false);
+        assert!(!app.show_dashboard_editor && !app.dashboard_editor.open);
+        app.dashboard_editor
+            .open(&app.dashboard_path.clone(), app.dashboard.registry());
+        app.show_dashboard_editor = true;
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        assert_eq!(
+            store
+                .load(
+                    &dashboard_path,
+                    std::slice::from_ref(app.dashboard_editor.test_slot(0).unwrap())
+                )
+                .unwrap(),
+            vec![false],
+            "an accepted fold survives close and reopen"
+        );
+        assert_eq!(
+            app.test_toast_messages
+                .iter()
+                .filter(|message| message.as_str() == "Dashboard saved.")
+                .count(),
+            0,
+            "reopen and repaint do not repeat Save effects"
+        );
+        click_dashboard_editor_close_button(&ctx, &mut app, false);
+        assert!(!app.show_dashboard_editor && !app.dashboard_editor.open);
+        drop(app);
+
+        let mut fresh_app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        fresh_app.dashboard_path = dashboard_path.to_string_lossy().into_owned();
+        fresh_app.dashboard_editor.open(
+            fresh_app.dashboard_path.as_str(),
+            fresh_app.dashboard.registry(),
+        );
+        fresh_app.show_dashboard_editor = true;
+        prepare_actual_query_frame(&ctx, &mut fresh_app);
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut fresh_app);
+        }
+        assert_eq!(fresh_app.dashboard_editor.test_grid_rows(), 5);
+        assert_eq!(
+            fresh_app.dashboard_editor.test_slot_expanded(0),
+            Some(false),
+            "a fresh app instance sharing the profile restores the accepted fold"
+        );
         drop(workspace);
     }
 

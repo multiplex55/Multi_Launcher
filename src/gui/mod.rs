@@ -3578,18 +3578,18 @@ impl LauncherApp {
         let hotfolder_runtime = match init_policy {
             LauncherInitPolicy::Production => {
                 hotfolder_runtime::HotFolderRuntimeDriver::new_with_activity(
-                    data_root,
+                    data_root.clone(),
                     hotfolder_action_adapter.clone(),
                     activity_center.clone(),
                 )
             }
             LauncherInitPolicy::IsolatedTest | LauncherInitPolicy::IsolatedWatcherTest => {
-                hotfolder_runtime::HotFolderRuntimeDriver::dormant(data_root)
+                hotfolder_runtime::HotFolderRuntimeDriver::dormant(data_root.clone())
             }
         };
         #[cfg(not(test))]
         let hotfolder_runtime = hotfolder_runtime::HotFolderRuntimeDriver::new_with_activity(
-            data_root,
+            data_root.clone(),
             hotfolder_action_adapter.clone(),
             activity_center.clone(),
         );
@@ -3711,7 +3711,7 @@ impl LauncherApp {
             dashboard_default_location: settings.dashboard.default_location.clone(),
             reduce_dashboard_work_when_unfocused: settings.reduce_dashboard_work_when_unfocused,
             show_dashboard_diagnostics: settings.show_dashboard_diagnostics,
-            dashboard_editor: DashboardEditorDialog::default(),
+            dashboard_editor: DashboardEditorDialog::with_profile_root(&data_root),
             show_dashboard_editor: false,
             rx,
             event_sink,

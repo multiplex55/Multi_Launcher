@@ -2,6 +2,7 @@ pub mod config;
 pub mod dashboard;
 pub mod data_cache;
 pub mod diagnostics;
+pub(crate) mod editor_presentation;
 pub mod layout;
 pub mod repaint;
 pub mod widgets;

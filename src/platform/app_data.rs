@@ -59,7 +59,7 @@ impl AppDataRoot {
     }
 }
 
-fn normalize_windows_identity_path(path: &Path) -> String {
+pub(crate) fn normalize_windows_identity_path(path: &Path) -> String {
     let normalized = path.to_string_lossy().replace('/', "\\").to_lowercase();
 
     if let Some(unc_path) = normalized.strip_prefix(r"\\?\unc\") {
