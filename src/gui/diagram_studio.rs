@@ -24,6 +24,14 @@ const CAMERA_KEYBOARD_PAN_SCREEN_POINTS: f64 = 64.0;
 const CAMERA_KEYBOARD_ZOOM_FACTOR: f32 = 1.2;
 const GRID_SPACING: f32 = 10.0;
 const DRAG_NODE_SEPARATION: f64 = 120.0;
+const SPLITTER_WIDTH: f32 = 8.0;
+const SOURCE_PANE_MIN_WIDTH: f32 = 280.0;
+const PREVIEW_PANE_MIN_WIDTH: f32 = 340.0;
+const INSPECTOR_PANE_MIN_WIDTH: f32 = 180.0;
+const CANVAS_MIN_WIDTH: f32 = 220.0;
+const CANVAS_MIN_HEIGHT: f32 = 300.0;
+const DEFAULT_SOURCE_PREVIEW_RATIO: f32 = 0.42;
+const DEFAULT_INSPECTOR_CANVAS_RATIO: f32 = 0.38;
 const VISUAL_TWO_COLUMN_MIN_WIDTH: f32 = 460.0;
 const SPLIT_TWO_COLUMN_MIN_WIDTH: f32 = 860.0;
 const NATIVE_DIAGRAM_EXTENSION: &str = "mld";
@@ -244,10 +252,55 @@ fn unix_millis() -> u64 {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ViewMode {
-    Source,
+    Source {
+        restore: PreviewMode,
+    },
     Visual,
     #[default]
     Split,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreviewMode {
+    Visual,
+    Split,
+}
+
+impl ViewMode {
+    fn hide_preview(self) -> Self {
+        match self {
+            Self::Source { .. } => self,
+            Self::Visual => Self::Source {
+                restore: PreviewMode::Visual,
+            },
+            Self::Split => Self::Source {
+                restore: PreviewMode::Split,
+            },
+        }
+    }
+
+    fn shows_preview(self) -> Self {
+        match self {
+            Self::Source {
+                restore: PreviewMode::Visual,
+            } => Self::Visual,
+            Self::Source {
+                restore: PreviewMode::Split,
+            } => Self::Split,
+            mode => mode,
+        }
+    }
+
+    const fn from_preview_mode(mode: PreviewMode) -> Self {
+        match mode {
+            PreviewMode::Visual => Self::Visual,
+            PreviewMode::Split => Self::Split,
+        }
+    }
+
+    const fn is_source(self) -> bool {
+        matches!(self, Self::Source { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -275,14 +328,6 @@ impl ExportScale {
             Self::Two => 2.0,
         }
     }
-}
-
-impl ViewMode {
-    const ALL: [(Self, &'static str); 3] = [
-        (Self::Source, "Source"),
-        (Self::Visual, "Visual"),
-        (Self::Split, "Split"),
-    ];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -456,6 +501,8 @@ pub(crate) struct DiagramStudioDialog {
     pending_markdown_source: Option<DiagramMarkdownSource>,
     default_directory: PathBuf,
     view_mode: ViewMode,
+    source_preview_split_ratio: f32,
+    inspector_canvas_split_ratio: f32,
     export_scale: ExportScale,
     cache: Option<RevisionCache>,
     camera: Camera,
@@ -500,6 +547,8 @@ pub(crate) struct DiagramStudioDialog {
     test_next_file_picker_result: Option<Option<PathBuf>>,
     #[cfg(test)]
     test_file_picker_calls: usize,
+    #[cfg(test)]
+    test_scene_build_count: usize,
 }
 
 pub(crate) struct DiagramMarkdownSource {
@@ -534,6 +583,8 @@ impl DiagramStudioDialog {
             pending_markdown_source: None,
             default_directory,
             view_mode: ViewMode::Split,
+            source_preview_split_ratio: DEFAULT_SOURCE_PREVIEW_RATIO,
+            inspector_canvas_split_ratio: DEFAULT_INSPECTOR_CANVAS_RATIO,
             export_scale: ExportScale::default(),
             cache: None,
             camera: Camera::default(),
@@ -578,6 +629,8 @@ impl DiagramStudioDialog {
             test_next_file_picker_result: None,
             #[cfg(test)]
             test_file_picker_calls: 0,
+            #[cfg(test)]
+            test_scene_build_count: 0,
         }
     }
 
@@ -1573,7 +1626,12 @@ impl DiagramStudioDialog {
             return;
         }
         let status = session.status();
-        let (scene, scene_error) = session.preview_graph().map_or((None, None), |graph| {
+        let preview_graph = session.preview_graph();
+        #[cfg(test)]
+        if preview_graph.is_some() {
+            self.test_scene_build_count = self.test_scene_build_count.saturating_add(1);
+        }
+        let (scene, scene_error) = preview_graph.map_or((None, None), |graph| {
             match build_scene(graph, SceneMetrics::default()) {
                 Ok(scene) => (Some(scene), None),
                 Err(error) => (None, Some(error.to_string())),
@@ -1882,6 +1940,8 @@ impl DiagramStudioDialog {
         let Self {
             documents,
             view_mode,
+            source_preview_split_ratio,
+            inspector_canvas_split_ratio,
             export_scale,
             cache,
             camera,
@@ -2177,10 +2237,46 @@ impl DiagramStudioDialog {
                         ui.weak("Modified");
                     }
                     ui.separator();
-                    for (mode, label) in ViewMode::ALL {
-                        let response = ui.selectable_label(*view_mode == mode, label);
+                    let source_mode = ui.selectable_label(view_mode.is_source(), "Source");
+                    #[cfg(test)]
+                    test_action_rects.push((
+                        "view_source".into(),
+                        source_mode.rect,
+                        ui.clip_rect(),
+                    ));
+                    if background_actions_allowed && source_mode.clicked() {
+                        *view_mode = view_mode.hide_preview();
+                    }
+                    for (mode, label) in [
+                        (PreviewMode::Visual, "Visual"),
+                        (PreviewMode::Split, "Split"),
+                    ] {
+                        let selected = !view_mode.is_source()
+                            && *view_mode == ViewMode::from_preview_mode(mode);
+                        let response = ui.selectable_label(selected, label);
+                        #[cfg(test)]
+                        test_action_rects.push((
+                            format!("view_{}", label.to_lowercase()),
+                            response.rect,
+                            ui.clip_rect(),
+                        ));
                         if background_actions_allowed && response.clicked() {
-                            *view_mode = mode;
+                            *view_mode = ViewMode::from_preview_mode(mode);
+                        }
+                    }
+                    if view_mode.is_source() {
+                        let response = ui.add_enabled(
+                            background_actions_allowed,
+                            egui::Button::new("Show preview"),
+                        );
+                        #[cfg(test)]
+                        test_action_rects.push((
+                            "show_preview".into(),
+                            response.rect,
+                            ui.clip_rect(),
+                        ));
+                        if response.clicked() {
+                            *view_mode = view_mode.shows_preview();
                         }
                     }
                     ui.separator();
@@ -2198,16 +2294,50 @@ impl DiagramStudioDialog {
                     if redo.clicked() && pending.is_none() {
                         *pending = Some(PendingMutation::Redo);
                     }
-                    if ui
-                        .add_enabled(background_actions_allowed, egui::Button::new("Fit"))
-                        .clicked()
-                    {
+                    let zoom_out =
+                        ui.add_enabled(background_actions_allowed, egui::Button::new("−"));
+                    #[cfg(test)]
+                    test_action_rects.push(("zoom_out".into(), zoom_out.rect, ui.clip_rect()));
+                    if zoom_out.clicked() {
+                        camera.zoom = (camera.zoom / CAMERA_KEYBOARD_ZOOM_FACTOR)
+                            .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+                        camera.fit_next = false;
+                    }
+                    let zoom_percentage = ui.label(format!("{:.0}%", camera.zoom * 100.0));
+                    #[cfg(test)]
+                    test_action_rects.push((
+                        "zoom_percentage".into(),
+                        zoom_percentage.rect,
+                        ui.clip_rect(),
+                    ));
+                    let zoom_in =
+                        ui.add_enabled(background_actions_allowed, egui::Button::new("+"));
+                    #[cfg(test)]
+                    test_action_rects.push(("zoom_in".into(), zoom_in.rect, ui.clip_rect()));
+                    if zoom_in.clicked() {
+                        camera.zoom = (camera.zoom * CAMERA_KEYBOARD_ZOOM_FACTOR)
+                            .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+                        camera.fit_next = false;
+                    }
+                    let fit = ui.add_enabled(background_actions_allowed, egui::Button::new("Fit"));
+                    #[cfg(test)]
+                    test_action_rects.push(("fit".into(), fit.rect, ui.clip_rect()));
+                    if fit.clicked() {
                         camera.fit_next = true;
                     }
-                    if ui
-                        .add_enabled(background_actions_allowed, egui::Button::new("Reset view"))
-                        .clicked()
-                    {
+                    let zoom_100 =
+                        ui.add_enabled(background_actions_allowed, egui::Button::new("100%"));
+                    #[cfg(test)]
+                    test_action_rects.push(("zoom_100".into(), zoom_100.rect, ui.clip_rect()));
+                    if zoom_100.clicked() {
+                        camera.zoom = 1.0;
+                        camera.fit_next = false;
+                    }
+                    let reset_view =
+                        ui.add_enabled(background_actions_allowed, egui::Button::new("Reset view"));
+                    #[cfg(test)]
+                    test_action_rects.push(("reset_view".into(), reset_view.rect, ui.clip_rect()));
+                    if reset_view.clicked() {
                         *camera = Camera::default();
                         camera.fit_next = false;
                     }
@@ -2510,7 +2640,7 @@ impl DiagramStudioDialog {
                 ui.separator();
 
                 match *view_mode {
-                    ViewMode::Source => source_editor(
+                    ViewMode::Source { .. } => source_editor(
                         ui,
                         session,
                         source_edit_allowed,
@@ -2529,6 +2659,7 @@ impl DiagramStudioDialog {
                         status.preview == PreviewState::Current,
                         revision,
                         camera,
+                        inspector_canvas_split_ratio,
                         selection,
                         selected_nodes,
                         property_draft,
@@ -2541,6 +2672,8 @@ impl DiagramStudioDialog {
                         test_canvas_rect,
                         #[cfg(test)]
                         test_canvas_id,
+                        #[cfg(test)]
+                        test_action_rects,
                     ),
                     ViewMode::Split => {
                         #[cfg(test)]
@@ -2572,6 +2705,7 @@ impl DiagramStudioDialog {
                                 status.preview == PreviewState::Current,
                                 revision,
                                 camera,
+                                inspector_canvas_split_ratio,
                                 selection,
                                 selected_nodes,
                                 property_draft,
@@ -2584,40 +2718,105 @@ impl DiagramStudioDialog {
                                 &mut canvas_rect,
                                 #[cfg(test)]
                                 &mut canvas_id,
+                                #[cfg(test)]
+                                test_action_rects,
                             );
                         } else {
-                            ui.columns(2, |columns| {
-                                source_editor(
-                                    &mut columns[0],
-                                    session,
-                                    source_edit_allowed,
-                                    pending,
-                                    *focus_source && source_focus_allowed,
-                                    source_focus_requested,
-                                    #[cfg(test)]
-                                    &mut source_id,
-                                    #[cfg(test)]
-                                    &mut source_rect,
+                            let available_width = ui.available_width();
+                            let available_height = ui.available_height();
+                            let (source_width, preview_width) = split_pane_widths(
+                                available_width,
+                                *source_preview_split_ratio,
+                                SOURCE_PANE_MIN_WIDTH,
+                                PREVIEW_PANE_MIN_WIDTH,
+                                DEFAULT_SOURCE_PREVIEW_RATIO,
+                            );
+                            *source_preview_split_ratio = validated_split_ratio(
+                                *source_preview_split_ratio,
+                                available_width,
+                                SPLITTER_WIDTH,
+                                SOURCE_PANE_MIN_WIDTH,
+                                PREVIEW_PANE_MIN_WIDTH,
+                                DEFAULT_SOURCE_PREVIEW_RATIO,
+                            );
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(source_width, available_height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        source_editor(
+                                            ui,
+                                            session,
+                                            source_edit_allowed,
+                                            pending,
+                                            *focus_source && source_focus_allowed,
+                                            source_focus_requested,
+                                            #[cfg(test)]
+                                            &mut source_id,
+                                            #[cfg(test)]
+                                            &mut source_rect,
+                                        );
+                                    },
                                 );
-                                visual_workspace(
-                                    &mut columns[1],
-                                    graph,
-                                    cache.scene.as_ref(),
-                                    status.preview == PreviewState::Current,
-                                    revision,
-                                    camera,
-                                    selection,
-                                    selected_nodes,
-                                    property_draft,
-                                    drag,
+                                let (splitter_rect, splitter_response) = draw_splitter(
+                                    ui,
+                                    "source-preview",
+                                    available_height,
                                     editing_allowed,
-                                    pending,
-                                    message,
-                                    canvas_focus_requested,
-                                    #[cfg(test)]
-                                    &mut canvas_rect,
-                                    #[cfg(test)]
-                                    &mut canvas_id,
+                                );
+                                #[cfg(test)]
+                                test_action_rects.push((
+                                    "source_preview_splitter".into(),
+                                    splitter_rect,
+                                    ui.clip_rect(),
+                                ));
+                                if editing_allowed
+                                    && splitter_response.dragged_by(egui::PointerButton::Primary)
+                                    && let Some(pointer) = splitter_response.interact_pointer_pos()
+                                {
+                                    *source_preview_split_ratio = validated_split_ratio(
+                                        split_ratio_from_pointer(
+                                            pointer.x,
+                                            splitter_rect.left(),
+                                            source_width,
+                                            available_width,
+                                        ),
+                                        available_width,
+                                        SPLITTER_WIDTH,
+                                        SOURCE_PANE_MIN_WIDTH,
+                                        PREVIEW_PANE_MIN_WIDTH,
+                                        DEFAULT_SOURCE_PREVIEW_RATIO,
+                                    );
+                                }
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(preview_width, available_height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        visual_workspace(
+                                            ui,
+                                            graph,
+                                            cache.scene.as_ref(),
+                                            status.preview == PreviewState::Current,
+                                            revision,
+                                            camera,
+                                            inspector_canvas_split_ratio,
+                                            selection,
+                                            selected_nodes,
+                                            property_draft,
+                                            drag,
+                                            editing_allowed,
+                                            pending,
+                                            message,
+                                            canvas_focus_requested,
+                                            #[cfg(test)]
+                                            &mut canvas_rect,
+                                            #[cfg(test)]
+                                            &mut canvas_id,
+                                            #[cfg(test)]
+                                            test_action_rects,
+                                        );
+                                    },
                                 );
                             });
                         }
@@ -2716,6 +2915,112 @@ fn direction_control(
     }
 }
 
+fn validated_split_ratio(
+    ratio: f32,
+    total_width: f32,
+    splitter_width: f32,
+    min_first_width: f32,
+    min_second_width: f32,
+    default_ratio: f32,
+) -> f32 {
+    let fallback = if default_ratio.is_finite() {
+        default_ratio.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    if !total_width.is_finite() || !splitter_width.is_finite() || total_width <= splitter_width {
+        return fallback;
+    }
+
+    let content_width = total_width - splitter_width;
+    if !min_first_width.is_finite()
+        || !min_second_width.is_finite()
+        || min_first_width < 0.0
+        || min_second_width < 0.0
+        || content_width < min_first_width + min_second_width
+    {
+        return fallback;
+    }
+
+    let minimum_ratio = min_first_width / content_width;
+    let maximum_ratio = 1.0 - min_second_width / content_width;
+    let ratio = if ratio.is_finite() { ratio } else { fallback };
+    ratio.clamp(minimum_ratio, maximum_ratio)
+}
+
+fn split_pane_widths(
+    total_width: f32,
+    ratio: f32,
+    min_first_width: f32,
+    min_second_width: f32,
+    default_ratio: f32,
+) -> (f32, f32) {
+    let total_width = if total_width.is_finite() {
+        total_width.max(0.0)
+    } else {
+        0.0
+    };
+    let content_width = (total_width - SPLITTER_WIDTH).max(0.0);
+    let ratio = validated_split_ratio(
+        ratio,
+        total_width,
+        SPLITTER_WIDTH,
+        min_first_width,
+        min_second_width,
+        default_ratio,
+    );
+    (content_width * ratio, content_width * (1.0 - ratio))
+}
+
+fn split_ratio_from_pointer(
+    pointer_x: f32,
+    splitter_left: f32,
+    first_width: f32,
+    total_width: f32,
+) -> f32 {
+    let split_left = splitter_left - first_width;
+    (pointer_x - split_left) / (total_width - SPLITTER_WIDTH)
+}
+
+fn draw_splitter(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    height: f32,
+    actions_allowed: bool,
+) -> (egui::Rect, egui::Response) {
+    let (_, rect) = ui.allocate_space(egui::vec2(SPLITTER_WIDTH, height.max(0.0)));
+    let sense = if actions_allowed {
+        egui::Sense::drag()
+    } else {
+        egui::Sense::hover()
+    };
+    let response = ui.interact(
+        rect,
+        ui.make_persistent_id(("diagram-studio-splitter", id_salt)),
+        sense,
+    );
+    let fill = if response.dragged() {
+        ui.visuals().widgets.active.bg_fill
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        ui.visuals().widgets.inactive.bg_fill
+    };
+    ui.painter().rect_filled(rect, 2.0, fill);
+    let x = rect.center().x;
+    ui.painter().line_segment(
+        [
+            egui::pos2(x, rect.top() + 4.0),
+            egui::pos2(x, rect.bottom() - 4.0),
+        ],
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.fg_stroke.color),
+    );
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    (rect, response)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn visual_workspace(
     ui: &mut egui::Ui,
@@ -2724,6 +3029,7 @@ fn visual_workspace(
     graph_is_current: bool,
     revision: u64,
     camera: &mut Camera,
+    inspector_canvas_split_ratio: &mut f32,
     selection: &mut Option<DiagramElement>,
     selected_nodes: &mut BTreeSet<NodeId>,
     property_draft: &mut Option<PropertyDraft>,
@@ -2734,6 +3040,7 @@ fn visual_workspace(
     canvas_focus_requested: &mut Option<egui::Id>,
     #[cfg(test)] test_canvas_rect: &mut Option<egui::Rect>,
     #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
     if ui.available_width() < VISUAL_TWO_COLUMN_MIN_WIDTH {
         draw_inspector(
@@ -2774,38 +3081,95 @@ fn visual_workspace(
             *test_canvas_rect = Some(_canvas_rect);
         }
     } else {
-        ui.columns(2, |columns| {
-            draw_inspector(
-                &mut columns[0],
-                graph,
-                graph_is_current,
-                revision,
-                selection,
-                selected_nodes,
-                property_draft,
-                actions_allowed,
-                pending,
-            );
-            let _canvas_rect = columns[1]
-                .scope_builder(canvas_scope_builder(), |ui| {
-                    draw_canvas(
+        let available_width = ui.available_width();
+        let available_height = ui.available_height();
+        let (inspector_width, canvas_width) = split_pane_widths(
+            available_width,
+            *inspector_canvas_split_ratio,
+            INSPECTOR_PANE_MIN_WIDTH,
+            CANVAS_MIN_WIDTH,
+            DEFAULT_INSPECTOR_CANVAS_RATIO,
+        );
+        *inspector_canvas_split_ratio = validated_split_ratio(
+            *inspector_canvas_split_ratio,
+            available_width,
+            SPLITTER_WIDTH,
+            INSPECTOR_PANE_MIN_WIDTH,
+            CANVAS_MIN_WIDTH,
+            DEFAULT_INSPECTOR_CANVAS_RATIO,
+        );
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.allocate_ui_with_layout(
+                egui::vec2(inspector_width, available_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    draw_inspector(
                         ui,
                         graph,
-                        scene,
                         graph_is_current,
                         revision,
-                        camera,
                         selection,
                         selected_nodes,
-                        drag,
+                        property_draft,
                         actions_allowed,
                         pending,
-                        message,
-                        canvas_focus_requested,
-                        #[cfg(test)]
-                        test_canvas_id,
-                    )
-                })
+                    );
+                },
+            );
+            let (splitter_rect, splitter_response) =
+                draw_splitter(ui, "inspector-canvas", available_height, actions_allowed);
+            #[cfg(test)]
+            test_action_rects.push((
+                "inspector_canvas_splitter".into(),
+                splitter_rect,
+                ui.clip_rect(),
+            ));
+            if actions_allowed
+                && splitter_response.dragged_by(egui::PointerButton::Primary)
+                && let Some(pointer) = splitter_response.interact_pointer_pos()
+            {
+                *inspector_canvas_split_ratio = validated_split_ratio(
+                    split_ratio_from_pointer(
+                        pointer.x,
+                        splitter_rect.left(),
+                        inspector_width,
+                        available_width,
+                    ),
+                    available_width,
+                    SPLITTER_WIDTH,
+                    INSPECTOR_PANE_MIN_WIDTH,
+                    CANVAS_MIN_WIDTH,
+                    DEFAULT_INSPECTOR_CANVAS_RATIO,
+                );
+            }
+            let _canvas_rect = ui
+                .allocate_ui_with_layout(
+                    egui::vec2(canvas_width, available_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.scope_builder(canvas_scope_builder(), |ui| {
+                            draw_canvas(
+                                ui,
+                                graph,
+                                scene,
+                                graph_is_current,
+                                revision,
+                                camera,
+                                selection,
+                                selected_nodes,
+                                drag,
+                                actions_allowed,
+                                pending,
+                                message,
+                                canvas_focus_requested,
+                                #[cfg(test)]
+                                test_canvas_id,
+                            )
+                        })
+                        .inner
+                    },
+                )
                 .inner;
             #[cfg(test)]
             {
@@ -2833,7 +3197,7 @@ fn draw_inspector(
     actions_allowed: bool,
     pending: &mut Option<PendingMutation>,
 ) {
-    ui.set_min_width(180.0);
+    ui.set_min_width(INSPECTOR_PANE_MIN_WIDTH);
     ui.heading("Structure");
     ui.small("Click list entries or nodes to inspect them.");
     if let Some(graph) = graph {
@@ -3250,8 +3614,8 @@ fn draw_canvas(
     canvas_focus_requested: &mut Option<egui::Id>,
     #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
 ) -> egui::Rect {
-    let width = ui.available_width().max(220.0);
-    let height = ui.available_height().max(300.0);
+    let width = ui.available_width().max(CANVAS_MIN_WIDTH);
+    let height = ui.available_height().max(CANVAS_MIN_HEIGHT);
     let (canvas_response, painter) =
         ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
     let canvas_rect = canvas_response.rect;
@@ -3928,6 +4292,22 @@ mod tests {
         let _ = frame_with_viewport_commands(dialog, ctx);
     }
 
+    fn frame_with_size(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, size: egui::Vec2) {
+        super::super::render::with_immediate_viewport_renderer(ctx, || {
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                focused: true,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(raw_input, |ui| {
+                let first_pass = ui.ctx().current_pass_index() == 0;
+                dialog.show(ui.ctx(), first_pass, true, true);
+            });
+            output.drop_without_applying_deltas();
+            dialog.on_ui_frame_complete(ctx);
+        });
+    }
+
     fn frame_with_viewport_commands(
         dialog: &mut DiagramStudioDialog,
         ctx: &egui::Context,
@@ -4104,6 +4484,34 @@ mod tests {
                 ],
             );
         }
+    }
+
+    fn drag_action_by(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        name: &str,
+        delta: egui::Vec2,
+    ) {
+        frame(dialog, ctx);
+        let start = action_center(dialog, name);
+        let end = start + delta;
+        let pointer_button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with_child_events(
+            dialog,
+            ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                pointer_button(start, true),
+            ],
+        );
+        frame_with_child_events(dialog, ctx, vec![egui::Event::PointerMoved(end)]);
+        frame_with_child_events(dialog, ctx, vec![pointer_button(end, false)]);
+        frame(dialog, ctx);
     }
 
     fn focus_action_with_keyboard(
@@ -5142,6 +5550,11 @@ mod tests {
             "menu_export",
             "auto_layout",
             "direction",
+            "zoom_out",
+            "zoom_percentage",
+            "zoom_in",
+            "fit",
+            "zoom_100",
         ] {
             let (_, rect, clip) = dialog
                 .test_action_rects
@@ -5400,6 +5813,290 @@ mod tests {
         assert!(
             visible.height() >= 220.0,
             "the default window shows a useful canvas region: canvas={canvas:?}, visible={visible:?}"
+        );
+    }
+
+    #[test]
+    fn studio_usability_diagram_presentation_preview_visibility_restores_mode_and_state() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        dialog.camera = Camera {
+            center: ScenePoint { x: 34.0, y: -17.0 },
+            zoom: 1.35,
+            fit_next: false,
+        };
+        dialog.set_selection(
+            DiagramElement::Node(NodeId::new("A").expect("fixture node id is valid")),
+            false,
+        );
+        frame(&mut dialog, &ctx);
+
+        let source = dialog.test_session().draft().to_owned();
+        let revision = dialog.test_session().revision();
+        let dirty = dialog.documents.is_dirty();
+        let undo_depth = dialog.test_session().undo_depth();
+        let redo_depth = dialog.test_session().redo_depth();
+        let selection = dialog.selection.clone();
+        let selected_nodes = dialog.selected_nodes.clone();
+        let camera = dialog.camera;
+        let scene_builds = dialog.test_scene_build_count;
+
+        click_action(&mut dialog, &ctx, "view_visual");
+        assert_eq!(dialog.view_mode, ViewMode::Visual);
+        click_action(&mut dialog, &ctx, "view_source");
+        assert_eq!(
+            dialog.view_mode,
+            ViewMode::Source {
+                restore: PreviewMode::Visual
+            }
+        );
+        assert!(dialog.test_canvas_rect.is_none());
+        assert!(
+            dialog
+                .test_action_rects
+                .iter()
+                .any(|(name, rect, clip)| { name == "show_preview" && clip.contains_rect(*rect) })
+        );
+        click_action(&mut dialog, &ctx, "show_preview");
+        assert_eq!(dialog.view_mode, ViewMode::Visual);
+
+        click_action(&mut dialog, &ctx, "view_split");
+        assert_eq!(dialog.view_mode, ViewMode::Split);
+        click_action(&mut dialog, &ctx, "view_source");
+        click_action(&mut dialog, &ctx, "show_preview");
+        assert_eq!(dialog.view_mode, ViewMode::Split);
+        assert!(dialog.test_canvas_rect.is_some());
+        assert_eq!(dialog.camera.center, camera.center);
+        assert_eq!(dialog.camera.zoom, camera.zoom);
+        assert_eq!(dialog.camera.fit_next, camera.fit_next);
+        assert_eq!(dialog.selection, selection);
+        assert_eq!(dialog.selected_nodes, selected_nodes);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.documents.is_dirty(), dirty);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+        assert_eq!(dialog.test_session().redo_depth(), redo_depth);
+        assert_eq!(dialog.test_scene_build_count, scene_builds);
+    }
+
+    #[test]
+    fn studio_usability_diagram_presentation_zoom_controls_are_local_and_bounded() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        dialog.camera = Camera {
+            center: ScenePoint { x: 23.0, y: 41.0 },
+            zoom: 1.0,
+            fit_next: false,
+        };
+        frame(&mut dialog, &ctx);
+        let source = dialog.test_session().draft().to_owned();
+        let revision = dialog.test_session().revision();
+        let dirty = dialog.documents.is_dirty();
+        let undo_depth = dialog.test_session().undo_depth();
+        let redo_depth = dialog.test_session().redo_depth();
+        let scene_builds = dialog.test_scene_build_count;
+
+        click_action(&mut dialog, &ctx, "zoom_in");
+        assert!((dialog.camera.zoom - CAMERA_KEYBOARD_ZOOM_FACTOR).abs() < 0.001);
+        click_action(&mut dialog, &ctx, "zoom_out");
+        assert!((dialog.camera.zoom - 1.0).abs() < 0.001);
+
+        dialog.camera.zoom = 2.75;
+        let center_before_100 = dialog.camera.center;
+        click_action(&mut dialog, &ctx, "zoom_100");
+        assert_eq!(dialog.camera.zoom, 1.0);
+        assert_eq!(dialog.camera.center, center_before_100);
+        assert!(!dialog.camera.fit_next);
+
+        dialog.camera.zoom = 6.0;
+        click_action(&mut dialog, &ctx, "fit");
+        assert!((CAMERA_MIN_ZOOM..=CAMERA_MAX_ZOOM).contains(&dialog.camera.zoom));
+        assert_ne!(dialog.camera.zoom, 6.0);
+        assert!(!dialog.camera.fit_next);
+
+        dialog.camera.zoom = CAMERA_MIN_ZOOM;
+        click_action(&mut dialog, &ctx, "zoom_out");
+        assert_eq!(dialog.camera.zoom, CAMERA_MIN_ZOOM);
+        dialog.camera.zoom = CAMERA_MAX_ZOOM;
+        click_action(&mut dialog, &ctx, "zoom_in");
+        assert_eq!(dialog.camera.zoom, CAMERA_MAX_ZOOM);
+
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.documents.is_dirty(), dirty);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+        assert_eq!(dialog.test_session().redo_depth(), redo_depth);
+        assert_eq!(dialog.test_scene_build_count, scene_builds);
+    }
+
+    #[test]
+    fn studio_usability_diagram_presentation_splitters_resize_and_preserve_ratios() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        dialog.camera = Camera {
+            center: ScenePoint { x: -12.0, y: 28.0 },
+            zoom: 1.4,
+            fit_next: false,
+        };
+        dialog.set_selection(
+            DiagramElement::Node(NodeId::new("A").expect("fixture node id is valid")),
+            false,
+        );
+        frame(&mut dialog, &ctx);
+
+        let source = dialog.test_session().draft().to_owned();
+        let revision = dialog.test_session().revision();
+        let dirty = dialog.documents.is_dirty();
+        let undo_depth = dialog.test_session().undo_depth();
+        let redo_depth = dialog.test_session().redo_depth();
+        let selection = dialog.selection.clone();
+        let selected_nodes = dialog.selected_nodes.clone();
+        let camera = dialog.camera;
+        let scene_builds = dialog.test_scene_build_count;
+        let initial_canvas_width = dialog
+            .test_canvas_rect
+            .expect("default split draws canvas")
+            .width();
+
+        drag_action_by(
+            &mut dialog,
+            &ctx,
+            "source_preview_splitter",
+            egui::vec2(-100.0, 0.0),
+        );
+        let outer_drag_canvas_width = dialog
+            .test_canvas_rect
+            .expect("source/preview split keeps canvas visible")
+            .width();
+        assert!(outer_drag_canvas_width > initial_canvas_width + 50.0);
+
+        drag_action_by(
+            &mut dialog,
+            &ctx,
+            "inspector_canvas_splitter",
+            egui::vec2(-60.0, 0.0),
+        );
+        let inner_drag_canvas_width = dialog
+            .test_canvas_rect
+            .expect("inspector/canvas split keeps canvas visible")
+            .width();
+        assert!(
+            inner_drag_canvas_width > outer_drag_canvas_width + 30.0,
+            "inner drag did not widen canvas: initial={initial_canvas_width}, outer={outer_drag_canvas_width}, inner={inner_drag_canvas_width}, source_ratio={}, inspector_ratio={}",
+            dialog.source_preview_split_ratio,
+            dialog.inspector_canvas_split_ratio,
+        );
+
+        let source_preview_ratio = dialog.source_preview_split_ratio;
+        let inspector_canvas_ratio = dialog.inspector_canvas_split_ratio;
+        click_action(&mut dialog, &ctx, "view_source");
+        assert_eq!(dialog.source_preview_split_ratio, source_preview_ratio);
+        assert_eq!(dialog.inspector_canvas_split_ratio, inspector_canvas_ratio);
+        click_action(&mut dialog, &ctx, "show_preview");
+        assert_eq!(dialog.source_preview_split_ratio, source_preview_ratio);
+        assert_eq!(dialog.inspector_canvas_split_ratio, inspector_canvas_ratio);
+
+        frame_with_size(&mut dialog, &ctx, egui::vec2(760.0, 900.0));
+        assert_eq!(dialog.source_preview_split_ratio, source_preview_ratio);
+        assert_eq!(dialog.inspector_canvas_split_ratio, inspector_canvas_ratio);
+        assert!(
+            dialog
+                .test_canvas_rect
+                .expect("stacked layout keeps canvas visible")
+                .width()
+                >= CANVAS_MIN_WIDTH
+        );
+        frame_with_size(&mut dialog, &ctx, TEST_VIEWPORT_SIZE);
+        assert_eq!(dialog.source_preview_split_ratio, source_preview_ratio);
+        assert_eq!(dialog.inspector_canvas_split_ratio, inspector_canvas_ratio);
+
+        assert_eq!(dialog.camera.center, camera.center);
+        assert_eq!(dialog.camera.zoom, camera.zoom);
+        assert_eq!(dialog.camera.fit_next, camera.fit_next);
+        assert_eq!(dialog.selection, selection);
+        assert_eq!(dialog.selected_nodes, selected_nodes);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.documents.is_dirty(), dirty);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+        assert_eq!(dialog.test_session().redo_depth(), redo_depth);
+        assert_eq!(dialog.test_scene_build_count, scene_builds);
+    }
+
+    #[test]
+    fn studio_usability_diagram_presentation_split_ratios_reject_nonfinite_and_clamp_bounds() {
+        let total_width = 1000.0;
+        let divider = SPLITTER_WIDTH;
+        let minimum_first = SOURCE_PANE_MIN_WIDTH;
+        let minimum_second = PREVIEW_PANE_MIN_WIDTH;
+        let lower = minimum_first / (total_width - divider);
+        let upper = 1.0 - minimum_second / (total_width - divider);
+
+        assert_eq!(
+            validated_split_ratio(
+                f32::NAN,
+                total_width,
+                divider,
+                minimum_first,
+                minimum_second,
+                DEFAULT_SOURCE_PREVIEW_RATIO,
+            ),
+            DEFAULT_SOURCE_PREVIEW_RATIO
+        );
+        assert_eq!(
+            validated_split_ratio(
+                f32::INFINITY,
+                total_width,
+                divider,
+                minimum_first,
+                minimum_second,
+                DEFAULT_SOURCE_PREVIEW_RATIO,
+            ),
+            DEFAULT_SOURCE_PREVIEW_RATIO
+        );
+        assert_eq!(
+            validated_split_ratio(
+                -10.0,
+                total_width,
+                divider,
+                minimum_first,
+                minimum_second,
+                DEFAULT_SOURCE_PREVIEW_RATIO,
+            ),
+            lower
+        );
+        assert_eq!(
+            validated_split_ratio(
+                10.0,
+                total_width,
+                divider,
+                minimum_first,
+                minimum_second,
+                DEFAULT_SOURCE_PREVIEW_RATIO,
+            ),
+            upper
+        );
+        assert_eq!(
+            validated_split_ratio(
+                0.2,
+                500.0,
+                divider,
+                SOURCE_PANE_MIN_WIDTH,
+                PREVIEW_PANE_MIN_WIDTH,
+                DEFAULT_SOURCE_PREVIEW_RATIO,
+            ),
+            DEFAULT_SOURCE_PREVIEW_RATIO
+        );
+        assert!(
+            split_pane_widths(
+                f32::INFINITY,
+                f32::NAN,
+                minimum_first,
+                minimum_second,
+                DEFAULT_SOURCE_PREVIEW_RATIO,
+            )
+            .0
+            .is_finite()
         );
     }
 

@@ -20,7 +20,7 @@ Contract: `docs/plans/CODEX_GOAL_STUDIO_LAUNCHER_USABILITY.md` and companion Kic
 | M0-A | complete | Baseline `e5eef3a324f89d07dbff1eec5db1635a385ae980`; immediate parent equals required tip; initial `git push -u origin HEAD` succeeded |
 | M1-A | complete | `b3073917a0b5f41d278c233a875ed1f69ae40084`, pushed; focused Nextest 6 passed |
 | M1-B | partial | Core Enter workflow verified both modes (4/4 focused pass); Root-hint startup exhausted bounded corrections; see stop report |
-| M2-A | pending | Diagram presentation |
+| M2-A | complete | Focused final selection 8/8 passed; parent commit boundary next; native smoke remains M6 |
 | M2-B / M2-C / M2-D | pending | Offline renderer / templates / viewer |
 | M3-A / M3-B / M3-C | pending | Calculator grammar / host / recovery |
 | M4-A / M4-B | pending | Note tables / safe close |
@@ -56,3 +56,13 @@ Root-hint bounded stop: [20261104T003517Z.md](stalls/20261104T003517Z.md). Lates
 Separate core verification PASS (production Root-hint code frozen): `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E 'test(studio_usability_query_enter_activates_real_note_in_both_jump_modes) | test(ordinary_enter_cannot_activate_root_results_behind_timer_or_paste_dialogs) | test(studio_usability_query_clear_reaches_dashboard_without_losing_editor_draft) | test(track_c_metric_empty_browse_frame_completes_without_last_results_valid)'` — 4/4 passed, 7,035 skipped, compilation 3m02s. Test-only extraction separates fresh Enter in both Jump states from the normal still-failing Root-hint test; no ignored/deleted/softened hint assertions. Verified real stored note dispatch exactly once, unchanged dirty Pad, tool-owned Enter protection, real dashboard/draft retention, exact undo/retype after cache repair. No native proof or successful Root-hint result claimed. Parent final diff/whitespace inspection found only intended paths, no debug prints or unrelated formatting churn. Partial source is coherent/compiled but the known hint defect remains explicit; M1-B is not accepted complete.
 
 Required reporting commit `0dd77735a869d48823f0f619071261d17717502e` contains only the human index and bounded-stop report; normal push succeeded. Partial source checkpoint follows separately and must not be described as M1-B acceptance.
+
+Partial M1-B source preserved in `98b5d67723a4fc0de277eae66a491c1cbbb00c3d` (`fix(gui): [M1-B partial] route focused query workflows`), normal push succeeded; clean tree confirmed. This is not complete M1-B acceptance. Fresh named-role Diagram implementer assigned M2-A only; previous writer stopped. Diagram presentation has no dependency on Root-hint startup. No budget expansion or retry of that failure authorized.
+
+## M2-A verification
+
+Only `src/gui/diagram_studio.rs` changed: Source mode retains the prior Visual/Split preview mode, Show preview restores it, visible local zoom/Fit/100% controls retain existing Reset behavior, and both allocations use stable-ID draggable finite/clamped split ratios with narrow stacking. Presentation actions preserve source/dirty/history/selection and scene-build counts in actual UI tests.
+
+Initial focused selection: 6/8 passed; constrained-width overflow and inner divider drag failed. First sizing correction: 7/8. Pointer-relative divider correction: exact drag test 1/1, then final assigned selection 8/8 (7,035 skipped). No known M1-B query test or broad suite ran. Four new presentation tests plus four existing layout/keyboard scope tests pass. Rustfmt touched only this file; parent diff/whitespace checks pass and no unrelated paths changed. Parent caught and requested restoration of an existing targeted lint attribute displaced by helper insertion. Native normal/constrained/DPI observations remain unrun until M6.
+
+Exact final command: `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E 'test(studio_usability_diagram_presentation) | test(diagram_studio_default_split_keeps_canvas_visible_beside_inspector) | test(diagram_studio_minimum_width_stacks_split_and_keeps_visual_controls_reachable) | test(diagram_studio_canvas_keyboard_pan_zoom_and_arrow_nudges_are_scoped) | test(diagram_studio_source_focus_does_not_pan_or_zoom_canvas)'` — 8/8, Nextest 0.325s, cached Cargo profile 0.99s. Afterward only existing attribute placement and identical `180.0`→constant reuse changed; no numeric or behavioral change and no redundant rerun.
