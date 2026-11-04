@@ -14,12 +14,13 @@ use crate::gui::note_find_preview::{
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::notes_markdown::{
-    MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout, MarkdownEditError,
-    MarkdownExportArtifact, MarkdownExportFormat, MarkdownHeading, MarkdownInlineFormat,
-    MarkdownPreview, MarkdownPreviewStatus, MarkdownSection, MarkdownTaskItem, ParsedMarkdownTable,
-    PlainLinkConversionReport, PreparedMarkdownEdit, analyze_markdown, convert_plain_links,
-    prepare_block_snippet, prepare_inline_format, prepare_insert_column, prepare_insert_row,
-    prepare_insert_table, prepare_remove_column, prepare_remove_row, prepare_set_cell,
+    MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION, MarkdownAnalysis, MarkdownBlockSnippet, MarkdownCallout,
+    MarkdownEditError, MarkdownExportArtifact, MarkdownExportFormat, MarkdownHeading,
+    MarkdownInlineFormat, MarkdownPreview, MarkdownPreviewStatus, MarkdownSection,
+    MarkdownTaskItem, ParsedMarkdownTable, PlainLinkConversionReport, PreparedMarkdownEdit,
+    analyze_markdown, convert_plain_links, prepare_block_snippet, prepare_inline_format,
+    prepare_insert_column, prepare_insert_row, prepare_insert_table,
+    prepare_insert_table_with_rows, prepare_remove_column, prepare_remove_row, prepare_set_cell,
     table_at_byte, task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
@@ -48,6 +49,7 @@ use std::process::Command;
 use std::{
     env,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 use url::Url;
@@ -56,6 +58,7 @@ const BACKLINK_PAGE_SIZE: usize = 12;
 const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 const HEAVY_RECOMPUTE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
+static NEXT_NOTE_PANEL_PROMPT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn effective_note_font_size(ctx: &egui::Context, local_size: f32) -> f32 {
     let overall_scale = crate::gui::theme::resolved_for_current_context(ctx)
@@ -1051,9 +1054,11 @@ enum PlainLinkConfirmOutcome {
 
 pub struct NotePanel {
     pub open: bool,
+    prompt_identity: u64,
     activation_handoff_pending: bool,
     note: Note,
     saved_content_baseline: String,
+    pending_close_after_save: bool,
     discard_unsaved_prompt: bool,
     link_search: String,
     link_menu_targets: Vec<LinkMenuResult>,
@@ -1072,6 +1077,7 @@ pub struct NotePanel {
     pending_mermaid_origin: Option<NoteMermaidOrigin>,
     active_mermaid_origin: Option<NoteMermaidOrigin>,
     pending_root_effect: Option<PendingNoteRootEffect>,
+    custom_table_builder: Option<CustomTableBuilder>,
     markdown_export_feedback: Option<(bool, String)>,
     markdown_analysis: Option<MarkdownAnalysis>,
     markdown_analysis_source_hash: Option<u64>,
@@ -1172,6 +1178,22 @@ pub struct NotePanel {
     #[cfg(test)]
     test_markdown_toolbar_menu: Option<(egui::Id, egui::Rect, egui::Rect)>,
     #[cfg(test)]
+    test_custom_table_insert_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_custom_table_builder_insert_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_custom_table_builder_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_custom_table_builder_cancel_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_save_changes_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_conflict_overwrite_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_conflict_save_as_new_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_conflict_cancel_rect: Option<egui::Rect>,
+    #[cfg(test)]
     test_next_markdown_export_path: Option<Option<PathBuf>>,
     #[cfg(test)]
     test_markdown_export_picker_calls: usize,
@@ -1224,6 +1246,20 @@ pub struct NotePanel {
     last_find_editor_rects: Vec<egui::Rect>,
     #[cfg(test)]
     last_find_navigation_source: Option<std::ops::Range<usize>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoteSaveOutcome {
+    Saved,
+    AwaitingDecision,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConflictSaveAction {
+    Overwrite,
+    SaveAsNew,
+    Cancel,
 }
 
 #[derive(Clone, Debug)]
@@ -1285,7 +1321,31 @@ struct PendingNoteToolbarFocusRestore {
     editor_id: egui::Id,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NoteTableBuilderOrigin {
+    note_slug: String,
+    note_path: PathBuf,
+    source_snapshot: String,
+    editor_id: egui::Id,
+    insert_at: usize,
+}
+
+struct CustomTableBuilder {
+    origin: NoteTableBuilderOrigin,
+    columns: usize,
+    data_rows: usize,
+    header_cells: Vec<String>,
+    pending_insert: bool,
+    error: Option<String>,
+}
+
+pub(crate) struct PendingCustomTableInsertion {
+    origin: NoteTableBuilderOrigin,
+    prepared: PreparedMarkdownEdit,
+}
+
 pub(crate) enum NotePanelEffect {
+    InsertCustomTable(PendingCustomTableInsertion),
     OpenDiagram {
         source: DiagramSourceCopy,
         origin: NoteMermaidOrigin,
@@ -1581,9 +1641,11 @@ impl NotePanel {
         let saved_content_baseline = note.content.clone();
         let mut panel = Self {
             open: true,
+            prompt_identity: NEXT_NOTE_PANEL_PROMPT_ID.fetch_add(1, Ordering::Relaxed),
             activation_handoff_pending: false,
             note,
             saved_content_baseline,
+            pending_close_after_save: false,
             discard_unsaved_prompt: false,
             link_search: String::new(),
             link_menu_targets: Vec::new(),
@@ -1602,6 +1664,7 @@ impl NotePanel {
             pending_mermaid_origin: None,
             active_mermaid_origin: None,
             pending_root_effect: None,
+            custom_table_builder: None,
             markdown_export_feedback: None,
             markdown_analysis: None,
             markdown_analysis_source_hash: None,
@@ -1697,6 +1760,22 @@ impl NotePanel {
             test_capture_markdown_fragment_ids: false,
             #[cfg(test)]
             test_markdown_toolbar_menu: None,
+            #[cfg(test)]
+            test_custom_table_insert_rect: None,
+            #[cfg(test)]
+            test_custom_table_builder_insert_rect: None,
+            #[cfg(test)]
+            test_custom_table_builder_rect: None,
+            #[cfg(test)]
+            test_custom_table_builder_cancel_rect: None,
+            #[cfg(test)]
+            test_save_changes_rect: None,
+            #[cfg(test)]
+            test_conflict_overwrite_rect: None,
+            #[cfg(test)]
+            test_conflict_save_as_new_rect: None,
+            #[cfg(test)]
+            test_conflict_cancel_rect: None,
             #[cfg(test)]
             test_next_markdown_export_path: None,
             #[cfg(test)]
@@ -2345,10 +2424,24 @@ impl NotePanel {
                     && self.note.content == origin.source_snapshot
             }
             NotePanelEffect::Export(request) => self.export_snapshot_matches(request),
+            NotePanelEffect::InsertCustomTable(request) => {
+                self.custom_table_origin_is_current(&request.origin)
+            }
         };
         if retained && still_matches {
             Some(staged.effect)
         } else {
+            if let NotePanelEffect::InsertCustomTable(request) = &staged.effect
+                && let Some(builder) = self.custom_table_builder.as_mut()
+                && builder.origin == request.origin
+            {
+                builder.pending_insert = false;
+                if retained {
+                    builder.error = Some(
+                        "The note or editor changed before the table could be inserted. Reopen the builder to use the current source.".into(),
+                    );
+                }
+            }
             if let NotePanelEffect::OpenDiagram { origin, .. } = &staged.effect
                 && self
                     .pending_mermaid_origin
@@ -2888,6 +2981,10 @@ impl NotePanel {
         )
     }
 
+    fn custom_table_builder_layer(&self) -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, self.custom_table_builder_id())
+    }
+
     pub(crate) fn query_focus_protected_state_blocks(&self) -> bool {
         if !self.open {
             return false;
@@ -3151,6 +3248,79 @@ impl NotePanel {
     #[cfg(test)]
     pub(crate) fn test_editor_widget_id(&self) -> Option<egui::Id> {
         self.last_textedit_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_begin_custom_table_builder(&mut self, ctx: &egui::Context) {
+        if let Some(editor_id) = self.last_textedit_id {
+            self.begin_custom_table_builder(ctx, editor_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_builder_insert_rect(&self) -> Option<egui::Rect> {
+        self.test_custom_table_builder_insert_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_builder_rect(&self) -> Option<egui::Rect> {
+        self.test_custom_table_builder_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_builder_cancel_rect(&self) -> Option<egui::Rect> {
+        self.test_custom_table_builder_cancel_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_origin_insert_at(&self) -> Option<usize> {
+        self.custom_table_builder
+            .as_ref()
+            .map(|builder| builder.origin.insert_at)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_builder_layer(&self) -> Option<egui::LayerId> {
+        self.custom_table_builder
+            .as_ref()
+            .map(|_| self.custom_table_builder_layer())
+    }
+
+    #[cfg(test)]
+    fn test_custom_table_history_step(
+        &mut self,
+        ctx: &egui::Context,
+        direction: ReplacementUndoDirection,
+    ) -> Option<String> {
+        let editor_id = self.last_textedit_id?;
+        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, editor_id)?;
+        let cursor = state.cursor.char_range().unwrap_or_else(|| {
+            egui::text::CCursorRange::one(egui::text::CCursor::new(
+                self.note.content.chars().count(),
+            ))
+        });
+        let mut undoer = state.undoer();
+        let (next_cursor, next_source) =
+            self.replacement_history_step(&mut undoer, cursor, direction)?;
+        self.replacement_history_mutation = Some(match direction {
+            ReplacementUndoDirection::Undo => ReplacementHistoryMutation::Undo,
+            ReplacementUndoDirection::Redo => ReplacementHistoryMutation::Redo,
+        });
+        self.replace_content_from_mutation(next_source.clone(), ctx.input(|input| input.time));
+        state.set_undoer(undoer);
+        state.cursor.set_char_range(Some(next_cursor));
+        state.store(ctx, editor_id);
+        Some(next_source)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_undo(&mut self, ctx: &egui::Context) -> Option<String> {
+        self.test_custom_table_history_step(ctx, ReplacementUndoDirection::Undo)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom_table_redo(&mut self, ctx: &egui::Context) -> Option<String> {
+        self.test_custom_table_history_step(ctx, ReplacementUndoDirection::Redo)
     }
 
     #[cfg(test)]
@@ -3822,6 +3992,267 @@ impl NotePanel {
         }
     }
 
+    fn begin_custom_table_builder(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
+        if !self.open
+            || self.last_textedit_id != Some(editor_id)
+            || !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+        {
+            return;
+        }
+        let range = self.current_editor_byte_range(ctx, editor_id);
+        self.custom_table_builder = Some(CustomTableBuilder {
+            origin: NoteTableBuilderOrigin {
+                note_slug: self.note.slug.clone(),
+                note_path: self.note.path.clone(),
+                source_snapshot: self.note.content.clone(),
+                editor_id,
+                insert_at: range.start,
+            },
+            columns: 2,
+            data_rows: 1,
+            header_cells: vec!["Column 1".into(), "Column 2".into()],
+            pending_insert: false,
+            error: None,
+        });
+    }
+
+    fn custom_table_builder_id(&self) -> egui::Id {
+        egui::Id::new((
+            "note-custom-table-builder",
+            self.note.slug.clone(),
+            self.note.path.clone(),
+        ))
+    }
+
+    pub(crate) fn query_focus_ordinary_layers(&self) -> impl Iterator<Item = egui::LayerId> {
+        std::iter::once(self.show_query_focus_layer()).chain(
+            self.custom_table_builder
+                .as_ref()
+                .map(|_| self.custom_table_builder_layer()),
+        )
+    }
+
+    fn custom_table_origin_is_current(&self, origin: &NoteTableBuilderOrigin) -> bool {
+        self.open
+            && self.note.slug == origin.note_slug
+            && self.note.path == origin.note_path
+            && self.note.content == origin.source_snapshot
+            && self.last_textedit_id == Some(origin.editor_id)
+            && matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split)
+            && self
+                .custom_table_builder
+                .as_ref()
+                .is_some_and(|builder| builder.origin == *origin)
+    }
+
+    fn stage_custom_table_insertion(&mut self, ctx: &egui::Context) {
+        if ctx.will_discard() || self.pending_root_effect.is_some() {
+            return;
+        }
+        let Some(builder) = self.custom_table_builder.as_ref() else {
+            return;
+        };
+        if builder.pending_insert {
+            return;
+        }
+        if !self.custom_table_origin_is_current(&builder.origin) {
+            if let Some(builder) = self.custom_table_builder.as_mut() {
+                builder.error = Some(
+                    "The note or editor changed. Cancel and reopen the builder to insert at the current caret.".into(),
+                );
+            }
+            return;
+        }
+        let origin = builder.origin.clone();
+        let prepared = match prepare_insert_table_with_rows(
+            &origin.source_snapshot,
+            origin.insert_at,
+            &builder.header_cells,
+            builder.data_rows,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(builder) = self.custom_table_builder.as_mut() {
+                    builder.error = Some(error.to_string());
+                }
+                return;
+            }
+        };
+        if let Some(builder) = self.custom_table_builder.as_mut() {
+            builder.pending_insert = true;
+            builder.error = None;
+        }
+        self.pending_root_effect = Some(PendingNoteRootEffect {
+            frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
+            pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+            effect: NotePanelEffect::InsertCustomTable(PendingCustomTableInsertion {
+                origin,
+                prepared,
+            }),
+        });
+    }
+
+    pub(crate) fn complete_custom_table_insertion(
+        &mut self,
+        ctx: &egui::Context,
+        request: PendingCustomTableInsertion,
+    ) -> Result<(), String> {
+        if !self.custom_table_origin_is_current(&request.origin) {
+            if let Some(builder) = self.custom_table_builder.as_mut() {
+                builder.pending_insert = false;
+                builder.error = Some(
+                    "The note or editor changed before the table could be inserted. Reopen the builder to use the current source.".into(),
+                );
+            }
+            return Err("The originating note or editor changed before insertion.".into());
+        }
+        match self.apply_prepared_markdown_edit_with_selection(
+            ctx,
+            request.origin.editor_id,
+            request.prepared,
+            None,
+        ) {
+            Ok(true) => {
+                self.custom_table_builder = None;
+                Ok(())
+            }
+            Ok(false) => {
+                if let Some(builder) = self.custom_table_builder.as_mut() {
+                    builder.pending_insert = false;
+                    builder.error = Some("The table did not change the note.".into());
+                }
+                Err("The table did not change the note.".into())
+            }
+            Err(error) => {
+                if let Some(builder) = self.custom_table_builder.as_mut() {
+                    builder.pending_insert = false;
+                    builder.error = Some(error.to_string());
+                }
+                Err(error.to_string())
+            }
+        }
+    }
+
+    fn show_custom_table_builder(&mut self, ctx: &egui::Context) {
+        if !self.open || self.custom_table_builder.is_none() {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.test_custom_table_builder_insert_rect = None;
+            self.test_custom_table_builder_rect = None;
+            self.test_custom_table_builder_cancel_rect = None;
+        }
+        let id = self.custom_table_builder_id();
+        let screen_rect = ctx.content_rect();
+        let available_size =
+            (screen_rect.size() - egui::vec2(40.0, 40.0)).max(egui::vec2(320.0, 280.0));
+        let default_size = egui::vec2(460.0, 460.0).min(available_size);
+        let default_pos = egui::pos2(
+            screen_rect.left() + 20.0,
+            (screen_rect.bottom() - default_size.y - 20.0).max(screen_rect.top() + 20.0),
+        );
+        let mut window_open = true;
+        let mut submit = false;
+        let mut cancel = false;
+        let mut authorized = false;
+        #[cfg(test)]
+        let mut insert_rect: Option<egui::Rect> = None;
+        #[cfg(test)]
+        let mut cancel_rect: Option<egui::Rect> = None;
+        let _output = egui::Window::new("Insert custom Markdown table")
+            .id(id)
+            .order(egui::Order::Middle)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(default_size)
+            .default_pos(default_pos)
+            .min_size(egui::vec2(320.0, 280.0))
+            .open(&mut window_open)
+            .show(ctx, |ui| {
+                authorized = !ctx.will_discard() && ui.is_visible() && !ui.is_sizing_pass();
+                let builder = self
+                    .custom_table_builder
+                    .as_mut()
+                    .expect("the builder remains present while its window is shown");
+                let mut changed = false;
+                let pending_insert = builder.pending_insert;
+                ui.add_enabled_ui(authorized && !builder.pending_insert, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Columns");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut builder.columns)
+                                    .range(1..=MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Data rows (excluding header)");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut builder.data_rows)
+                                    .range(1..=MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION),
+                            )
+                            .changed();
+                    });
+                    builder
+                        .header_cells
+                        .resize_with(builder.columns, String::new);
+                    ui.separator();
+                    let rows_max_height = (ui.available_height() - 48.0).max(64.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("custom-table-columns", id))
+                        .max_height(rows_max_height)
+                        .show(ui, |ui| {
+                            for (index, name) in builder.header_cells.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Column {}", index + 1));
+                                    changed |= ui.text_edit_singleline(name).changed();
+                                });
+                            }
+                        });
+                    if changed {
+                        builder.error = None;
+                    }
+                    ui.separator();
+                    if let Some(error) = &builder.error {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                    ui.horizontal(|ui| {
+                        let insert = ui.button("Insert");
+                        #[cfg(test)]
+                        if authorized && ui.is_visible() && !ui.is_sizing_pass() {
+                            insert_rect = Some(insert.rect);
+                        }
+                        submit = insert.clicked();
+                        let cancel_response = ui.button("Cancel");
+                        #[cfg(test)]
+                        if authorized && ui.is_visible() && !ui.is_sizing_pass() {
+                            cancel_rect = Some(cancel_response.rect);
+                        }
+                        cancel = cancel_response.clicked();
+                    });
+                });
+                if pending_insert {
+                    ui.label("Inserting table…");
+                }
+            });
+        #[cfg(test)]
+        {
+            self.test_custom_table_builder_insert_rect = insert_rect;
+            self.test_custom_table_builder_rect =
+                _output.as_ref().map(|output| output.response.rect);
+            self.test_custom_table_builder_cancel_rect = cancel_rect;
+        }
+        if authorized && submit {
+            self.stage_custom_table_insertion(ctx);
+        }
+        if authorized && (cancel || !window_open) {
+            self.custom_table_builder = None;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_last_edit_at_secs(&self) -> Option<f64> {
         self.last_edit_at_secs
@@ -3835,6 +4266,14 @@ impl NotePanel {
     #[cfg(test)]
     pub(crate) fn test_saved_content_baseline(&self) -> &str {
         &self.saved_content_baseline
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_note_prompt_ids(&self) -> (egui::Id, egui::Id) {
+        (
+            self.note_prompt_id("close"),
+            self.note_prompt_id("save-conflict"),
+        )
     }
 
     #[cfg(test)]
@@ -3858,19 +4297,53 @@ impl NotePanel {
         self.saved_content_baseline.clone_from(&self.note.content);
     }
 
-    pub(crate) fn request_close(&mut self, app: &mut LauncherApp) {
+    fn note_prompt_id(&self, kind: &'static str) -> egui::Id {
+        egui::Id::new(("note-panel-prompt", kind, self.prompt_identity))
+    }
+
+    fn close_after_successful_save(&mut self, app: &mut LauncherApp) {
+        if !self.pending_close_after_save {
+            return;
+        }
+        self.pending_close_after_save = false;
+        self.discard_unsaved_prompt = false;
+        self.overwrite_prompt = false;
+        self.close_panel_and_release_focus(app);
+    }
+
+    fn close_panel_and_release_focus(&mut self, app: &mut LauncherApp) {
+        self.open = false;
+        self.pending_close_after_save = false;
+        self.discard_unsaved_prompt = false;
+        self.overwrite_prompt = false;
+        self.custom_table_builder = None;
         self.surrender_find_focus(&app.egui_ctx);
         if let Some(id) = self.last_textedit_id {
             app.egui_ctx.memory_mut(|memory| memory.surrender_focus(id));
         }
-        if app.note_save_on_close {
-            self.save(app);
-            if !self.overwrite_prompt {
-                self.open = false;
-            }
-        } else if !app.note_confirm_discard_unsaved_changes || !self.has_unsaved_changes() {
-            self.open = false;
+    }
+
+    pub(crate) fn request_close(&mut self, app: &mut LauncherApp) {
+        if !app.note_save_on_close && !app.note_confirm_discard_unsaved_changes {
+            self.close_panel_and_release_focus(app);
+        } else if self.overwrite_prompt {
+            self.pending_close_after_save = true;
             self.discard_unsaved_prompt = false;
+            self.open = true;
+        } else if app.note_save_on_close {
+            self.pending_close_after_save = true;
+            match self.save(app) {
+                NoteSaveOutcome::Saved => {}
+                NoteSaveOutcome::AwaitingDecision => self.open = true,
+                NoteSaveOutcome::Failed => {
+                    self.open = true;
+                    self.discard_unsaved_prompt = true;
+                }
+            }
+        } else if !self.has_unsaved_changes() {
+            self.pending_close_after_save = false;
+            self.discard_unsaved_prompt = false;
+            self.close_panel_and_release_focus(app);
         } else {
             self.open = true;
             self.discard_unsaved_prompt = true;
@@ -3879,13 +4352,16 @@ impl NotePanel {
 
     fn keep_editing(&mut self) {
         self.discard_unsaved_prompt = false;
+        self.pending_close_after_save = false;
         self.open = true;
         self.focus_textedit_next_frame = true;
     }
 
     fn discard_changes(&mut self) {
         self.discard_unsaved_prompt = false;
+        self.pending_close_after_save = false;
         self.open = false;
+        self.custom_table_builder = None;
     }
 
     pub(crate) fn replace_content_after_saved_external_mutation(
@@ -3982,6 +4458,7 @@ impl NotePanel {
             self.active_mermaid_origin = None;
             self.pending_mermaid_origin = None;
             self.pending_root_effect = None;
+            self.custom_table_builder = None;
             self.markdown_toolbar_popup_was_open = false;
             self.markdown_toolbar_owns_selection = false;
             self.applying_toolbar_markdown_action = false;
@@ -4034,6 +4511,13 @@ impl NotePanel {
         app: &mut LauncherApp,
         observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
     ) {
+        #[cfg(test)]
+        {
+            self.test_save_changes_rect = None;
+            self.test_conflict_overwrite_rect = None;
+            self.test_conflict_save_as_new_rect = None;
+            self.test_conflict_cancel_rect = None;
+        }
         #[cfg(feature = "qa-framebuffer-capture")]
         {
             self.start_note_replace_paint(ctx, app.qa_framebuffer_note_replace_expected_slug());
@@ -4093,6 +4577,7 @@ impl NotePanel {
                         self.last_preview_heading_rects.clear();
                         self.last_preview_heading_font_sizes.clear();
                         self.test_markdown_toolbar_menu = None;
+                        self.test_custom_table_insert_rect = None;
                         self.test_markdown_export_feedback_rect = None;
                         self.test_note_toolbar_edit_button = None;
                         self.test_markdown_tool_rects.clear();
@@ -4168,6 +4653,8 @@ impl NotePanel {
             }
             ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, window_id));
         }
+
+        self.show_custom_table_builder(ctx);
 
         // If the panel is closing, ensure we don't leave egui focus on a widget
         // that will no longer exist this frame. This avoids AccessKit panics
@@ -4289,9 +4776,11 @@ impl NotePanel {
 
         if self.discard_unsaved_prompt {
             let mut prompt_open = true;
+            let mut save_changes = false;
             let mut discard = false;
             let mut keep_editing = false;
             egui::Window::new("Discard unsaved changes?")
+                .id(self.note_prompt_id("close"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -4299,10 +4788,17 @@ impl NotePanel {
                 .show(ctx, |ui| {
                     widgets::compact_section_heading(
                         ui,
-                        "This note has changes that have not been saved.",
+                        "Save changes before closing this note?",
                         None,
                     );
                     ui.horizontal(|ui| {
+                        let save = ui.button("Save Changes");
+                        let save = widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary);
+                        #[cfg(test)]
+                        if ui.is_visible() && !ui.is_sizing_pass() {
+                            self.test_save_changes_rect = Some(save.rect);
+                        }
+                        save_changes = save.clicked();
                         let response = ui.button("Discard Changes");
                         let response = widgets::with_button_emphasis(
                             ui,
@@ -4338,6 +4834,9 @@ impl NotePanel {
                 });
             if discard {
                 self.discard_changes();
+            } else if save_changes {
+                self.pending_close_after_save = true;
+                self.save(app);
             } else if keep_editing || !prompt_open {
                 self.keep_editing();
             }
@@ -4352,10 +4851,14 @@ impl NotePanel {
             self.surrender_find_focus(ctx);
         }
         if self.overwrite_prompt {
+            let mut prompt_open = true;
+            let mut selected_action = None;
             egui::Window::new("Note exists")
+                .id(self.note_prompt_id("save-conflict"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut prompt_open)
                 .show(ctx, |ui| {
                     widgets::compact_section_heading(
                         ui,
@@ -4364,49 +4867,67 @@ impl NotePanel {
                     );
                     ui.horizontal(|ui| {
                         let overwrite = ui.button("Overwrite");
-                        if widgets::with_button_emphasis(ui, overwrite, ButtonEmphasis::Destructive)
-                            .clicked()
-                        {
-                            if let Err(e) = save_note(&mut self.note, true) {
-                                app.report_error(
-                                    "ui operation",
-                                    format!("Failed to save note: {e}"),
-                                );
-                            } else {
-                                self.refresh_fast_derived();
-                                self.refresh_heavy_derived(
-                                    true,
-                                    app.note_settings.backlinks_enabled,
-                                );
-                                self.mark_current_content_saved();
-                                self.finish_save(app);
-                                self.overwrite_prompt = false;
-                            }
+                        let overwrite = widgets::with_button_emphasis(
+                            ui,
+                            overwrite,
+                            ButtonEmphasis::Destructive,
+                        );
+                        #[cfg(test)]
+                        if ui.is_visible() && !ui.is_sizing_pass() {
+                            self.test_conflict_overwrite_rect = Some(overwrite.rect);
+                        }
+                        if overwrite.clicked() {
+                            selected_action = Some(ConflictSaveAction::Overwrite);
                         }
                         let save_as_new = ui.button("Save as New");
-                        if widgets::with_button_emphasis(ui, save_as_new, ButtonEmphasis::Primary)
-                            .clicked()
-                        {
-                            self.note.slug.clear();
-                            self.note.path = std::path::PathBuf::new();
-                            if let Err(e) = save_note(&mut self.note, true) {
-                                app.report_error(
-                                    "ui operation",
-                                    format!("Failed to save note: {e}"),
-                                );
-                            } else {
-                                self.refresh_fast_derived();
-                                self.refresh_heavy_derived(
-                                    true,
-                                    app.note_settings.backlinks_enabled,
-                                );
-                                self.mark_current_content_saved();
-                                self.finish_save(app);
-                                self.overwrite_prompt = false;
-                            }
+                        let save_as_new =
+                            widgets::with_button_emphasis(ui, save_as_new, ButtonEmphasis::Primary);
+                        #[cfg(test)]
+                        if ui.is_visible() && !ui.is_sizing_pass() {
+                            self.test_conflict_save_as_new_rect = Some(save_as_new.rect);
+                        }
+                        if save_as_new.clicked() {
+                            selected_action = Some(ConflictSaveAction::SaveAsNew);
+                        }
+                        let cancel = ui.button("Cancel");
+                        #[cfg(test)]
+                        if ui.is_visible() && !ui.is_sizing_pass() {
+                            self.test_conflict_cancel_rect = Some(cancel.rect);
+                        }
+                        if cancel.clicked() {
+                            selected_action = Some(ConflictSaveAction::Cancel);
                         }
                     });
                 });
+            match selected_action {
+                Some(ConflictSaveAction::Overwrite) => {
+                    let candidate = self.note.clone();
+                    self.save_with_overwrite(app, candidate);
+                }
+                Some(ConflictSaveAction::SaveAsNew) => {
+                    let mut candidate = self.note.clone();
+                    candidate.slug.clear();
+                    candidate.path = std::path::PathBuf::new();
+                    self.save_with_overwrite(app, candidate);
+                }
+                Some(ConflictSaveAction::Cancel) if self.pending_close_after_save => {
+                    self.overwrite_prompt = false;
+                    self.keep_editing();
+                }
+                Some(ConflictSaveAction::Cancel) => {
+                    self.overwrite_prompt = false;
+                    self.focus_textedit_next_frame = true;
+                }
+                None if !prompt_open => {
+                    self.overwrite_prompt = false;
+                    if self.pending_close_after_save {
+                        self.keep_editing();
+                    } else {
+                        self.focus_textedit_next_frame = true;
+                    }
+                }
+                None => {}
+            }
         }
         self.request_heavy_refresh_retry(ctx);
         #[cfg(feature = "qa-framebuffer-capture")]
@@ -6669,7 +7190,7 @@ impl NotePanel {
     /// panel closes while [`Settings::note_save_on_close`](crate::settings::Settings::note_save_on_close)
     /// is `true`. Close events include pressing `Esc`, clicking the window's
     /// close button, or any programmatic request to close the panel.
-    pub(super) fn save(&mut self, app: &mut LauncherApp) {
+    fn save(&mut self, app: &mut LauncherApp) -> NoteSaveOutcome {
         self.note.tags = extract_tags(&self.note.content);
         self.note.links = extract_wiki_links(&self.note.content)
             .into_iter()
@@ -6686,25 +7207,58 @@ impl NotePanel {
         }
         match save_note(&mut self.note, app.note_always_overwrite) {
             Ok(true) => {
-                self.refresh_fast_derived();
-                self.refresh_heavy_derived(true, app.note_settings.backlinks_enabled);
-                self.mark_current_content_saved();
-                self.finish_save(app);
-                self.link_menu_targets_version = None;
-                self.invalidate_link_menu_results();
+                self.finish_successful_save(app);
+                NoteSaveOutcome::Saved
             }
             Ok(false) => {
                 self.overwrite_prompt = true;
+                if self.pending_close_after_save {
+                    self.discard_unsaved_prompt = false;
+                }
+                NoteSaveOutcome::AwaitingDecision
             }
             Err(e) => {
                 app.report_error("ui operation", format!("Failed to save note: {e}"));
+                NoteSaveOutcome::Failed
             }
         }
     }
 
+    fn save_with_overwrite(
+        &mut self,
+        app: &mut LauncherApp,
+        mut candidate: Note,
+    ) -> NoteSaveOutcome {
+        match save_note(&mut candidate, true) {
+            Ok(true) => {
+                self.note = candidate;
+                self.finish_successful_save(app);
+                NoteSaveOutcome::Saved
+            }
+            Ok(false) => {
+                self.overwrite_prompt = true;
+                NoteSaveOutcome::AwaitingDecision
+            }
+            Err(error) => {
+                app.report_error("ui operation", format!("Failed to save note: {error}"));
+                NoteSaveOutcome::Failed
+            }
+        }
+    }
+
+    fn finish_successful_save(&mut self, app: &mut LauncherApp) {
+        self.refresh_fast_derived();
+        self.refresh_heavy_derived(true, app.note_settings.backlinks_enabled);
+        self.mark_current_content_saved();
+        self.finish_save(app);
+        self.link_menu_targets_version = None;
+        self.invalidate_link_menu_results();
+        self.overwrite_prompt = false;
+        self.close_after_successful_save(app);
+    }
+
     fn finish_save(&self, app: &mut LauncherApp) {
         app.search();
-        app.focus_input();
         if app.enable_toasts {
             app.add_toast(Toast {
                 text: format!("Saved note {}", self.note.title).into(),
@@ -7392,6 +7946,15 @@ impl NotePanel {
                     let prepared =
                         self.prepare_current_table_edit(ctx, id, TableEditOperation::InsertTable);
                     self.report_markdown_edit_result(ctx, id, app, prepared);
+                    ui.close();
+                }
+                let custom_table = ui.button("Insert custom table…");
+                #[cfg(test)]
+                if ui.is_visible() && !ui.is_sizing_pass() {
+                    self.test_custom_table_insert_rect = Some(custom_table.rect);
+                }
+                if custom_table.clicked() {
+                    self.begin_custom_table_builder(ctx, id);
                     ui.close();
                 }
                 let table_context = self.current_table_context(ctx, id);
@@ -11681,6 +12244,22 @@ mod tests {
     }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
+        new_app_with_paths(ctx, "actions.json".into(), "settings.json".into())
+    }
+
+    fn new_app_in_dir(ctx: &egui::Context, data_dir: &std::path::Path) -> LauncherApp {
+        new_app_with_paths(
+            ctx,
+            data_dir.join("actions.json"),
+            data_dir.join("settings.json"),
+        )
+    }
+
+    fn new_app_with_paths(
+        ctx: &egui::Context,
+        actions_path: std::path::PathBuf,
+        settings_path: std::path::PathBuf,
+    ) -> LauncherApp {
         let mut settings = Settings::default();
         settings.paste_sequence.next_hotkey = None;
         settings.paste_sequence.cancel_hotkey = None;
@@ -11689,8 +12268,8 @@ mod tests {
             Arc::new(Vec::new()),
             0,
             PluginManager::new(),
-            "actions.json".into(),
-            "settings.json".into(),
+            actions_path.to_string_lossy().into_owned(),
+            settings_path.to_string_lossy().into_owned(),
             settings,
             None,
             None,
@@ -12978,6 +13557,271 @@ mod tests {
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
         );
         output.drop_without_applying_deltas();
+    }
+
+    fn rendered_note(ctx: &egui::Context, panel: &mut NotePanel, app: &mut LauncherApp) {
+        for _ in 0..3 {
+            render_panel_once(ctx, panel, app);
+        }
+    }
+
+    #[test]
+    fn studio_usability_note_close_failed_autosave_keeps_draft_and_table_builder_for_retry() {
+        let temp = TempNotesDir::new();
+        temp.write_note("alpha.md", "# Alpha\n\noriginal");
+        temp.refresh_cache();
+        let ctx = egui::Context::default();
+        let mut app = new_app_in_dir(&ctx, temp.dir.path());
+        app.note_save_on_close = true;
+        let note = crate::plugins::note::load_notes()
+            .unwrap()
+            .into_iter()
+            .find(|note| note.slug == "alpha")
+            .unwrap();
+        let old_slug = note.slug.clone();
+        let old_path = note.path.clone();
+        let mut panel = NotePanel::from_note(note);
+        panel.set_view_mode(NoteViewMode::Edit);
+        panel.replace_content_from_mutation("# Alpha\n\ndraft\r\nwith exact bytes".into(), 1.0);
+        rendered_note(&ctx, &mut panel, &mut app);
+        panel.test_begin_custom_table_builder(&ctx);
+        assert!(panel.custom_table_builder.is_some());
+
+        let invalid_notes_dir = temp.dir.path().join("not-a-directory.md");
+        fs::write(&invalid_notes_dir, "not a directory").unwrap();
+        unsafe { std::env::set_var("ML_NOTES_DIR", &invalid_notes_dir) };
+        panel.request_close(&mut app);
+
+        assert!(panel.open, "a failed auto-save must keep its note open");
+        assert!(panel.pending_close_after_save);
+        assert!(panel.discard_unsaved_prompt);
+        assert_eq!(panel.note_content(), "# Alpha\n\ndraft\r\nwith exact bytes");
+        assert_eq!(panel.note.slug, old_slug);
+        assert_eq!(panel.note.path, old_path);
+        assert_eq!(panel.test_saved_content_baseline(), "# Alpha\n\noriginal");
+        assert!(panel.custom_table_builder.is_some());
+
+        unsafe { std::env::set_var("ML_NOTES_DIR", temp.dir.path()) };
+        rendered_note(&ctx, &mut panel, &mut app);
+        let save_changes = panel
+            .test_save_changes_rect
+            .expect("failed auto-save exposes an explicit Save Changes retry");
+        click_panel_response(&ctx, &mut panel, &mut app, save_changes);
+
+        assert!(!panel.open);
+        assert!(!panel.pending_close_after_save);
+        assert!(!panel.has_unsaved_changes());
+        assert!(panel.custom_table_builder.is_none());
+        let disk_note = crate::plugins::note::load_notes()
+            .unwrap()
+            .into_iter()
+            .find(|note| note.slug == old_slug)
+            .unwrap();
+        assert_eq!(disk_note.content, "# Alpha\n\ndraft\r\nwith exact bytes");
+    }
+
+    #[test]
+    fn studio_usability_note_close_prompt_can_save_and_conflict_prompts_are_panel_owned() {
+        let temp = TempNotesDir::new();
+        let ctx = egui::Context::default();
+        let mut app = new_app_in_dir(&ctx, temp.dir.path());
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = true;
+        let mut panel = NotePanel::from_note(note_with_slug("Alpha", "alpha"));
+        panel.replace_content_from_mutation("# Alpha\n\nsaved from the prompt".into(), 1.0);
+        panel.request_close(&mut app);
+        assert!(panel.discard_unsaved_prompt);
+        rendered_note(&ctx, &mut panel, &mut app);
+        let save_changes = panel
+            .test_save_changes_rect
+            .expect("the dirty close prompt offers Save Changes");
+        click_panel_response(&ctx, &mut panel, &mut app, save_changes);
+        assert!(!panel.open);
+        assert_eq!(
+            crate::plugins::note::load_notes().unwrap()[0].content,
+            "# Alpha\n\nsaved from the prompt"
+        );
+
+        let mut conflict_panel = NotePanel::from_note(note_with_slug("Alpha", "alpha"));
+        conflict_panel.replace_content_from_mutation("# Alpha\n\nconflicting draft".into(), 1.0);
+        conflict_panel.request_close(&mut app);
+        rendered_note(&ctx, &mut conflict_panel, &mut app);
+        let save_changes = conflict_panel.test_save_changes_rect.unwrap();
+        click_panel_response(&ctx, &mut conflict_panel, &mut app, save_changes);
+        assert!(conflict_panel.pending_close_after_save && conflict_panel.overwrite_prompt);
+        assert!(!conflict_panel.discard_unsaved_prompt);
+        rendered_note(&ctx, &mut conflict_panel, &mut app);
+        let cancel = conflict_panel.test_conflict_cancel_rect.unwrap();
+        click_panel_response(&ctx, &mut conflict_panel, &mut app, cancel);
+        assert!(conflict_panel.open && conflict_panel.has_unsaved_changes());
+        assert!(!conflict_panel.pending_close_after_save);
+        assert!(!conflict_panel.overwrite_prompt && !conflict_panel.discard_unsaved_prompt);
+
+        let mut already_conflicted_panel = NotePanel::from_note(note_with_slug("Alpha", "alpha"));
+        already_conflicted_panel
+            .replace_content_from_mutation("# Alpha\n\nclose during conflict".into(), 1.0);
+        assert_eq!(
+            already_conflicted_panel.save(&mut app),
+            NoteSaveOutcome::AwaitingDecision
+        );
+        assert!(!already_conflicted_panel.pending_close_after_save);
+        already_conflicted_panel.request_close(&mut app);
+        assert!(already_conflicted_panel.open && already_conflicted_panel.overwrite_prompt);
+        assert!(already_conflicted_panel.pending_close_after_save);
+        assert!(!already_conflicted_panel.discard_unsaved_prompt);
+        rendered_note(&ctx, &mut already_conflicted_panel, &mut app);
+        let cancel = already_conflicted_panel.test_conflict_cancel_rect.unwrap();
+        click_panel_response(&ctx, &mut already_conflicted_panel, &mut app, cancel);
+        assert!(already_conflicted_panel.open && already_conflicted_panel.has_unsaved_changes());
+        assert!(!already_conflicted_panel.pending_close_after_save);
+        assert!(!already_conflicted_panel.overwrite_prompt);
+
+        let first = NotePanel::from_note(note_with_slug("Same Title", ""));
+        let second = NotePanel::from_note(note_with_slug("Same Title", ""));
+        assert_ne!(
+            first.test_note_prompt_ids(),
+            second.test_note_prompt_ids(),
+            "two unsaved notes with the same proposed title own separate prompt windows"
+        );
+    }
+
+    #[test]
+    fn studio_usability_note_close_save_as_new_publishes_identity_only_after_success() {
+        let temp = TempNotesDir::new();
+        temp.write_note("alpha.md", "# Alpha\n\nexisting");
+        temp.refresh_cache();
+        let ctx = egui::Context::default();
+        let mut app = new_app_in_dir(&ctx, temp.dir.path());
+        app.note_save_on_close = true;
+        let mut panel = NotePanel::from_note(note_with_slug("Alpha", "alpha"));
+        panel.note.content = "# Alpha\n\nnew draft".into();
+        let original_source = panel.note.content.clone();
+        let original_slug = panel.note.slug.clone();
+        let original_path = panel.note.path.clone();
+        panel.request_close(&mut app);
+        assert!(panel.open && panel.pending_close_after_save && panel.overwrite_prompt);
+        assert!(!panel.discard_unsaved_prompt);
+        assert_eq!(panel.note.slug, original_slug);
+        assert_eq!(panel.note.path, original_path);
+
+        let invalid_notes_dir = temp.dir.path().join("not-a-directory.md");
+        fs::write(&invalid_notes_dir, "not a directory").unwrap();
+        unsafe { std::env::set_var("ML_NOTES_DIR", &invalid_notes_dir) };
+        rendered_note(&ctx, &mut panel, &mut app);
+        let save_as_new = panel
+            .test_conflict_save_as_new_rect
+            .expect("conflict prompt exposes Save as New");
+        click_panel_response(&ctx, &mut panel, &mut app, save_as_new);
+
+        assert!(panel.open && panel.pending_close_after_save && panel.overwrite_prompt);
+        assert_eq!(panel.note.slug, original_slug);
+        assert_eq!(panel.note.path, original_path);
+        assert_eq!(panel.note.content, original_source);
+        assert!(panel.has_unsaved_changes());
+
+        unsafe { std::env::set_var("ML_NOTES_DIR", temp.dir.path()) };
+        rendered_note(&ctx, &mut panel, &mut app);
+        let cancel = panel
+            .test_conflict_cancel_rect
+            .expect("the conflict prompt exposes Cancel");
+        click_panel_response(&ctx, &mut panel, &mut app, cancel);
+        assert!(panel.open && panel.has_unsaved_changes());
+        assert!(!panel.pending_close_after_save && !panel.overwrite_prompt);
+        assert_eq!(panel.note.slug, original_slug);
+        assert_eq!(panel.note.path, original_path);
+    }
+
+    #[test]
+    fn studio_usability_note_close_successful_save_as_new_closes_with_new_identity() {
+        let temp = TempNotesDir::new();
+        temp.write_note("alpha.md", "# Alpha\n\nexisting");
+        temp.refresh_cache();
+        let ctx = egui::Context::default();
+        let mut app = new_app_in_dir(&ctx, temp.dir.path());
+        app.note_save_on_close = true;
+        let mut panel = NotePanel::from_note(note_with_slug("Alpha", "alpha"));
+        panel.note.content = "# Alpha\n\nsecond draft".into();
+        panel.request_close(&mut app);
+        assert!(panel.open && panel.overwrite_prompt && panel.pending_close_after_save);
+        assert!(!panel.discard_unsaved_prompt);
+        rendered_note(&ctx, &mut panel, &mut app);
+        let save_as_new = panel.test_conflict_save_as_new_rect.unwrap();
+        click_panel_response(&ctx, &mut panel, &mut app, save_as_new);
+
+        assert!(!panel.open);
+        assert!(!panel.pending_close_after_save);
+        assert!(!panel.has_unsaved_changes());
+        assert_ne!(panel.note.slug, "");
+        assert!(panel.note.path.exists());
+        let notes = crate::plugins::note::load_notes().unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.content == "# Alpha\n\nsecond draft")
+        );
+    }
+
+    #[test]
+    fn studio_usability_note_close_with_both_options_disabled_releases_note_focus_without_saving() {
+        let temp = TempNotesDir::new();
+        temp.write_note("alpha.md", "# Alpha\n\nBody");
+        temp.refresh_cache();
+        let ctx = egui::Context::default();
+        let mut app = new_app_in_dir(&ctx, temp.dir.path());
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = false;
+        let note = crate::plugins::note::load_notes()
+            .unwrap()
+            .into_iter()
+            .find(|note| note.slug == "alpha")
+            .unwrap();
+        let mut panel = NotePanel::from_note(note);
+        panel.set_view_mode(NoteViewMode::Edit);
+        panel.replace_content_from_mutation("# Alpha\n\ndraft stays unsaved".into(), 1.0);
+        rendered_note(&ctx, &mut panel, &mut app);
+        let editor_id = panel.last_textedit_id.unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        render_panel_once(&ctx, &mut panel, &mut app);
+        assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
+
+        panel.request_close(&mut app);
+
+        assert!(!panel.open);
+        assert!(!panel.pending_close_after_save);
+        assert_eq!(ctx.memory(|memory| memory.focused()), None);
+        assert!(panel.has_unsaved_changes());
+        assert_eq!(
+            crate::plugins::note::load_notes().unwrap()[0].content,
+            "# Alpha\n\nBody"
+        );
+
+        panel.open = true;
+        let query_id = egui::Id::new("query_input");
+        let mut query_text = "unrelated root query".to_owned();
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 650.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut query_text).id(query_id))
+                        .request_focus();
+                });
+            },
+        )
+        .drop_without_applying_deltas();
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+
+        panel.request_close(&mut app);
+
+        assert!(!panel.open);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
     }
 
     #[test]
@@ -16548,6 +17392,159 @@ More text.
         assert_eq!(tables[0].rows().len(), 3);
         assert_eq!(panel.replacement_undo_boundaries.len(), 1);
         ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn custom_table_builder_refuses_a_changed_origin_source() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let id = egui::Id::new("custom_table_stale_source");
+        let original = "Before selected text After";
+        let mut panel = NotePanel::from_note(empty_note(original));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
+        let selection_start = original.find("selected").unwrap();
+        let selection_end = selection_start + "selected text".len();
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(original[..selection_start].chars().count()),
+                egui::text::CCursor::new(original[..selection_end].chars().count()),
+            )));
+        state.store(&ctx, id);
+        panel.begin_custom_table_builder(&ctx, id);
+        assert_eq!(
+            panel.test_custom_table_origin_insert_at(),
+            Some(selection_start)
+        );
+
+        panel.replace_content_after_external_mutation("Changed by another editor".into());
+        panel.stage_custom_table_insertion(&ctx);
+
+        assert_eq!(panel.note_content(), "Changed by another editor");
+        assert!(panel.pending_root_effect.is_none());
+        assert_eq!(panel.replacement_undo_boundaries.len(), 0);
+        assert!(
+            panel
+                .custom_table_builder
+                .as_ref()
+                .and_then(|builder| builder.error.as_ref())
+                .is_some_and(|error| error.contains("changed"))
+        );
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn discarded_custom_table_insert_leaves_builder_retryable() {
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("discarded_custom_table_editor");
+        let source = "Before table After";
+        let mut panel = NotePanel::from_note(empty_note(source));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(editor_id);
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new("Before ".chars().count()),
+            )));
+        state.store(&ctx, editor_id);
+        panel.begin_custom_table_builder(&ctx, editor_id);
+
+        let mut discard_requested = false;
+        ctx.run_ui(Default::default(), |ctx| {
+            panel.stage_custom_table_insertion(ctx);
+            if !discard_requested {
+                ctx.request_discard("discard the pending custom table insertion");
+                discard_requested = true;
+            }
+        })
+        .drop_without_applying_deltas();
+
+        assert!(panel.on_ui_frame_complete(&ctx).is_none());
+        assert!(panel.pending_root_effect.is_none());
+        assert!(
+            panel
+                .custom_table_builder
+                .as_ref()
+                .is_some_and(|builder| !builder.pending_insert && builder.error.is_none())
+        );
+        assert_eq!(panel.note_content(), source);
+
+        ctx.run_ui(Default::default(), |ctx| {
+            panel.stage_custom_table_insertion(ctx)
+        })
+        .drop_without_applying_deltas();
+        let effect = panel
+            .on_ui_frame_complete(&ctx)
+            .expect("the retry is retained by its root frame");
+        let NotePanelEffect::InsertCustomTable(request) = effect else {
+            panic!("retry produces a custom table insertion effect");
+        };
+        panel
+            .complete_custom_table_insertion(&ctx, request)
+            .expect("the retry applies to the captured source");
+
+        assert!(
+            panel
+                .note_content()
+                .starts_with("Before \n\n| Column 1 | Column 2 |")
+        );
+        assert!(panel.note_content().ends_with("\n\ntable After"));
+        assert_eq!(panel.test_replacement_history_counts(), (1, 0));
+        assert!(panel.custom_table_builder.is_none());
+    }
+
+    #[test]
+    fn custom_table_builder_keeps_insert_and_cancel_visible_in_a_small_window() {
+        let ctx = egui::Context::default();
+        let mut panel = NotePanel::from_note(empty_note("Small screen draft"));
+        panel.view_mode = NoteViewMode::Edit;
+        let editor_id = egui::Id::new("small_screen_custom_table_editor");
+        panel.last_textedit_id = Some(editor_id);
+        let mut editor_state = egui::widgets::text_edit::TextEditState::default();
+        editor_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(0),
+            )));
+        editor_state.store(&ctx, editor_id);
+        panel.begin_custom_table_builder(&ctx, editor_id);
+        let builder = panel
+            .custom_table_builder
+            .as_mut()
+            .expect("the builder opens from the active editor");
+        builder.columns = 24;
+        builder.header_cells = (1..=24).map(|column| format!("Column {column}")).collect();
+        builder.data_rows = 12;
+
+        for _ in 0..3 {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(420.0, 360.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| panel.show_custom_table_builder(ctx),
+            )
+            .drop_without_applying_deltas();
+        }
+
+        let window = panel
+            .test_custom_table_builder_rect()
+            .expect("the resizable builder fits the constrained screen");
+        let insert = panel
+            .test_custom_table_builder_insert_rect()
+            .expect("Insert remains reachable below the scrolling names");
+        let cancel = panel
+            .test_custom_table_builder_cancel_rect()
+            .expect("Cancel remains reachable below the scrolling names");
+        assert!(window.contains_rect(insert));
+        assert!(window.contains_rect(cancel));
     }
 
     #[test]

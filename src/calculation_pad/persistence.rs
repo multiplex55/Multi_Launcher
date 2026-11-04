@@ -5,11 +5,13 @@ use crate::common::atomic_file::save_atomic;
 use crate::platform::app_data::AppDataRoot;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 pub const MAX_SAVED_DOCUMENTS: usize = 128;
 pub const MAX_STORED_DOCUMENT_BYTES: usize = 512 * 1024;
@@ -17,7 +19,501 @@ pub const CURRENT_DOCUMENT_FORMAT_VERSION: u32 = 1;
 
 const CALCULATION_PAD_DIRECTORY: &str = "calculation_pad";
 const DOCUMENTS_DIRECTORY: &str = "documents";
+const RECOVERY_FILE: &str = "last_source.json";
 const MAX_DIRECTORY_ENTRIES: usize = MAX_SAVED_DOCUMENTS * 4;
+pub const CURRENT_RECOVERY_FORMAT_VERSION: u32 = 1;
+pub const MAX_STORED_RECOVERY_BYTES: usize = 512 * 1024;
+const RECOVERY_WRITE_DEBOUNCE: Duration = Duration::from_millis(350);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PadRecoverySnapshot {
+    pub document_id: DocumentId,
+    pub revision: u64,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PadRecoveryWriteFailure {
+    pub document_id: DocumentId,
+    pub revision: u64,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StoredRecovery {
+    format_version: u32,
+    document_id: DocumentId,
+    revision: u64,
+    source: String,
+}
+
+/// A single bounded source-only recovery record, separate from saved pads.
+#[derive(Clone)]
+pub struct PadRecoveryStore {
+    root: PathBuf,
+    pad_directory: PathBuf,
+    path: PathBuf,
+    transaction: Arc<Mutex<()>>,
+    #[cfg(test)]
+    test_before_write: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl PadRecoveryStore {
+    pub fn new(root: &AppDataRoot) -> Self {
+        let root = root.path().to_path_buf();
+        let pad_directory = root.join(CALCULATION_PAD_DIRECTORY);
+        let path = pad_directory.join(RECOVERY_FILE);
+        let transaction = path_transaction(&pad_directory);
+        Self {
+            root,
+            pad_directory,
+            path,
+            transaction,
+            #[cfg(test)]
+            test_before_write: None,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn load(&self) -> anyhow::Result<Option<PadRecoverySnapshot>> {
+        let _transaction = self.lock_transaction();
+        if !self.ensure_existing_directory()? {
+            return Ok(None);
+        }
+        let Some(bytes) = read_recovery_limited(&self.path)? else {
+            return Ok(None);
+        };
+        let stored: StoredRecovery = serde_json::from_slice(&bytes)
+            .map_err(|error| anyhow::anyhow!("invalid Calculation Pad recovery JSON: {error}"))?;
+        if stored.format_version != CURRENT_RECOVERY_FORMAT_VERSION {
+            anyhow::bail!(
+                "unsupported Calculation Pad recovery version {} (supported version is {})",
+                stored.format_version,
+                CURRENT_RECOVERY_FORMAT_VERSION
+            );
+        }
+        if stored.document_id.0 == 0 {
+            anyhow::bail!("Calculation Pad recovery document identity is invalid");
+        }
+        validate_recovery_source(&stored.source)?;
+        Ok(Some(PadRecoverySnapshot {
+            document_id: stored.document_id,
+            revision: stored.revision,
+            source: stored.source,
+        }))
+    }
+
+    fn save(&self, snapshot: &PadRecoverySnapshot) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = &self.test_before_write {
+            hook();
+        }
+        validate_recovery_source(&snapshot.source)?;
+        if snapshot.document_id.0 == 0 {
+            anyhow::bail!("Calculation Pad recovery document identity is invalid");
+        }
+        let stored = StoredRecovery {
+            format_version: CURRENT_RECOVERY_FORMAT_VERSION,
+            document_id: snapshot.document_id,
+            revision: snapshot.revision,
+            source: snapshot.source.clone(),
+        };
+        let bytes = serde_json::to_vec(&stored)
+            .map_err(|error| anyhow::anyhow!("encode Calculation Pad recovery: {error}"))?;
+        if bytes.len() > MAX_STORED_RECOVERY_BYTES {
+            anyhow::bail!(
+                "Calculation Pad recovery exceeds the {MAX_STORED_RECOVERY_BYTES}-byte stored limit"
+            );
+        }
+        let _transaction = self.lock_transaction();
+        self.ensure_write_directory()?;
+        crate::common::atomic_file::save_atomic(&self.path, &bytes)
+            .map_err(|error| anyhow::anyhow!("write Calculation Pad recovery: {error}"))?;
+        Ok(())
+    }
+
+    fn clear(&self) -> anyhow::Result<()> {
+        let _transaction = self.lock_transaction();
+        if !self.ensure_existing_directory()? {
+            return Ok(());
+        }
+        match fs::symlink_metadata(&self.path) {
+            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+                fs::remove_file(&self.path)
+                    .map_err(|error| anyhow::anyhow!("clear Calculation Pad recovery: {error}"))?;
+            }
+            Ok(_) => anyhow::bail!(
+                "refusing to remove unsafe Calculation Pad recovery path {}",
+                self.path.display()
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "inspect Calculation Pad recovery path {}: {error}",
+                    self.path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn lock_transaction(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.transaction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn ensure_existing_directory(&self) -> anyhow::Result<bool> {
+        match fs::metadata(&self.root) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => anyhow::bail!("unsafe Calculation Pad recovery root"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        match fs::symlink_metadata(&self.pad_directory) {
+            Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+            Ok(_) => anyhow::bail!("unsafe Calculation Pad recovery directory"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn ensure_write_directory(&self) -> anyhow::Result<()> {
+        fs::create_dir_all(&self.root)?;
+        match fs::symlink_metadata(&self.pad_directory) {
+            Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+            Ok(_) => anyhow::bail!("unsafe Calculation Pad recovery directory"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&self.pad_directory)?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn validate_recovery_source(source: &str) -> anyhow::Result<()> {
+    if source.len() > MAX_DOCUMENT_BYTES {
+        anyhow::bail!("recovered source exceeds the {MAX_DOCUMENT_BYTES}-byte limit");
+    }
+    let lines = source.split('\n').count();
+    if lines > MAX_SOURCE_LINES {
+        anyhow::bail!("recovered source exceeds the {MAX_SOURCE_LINES}-line limit");
+    }
+    Ok(())
+}
+
+fn read_recovery_limited(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("unsafe Calculation Pad recovery file");
+    }
+    if metadata.len() > MAX_STORED_RECOVERY_BYTES as u64 {
+        anyhow::bail!(
+            "Calculation Pad recovery exceeds the {MAX_STORED_RECOVERY_BYTES}-byte stored limit"
+        );
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)?
+        .take((MAX_STORED_RECOVERY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_STORED_RECOVERY_BYTES {
+        anyhow::bail!(
+            "Calculation Pad recovery exceeds the {MAX_STORED_RECOVERY_BYTES}-byte stored limit"
+        );
+    }
+    Ok(Some(bytes))
+}
+
+enum RecoveryCommand {
+    Save {
+        snapshot: PadRecoverySnapshot,
+        due: Option<Instant>,
+        reply: Option<mpsc::Sender<anyhow::Result<()>>>,
+    },
+    Clear {
+        reply: Option<mpsc::Sender<anyhow::Result<()>>>,
+    },
+    Load(mpsc::Sender<anyhow::Result<Option<PadRecoverySnapshot>>>),
+    Flush(mpsc::Sender<anyhow::Result<Vec<PadRecoveryWriteFailure>>>),
+    Shutdown(mpsc::Sender<anyhow::Result<Vec<PadRecoveryWriteFailure>>>),
+}
+
+impl RecoveryCommand {
+    fn is_fence(&self) -> bool {
+        matches!(self, Self::Load(_) | Self::Flush(_) | Self::Shutdown(_))
+    }
+}
+
+#[derive(Default)]
+struct RecoveryQueue {
+    commands: VecDeque<RecoveryCommand>,
+    stopped: bool,
+    async_errors: Vec<PadRecoveryWriteFailure>,
+}
+
+/// One serialized worker coalesces pending source writes while preserving
+/// ordered clear/read/flush barriers.
+pub struct PadRecoveryWriter {
+    store: PadRecoveryStore,
+    queue: Arc<(Mutex<RecoveryQueue>, Condvar)>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl PadRecoveryWriter {
+    pub fn new(store: PadRecoveryStore) -> Self {
+        Self {
+            store,
+            queue: Arc::new((Mutex::new(RecoveryQueue::default()), Condvar::new())),
+            worker: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_write_hook(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.store.test_before_write = Some(hook);
+    }
+
+    pub fn schedule(&mut self, snapshot: PadRecoverySnapshot) -> anyhow::Result<()> {
+        self.enqueue_mutation(RecoveryCommand::Save {
+            snapshot,
+            due: Some(Instant::now() + RECOVERY_WRITE_DEBOUNCE),
+            reply: None,
+        })
+    }
+
+    pub fn save_now(&mut self, snapshot: PadRecoverySnapshot) -> anyhow::Result<()> {
+        let (sender, receiver) = mpsc::channel();
+        self.enqueue_mutation(RecoveryCommand::Save {
+            snapshot,
+            due: None,
+            reply: Some(sender),
+        })?;
+        receiver
+            .recv()
+            .map_err(|_| anyhow::anyhow!("Calculation Pad recovery writer stopped"))?
+    }
+
+    pub fn clear_now(&mut self) -> anyhow::Result<()> {
+        let (sender, receiver) = mpsc::channel();
+        self.enqueue_mutation(RecoveryCommand::Clear {
+            reply: Some(sender),
+        })?;
+        receiver
+            .recv()
+            .map_err(|_| anyhow::anyhow!("Calculation Pad recovery writer stopped"))?
+    }
+
+    pub fn load(&mut self) -> anyhow::Result<Option<PadRecoverySnapshot>> {
+        let (sender, receiver) = mpsc::channel();
+        self.enqueue_fence(RecoveryCommand::Load(sender))?;
+        receiver
+            .recv()
+            .map_err(|_| anyhow::anyhow!("Calculation Pad recovery writer stopped"))?
+    }
+
+    pub fn flush(&mut self) -> anyhow::Result<Vec<PadRecoveryWriteFailure>> {
+        if self.worker.is_none() {
+            return Ok(Vec::new());
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.enqueue_fence(RecoveryCommand::Flush(sender))?;
+        receiver
+            .recv()
+            .map_err(|_| anyhow::anyhow!("Calculation Pad recovery writer stopped"))?
+    }
+
+    pub fn take_async_errors(&mut self) -> Vec<PadRecoveryWriteFailure> {
+        let (state, _) = &*self.queue;
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut state.async_errors)
+    }
+
+    pub fn shutdown(&mut self) -> anyhow::Result<Vec<PadRecoveryWriteFailure>> {
+        if self.worker.is_none() {
+            return Ok(Vec::new());
+        }
+        let (sender, receiver) = mpsc::channel();
+        let enqueue = self.enqueue_fence(RecoveryCommand::Shutdown(sender));
+        let worker = self
+            .worker
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Calculation Pad recovery worker was not started"))?;
+        let result = match enqueue {
+            Ok(()) => receiver
+                .recv()
+                .map_err(|_| anyhow::anyhow!("Calculation Pad recovery writer stopped"))?,
+            Err(error) => Err(error),
+        };
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Calculation Pad recovery writer panicked"))?;
+        result
+    }
+
+    fn enqueue_mutation(&mut self, command: RecoveryCommand) -> anyhow::Result<()> {
+        self.ensure_worker()?;
+        let (state, changed) = &*self.queue;
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.stopped {
+            anyhow::bail!("Calculation Pad recovery writer is shut down");
+        }
+        let last_fence = state.commands.iter().rposition(RecoveryCommand::is_fence);
+        state
+            .commands
+            .truncate(last_fence.map_or(0, |index| index + 1));
+        state.commands.push_back(command);
+        changed.notify_one();
+        Ok(())
+    }
+
+    fn enqueue_fence(&mut self, command: RecoveryCommand) -> anyhow::Result<()> {
+        self.ensure_worker()?;
+        let (state, changed) = &*self.queue;
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.stopped {
+            anyhow::bail!("Calculation Pad recovery writer is shut down");
+        }
+        state.commands.push_back(command);
+        changed.notify_one();
+        Ok(())
+    }
+
+    fn ensure_worker(&mut self) -> anyhow::Result<()> {
+        if self.worker.is_some() {
+            return Ok(());
+        }
+        let store = self.store.clone();
+        let queue = Arc::clone(&self.queue);
+        let worker = thread::Builder::new()
+            .name("calculation-pad-recovery".into())
+            .spawn(move || recovery_worker(store, queue))
+            .map_err(|error| anyhow::anyhow!("start Calculation Pad recovery writer: {error}"))?;
+        self.worker = Some(worker);
+        Ok(())
+    }
+}
+
+impl Drop for PadRecoveryWriter {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+fn recovery_worker(store: PadRecoveryStore, shared: Arc<(Mutex<RecoveryQueue>, Condvar)>) {
+    loop {
+        let command = {
+            let (state, changed) = &*shared;
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loop {
+                let Some(front) = state.commands.front() else {
+                    if state.stopped {
+                        return;
+                    }
+                    state = changed
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    continue;
+                };
+                if let RecoveryCommand::Save { due: Some(due), .. } = front
+                    && state.commands.len() == 1
+                    && *due > Instant::now()
+                {
+                    let remaining = due.saturating_duration_since(Instant::now());
+                    let (next, _) = changed
+                        .wait_timeout(state, remaining)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state = next;
+                    continue;
+                }
+                break state.commands.pop_front().expect("front was present");
+            }
+        };
+
+        match command {
+            RecoveryCommand::Save {
+                snapshot, reply, ..
+            } => {
+                let result = store.save(&snapshot);
+                finish_recovery_command(
+                    &shared,
+                    result,
+                    reply,
+                    Some((snapshot.document_id, snapshot.revision)),
+                );
+            }
+            RecoveryCommand::Clear { reply } => {
+                let result = store.clear();
+                finish_recovery_command(&shared, result, reply, None);
+            }
+            RecoveryCommand::Load(reply) => {
+                let _ = reply.send(store.load());
+            }
+            RecoveryCommand::Flush(reply) => {
+                let _ = reply.send(recovery_barrier_result(&shared));
+            }
+            RecoveryCommand::Shutdown(reply) => {
+                let _ = reply.send(recovery_barrier_result(&shared));
+                let (state, changed) = &*shared;
+                state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .stopped = true;
+                changed.notify_all();
+                return;
+            }
+        }
+    }
+}
+
+fn recovery_barrier_result(
+    shared: &Arc<(Mutex<RecoveryQueue>, Condvar)>,
+) -> anyhow::Result<Vec<PadRecoveryWriteFailure>> {
+    let (state, _) = &**shared;
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(std::mem::take(&mut state.async_errors))
+}
+
+fn finish_recovery_command(
+    shared: &Arc<(Mutex<RecoveryQueue>, Condvar)>,
+    result: anyhow::Result<()>,
+    reply: Option<mpsc::Sender<anyhow::Result<()>>>,
+    failure_identity: Option<(DocumentId, u64)>,
+) {
+    if let Some(reply) = reply {
+        let _ = reply.send(result);
+    } else if let (Err(error), Some((document_id, revision))) = (result, failure_identity) {
+        let (state, changed) = &**shared;
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .async_errors
+            .push(PadRecoveryWriteFailure {
+                document_id,
+                revision,
+                message: error.to_string(),
+            });
+        changed.notify_all();
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -730,16 +1226,150 @@ fn path_transaction(path: &Path) -> Arc<Mutex<()>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CURRENT_DOCUMENT_FORMAT_VERSION, DocumentId, LineId, MAX_DOCUMENT_BYTES,
-        MAX_SAVED_DOCUMENTS, MAX_SOURCE_LINES, MAX_STORED_DOCUMENT_BYTES, PadDocumentStore,
-        PadStoreError,
+        CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,
+        MAX_DOCUMENT_BYTES, MAX_SAVED_DOCUMENTS, MAX_SOURCE_LINES, MAX_STORED_DOCUMENT_BYTES,
+        MAX_STORED_RECOVERY_BYTES, PadDocumentStore, PadRecoverySnapshot, PadRecoveryStore,
+        PadRecoveryWriter, PadStoreError,
     };
     use crate::platform::app_data::AppDataRoot;
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
     fn fixture() -> (tempfile::TempDir, PadDocumentStore) {
         let directory = tempfile::tempdir().unwrap();
         let root = AppDataRoot::from_path(directory.path().join("app-data"));
         (directory, PadDocumentStore::new(&root))
+    }
+
+    fn recovery_fixture() -> (tempfile::TempDir, AppDataRoot, PadRecoveryStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(directory.path().join("app-data"));
+        let store = PadRecoveryStore::new(&root);
+        (directory, root, store)
+    }
+
+    fn recovery_snapshot(source: &str, revision: u64) -> PadRecoverySnapshot {
+        PadRecoverySnapshot {
+            document_id: DocumentId(41),
+            revision,
+            source: source.to_owned(),
+        }
+    }
+
+    #[test]
+    fn recovery_round_trips_exact_bounded_source_and_rejects_bad_versions_and_sizes() {
+        let (_directory, _root, store) = recovery_fixture();
+        let snapshot = recovery_snapshot("π = 2\r\n1 / 0\r\n", 8);
+
+        store.save(&snapshot).unwrap();
+
+        assert_eq!(store.load().unwrap(), Some(snapshot));
+        let encoded = std::fs::read(store.path()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["format_version"], CURRENT_RECOVERY_FORMAT_VERSION);
+        value["format_version"] = serde_json::json!(CURRENT_RECOVERY_FORMAT_VERSION + 1);
+        std::fs::write(store.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            store
+                .load()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
+
+        std::fs::write(store.path(), vec![b' '; MAX_STORED_RECOVERY_BYTES + 1]).unwrap();
+        assert!(
+            store
+                .load()
+                .unwrap_err()
+                .to_string()
+                .contains("stored limit")
+        );
+    }
+
+    #[test]
+    fn recovery_record_never_changes_a_named_saved_pad() {
+        let (_directory, root, recovery) = recovery_fixture();
+        let named = PadDocumentStore::new(&root);
+        let source = "saved = 10".to_owned();
+        let (saved, _) = named
+            .save_as("Named", source.clone(), vec![LineId(1)], 2)
+            .unwrap();
+        let path = named.document_path(saved.id);
+        let original_bytes = std::fs::read(&path).unwrap();
+
+        recovery.save(&recovery_snapshot("draft = 20", 3)).unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), original_bytes);
+        assert_eq!(named.open(saved.id).unwrap().stored.source, source);
+    }
+
+    #[test]
+    fn recovery_clear_barrier_follows_an_in_flight_delayed_write() {
+        let (_directory, _root, store) = recovery_fixture();
+        let gate = std::sync::Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let hook_gate = std::sync::Arc::clone(&gate);
+        let mut writer = PadRecoveryWriter::new(store.clone());
+        writer.set_before_write_hook(std::sync::Arc::new(move || {
+            let (state, changed) = &*hook_gate;
+            let mut state = state.lock().unwrap();
+            state.0 = true;
+            changed.notify_all();
+            while !state.1 {
+                state = changed.wait(state).unwrap();
+            }
+        }));
+
+        writer
+            .schedule(recovery_snapshot("discard me = 1", 4))
+            .unwrap();
+        let (state, changed) = &*gate;
+        let mut state = state.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !state.0 && Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let (next, _) = changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+        }
+        assert!(
+            state.0,
+            "the recovery write did not enter its delayed section"
+        );
+        drop(state);
+
+        let queue = std::sync::Arc::clone(&writer.queue);
+        let writer = std::sync::Arc::new(Mutex::new(writer));
+        let clear_writer = std::sync::Arc::clone(&writer);
+        let clear = std::thread::spawn(move || clear_writer.lock().unwrap().clear_now());
+        let (queued, queued_changed) = &*queue;
+        let mut queued = queued.lock().unwrap();
+        while !queued
+            .commands
+            .iter()
+            .any(|command| matches!(command, super::RecoveryCommand::Clear { .. }))
+        {
+            queued = queued_changed.wait(queued).unwrap();
+        }
+        drop(queued);
+
+        let release_gate = std::sync::Arc::clone(&gate);
+        let release = std::thread::spawn(move || {
+            let (state, changed) = &*release_gate;
+            let mut state = state.lock().unwrap();
+            state.1 = true;
+            changed.notify_all();
+        });
+        clear.join().unwrap().unwrap();
+        release.join().unwrap();
+        assert_eq!(store.load().unwrap(), None);
+
+        let mut writer = writer.lock().unwrap();
+        writer.save_now(recovery_snapshot("", 0)).unwrap();
+        assert_eq!(
+            store.load().unwrap().map(|record| record.source),
+            Some(String::new())
+        );
+        writer.shutdown().unwrap();
     }
 
     #[test]

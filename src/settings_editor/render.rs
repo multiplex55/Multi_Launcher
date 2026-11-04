@@ -3559,6 +3559,15 @@ impl SettingsEditor {
             "Require confirm for destructive actions",
         );
 
+        ui.label(egui::RichText::new("Draft recovery").strong());
+        targets.checkbox(
+            ui,
+            &mut self.calculation_pad_remember_source,
+            setting_ids::CALCULATION_PAD_REMEMBER_SOURCE,
+            "Remember last Calculation Pad source",
+        );
+        ui.small("Restored source remains an unsaved draft; saved Calculation Pad documents are kept separately.");
+
         ui.label(egui::RichText::new("Notifications and errors").strong());
         targets.checkbox(
             ui,

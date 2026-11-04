@@ -113,6 +113,7 @@ impl SettingsEditor {
             note_save_on_close: settings.note_save_on_close,
             note_confirm_discard_unsaved_changes: settings.note_confirm_discard_unsaved_changes,
             note_always_overwrite: settings.note_always_overwrite,
+            calculation_pad_remember_source: settings.calculation_pad_remember_source,
             note_images_as_links: settings.note_images_as_links,
             note_show_details: settings.note_show_details,
             note_more_limit: settings.note_more_limit,
@@ -320,6 +321,7 @@ impl SettingsEditor {
             note_save_on_close: self.note_save_on_close,
             note_confirm_discard_unsaved_changes: self.note_confirm_discard_unsaved_changes,
             note_always_overwrite: self.note_always_overwrite,
+            calculation_pad_remember_source: self.calculation_pad_remember_source,
             note_images_as_links: self.note_images_as_links,
             note_show_details: self.note_show_details,
             note_more_limit: self.note_more_limit,
@@ -434,6 +436,19 @@ mod tests {
     use crate::plugins::note::NotePluginSettings;
     use crate::plugins::screenshot::ScreenshotPluginSettings;
     use crate::settings::Settings;
+
+    #[test]
+    fn calculation_pad_recovery_preference_round_trips_through_the_editor() {
+        let mut settings = Settings::default();
+        assert!(!settings.calculation_pad_remember_source);
+        settings.calculation_pad_remember_source = true;
+        let mut editor = SettingsEditor::from_settings(&settings);
+        assert!(editor.calculation_pad_remember_source);
+
+        editor.calculation_pad_remember_source = false;
+        let saved = editor.to_settings(&settings).expect("valid settings draft");
+        assert!(!saved.calculation_pad_remember_source);
+    }
 
     #[test]
     fn utility_dialog_size_selection_is_session_only_and_save_preserves_latest_sizes() {

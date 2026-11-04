@@ -1079,6 +1079,7 @@ pub struct LauncherApp {
     pub(crate) utility_dialog_size_manager: utility_dialog_size::UtilityDialogSizeManager,
     pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
     pub(crate) settings_save_reconciliation_required: bool,
+    pub(crate) pending_calculation_pad_recovery_preference: Option<bool>,
     /// Persistence failure captured before GUI startup. A later recovery UI can
     /// consume this without re-reading or replacing the damaged settings file.
     pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
@@ -1406,9 +1407,10 @@ struct PendingShowQueryFocus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct QueryFocusNotesContext {
+struct QueryFocusOrdinaryContext {
     notes_dialog_open: bool,
     note_panel_layers: std::collections::HashSet<egui::LayerId>,
+    ordinary_panel_layers: std::collections::HashSet<egui::LayerId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1416,7 +1418,8 @@ struct QueryFocusSession {
     origin: QueryFocusOrigin,
     visibility_revision: u64,
     root_identity: (usize, u64),
-    notes_context: QueryFocusNotesContext,
+    ordinary_context: QueryFocusOrdinaryContext,
+    root_jump_session_generation: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3172,7 +3175,9 @@ impl LauncherApp {
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
-        let calculation_pad_dialog = CalculationPadDialog::new(&data_root);
+        let mut calculation_pad_dialog = CalculationPadDialog::new(&data_root);
+        calculation_pad_dialog
+            .initialize_recovery_preference(settings.calculation_pad_remember_source);
         let convert_panel = ConvertPanel::with_data_root(&data_root);
         let diagram_studio_dialog = DiagramStudioDialog::new(&data_root);
         let markdown_studio_dialog = MarkdownStudioDialog::new(&data_root);
@@ -3573,18 +3578,18 @@ impl LauncherApp {
         let hotfolder_runtime = match init_policy {
             LauncherInitPolicy::Production => {
                 hotfolder_runtime::HotFolderRuntimeDriver::new_with_activity(
-                    data_root,
+                    data_root.clone(),
                     hotfolder_action_adapter.clone(),
                     activity_center.clone(),
                 )
             }
             LauncherInitPolicy::IsolatedTest | LauncherInitPolicy::IsolatedWatcherTest => {
-                hotfolder_runtime::HotFolderRuntimeDriver::dormant(data_root)
+                hotfolder_runtime::HotFolderRuntimeDriver::dormant(data_root.clone())
             }
         };
         #[cfg(not(test))]
         let hotfolder_runtime = hotfolder_runtime::HotFolderRuntimeDriver::new_with_activity(
-            data_root,
+            data_root.clone(),
             hotfolder_action_adapter.clone(),
             activity_center.clone(),
         );
@@ -3681,6 +3686,7 @@ impl LauncherApp {
             utility_dialog_size_manager,
             pending_settings_save: None,
             settings_save_reconciliation_required: false,
+            pending_calculation_pad_recovery_preference: None,
             startup_settings_diagnostic: None,
             actions_persistence_diagnostic: None,
             startup_recovery: Default::default(),
@@ -3705,7 +3711,7 @@ impl LauncherApp {
             dashboard_default_location: settings.dashboard.default_location.clone(),
             reduce_dashboard_work_when_unfocused: settings.reduce_dashboard_work_when_unfocused,
             show_dashboard_diagnostics: settings.show_dashboard_diagnostics,
-            dashboard_editor: DashboardEditorDialog::default(),
+            dashboard_editor: DashboardEditorDialog::with_profile_root(&data_root),
             show_dashboard_editor: false,
             rx,
             event_sink,
@@ -10917,15 +10923,6 @@ mod tests {
     }
 
     #[test]
-    fn launcher_enter_activation_requires_query_focus_and_closed_file_search() {
-        assert!(!LauncherApp::launcher_enter_activation_enabled(
-            false, false
-        ));
-        assert!(LauncherApp::launcher_enter_activation_enabled(true, false));
-        assert!(!LauncherApp::launcher_enter_activation_enabled(true, true));
-    }
-
-    #[test]
     fn fs_query_text_does_not_imply_launcher_keyboard_ownership() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -10939,23 +10936,6 @@ mod tests {
         app.selected = Some(0);
 
         assert!(!LauncherApp::launcher_query_keyboard_enabled(false));
-        assert!(!LauncherApp::launcher_enter_activation_enabled(
-            false,
-            app.file_search_dialog.open
-        ));
-    }
-
-    #[test]
-    fn open_file_search_disables_launcher_enter_activation() {
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        app.query = "fs".into();
-        app.file_search_dialog.open = true;
-
-        assert!(!LauncherApp::launcher_enter_activation_enabled(
-            true,
-            app.file_search_dialog.open
-        ));
     }
 
     #[test]

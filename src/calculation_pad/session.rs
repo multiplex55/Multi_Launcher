@@ -422,6 +422,54 @@ impl CalculationPadSession {
         self.commit_source_edit(source, line_ids, next_line_id)
     }
 
+    /// Restores an unnamed recovery draft over the session's initial blank
+    /// document. Recovery starts with fresh line identities, no undo history,
+    /// and the blank source as its saved baseline so restored text stays dirty.
+    pub(crate) fn restore_recovered_source(
+        &mut self,
+        source: String,
+    ) -> Result<bool, SessionError> {
+        self.ensure_editable()?;
+        validate_source_size(&source)?;
+        let current = self
+            .current
+            .as_ref()
+            .ok_or(SessionError::NoActiveDocument)?;
+        if current.name.is_some()
+            || current.is_dirty()
+            || !current.source.is_empty()
+            || current.revision != 0
+        {
+            return Ok(false);
+        }
+        if source.is_empty() {
+            self.history.clear();
+            return Ok(true);
+        }
+
+        let (line_ids, next_line_id) = remap_line_ids(
+            &current.source,
+            &current.line_ids,
+            &source,
+            current.next_line_id,
+        )?;
+        let next_revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(SessionError::RevisionExhausted)?;
+        let current = self
+            .current
+            .as_mut()
+            .ok_or(SessionError::NoActiveDocument)?;
+        current.source = source;
+        current.line_ids = line_ids;
+        current.next_line_id = next_line_id;
+        current.revision = next_revision;
+        current.cached_evaluation = None;
+        self.history.clear();
+        Ok(true)
+    }
+
     fn commit_source_edit(
         &mut self,
         source: String,
@@ -738,7 +786,7 @@ impl CalculationPadSession {
     }
 
     #[cfg(test)]
-    fn evaluation_count(&self) -> usize {
+    pub(crate) fn evaluation_count(&self) -> usize {
         self.current
             .as_ref()
             .map_or(0, |document| document.evaluation_count)
@@ -1029,6 +1077,49 @@ mod tests {
         assert_eq!(session.revision(), Some(revision + 1));
         assert_eq!(scalar(&mut session, 1), 5.0);
         assert_eq!(session.evaluation_count(), 2);
+    }
+
+    #[test]
+    fn recovered_source_is_an_exact_dirty_draft_with_fresh_line_ids() {
+        let (_directory, _root, mut session) = fixture();
+        let source = "α = 2\r\n{顧客 名} = α + 3\r\n";
+
+        assert!(session.restore_recovered_source(source.to_owned()).unwrap());
+
+        assert_eq!(session.source(), Some(source));
+        assert!(session.is_dirty());
+        assert!(!session.is_saved());
+        assert!(!session.can_undo());
+        let line_ids = session.line_ids().unwrap();
+        assert_eq!(line_ids.len(), 3);
+        let unique_ids = line_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique_ids.len(), line_ids.len());
+        assert_eq!(session.evaluation_count(), 0);
+        session.evaluation().unwrap();
+        assert_eq!(session.evaluation_count(), 1);
+    }
+
+    #[test]
+    fn recovery_cannot_replace_a_live_draft_undone_to_blank() {
+        let (_directory, _root, mut session) = fixture();
+        let original_id = session.current_id();
+        session.replace_source("temporary = 1").unwrap();
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(""));
+        assert!(session.can_redo());
+
+        assert!(
+            !session
+                .restore_recovered_source("older draft = 9".to_owned())
+                .unwrap()
+        );
+
+        assert_eq!(session.source(), Some(""));
+        assert_eq!(session.current_id(), original_id);
+        assert!(session.can_redo());
     }
 
     #[test]

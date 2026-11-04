@@ -51,6 +51,7 @@ pub mod ids {
     pub const ACTIONS_PRESERVE_COMMAND: &str = "actions.preserve_command";
     pub const ACTIONS_CLEAR_QUERY: &str = "actions.clear_query_after_run";
     pub const ACTIONS_CONFIRM_DESTRUCTIVE: &str = "actions.confirm_destructive";
+    pub const CALCULATION_PAD_REMEMBER_SOURCE: &str = "calculation_pad.remember_source";
     pub const FEEDBACK_TOASTS: &str = "feedback.toasts";
     pub const FEEDBACK_TOAST_DURATION: &str = "feedback.toast_duration";
     pub const FEEDBACK_TOAST_DURATION_VALUE: &str = "feedback.toast_duration/value";
@@ -1083,6 +1084,18 @@ const SEEDS: &[Seed] = &[
         "Confirm destructive actions",
         "Ask before running destructive actions.",
         &["safety", "confirmation"]
+    ),
+    seed!(
+        ids::CALCULATION_PAD_REMEMBER_SOURCE,
+        Application,
+        S::Main(M::ActionsFeedback),
+        "Remember last Calculation Pad source",
+        "Restore the last Calculation Pad source as an unsaved draft when you explicitly open the pad.",
+        &[
+            "calculator recovery",
+            "restore calculation source",
+            "draft recovery"
+        ]
     ),
     seed!(
         ids::FEEDBACK_TOASTS,
@@ -2538,6 +2551,16 @@ mod tests {
             .expect("Jump Mode remains in the settings catalog");
         assert_eq!(jump_mode.label, "Jump Mode");
         assert_eq!(jump_mode.id.as_str(), "launcher.experimental_jump_mode");
+        let recovery = catalog
+            .entry(ids::CALCULATION_PAD_REMEMBER_SOURCE)
+            .expect("Calculation Pad recovery remains searchable");
+        assert_eq!(recovery.label, "Remember last Calculation Pad source");
+        assert!(
+            catalog
+                .search("calculator recovery")
+                .iter()
+                .any(|entry| entry.id == recovery.id)
+        );
         let expected_ids = [
             "hotkeys.launcher",
             "hotkeys.quit.enabled",
@@ -2586,6 +2609,7 @@ mod tests {
             "actions.preserve_command",
             "actions.clear_query_after_run",
             "actions.confirm_destructive",
+            "calculation_pad.remember_source",
             "feedback.toasts",
             "feedback.toast_duration",
             "feedback.toast_duration/value",

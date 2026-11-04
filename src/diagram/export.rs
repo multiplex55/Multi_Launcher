@@ -2,6 +2,7 @@
 
 use super::model::NodeShape;
 use super::persistence::DiagramExportPublicationError;
+use super::rendering::{DiagramRenderOutput, RasterSize, rasterize_output_svg};
 use super::scene::{
     ArrowHead, CubicBezier, DiagramScene, PreparedText, SceneMetrics, SceneNode, ScenePoint,
     SceneRect, TextHorizontalAlignment, build_scene,
@@ -191,6 +192,151 @@ impl DiagramImageSnapshot {
     ) -> Result<DiagramExportArtifact, DiagramExportError> {
         encode_png_with_font_set(self, scale, fonts)
     }
+}
+
+/// Immutable generic-render result captured for image export. It contains the
+/// exact adapter output that was accepted for the displayed revision; PNG
+/// dimensions are rasterized from its cached SVG without reparsing Mermaid.
+#[derive(Clone, Debug)]
+pub struct DiagramRenderedImageSnapshot {
+    revision: u64,
+    output: std::sync::Arc<DiagramRenderOutput>,
+}
+
+impl DiagramRenderedImageSnapshot {
+    pub fn capture(revision: u64, output: std::sync::Arc<DiagramRenderOutput>) -> Self {
+        Self { revision, output }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn encode_svg(&self, scale: f64) -> Result<DiagramExportArtifact, DiagramExportError> {
+        let (width, height, _) =
+            scaled_render_dimensions(self.output.natural_width, self.output.natural_height, scale)?;
+        let bytes = scale_svg_dimensions(&self.output.svg, width, height)?;
+        Ok(DiagramExportArtifact {
+            revision: self.revision,
+            format: DiagramExportFormat::Svg,
+            bytes,
+            dimensions: Some((width, height)),
+            warnings: DiagramExportWarnings::default(),
+        })
+    }
+
+    pub fn encode_png(&self, scale: f64) -> Result<DiagramExportArtifact, DiagramExportError> {
+        let (width, height, raster_size) =
+            scaled_render_dimensions(self.output.natural_width, self.output.natural_height, scale)?;
+        let raster = rasterize_output_svg(&self.output, raster_size)
+            .map_err(|error| DiagramExportError::Encode(error.to_string()))?;
+        let mut writer = BoundedBytes::new(MAX_PNG_BYTES);
+        let result = image::codecs::png::PngEncoder::new(&mut writer).write_image(
+            &raster.rgba,
+            width,
+            height,
+            image::ColorType::Rgba8,
+        );
+        if writer.exceeded {
+            return Err(DiagramExportError::EncodedSizeLimit {
+                format: DiagramExportFormat::Png,
+                max_bytes: MAX_PNG_BYTES,
+            });
+        }
+        result.map_err(|error| DiagramExportError::Encode(error.to_string()))?;
+        Ok(DiagramExportArtifact {
+            revision: self.revision,
+            format: DiagramExportFormat::Png,
+            bytes: writer.bytes,
+            dimensions: Some((width, height)),
+            warnings: DiagramExportWarnings::default(),
+        })
+    }
+}
+
+fn scaled_render_dimensions(
+    natural_width: f32,
+    natural_height: f32,
+    scale: f64,
+) -> Result<(u32, u32, RasterSize), DiagramExportError> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(DiagramExportError::InvalidScale);
+    }
+    let width = (f64::from(natural_width) * scale).ceil();
+    let height = (f64::from(natural_height) * scale).ceil();
+    if !width.is_finite()
+        || !height.is_finite()
+        || width < 1.0
+        || height < 1.0
+        || width > f64::from(u32::MAX)
+        || height > f64::from(u32::MAX)
+    {
+        return Err(DiagramExportError::OutputTooLarge {
+            width: u32::MAX,
+            height: u32::MAX,
+            max_side: MAX_EXPORT_SIDE,
+            max_pixels: MAX_EXPORT_PIXELS,
+        });
+    }
+    let width = width as u32;
+    let height = height as u32;
+    let raster_size =
+        RasterSize::new(width, height).map_err(|_| DiagramExportError::OutputTooLarge {
+            width,
+            height,
+            max_side: MAX_EXPORT_SIDE,
+            max_pixels: MAX_EXPORT_PIXELS,
+        })?;
+    Ok((width, height, raster_size))
+}
+
+fn scale_svg_dimensions(svg: &str, width: u32, height: u32) -> Result<Vec<u8>, DiagramExportError> {
+    if svg.len() > MAX_SVG_BYTES {
+        return Err(DiagramExportError::EncodedSizeLimit {
+            format: DiagramExportFormat::Svg,
+            max_bytes: MAX_SVG_BYTES,
+        });
+    }
+    let root_start = svg.find("<svg").ok_or_else(|| {
+        DiagramExportError::Encode("renderer output has no SVG root element".to_owned())
+    })?;
+    let root_end = svg[root_start..]
+        .find('>')
+        .map(|index| root_start + index + 1)
+        .ok_or_else(|| DiagramExportError::Encode("renderer SVG root is incomplete".to_owned()))?;
+    let mut root = svg[root_start..root_end].to_owned();
+    set_svg_root_attribute(&mut root, "width", &width.to_string());
+    set_svg_root_attribute(&mut root, "height", &height.to_string());
+
+    let extra = root.len().saturating_sub(root_end - root_start);
+    if svg.len().saturating_add(extra) > MAX_SVG_BYTES {
+        return Err(DiagramExportError::EncodedSizeLimit {
+            format: DiagramExportFormat::Svg,
+            max_bytes: MAX_SVG_BYTES,
+        });
+    }
+    let mut scaled = String::new();
+    scaled
+        .try_reserve_exact(svg.len().saturating_add(extra))
+        .map_err(|_| DiagramExportError::ImageAllocation)?;
+    scaled.push_str(&svg[..root_start]);
+    scaled.push_str(&root);
+    scaled.push_str(&svg[root_end..]);
+    Ok(scaled.into_bytes())
+}
+
+fn set_svg_root_attribute(root: &mut String, name: &str, value: &str) {
+    let marker = format!(" {name}=\"");
+    if let Some(start) = root.find(&marker) {
+        let value_start = start + marker.len();
+        if let Some(end_offset) = root[value_start..].find('"') {
+            let value_end = value_start + end_offset;
+            root.replace_range(value_start..value_end, value);
+            return;
+        }
+    }
+    let insert_at = root.len().saturating_sub(1);
+    root.insert_str(insert_at, &format!(" {name}=\"{value}\""));
 }
 
 fn encode_png_with_font_set(

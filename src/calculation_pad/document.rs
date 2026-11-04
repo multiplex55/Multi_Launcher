@@ -6,11 +6,12 @@ use crate::unit_conversion::{
     self, Approximation, ConversionError, ConversionRequest, QuantityComponent, Unit,
 };
 use exmex::{Express, FlatEx};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 
-use super::operators::CheckedOperators;
+use super::operators::{CheckedOperators, ModuloOperators};
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_LINES: usize = 256;
@@ -19,8 +20,12 @@ pub const MAX_EXPRESSION_NESTING: usize = 32;
 pub const MAX_DEPENDENCIES: usize = 512;
 pub const MAX_DEPENDENCIES_PER_LINE: usize = 64;
 pub const MAX_NAME_BYTES: usize = 128;
+const MAX_PREPARED_EXPRESSION_BYTES: usize = MAX_EXPRESSION_BYTES * 4;
 
 type CheckedExpression = FlatEx<f64, CheckedOperators>;
+type ModuloExpression = FlatEx<f64, ModuloOperators>;
+
+const MAX_EXACT_SCALAR_INTEGER: u64 = 1_u64 << 53;
 
 /// A source-authoritative calculation document.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -285,6 +290,20 @@ pub enum DiagnosticKind {
     InvalidExpression,
     InvalidArithmetic,
     InvalidBaseNumber,
+    InvalidPrefixedInteger {
+        radix: u32,
+    },
+    PrefixedIntegerOverflow {
+        radix: u32,
+    },
+    PrefixedIntegerTooLarge {
+        max_exact: u64,
+    },
+    InvalidScientificLiteral,
+    ScientificLiteralOutOfRange,
+    PreparedExpressionTooLong {
+        max_bytes: usize,
+    },
     UnitConversion(ConversionError),
     ExpressionTooLong {
         max_bytes: usize,
@@ -338,10 +357,29 @@ impl fmt::Display for Diagnostic {
                 write!(formatter, "{reference} is not an exact base value")
             }
             Kind::InvalidExpression => formatter.write_str("invalid expression"),
-            Kind::InvalidArithmetic => {
-                formatter.write_str("division by zero or non-finite arithmetic result")
-            }
+            Kind::InvalidArithmetic => formatter
+                .write_str("division or remainder by zero, or non-finite arithmetic result"),
             Kind::InvalidBaseNumber => formatter.write_str("invalid unsigned base value"),
+            Kind::InvalidPrefixedInteger { radix } => {
+                write!(formatter, "invalid base-{radix} integer literal")
+            }
+            Kind::PrefixedIntegerOverflow { radix } => write!(
+                formatter,
+                "base-{radix} integer literal exceeds the unsigned 128-bit limit"
+            ),
+            Kind::PrefixedIntegerTooLarge { max_exact } => write!(
+                formatter,
+                "integer literal exceeds the exactly representable scalar limit of {max_exact}"
+            ),
+            Kind::InvalidScientificLiteral => {
+                formatter.write_str("invalid scientific-notation literal")
+            }
+            Kind::ScientificLiteralOutOfRange => formatter
+                .write_str("scientific-notation literal is outside the finite scalar range"),
+            Kind::PreparedExpressionTooLong { max_bytes } => write!(
+                formatter,
+                "normalized expression exceeds the {max_bytes}-byte evaluation limit"
+            ),
             Kind::UnitConversion(error) => write!(formatter, "{error}"),
             Kind::ExpressionTooLong { max_bytes } => {
                 write!(formatter, "expression exceeds the {max_bytes}-byte limit")
@@ -373,7 +411,7 @@ struct PreparedLine {
 enum PreparedStatement {
     Blank,
     Comment,
-    Scalar(Box<CheckedExpression>),
+    Scalar(PreparedScalar),
     PhysicalConversion(String),
     PhysicalReference {
         destination: Unit,
@@ -387,6 +425,28 @@ enum PreparedStatement {
         destination: NumericBase,
     },
     Invalid,
+}
+
+#[derive(Debug)]
+enum PreparedScalar {
+    Checked(Box<CheckedExpression>),
+    Modulo(Box<ModuloExpression>),
+}
+
+impl PreparedScalar {
+    fn var_names(&self) -> &[String] {
+        match self {
+            Self::Checked(expression) => expression.var_names(),
+            Self::Modulo(expression) => expression.var_names(),
+        }
+    }
+
+    fn eval(&self, variables: &[f64]) -> exmex::ExResult<f64> {
+        match self {
+            Self::Checked(expression) => expression.eval(variables),
+            Self::Modulo(expression) => expression.eval(variables),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -407,6 +467,20 @@ enum ReferenceKind {
 struct AssignmentName {
     canonical: String,
     braced: bool,
+}
+
+#[derive(Debug, Default)]
+struct ExpressionScan {
+    identifiers: usize,
+    numeric_literals: Vec<NumericLiteralRewrite>,
+    uses_remainder: bool,
+    uses_mod_function: bool,
+}
+
+#[derive(Debug)]
+struct NumericLiteralRewrite {
+    source_range: Range<usize>,
+    replacement: String,
 }
 
 fn prepare_line(
@@ -482,21 +556,9 @@ fn prepare_line(
         );
     }
 
-    let identifier_count = match validate_expression_bounds(expression) {
-        Ok(count) => count,
-        Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
-    };
-    if total_identifiers.saturating_add(identifier_count) > MAX_DEPENDENCIES {
-        return PreparedLine::invalid(
-            source_range,
-            assignment_name,
-            DiagnosticKind::TooManyIdentifiers {
-                max_identifiers: MAX_DEPENDENCIES,
-            },
-        );
-    }
-    *total_identifiers += identifier_count;
-
+    // Exact base conversions have their own u128 grammar. Dispatch them before
+    // scalar-token scanning so hexadecimal digits such as `0bad` retain their
+    // exact-conversion meaning and are not subject to scalar precision limits.
     if let Some(base_conversion) = parse_base_conversion(expression) {
         return match base_conversion {
             Ok((value, base)) => PreparedLine {
@@ -510,6 +572,21 @@ fn prepare_line(
             Err(kind) => PreparedLine::invalid(source_range, assignment_name, kind),
         };
     }
+
+    let scan = match scan_expression(expression) {
+        Ok(scan) => scan,
+        Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
+    };
+    if total_identifiers.saturating_add(scan.identifiers) > MAX_DEPENDENCIES {
+        return PreparedLine::invalid(
+            source_range,
+            assignment_name,
+            DiagnosticKind::TooManyIdentifiers {
+                max_identifiers: MAX_DEPENDENCIES,
+            },
+        );
+    }
+    *total_identifiers += scan.identifiers;
 
     if let Some((source, destination)) = split_to_keyword(expression) {
         if let Some(reference) = parse_simple_reference(source) {
@@ -554,7 +631,35 @@ fn prepare_line(
         };
     }
 
-    match CheckedExpression::parse_wo_compile(expression) {
+    let lowered_numbers = match lower_numeric_literals(expression, &scan.numeric_literals) {
+        Ok(lowered) => lowered,
+        Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
+    };
+    let lowered_expression = if scan.uses_mod_function {
+        Cow::Owned(lower_mod_function_calls(lowered_numbers.as_ref()))
+    } else {
+        lowered_numbers
+    };
+    if lowered_expression.len() > MAX_PREPARED_EXPRESSION_BYTES {
+        return PreparedLine::invalid(
+            source_range,
+            assignment_name,
+            DiagnosticKind::PreparedExpressionTooLong {
+                max_bytes: MAX_PREPARED_EXPRESSION_BYTES,
+            },
+        );
+    }
+    let parsed = if scan.uses_remainder || scan.uses_mod_function {
+        ModuloExpression::parse_wo_compile(lowered_expression.as_ref())
+            .map(Box::new)
+            .map(PreparedScalar::Modulo)
+    } else {
+        CheckedExpression::parse_wo_compile(lowered_expression.as_ref())
+            .map(Box::new)
+            .map(PreparedScalar::Checked)
+    };
+
+    match parsed {
         Ok(parsed) => {
             let references = parsed
                 .var_names()
@@ -564,7 +669,7 @@ fn prepare_line(
             PreparedLine {
                 source_range,
                 assignment_name,
-                statement: PreparedStatement::Scalar(Box::new(parsed)),
+                statement: PreparedStatement::Scalar(parsed),
                 references,
                 dependencies: Vec::new(),
                 diagnostic: None,
@@ -730,12 +835,12 @@ fn is_row_reference_name(name: &str) -> bool {
     })
 }
 
-fn validate_expression_bounds(expression: &str) -> Result<usize, DiagnosticKind> {
-    let mut identifiers = 0;
+fn scan_expression(expression: &str) -> Result<ExpressionScan, DiagnosticKind> {
+    let mut scan = ExpressionScan::default();
     let mut depth = 0;
     let mut characters = expression.char_indices().peekable();
 
-    while let Some((_, character)) = characters.next() {
+    while let Some((index, character)) = characters.next() {
         match character {
             '{' => {
                 let mut name_bytes = 0;
@@ -756,7 +861,7 @@ fn validate_expression_bounds(expression: &str) -> Result<usize, DiagnosticKind>
                         max_bytes: MAX_NAME_BYTES,
                     });
                 }
-                identifiers += 1;
+                scan.identifiers += 1;
             }
             '}' => return Err(DiagnosticKind::InvalidExpression),
             '(' => {
@@ -773,7 +878,29 @@ fn validate_expression_bounds(expression: &str) -> Result<usize, DiagnosticKind>
                 }
                 depth -= 1;
             }
+            '%' => scan.uses_remainder = true,
+            // `@` is reserved for the private lowering of mod(a, b). It was not
+            // part of the user grammar before this checkpoint.
+            '@' => return Err(DiagnosticKind::InvalidExpression),
+            '0'..='9' | '.' => {
+                let literal = if character == '0' {
+                    parse_prefixed_integer(expression, index)?
+                } else {
+                    None
+                }
+                .or(parse_scientific_literal(expression, index)?);
+                if let Some(literal) = literal {
+                    while characters
+                        .peek()
+                        .is_some_and(|(next_index, _)| *next_index < literal.source_range.end)
+                    {
+                        characters.next();
+                    }
+                    scan.numeric_literals.push(literal);
+                }
+            }
             character if is_identifier_start(character) => {
+                let start = index;
                 let mut name_bytes = character.len_utf8();
                 while let Some((_, next)) = characters.peek().copied() {
                     if !is_identifier_continue(next) {
@@ -787,11 +914,17 @@ fn validate_expression_bounds(expression: &str) -> Result<usize, DiagnosticKind>
                         max_bytes: MAX_NAME_BYTES,
                     });
                 }
-                identifiers += 1;
+                scan.identifiers += 1;
+                if &expression[start..start + name_bytes] == "mod"
+                    && next_non_whitespace_index(expression, start + name_bytes)
+                        .is_some_and(|open| expression[open..].starts_with('('))
+                {
+                    scan.uses_mod_function = true;
+                }
             }
             _ => {}
         }
-        if identifiers > MAX_DEPENDENCIES_PER_LINE {
+        if scan.identifiers > MAX_DEPENDENCIES_PER_LINE {
             return Err(DiagnosticKind::TooManyIdentifiers {
                 max_identifiers: MAX_DEPENDENCIES_PER_LINE,
             });
@@ -800,7 +933,311 @@ fn validate_expression_bounds(expression: &str) -> Result<usize, DiagnosticKind>
     if depth != 0 {
         return Err(DiagnosticKind::InvalidExpression);
     }
-    Ok(identifiers)
+    Ok(scan)
+}
+
+fn parse_prefixed_integer(
+    expression: &str,
+    start: usize,
+) -> Result<Option<NumericLiteralRewrite>, DiagnosticKind> {
+    if expression[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|previous| is_identifier_continue(previous) || previous == '.')
+    {
+        return Ok(None);
+    }
+
+    let Some(prefix) = expression.as_bytes().get(start + 1).copied() else {
+        return Ok(None);
+    };
+    let (base, radix) = match prefix.to_ascii_lowercase() {
+        b'x' => (NumericBase::Hexadecimal, 16),
+        b'b' => (NumericBase::Binary, 2),
+        b'o' => (NumericBase::Octal, 8),
+        _ => return Ok(None),
+    };
+
+    let mut end = start + 2;
+    let digits_start = end;
+    for (offset, character) in expression[digits_start..].char_indices() {
+        if !is_identifier_continue(character) && character != '.' {
+            break;
+        }
+        end = digits_start + offset + character.len_utf8();
+    }
+
+    let digits = &expression[start + 2..end];
+    if digits.is_empty()
+        || !digits
+            .bytes()
+            .all(|digit| digit_is_valid_for_radix(digit, radix))
+    {
+        return Err(DiagnosticKind::InvalidPrefixedInteger { radix });
+    }
+    let value =
+        parse_unsigned(digits, base).ok_or(DiagnosticKind::PrefixedIntegerOverflow { radix })?;
+    if value > u128::from(MAX_EXACT_SCALAR_INTEGER) {
+        return Err(DiagnosticKind::PrefixedIntegerTooLarge {
+            max_exact: MAX_EXACT_SCALAR_INTEGER,
+        });
+    }
+
+    Ok(Some(NumericLiteralRewrite {
+        source_range: start..end,
+        replacement: (value as u64).to_string(),
+    }))
+}
+
+fn parse_scientific_literal(
+    expression: &str,
+    start: usize,
+) -> Result<Option<NumericLiteralRewrite>, DiagnosticKind> {
+    if expression[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|previous| is_identifier_continue(previous) || previous == '.')
+    {
+        return Ok(None);
+    }
+
+    let bytes = expression.as_bytes();
+    let mut cursor = start;
+    let mut mantissa_digits = 0;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+        cursor += 1;
+        mantissa_digits += 1;
+    }
+    if bytes.get(cursor) == Some(&b'.') {
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+            mantissa_digits += 1;
+        }
+    }
+    if mantissa_digits == 0
+        || !bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(*byte, b'e' | b'E'))
+    {
+        return Ok(None);
+    }
+
+    cursor += 1;
+    if bytes
+        .get(cursor)
+        .is_some_and(|byte| matches!(*byte, b'+' | b'-'))
+    {
+        cursor += 1;
+    }
+    let exponent_start = cursor;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+        cursor += 1;
+    }
+    if cursor == exponent_start {
+        return Err(DiagnosticKind::InvalidScientificLiteral);
+    }
+
+    let value = expression[start..cursor]
+        .parse::<f64>()
+        .map_err(|_| DiagnosticKind::ScientificLiteralOutOfRange)?;
+    if !value.is_finite() {
+        return Err(DiagnosticKind::ScientificLiteralOutOfRange);
+    }
+
+    Ok(Some(NumericLiteralRewrite {
+        source_range: start..cursor,
+        replacement: decimalize_finite_float(value),
+    }))
+}
+
+fn decimalize_finite_float(value: f64) -> String {
+    let representation = value.to_string();
+    let Some((mantissa, exponent)) = representation.split_once(['e', 'E']) else {
+        return representation;
+    };
+    let exponent = exponent.parse::<i32>().unwrap_or(0);
+    let negative = mantissa.starts_with('-');
+    let mantissa = mantissa.strip_prefix('-').unwrap_or(mantissa);
+    let decimal_position = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+    let digits = mantissa.replace('.', "");
+    let final_position = decimal_position + exponent;
+    let mut decimal = String::with_capacity(
+        digits
+            .len()
+            .saturating_add(exponent.unsigned_abs() as usize + 2),
+    );
+    if negative {
+        decimal.push('-');
+    }
+    if final_position <= 0 {
+        decimal.push_str("0.");
+        decimal.extend(std::iter::repeat_n(
+            '0',
+            final_position.unsigned_abs() as usize,
+        ));
+        decimal.push_str(&digits);
+    } else if final_position as usize >= digits.len() {
+        decimal.push_str(&digits);
+        decimal.extend(std::iter::repeat_n(
+            '0',
+            final_position as usize - digits.len(),
+        ));
+    } else {
+        let split = final_position as usize;
+        decimal.push_str(&digits[..split]);
+        decimal.push('.');
+        decimal.push_str(&digits[split..]);
+    }
+    decimal
+}
+
+fn digit_is_valid_for_radix(digit: u8, radix: u32) -> bool {
+    let value = match digit {
+        b'0'..=b'9' => u32::from(digit - b'0'),
+        b'a'..=b'f' => u32::from(digit - b'a') + 10,
+        b'A'..=b'F' => u32::from(digit - b'A') + 10,
+        _ => return false,
+    };
+    value < radix
+}
+
+fn lower_numeric_literals<'a>(
+    expression: &'a str,
+    literals: &[NumericLiteralRewrite],
+) -> Result<Cow<'a, str>, DiagnosticKind> {
+    if literals.is_empty() {
+        return Ok(Cow::Borrowed(expression));
+    }
+
+    let mut lowered_len = expression.len();
+    for literal in literals {
+        lowered_len = lowered_len
+            .checked_sub(literal.source_range.len())
+            .and_then(|length| length.checked_add(literal.replacement.len()))
+            .ok_or(DiagnosticKind::PreparedExpressionTooLong {
+                max_bytes: MAX_PREPARED_EXPRESSION_BYTES,
+            })?;
+    }
+    if lowered_len > MAX_PREPARED_EXPRESSION_BYTES {
+        return Err(DiagnosticKind::PreparedExpressionTooLong {
+            max_bytes: MAX_PREPARED_EXPRESSION_BYTES,
+        });
+    }
+
+    let mut lowered = String::with_capacity(lowered_len);
+    let mut copied_until = 0;
+    for literal in literals {
+        lowered.push_str(&expression[copied_until..literal.source_range.start]);
+        lowered.push_str(&literal.replacement);
+        copied_until = literal.source_range.end;
+    }
+    lowered.push_str(&expression[copied_until..]);
+    Ok(Cow::Owned(lowered))
+}
+
+fn lower_mod_function_calls(expression: &str) -> String {
+    fn lower(source: &str) -> String {
+        let mut output = String::with_capacity(source.len());
+        let mut characters = source.char_indices().peekable();
+        let mut copied_until = 0;
+
+        while let Some((start, character)) = characters.next() {
+            if character == '{' {
+                for (_, next) in characters.by_ref() {
+                    if next == '}' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if !is_identifier_start(character) {
+                continue;
+            }
+
+            let mut end = start + character.len_utf8();
+            while let Some((_, next)) = characters.peek().copied() {
+                if !is_identifier_continue(next) {
+                    break;
+                }
+                end += next.len_utf8();
+                characters.next();
+            }
+            if &source[start..end] != "mod" {
+                continue;
+            }
+            let Some(open) = next_non_whitespace_index(source, end) else {
+                continue;
+            };
+            if !source[open..].starts_with('(') {
+                continue;
+            }
+            let Some((close, Some(comma), false)) = mod_call_delimiters(source, open) else {
+                continue;
+            };
+
+            let left = source[open + 1..comma].trim();
+            let right = source[comma + 1..close].trim();
+            if left.is_empty() || right.is_empty() {
+                continue;
+            }
+
+            output.push_str(&source[copied_until..start]);
+            output.push_str("((");
+            output.push_str(&lower(left));
+            output.push_str(") @ (");
+            output.push_str(&lower(right));
+            output.push_str("))");
+            copied_until = close + 1;
+            while characters
+                .peek()
+                .is_some_and(|(next_index, _)| *next_index < copied_until)
+            {
+                characters.next();
+            }
+        }
+
+        output.push_str(&source[copied_until..]);
+        output
+    }
+
+    lower(expression)
+}
+
+fn mod_call_delimiters(expression: &str, open: usize) -> Option<(usize, Option<usize>, bool)> {
+    let mut depth = 0;
+    let mut in_braces = false;
+    let mut comma = None;
+    let mut multiple_commas = false;
+
+    for (offset, character) in expression[open..].char_indices() {
+        let index = open + offset;
+        match character {
+            '{' => in_braces = true,
+            '}' => in_braces = false,
+            '(' if !in_braces => depth += 1,
+            ')' if !in_braces => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((index, comma, multiple_commas));
+                }
+            }
+            ',' if !in_braces && depth == 1 && comma.replace(index).is_some() => {
+                multiple_commas = true;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn next_non_whitespace_index(expression: &str, start: usize) -> Option<usize> {
+    for (offset, character) in expression[start..].char_indices() {
+        if !character.is_whitespace() {
+            return Some(start + offset);
+        }
+    }
+    None
 }
 
 fn split_to_keyword(expression: &str) -> Option<(&str, &str)> {
@@ -1242,6 +1679,13 @@ mod tests {
         }
     }
 
+    fn error_message(evaluation: &CalculationEvaluation<'_>, line_index: usize) -> String {
+        match &evaluation.lines[line_index].outcome {
+            LineOutcome::Error(diagnostic) => diagnostic.to_string(),
+            other => panic!("expected an error on line {line_index}, got {other:?}"),
+        }
+    }
+
     fn scalar(evaluation: &CalculationEvaluation<'_>, line_index: usize) -> f64 {
         match value(evaluation, line_index) {
             CalculationValue::Scalar(value) => *value,
@@ -1515,6 +1959,195 @@ mod tests {
             value(&evaluation, 0).formatted_result().as_deref(),
             Some("20000000000001")
         );
+    }
+
+    #[test]
+    fn evaluates_mixed_base_scalar_literals_without_rewriting_source_or_names() {
+        let source = concat!(
+            "# labels 0xff\r\n",
+            "value0xff = 2\r\n",
+            "value0xff + 1\r\n",
+            "{base 0x10} = 4\r\n",
+            "{base 0x10} + 1\r\n",
+            "0x1235 + 0b0101010101\r\n",
+            "sqrt(0o20) + 1e2\r\n",
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+
+        assert_eq!(evaluation.source, source);
+        assert_eq!(scalar(&evaluation, 2), 3.0);
+        assert_eq!(scalar(&evaluation, 4), 5.0);
+        assert_eq!(scalar(&evaluation, 5), 5002.0);
+        assert_eq!(scalar(&evaluation, 6), 104.0);
+        assert_eq!(
+            &evaluation.source[evaluation.lines[5].source_range.clone()],
+            "0x1235 + 0b0101010101"
+        );
+    }
+
+    #[test]
+    fn scientific_literals_are_normalized_only_on_the_scalar_path() {
+        let source = concat!(
+            "1e2\r\n",
+            "1.25E-2\r\n",
+            "1e308\r\n",
+            "1e-308\r\n",
+            "0xE2 + 1e1\r\n",
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+
+        assert_eq!(evaluation.source, source);
+        assert_eq!(scalar(&evaluation, 0), 100.0);
+        assert_eq!(scalar(&evaluation, 1), 0.0125);
+        assert_eq!(scalar(&evaluation, 2), 1e308);
+        assert_eq!(scalar(&evaluation, 3), 1e-308);
+        assert_eq!(scalar(&evaluation, 4), 236.0);
+    }
+
+    #[test]
+    fn exact_hexadecimal_conversions_keep_their_u128_grammar_and_range() {
+        let document = CalculationDocument::new(
+            "0bad hex to dec\n0b00 hex to dec\n20000000000001 hex to dec\n0x20000000000001\n",
+        );
+        let evaluation = document.evaluate();
+
+        assert!(matches!(
+            value(&evaluation, 0),
+            CalculationValue::ExactBase { value: 2989, .. }
+        ));
+        assert!(matches!(
+            value(&evaluation, 1),
+            CalculationValue::ExactBase { value: 2816, .. }
+        ));
+        assert!(matches!(
+            value(&evaluation, 2),
+            CalculationValue::ExactBase {
+                value: 9_007_199_254_740_993,
+                ..
+            }
+        ));
+        assert!(matches!(
+            error(&evaluation, 3),
+            DiagnosticKind::PrefixedIntegerTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn scientific_literals_report_malformed_and_out_of_range_exponents() {
+        let document = CalculationDocument::new("1e\n1e+\n1e309\n");
+        let evaluation = document.evaluate();
+
+        assert!(matches!(
+            error(&evaluation, 0),
+            DiagnosticKind::InvalidScientificLiteral
+        ));
+        assert!(matches!(
+            error(&evaluation, 1),
+            DiagnosticKind::InvalidScientificLiteral
+        ));
+        assert!(matches!(
+            error(&evaluation, 2),
+            DiagnosticKind::ScientificLiteralOutOfRange
+        ));
+    }
+
+    #[test]
+    fn scientific_expansion_is_bounded_after_the_raw_expression_limit() {
+        let source = std::iter::repeat_n("1e-308", 250)
+            .collect::<Vec<_>>()
+            .join("+");
+        assert!(source.len() <= MAX_EXPRESSION_BYTES);
+
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        assert!(matches!(
+            error(&evaluation, 0),
+            DiagnosticKind::PreparedExpressionTooLong { .. }
+        ));
+    }
+
+    #[test]
+    fn accepts_the_exact_scalar_integer_limit_and_rejects_the_next_integer() {
+        let document =
+            CalculationDocument::new("0x20000000000000\n0x1fffffffffffff\n0x20000000000001\n");
+        let evaluation = document.evaluate();
+
+        assert_eq!(scalar(&evaluation, 0), 9_007_199_254_740_992.0);
+        assert_eq!(scalar(&evaluation, 1), 9_007_199_254_740_991.0);
+        assert!(matches!(
+            error(&evaluation, 2),
+            DiagnosticKind::PrefixedIntegerTooLarge {
+                max_exact: 9_007_199_254_740_992
+            }
+        ));
+        assert!(error_message(&evaluation, 2).contains("exactly representable"));
+    }
+
+    #[test]
+    fn diagnoses_missing_invalid_and_overflowing_prefixed_integer_digits() {
+        let document =
+            CalculationDocument::new("0x\n0b102\n0o8\n0x100000000000000000000000000000000\n");
+        let evaluation = document.evaluate();
+
+        for line in 0..3 {
+            assert!(matches!(
+                error(&evaluation, line),
+                DiagnosticKind::InvalidPrefixedInteger { .. }
+            ));
+        }
+        assert!(matches!(
+            error(&evaluation, 3),
+            DiagnosticKind::PrefixedIntegerOverflow { radix: 16 }
+        ));
+    }
+
+    #[test]
+    fn prefixed_literals_do_not_consume_identifier_limits() {
+        let source = std::iter::repeat_n("0x1", MAX_DEPENDENCIES_PER_LINE + 1)
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+
+        assert_eq!(
+            scalar(&evaluation, 0),
+            (MAX_DEPENDENCIES_PER_LINE + 1) as f64
+        );
+    }
+
+    #[test]
+    fn supports_remainder_and_contextual_euclidean_mod_without_reserving_mod() {
+        let document = CalculationDocument::new(
+            "mod = 5\nmod + 1\n{mod} + 2\nmod(-7, 3)\nmod(7, -3)\nmod(mod(-7, 3), 2)\n-7 % 3\n20 % 6 / 2\n2 * 5 % 3\n20 / 6 % 2\nmax(mod(-7, 3), 1)\n",
+        );
+        let evaluation = document.evaluate();
+
+        assert_eq!(scalar(&evaluation, 1), 6.0);
+        assert_eq!(scalar(&evaluation, 2), 7.0);
+        assert_eq!(scalar(&evaluation, 3), 2.0);
+        assert_eq!(scalar(&evaluation, 4), 1.0);
+        assert_eq!(scalar(&evaluation, 5), 0.0);
+        assert_eq!(scalar(&evaluation, 6), -1.0);
+        assert_eq!(scalar(&evaluation, 7), 1.0);
+        assert_eq!(scalar(&evaluation, 8), 1.0);
+        assert!((scalar(&evaluation, 9) - 1.3333333333333335).abs() < f64::EPSILON);
+        assert_eq!(scalar(&evaluation, 10), 2.0);
+    }
+
+    #[test]
+    fn remainder_rejects_zero_and_non_finite_operands() {
+        let document = CalculationDocument::new("1 % 0\n(1 / 0) % 2\n1 % (1 / 0)\n");
+        let evaluation = document.evaluate();
+
+        for line in 0..3 {
+            assert!(matches!(
+                error(&evaluation, line),
+                DiagnosticKind::InvalidArithmetic
+            ));
+        }
+        assert!(error_message(&evaluation, 0).contains("remainder by zero"));
     }
 
     #[test]

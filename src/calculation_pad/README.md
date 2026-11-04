@@ -2,8 +2,9 @@
 
 The Calculation Pad engine evaluates a source document one physical line at a
 time. It retains the original text, blank lines, comments, line order, and
-line-ending bytes. Each evaluation starts from the current source; it does not
-reuse results from an earlier evaluation.
+line-ending bytes. Direct document evaluation always reads the current source.
+The UI session caches its evaluation for the current source revision and
+recomputes after an edit, undo, or redo changes that revision.
 
 ## Lines and names
 
@@ -16,8 +17,10 @@ reuse results from an earlier evaluation.
   spaces. Braces and line breaks are not allowed inside a name. Names are
   limited to 128 UTF-8 bytes.
 * Bare operator/function/constant names and `rN` row-reference names are
-  reserved for assignments. Braces allow names that match an operator or
-  constant, such as `{sin}`.
+  reserved for assignments. `mod` is a contextual exception: `mod(` starts
+  the modulo function, while bare `mod` remains an assignable/referencable
+  name. Braces allow names that match an operator or constant, such as
+  `{sin}`.
 * Duplicate assignments, unknown names, forward references, and references to
   a failed result are errors on the affected line. A later valid line still
   evaluates independently.
@@ -30,8 +33,12 @@ cyclic references are diagnosed.
 ## Scalar expressions
 
 Scalar expressions use the `exmex` expression grammar with finite `f64`
-results. The engine supports `+`, `-`, `*`, `/`, `^`; unary `+` and `-`; the
-functions `abs`, `signum`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+results. Scientific notation is supported, for example `1.25e-2` and
+`6.02E23`. Scalar integer literals may use `0x`, `0b`, or `0o` prefixes;
+their values are deliberately bounded to 2^53, the exactly representable
+integer range endpoint (larger even integers are also rejected). The engine
+supports `+`, `-`, `*`, `/`, `^`, and `%`; unary `+` and `-`; the functions
+`abs`, `signum`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
 `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`, `floor`, `round`, `ceil`,
 `trunc`, `fract`, `exp`, `sqrt`, `cbrt`, `ln`, `log`, `log2`, `log10`,
 `atan2`, `min`, and `max`; and the constants `PI`, `π`, `E`, `e`, `TAU`, and
@@ -44,6 +51,12 @@ PI * radius ^ 2
 
 Non-finite operands and intermediate results remain invalid even when a later
 operation could otherwise hide them, as in `min(sqrt(-1), 1)`.
+
+`a % b` returns the remainder with the dividend's sign (`-7 % 3` is `-1`).
+`mod(a, b)` returns the non-negative Euclidean remainder (`mod(-7, 3)` is
+`2`). Both forms reject a zero divisor. When `%` or contextual `mod(a, b)` is
+used, `*`, `/`, and `%` group left to right; expressions without these forms
+keep the original operator precedence.
 
 ## Physical quantities
 
@@ -78,7 +91,18 @@ r1 to bin
 ```
 
 Values from zero through `u128::MAX` are supported. The output digits are
-lowercase, with no base prefix or leading zeroes.
+lowercase, with no base prefix or leading zeroes. This conversion syntax is
+separate from scalar prefixes: for example, `0bad hex to dec` means the exact
+hexadecimal value `0x0bad`, while `0x0bad` by itself is a scalar literal.
+
+## Remembered source
+
+**Remember last Calculation Pad source** is off by default in Settings. When
+enabled, an explicit open restores the most recently accepted source as a
+dirty draft. It does not open the pad at application startup. The bounded
+recovery record is separate from named documents; disabling the preference
+clears only that record. A recovered expression may still contain ordinary
+evaluation errors, and remains editable.
 
 ## Resource limits
 
@@ -89,6 +113,7 @@ The evaluator checks these bounds before invoking expression or unit parsers:
 | Source document | 64 KiB |
 | Physical source lines | 256 |
 | Expression or conversion line | 2,048 UTF-8 bytes |
+| Normalized scalar expression | 8 KiB |
 | Parenthesis nesting | 32 levels |
 | Identifier occurrences per line | 64 |
 | Identifier occurrences per document | 512 |

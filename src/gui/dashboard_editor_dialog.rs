@@ -11,6 +11,7 @@ use eframe::egui::collapsing_header::CollapsingState;
 use serde_json::Value;
 use std::cell::Cell;
 use std::collections::HashSet;
+use std::path::Path;
 use std::rc::Rc;
 
 #[derive(Default)]
@@ -34,10 +35,10 @@ enum SplitDirection {
 struct DashboardEditorDraftSnapshot {
     config: DashboardConfig,
     error: Option<String>,
-    pending_save: bool,
     selected_slot: Option<usize>,
     show_preview: bool,
     blocked_warning: Option<String>,
+    presentation_warning: Option<String>,
     drag_anchor: Option<(usize, usize)>,
     swap_anchor: Option<usize>,
     slot_expand_all: bool,
@@ -49,6 +50,9 @@ struct DashboardEditorDraftSnapshot {
     confirm_modal: ConfirmationModal,
     pending_reset: Option<(usize, Value)>,
     pending_confirmation: Option<PendingDashboardEditorConfirmation>,
+    slot_presentations: Vec<crate::dashboard::editor_presentation::DashboardSlotPresentation>,
+    presentation_base: Vec<crate::dashboard::editor_presentation::DashboardSlotPresentationBase>,
+    next_presentation_id: u64,
 }
 
 impl DashboardEditorDraftSnapshot {
@@ -56,10 +60,10 @@ impl DashboardEditorDraftSnapshot {
         Self {
             config: dialog.config.clone(),
             error: dialog.error.clone(),
-            pending_save: dialog.pending_save,
             selected_slot: dialog.selected_slot,
             show_preview: dialog.show_preview,
             blocked_warning: dialog.blocked_warning.clone(),
+            presentation_warning: dialog.presentation_warning.clone(),
             drag_anchor: dialog.drag_anchor,
             swap_anchor: dialog.swap_anchor,
             slot_expand_all: dialog.slot_expand_all,
@@ -71,16 +75,19 @@ impl DashboardEditorDraftSnapshot {
             confirm_modal: dialog.confirm_modal.clone(),
             pending_reset: dialog.pending_reset.clone(),
             pending_confirmation: dialog.pending_confirmation,
+            slot_presentations: dialog.slot_presentations.clone(),
+            presentation_base: dialog.presentation_base.clone(),
+            next_presentation_id: dialog.next_presentation_id,
         }
     }
 
     fn restore(self, dialog: &mut DashboardEditorDialog) {
         dialog.config = self.config;
         dialog.error = self.error;
-        dialog.pending_save = self.pending_save;
         dialog.selected_slot = self.selected_slot;
         dialog.show_preview = self.show_preview;
         dialog.blocked_warning = self.blocked_warning;
+        dialog.presentation_warning = self.presentation_warning;
         dialog.drag_anchor = self.drag_anchor;
         dialog.swap_anchor = self.swap_anchor;
         dialog.slot_expand_all = self.slot_expand_all;
@@ -92,6 +99,9 @@ impl DashboardEditorDraftSnapshot {
         dialog.confirm_modal = self.confirm_modal;
         dialog.pending_reset = self.pending_reset;
         dialog.pending_confirmation = self.pending_confirmation;
+        dialog.slot_presentations = self.slot_presentations;
+        dialog.presentation_base = self.presentation_base;
+        dialog.next_presentation_id = self.next_presentation_id;
     }
 }
 
@@ -100,6 +110,22 @@ struct PendingDashboardEditorConfirmation {
     kind: DashboardEditorConfirmationKind,
     instance: u64,
     slot_token: u64,
+}
+
+struct PendingDashboardEditorEffects {
+    root_frame_nr: u64,
+    root_pass_nr: u64,
+    target_generation: u64,
+    dashboard_path: String,
+    presentation_updates: Vec<(u64, bool)>,
+    close_requested: bool,
+    save_config: Option<DashboardConfig>,
+}
+
+pub(crate) struct DashboardEditorCompletion {
+    pub(crate) dashboard_saved: bool,
+    pub(crate) presentation_error: Option<String>,
+    pub(crate) editor_open: bool,
 }
 
 fn register_editor_target(
@@ -140,10 +166,10 @@ pub struct DashboardEditorDialog {
     path: String,
     config: DashboardConfig,
     error: Option<String>,
-    pending_save: bool,
     selected_slot: Option<usize>,
     show_preview: bool,
     blocked_warning: Option<String>,
+    presentation_warning: Option<String>,
     drag_anchor: Option<(usize, usize)>,
     swap_anchor: Option<usize>,
     slot_expand_all: bool,
@@ -159,10 +185,18 @@ pub struct DashboardEditorDialog {
     slot_tokens: Vec<u64>,
     next_slot_token: u64,
     target_generation: u64,
+    presentation_store:
+        Option<crate::dashboard::editor_presentation::DashboardEditorPresentationStore>,
+    slot_presentations: Vec<crate::dashboard::editor_presentation::DashboardSlotPresentation>,
+    presentation_base: Vec<crate::dashboard::editor_presentation::DashboardSlotPresentationBase>,
+    next_presentation_id: u64,
+    pending_root_effects: Option<PendingDashboardEditorEffects>,
     pub(crate) property_identity_store: Rc<WidgetPropertyIdentityStore>,
     pub(crate) native_combo_anchors: Vec<crate::dashboard::widgets::WidgetNativeComboAnchor>,
     #[cfg(test)]
     test_scroll_metrics: Option<(egui::Id, f32)>,
+    #[cfg(test)]
+    test_grid_rows_response: Option<(egui::Id, egui::Rect)>,
 }
 
 impl Default for DashboardEditorDialog {
@@ -172,10 +206,10 @@ impl Default for DashboardEditorDialog {
             path: "dashboard.json".into(),
             config: DashboardConfig::default(),
             error: None,
-            pending_save: false,
             selected_slot: None,
             show_preview: false,
             blocked_warning: None,
+            presentation_warning: None,
             drag_anchor: None,
             swap_anchor: None,
             slot_expand_all: false,
@@ -191,19 +225,196 @@ impl Default for DashboardEditorDialog {
             slot_tokens: Vec::new(),
             next_slot_token: 1,
             target_generation: 0,
+            presentation_store: None,
+            slot_presentations: Vec::new(),
+            presentation_base: Vec::new(),
+            next_presentation_id: 1,
+            pending_root_effects: None,
             property_identity_store: Rc::new(WidgetPropertyIdentityStore::default()),
             native_combo_anchors: Vec::new(),
             #[cfg(test)]
             test_scroll_metrics: None,
+            #[cfg(test)]
+            test_grid_rows_response: None,
         }
     }
 }
 
 impl DashboardEditorDialog {
+    pub(crate) fn with_profile_root(root: &crate::platform::app_data::AppDataRoot) -> Self {
+        let mut dialog = Self::default();
+        dialog.presentation_store = Some(
+            crate::dashboard::editor_presentation::DashboardEditorPresentationStore::for_profile(
+                root.path(),
+            ),
+        );
+        dialog
+    }
+
     pub fn open(&mut self, path: &str, registry: &WidgetRegistry) {
         self.path = path.to_string();
         self.reload(registry);
         self.open = true;
+    }
+
+    fn next_presentation_id(&mut self) -> u64 {
+        let id = self.next_presentation_id;
+        self.next_presentation_id = self.next_presentation_id.wrapping_add(1).max(1);
+        id
+    }
+
+    fn initialize_presentations(&mut self, slots: &[SlotConfig], expanded: &[bool]) {
+        self.slot_presentations.clear();
+        self.presentation_base.clear();
+        for (index, slot) in slots.iter().enumerate() {
+            let id = self.next_presentation_id();
+            self.slot_presentations.push(
+                crate::dashboard::editor_presentation::DashboardSlotPresentation {
+                    id,
+                    expanded: expanded.get(index).copied().unwrap_or(true),
+                },
+            );
+            self.presentation_base.push(
+                crate::dashboard::editor_presentation::DashboardSlotPresentationBase {
+                    id,
+                    slot: slot.clone(),
+                },
+            );
+        }
+    }
+
+    fn ensure_presentations(&mut self) {
+        while self.slot_presentations.len() > self.config.slots.len() {
+            self.slot_presentations.pop();
+        }
+        while self.slot_presentations.len() < self.config.slots.len() {
+            let id = self.next_presentation_id();
+            self.slot_presentations.push(
+                crate::dashboard::editor_presentation::DashboardSlotPresentation {
+                    id,
+                    expanded: true,
+                },
+            );
+        }
+    }
+
+    fn presentation_id_at(&self, index: usize) -> u64 {
+        self.slot_presentations[index].id
+    }
+
+    fn set_presentation_expanded(&mut self, id: u64, expanded: bool) {
+        let Some(presentation) = self
+            .slot_presentations
+            .iter_mut()
+            .find(|presentation| presentation.id == id)
+        else {
+            return;
+        };
+        presentation.expanded = expanded;
+    }
+
+    fn base_presentation_records(&self) -> Vec<(SlotConfig, bool)> {
+        self.presentation_base
+            .iter()
+            .filter_map(|base| {
+                self.slot_presentations
+                    .iter()
+                    .find(|presentation| presentation.id == base.id)
+                    .map(|presentation| (base.slot.clone(), presentation.expanded))
+            })
+            .collect()
+    }
+
+    fn current_presentation_records(&self) -> Vec<(SlotConfig, bool)> {
+        self.config
+            .slots
+            .iter()
+            .zip(&self.slot_presentations)
+            .map(|(slot, presentation)| (slot.clone(), presentation.expanded))
+            .collect()
+    }
+
+    fn adopt_saved_config(&mut self, config: DashboardConfig) {
+        self.config = config;
+        self.ensure_presentations();
+        self.presentation_base = self
+            .config
+            .slots
+            .iter()
+            .zip(&self.slot_presentations)
+            .map(|(slot, presentation)| {
+                crate::dashboard::editor_presentation::DashboardSlotPresentationBase {
+                    id: presentation.id,
+                    slot: slot.clone(),
+                }
+            })
+            .collect();
+        self.renew_slot_tokens();
+    }
+
+    /// Publish staged dashboard writes only after this exact ROOT pass was
+    /// retained and the original dialog/path owner is still current.
+    pub(crate) fn on_ui_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+        registry: &WidgetRegistry,
+        active_dashboard_path: &str,
+    ) -> Option<DashboardEditorCompletion> {
+        let effects = self.pending_root_effects.take()?;
+        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
+            == effects.root_frame_nr.saturating_add(1)
+            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
+                == effects.root_pass_nr.saturating_add(1);
+        if !retained
+            || self.target_generation != effects.target_generation
+            || self.path != effects.dashboard_path
+            || active_dashboard_path != effects.dashboard_path
+        {
+            return None;
+        }
+
+        for (id, expanded) in effects.presentation_updates {
+            self.set_presentation_expanded(id, expanded);
+        }
+
+        let mut dashboard_saved = false;
+        let mut presentation_records = self.base_presentation_records();
+        let mut presentation_error = None;
+        let save_requested = effects.save_config.is_some();
+        if let Some(config) = effects.save_config {
+            if config != self.config {
+                self.error = Some("Dashboard draft changed before Save could finish.".into());
+            } else {
+                match self.persist_config(registry, &effects.dashboard_path, config) {
+                    Ok(committed) => {
+                        self.adopt_saved_config(committed);
+                        presentation_records = self.current_presentation_records();
+                        self.error = None;
+                        dashboard_saved = true;
+                    }
+                    Err(error) => self.error = Some(format!("Failed to save: {error}")),
+                }
+            }
+        }
+        if let Some(store) = &self.presentation_store {
+            match store.save(Path::new(&effects.dashboard_path), &presentation_records) {
+                Ok(()) => self.presentation_warning = None,
+                Err(error) => {
+                    let error = error.to_string();
+                    self.presentation_warning =
+                        Some(format!("Could not save Dashboard Editor layout: {error}"));
+                    presentation_error = Some(error);
+                }
+            }
+        }
+        if effects.close_requested && (!save_requested || dashboard_saved) {
+            self.open = false;
+        }
+        Some(DashboardEditorCompletion {
+            dashboard_saved,
+            presentation_error,
+            editor_open: self.open,
+        })
     }
 
     pub(crate) fn target_generation(&self) -> u64 {
@@ -216,6 +427,21 @@ impl DashboardEditorDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_grid_rows_response(&self) -> Option<(egui::Id, egui::Rect)> {
+        self.test_grid_rows_response
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_grid_rows(&self) -> u8 {
+        self.config.grid.rows
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_grid_rows(&mut self, rows: u8) {
+        self.config.grid.rows = rows.clamp(1, 12);
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_slot_token(&self, index: usize) -> Option<u64> {
         self.slot_tokens.get(index).copied()
     }
@@ -223,6 +449,13 @@ impl DashboardEditorDialog {
     #[cfg(test)]
     pub(crate) fn test_slot(&self, index: usize) -> Option<&SlotConfig> {
         self.config.slots.get(index)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_slot_expanded(&self, index: usize) -> Option<bool> {
+        self.slot_presentations
+            .get(index)
+            .map(|presentation| presentation.expanded)
     }
 
     #[cfg(test)]
@@ -342,8 +575,15 @@ impl DashboardEditorDialog {
 
     fn add_slot(&mut self, slot: SlotConfig) {
         let token = self.next_slot_token();
+        let presentation_id = self.next_presentation_id();
         self.config.slots.push(slot);
         self.slot_tokens.push(token);
+        self.slot_presentations.push(
+            crate::dashboard::editor_presentation::DashboardSlotPresentation {
+                id: presentation_id,
+                expanded: true,
+            },
+        );
     }
 
     fn reload(&mut self, registry: &WidgetRegistry) {
@@ -355,6 +595,23 @@ impl DashboardEditorDialog {
             Ok(cfg) => {
                 self.config = cfg;
                 self.error = None;
+                let expanded = if let Some(store) = &self.presentation_store {
+                    match store.load(Path::new(&self.path), &self.config.slots) {
+                        Ok(expanded) => {
+                            self.presentation_warning = None;
+                            expanded
+                        }
+                        Err(error) => {
+                            self.presentation_warning = Some(format!(
+                                "Saved Dashboard Editor layout could not be loaded; sections defaulted open: {error}"
+                            ));
+                            vec![true; self.config.slots.len()]
+                        }
+                    }
+                } else {
+                    vec![true; self.config.slots.len()]
+                };
+                self.initialize_presentations(&self.config.slots.clone(), &expanded);
                 self.slot_tokens.clear();
                 for _ in 0..self.config.slots.len() {
                     let token = self.next_slot_token();
@@ -368,18 +625,13 @@ impl DashboardEditorDialog {
         }
     }
 
-    fn save(&mut self, registry: &WidgetRegistry) {
-        match DashboardConfig::replace(&self.path, registry, self.config.clone()) {
-            Ok(committed) => {
-                self.config = committed;
-                self.renew_slot_tokens();
-                self.error = None;
-                self.pending_save = true;
-            }
-            Err(e) => {
-                self.error = Some(format!("Failed to save: {e}"));
-            }
-        }
+    fn persist_config(
+        &self,
+        registry: &WidgetRegistry,
+        path: &str,
+        config: DashboardConfig,
+    ) -> anyhow::Result<DashboardConfig> {
+        DashboardConfig::replace(path, registry, config)
     }
 
     pub fn ui(
@@ -421,7 +673,14 @@ impl DashboardEditorDialog {
         }
         settings_ctx.begin_native_combo_anchor_pass();
         self.ensure_slot_tokens();
-        let mut should_reload = false;
+        self.ensure_presentations();
+        #[cfg(test)]
+        {
+            self.test_grid_rows_response = None;
+        }
+        let mut save_requested = false;
+        let mut presentation_updates = Vec::new();
+        let mut close_requested = false;
         let mut open = self.open;
         let mut authorized_visible_pass = false;
         let mut draft_snapshot = None;
@@ -452,6 +711,10 @@ impl DashboardEditorDialog {
                         let response = ui.add(
                             egui::DragValue::new(&mut self.config.grid.rows).range(1..=12),
                         );
+                        #[cfg(test)]
+                        {
+                            self.test_grid_rows_response = Some((response.id, response.rect));
+                        }
                         register_editor_target(jump_scope, ui, &response, "grid/rows", "Grid rows", crate::gui::jump_mode::TargetKind::Slider, &mut visual_order);
                         if response.changed() {
                             self.clamp_all_slots();
@@ -497,6 +760,9 @@ impl DashboardEditorDialog {
                     let (_, mut warnings) =
                         crate::dashboard::layout::normalize_slots(&self.config, registry);
                     if let Some(err) = &self.blocked_warning {
+                        warnings.push(err.clone());
+                    }
+                    if let Some(err) = &self.presentation_warning {
                         warnings.push(err.clone());
                     }
                     if !warnings.is_empty() {
@@ -552,7 +818,7 @@ impl DashboardEditorDialog {
                             );
                             register_editor_target(jump_scope, ui, &response, "save", "Save dashboard", crate::gui::jump_mode::TargetKind::Button, &mut visual_order);
                             if response.clicked() && authorized_visible_pass {
-                                self.save(registry);
+                                save_requested = true;
                             }
                         });
                         if has_conflicts {
@@ -657,6 +923,8 @@ impl DashboardEditorDialog {
                     while idx < self.config.slots.len() {
                         let original_slot = self.config.slots[idx].clone();
                         let slot_token = self.slot_tokens[idx];
+                        let presentation_id = self.presentation_id_at(idx);
+                        let mut expanded_this_pass = self.slot_presentations[idx].expanded;
                         let mut slot = original_slot.clone();
                         let mut edited = false;
                         let mut swapped = false;
@@ -664,19 +932,22 @@ impl DashboardEditorDialog {
                         let mut section_order = visual_order;
                         ui.scope_builder(
                             egui::UiBuilder::new()
-                                .id(ui.id().with(("dashboard-editor-slot", slot_token))),
+                                .id(ui.id().with(("dashboard-editor-slot", presentation_id))),
                             |ui| {
-                            let collapsing_id = ui.id().with(("slot-collapse", slot_token));
+                            let collapsing_id = ui.id().with(("slot-collapse", presentation_id));
                             let mut state = CollapsingState::load_with_default_open(
                                 ui.ctx(),
                                 collapsing_id,
-                                true,
+                                self.slot_presentations[idx].expanded,
                             );
                             if self.slot_expand_all {
                                 state.set_open(true);
                                 state.store(ui.ctx());
                             } else if self.slot_collapse_all {
                                 state.set_open(false);
+                                state.store(ui.ctx());
+                            } else {
+                                state.set_open(self.slot_presentations[idx].expanded);
                                 state.store(ui.ctx());
                             }
                             let header_response = state.show_header(ui, |ui| {
@@ -751,6 +1022,7 @@ impl DashboardEditorDialog {
                                     );
                                 });
                             });
+                            expanded_this_pass = header_response.is_open();
                             section_order = visual_order;
                             visual_order = visual_order.saturating_add(1);
                             let (response, _, body) = header_response.body_unindented(|ui| {
@@ -854,6 +1126,9 @@ impl DashboardEditorDialog {
                             }
                             },
                         );
+                        if self.slot_presentations[idx].expanded != expanded_this_pass {
+                            presentation_updates.push((presentation_id, expanded_this_pass));
+                        }
                         let section_response = section_response
                             .expect("the slot section has a real header response");
                         register_editor_target_at_order(
@@ -946,13 +1221,24 @@ impl DashboardEditorDialog {
             }
         }
         if native_ui_owner && first_ui_pass {
-            self.open = open;
+            close_requested = !open;
         }
-        if authorized_visible_pass && self.pending_save {
-            self.pending_save = false;
-            should_reload = true;
+        if authorized_visible_pass
+            && first_ui_pass
+            && !ctx.will_discard()
+            && (save_requested || !presentation_updates.is_empty() || close_requested)
+        {
+            self.pending_root_effects = Some(PendingDashboardEditorEffects {
+                root_frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
+                root_pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                target_generation: self.target_generation,
+                dashboard_path: self.path.clone(),
+                presentation_updates,
+                close_requested,
+                save_config: save_requested.then(|| self.config.clone()),
+            });
         }
-        should_reload
+        false
     }
 
     fn clamp_all_slots(&mut self) {
@@ -1015,6 +1301,7 @@ impl DashboardEditorDialog {
         }
         let token = self.slot_tokens.remove(idx);
         self.config.slots.remove(idx);
+        self.slot_presentations.remove(idx);
         self.property_identity_store.clear_slot(token);
         if let Some(selected) = self.selected_slot {
             if selected >= idx && !self.config.slots.is_empty() {
@@ -1242,6 +1529,7 @@ impl DashboardEditorDialog {
                 self.config.slots[first] = first_slot;
                 self.config.slots[second] = second_slot;
                 self.slot_tokens.swap(first, second);
+                self.slot_presentations.swap(first, second);
                 self.blocked_warning = None;
                 Ok(())
             }
@@ -2012,6 +2300,13 @@ impl DashboardEditorDialog {
                 self.config.slots[new_idx] = new_slot;
                 let token = self.next_slot_token();
                 self.slot_tokens.push(token);
+                let presentation_id = self.next_presentation_id();
+                self.slot_presentations.push(
+                    crate::dashboard::editor_presentation::DashboardSlotPresentation {
+                        id: presentation_id,
+                        expanded: true,
+                    },
+                );
                 self.blocked_warning = None;
                 Ok(())
             }
@@ -2038,11 +2333,135 @@ mod persistence_tests {
         assert!(dialog.error.is_some());
 
         dialog.config.grid.rows = 9;
-        dialog.save(&registry);
-
-        assert!(!dialog.pending_save);
-        assert!(dialog.error.as_deref().unwrap().contains("Failed to save"));
+        let save = dialog.persist_config(&registry, &dialog.path, dialog.config.clone());
+        assert!(save.is_err());
+        assert_eq!(
+            dialog.config.grid.rows, 9,
+            "a failed save retains the draft"
+        );
         assert_eq!(std::fs::read(temporary.path()).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_coalesced_save_and_close_keeps_editor_open_and_draft_retryable() {
+        let temporary = tempfile::NamedTempFile::new().unwrap();
+        let original = b"{broken";
+        std::fs::write(temporary.path(), original).unwrap();
+        let registry = WidgetRegistry::with_defaults();
+        let mut dialog = DashboardEditorDialog::default();
+        let path = temporary.path().to_string_lossy().into_owned();
+        dialog.open(&path, &registry);
+        dialog.config.grid.rows = 9;
+        let ctx = egui::Context::default();
+        let root_frame_nr = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        let root_pass_nr = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+        dialog.pending_root_effects = Some(PendingDashboardEditorEffects {
+            root_frame_nr,
+            root_pass_nr,
+            target_generation: dialog.target_generation,
+            dashboard_path: path.clone(),
+            presentation_updates: Vec::new(),
+            close_requested: true,
+            save_config: Some(dialog.config.clone()),
+        });
+
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.drop_without_applying_deltas();
+        let completion = dialog
+            .on_ui_frame_complete(&ctx, &registry, &path)
+            .expect("the coalesced receipt belongs to the retained ROOT pass");
+
+        assert!(!completion.dashboard_saved);
+        assert!(completion.editor_open);
+        assert!(dialog.open, "failed Save must leave the editor open");
+        assert_eq!(dialog.config.grid.rows, 9, "failed Save keeps the draft");
+        assert!(dialog.error.is_some());
+        assert_eq!(std::fs::read(temporary.path()).unwrap(), original);
+    }
+
+    #[test]
+    fn known_local_slot_changes_preserve_separate_presentation_identity() {
+        let profile = tempfile::tempdir().unwrap();
+        let dashboard_path = profile.path().join("dashboard.json");
+        let registry = WidgetRegistry::with_defaults();
+        let mut config = DashboardConfig::default();
+        config.grid.rows = 1;
+        config.grid.cols = 2;
+        let mut weather = SlotConfig::with_widget("weather_site", 0, 0);
+        weather.id = Some("weather-user-id".into());
+        let mut pinned = SlotConfig::with_widget("pinned_commands", 0, 1);
+        pinned.id = Some("pinned-user-id".into());
+        config.slots = vec![weather.clone(), pinned.clone()];
+        std::fs::write(
+            &dashboard_path,
+            serde_json::to_vec(&config).expect("the fixture dashboard serializes"),
+        )
+        .unwrap();
+
+        let store =
+            crate::dashboard::editor_presentation::DashboardEditorPresentationStore::for_profile(
+                profile.path(),
+            );
+        store
+            .save(&dashboard_path, &[(weather, false), (pinned, true)])
+            .unwrap();
+        let data_root = crate::platform::app_data::AppDataRoot::from_path(profile.path());
+        let mut dialog = DashboardEditorDialog::with_profile_root(&data_root);
+        dialog.open(dashboard_path.to_str().unwrap(), &registry);
+        assert_eq!(dialog.test_slot_expanded(0), Some(false));
+        assert_eq!(dialog.test_slot_expanded(1), Some(true));
+
+        dialog.swap_slots(0, 1, &registry).unwrap();
+        assert_eq!(
+            dialog.test_slot(0).unwrap().id.as_deref(),
+            Some("pinned-user-id")
+        );
+        assert_eq!(
+            dialog.test_slot(1).unwrap().id.as_deref(),
+            Some("weather-user-id")
+        );
+        assert_eq!(dialog.test_slot_expanded(0), Some(true));
+        assert_eq!(dialog.test_slot_expanded(1), Some(false));
+
+        dialog.add_slot(SlotConfig::with_widget("todo", 0, 2));
+        assert_eq!(dialog.test_slot_expanded(2), Some(true));
+        let added_presentation_id = dialog.slot_presentations[2].id;
+        dialog.remove_slot_at(2);
+        assert!(
+            dialog
+                .slot_presentations
+                .iter()
+                .all(|presentation| presentation.id != added_presentation_id)
+        );
+
+        let local_presentation_id = dialog.slot_presentations[0].id;
+        dialog.config.slots[0].id = Some("locally-renamed-pinned".into());
+        assert_eq!(dialog.slot_presentations[0].id, local_presentation_id);
+        assert_eq!(dialog.test_slot_expanded(0), Some(true));
+        assert_eq!(
+            dialog.test_slot(0).unwrap().id.as_deref(),
+            Some("locally-renamed-pinned")
+        );
+
+        let committed = dialog
+            .persist_config(&registry, &dialog.path, dialog.config.clone())
+            .unwrap();
+        dialog.adopt_saved_config(committed);
+        store
+            .save(&dashboard_path, &dialog.current_presentation_records())
+            .unwrap();
+        let mut reopened = DashboardEditorDialog::with_profile_root(&data_root);
+        reopened.open(dashboard_path.to_str().unwrap(), &registry);
+        assert_eq!(reopened.test_slot_expanded(0), Some(true));
+        assert_eq!(reopened.test_slot_expanded(1), Some(false));
+        assert_eq!(
+            reopened.test_slot(0).unwrap().id.as_deref(),
+            Some("locally-renamed-pinned")
+        );
+        assert_eq!(
+            reopened.test_slot(1).unwrap().id.as_deref(),
+            Some("weather-user-id")
+        );
     }
 
     #[test]

@@ -1,8 +1,38 @@
 # Diagram Studio Mermaid flowchart subset
 
-This document defines the source accepted by `diagram::parse_mermaid` and emitted by `diagram::format_mermaid`. It is an intentionally bounded flowchart subset, not a general Mermaid implementation. Parsing consumes each nonblank statement completely. Unsupported syntax produces a diagnostic; a valid prefix is never returned as if the whole file succeeded.
+This document first defines the source accepted by `diagram::parse_mermaid` and emitted by `diagram::format_mermaid`. That parser is an intentionally bounded native flowchart subset, not a general Mermaid implementation. Parsing consumes each nonblank statement completely. Unsupported syntax produces a diagnostic; a valid prefix is never returned as if the whole file succeeded.
 
 Syntax reference: [official Mermaid flowchart documentation](https://mermaid.js.org/syntax/flowchart.html). Only the forms listed below are admitted here.
+
+## Source-rendered families
+
+The ten families below use the separately bounded preview adapter. They remain
+exact Mermaid source in the document session; the adapter does not create a
+native flowchart graph, update native LastGood state, or expand
+`diagram::parse_mermaid`. Source rendering is available only when the pinned
+renderer strictly parses the whole source and the family's bounded line and
+parsed-item accounting accepts it. This is a useful starter and preview subset,
+not a claim of complete Mermaid compatibility.
+
+| Family | Admitted source forms |
+| --- | --- |
+| Mindmap | One `mindmap` header followed by renderer-parsed node lines; source node accounting must match the parsed node count. |
+| Sequence | `sequenceDiagram`, simple participant/actor declarations, and simple arrow messages with labels; parsed message count must match. |
+| Class | Simple class identifiers, optional brace blocks with visibility-prefixed member lines (`+`, `-`, `#`, `~`), and one-line relation statements whose count matches parsed edges. |
+| State | `stateDiagram` or `stateDiagram-v2` followed by transition statements containing `-->`; each statement must correspond to a parsed edge. |
+| Entity Relationship | `erDiagram` relationship statements containing `--` and a relationship label after `:`; each statement must correspond to a parsed edge. |
+| Gantt | Optional one title, nonempty sections and date format, and task statements; source task and section counts must match parsed data. |
+| Timeline | Optional one title, sections, and `time : event` statements; event and section counts must match parsed data. |
+| User Journey | Optional one title, sections, and task statements with a finite score from 0 through 5; task and section counts must match parsed items. |
+| Pie | Optional one title, optional `showData`, and slices with finite positive numeric values; slice counts must match parsed data. |
+| GitGraph | Basic commits, simple branch/checkout/switch commands, and merges with simple branch identifiers; commit and branch accounting must match parsed data. |
+
+Common source bounds remain 65,536 bytes, 4,096 physical lines, and 8,192
+bytes per line. Directives and frontmatter are not part of the admitted forms.
+Other syntax may be rejected even when Mermaid itself accepts it. Do not infer
+native graph editing, layout preservation, or full Mermaid parity from a
+successful rendered preview. Native flowchart editing continues to use only
+the grammar below.
 
 ## Grammar
 
@@ -72,7 +102,7 @@ The decoded label limit applies after one-pass entity decoding. A source documen
 
 ## Pure session behavior and native codec
 
-`DiagramSession` owns the current source draft, its last-good graph/source snapshot, a monotonic revision and edge-ID high-water mark, bounded undo/redo, and a content-based saved baseline. A supported draft is `Current` only when it agrees semantically with the last-good graph. Invalid or unsupported in-bounds text is retained byte-for-byte and shown as `Stale` when an older graph exists, or `NoPreview` otherwise. Every visual graph transaction is blocked until the draft parses as supported current source. Parser line/count limits remain editable drafts; a source over the 65,536-byte limit is rejected atomically.
+`DiagramSession` owns the current source draft, its native last-good graph/source snapshot, a monotonic revision and edge-ID high-water mark, bounded undo/redo, and a content-based saved baseline. A supported native flowchart draft is `Current` only when it agrees semantically with the last-good graph. Invalid or unsupported in-bounds native text is retained byte-for-byte and shown as `Stale` when an older native graph exists, or `NoPreview` otherwise. Generic renderer results have their own document/revision/options identity and never become native LastGood graph state. Every visual graph transaction is blocked until the draft parses as supported current flowchart source. Parser line/count limits remain editable drafts; a source over the 65,536-byte limit is rejected atomically.
 
 Supported text edits reconcile nodes by stable ID, retaining positions for survivors, including a survivor at the origin. New nodes receive deterministic anchors on a bounded 64-by-64 lattice with 180-unit spacing and integer coordinates from -32 through 31. Candidates are visited center-out, beginning at `(0, 0)`, so small new graphs stay near the origin. One shared cursor advances across newly seeded nodes, skipping any candidate less than 120 coordinate units from an occupied survivor or earlier new anchor. Existing source edges first match by directed endpoints and label, then by directed endpoints alone so relabeling retains identity. Each pass consumes parallel edges in source order. When parallel edges are indistinguishable, source order is the available stable tie-breaker. Unmatched edges use the session allocator, which is not restored by undo or redo.
 
@@ -82,7 +112,7 @@ The version 1 JSON byte codec is an in-memory/native serialization boundary; it 
 
 `DiagramDocumentController` keeps the active path and SHA-256 disk baseline outside the session history. Its explicit-path store reads at most 8 MiB plus one detection byte and accepts regular files only. Save As refuses an occupied destination; Save compares current bytes with the baseline before durable atomic replacement. This preflight detects changed or deleted bytes but is not a race-free compare-and-swap. The controller acknowledges the exact captured session content only after a successful write, while native bytes always include history, revision, and allocator state even when content is clean. A blank untitled document requires Save As. New, Open, and Close share one pending Save/Discard/Cancel decision; failed saves and failed pending Open leave the active session and decision available. A pending Open retains its path and rereads it when applied, including after saving the current document.
 
-The pure import boundary accepts an explicitly selected regular `.mmd` file, reads at most 65,536 bytes plus one detection byte, and requires UTF-8. It preserves the source string exactly, including a UTF-8 BOM, CRLF, comments, and unsupported syntax. Import creates a fresh untitled session; unsupported imported source has no prior preview and remains editable as raw text. If the current document is dirty, the controller keeps only the typed import path while awaiting Save/Discard/Cancel and rereads it when the decision is applied. The three built-in Linear, Decision, and Process templates use validated subset source and the same fresh-session replacement behavior.
+The pure import boundary accepts an explicitly selected regular `.mmd` file, reads at most 65,536 bytes plus one detection byte, and requires UTF-8. It preserves the source string exactly, including a UTF-8 BOM, CRLF, comments, and unsupported syntax. Import creates a fresh untitled session; unsupported imported source has no native prior preview and remains editable as raw text. A separately accepted source-rendered family can show its matching generic preview without changing native LastGood state. If the current document is dirty, the controller keeps only the typed import path while awaiting Save/Discard/Cancel and rereads it when the decision is applied. The Linear, Decision, and Process templates use validated native flowchart source. The other ten templates provide bounded source-rendered starters and use the same fresh-session replacement behavior.
 
 `layout_positions` is a deterministic pure initial-layout operation. It collapses cycles into stable strongly connected components, ranks connected components along the graph direction, places disconnected components at the first rank, and separates group members into lanes. Rank and lane spacing use the same node extents and group padding/header measurements as the shared scene builder. `DiagramDocumentController::auto_layout` publishes the resulting positions through one bounded `MoveNodes` transaction; IDs, labels, shapes, groups, direction, and edges remain unchanged. Repeating layout is a no-op; successful layout participates in the ordinary session undo/redo history. If scene geometry or coordinates exceed existing bounds, the operation fails without changing the session.
 

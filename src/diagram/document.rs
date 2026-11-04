@@ -1332,6 +1332,70 @@ mod tests {
     }
 
     #[test]
+    fn diagram_document_dirty_generic_template_replacement_keeps_decision_preflight() {
+        let mut controller = DiagramDocumentController::new();
+        let original = "mindmap\r\n  root((Current))\r\n    Unsaved branch\r\n";
+        controller.replace_source(original).unwrap();
+
+        assert_eq!(
+            controller.request_template(DiagramTemplate::Pie).unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Cancel)
+                .unwrap(),
+            TransitionOutcome::Cancelled
+        );
+        assert_eq!(controller.session().unwrap().draft(), original);
+        assert!(controller.is_dirty());
+
+        assert_eq!(
+            controller.request_template(DiagramTemplate::Pie).unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Discard)
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        let session = controller.session().unwrap();
+        assert_eq!(session.draft(), DiagramTemplate::Pie.source());
+        assert!(session.current_graph().is_none());
+        assert_eq!(session.status().preview, PreviewState::NoPreview);
+        assert_eq!(session.revision(), 1);
+        assert_eq!(controller.path(), None);
+        assert_eq!(controller.disk_digest(), None);
+    }
+
+    #[test]
+    fn diagram_document_generic_source_save_and_reopen_preserves_exact_unicode_crlf() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("generic.mld");
+        let source = "%% keep this comment\r\npie showData\r\n    title Café budget\r\n    \"Tea 🍵\" : 12\r\n";
+        let mut original = DiagramDocumentController::new();
+        original
+            .request_source_copy(DiagramSourceCopy::new(source).unwrap())
+            .unwrap();
+        original.save_as(&path).unwrap();
+        assert!(!original.is_dirty());
+
+        let mut reopened = DiagramDocumentController::new();
+        assert_eq!(
+            reopened.request_open(&path).unwrap(),
+            TransitionOutcome::Applied
+        );
+        let session = reopened.session().unwrap();
+        assert_eq!(session.draft(), source);
+        assert!(session.current_graph().is_none());
+        assert_eq!(session.status().preview, PreviewState::NoPreview);
+        assert_eq!(session.last_good_source(), None);
+        assert_eq!(reopened.path(), Some(path.as_path()));
+        assert!(!reopened.is_dirty());
+    }
+
+    #[test]
     fn diagram_document_pending_import_rereads_after_single_save_as_publication() {
         let directory = tempfile::tempdir().unwrap();
         let import_path = directory.path().join("target.mmd");

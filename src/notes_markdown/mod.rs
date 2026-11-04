@@ -30,10 +30,11 @@ pub use preview::{
     MermaidFenceStatus,
 };
 pub use tables::{
-    MAX_MARKDOWN_TABLE_CELLS, MAX_MARKDOWN_TABLES, MarkdownTableAlignment, MarkdownTableRow,
-    ParsedMarkdownTable, TableEditError, parse_markdown_tables, prepare_insert_column,
-    prepare_insert_row, prepare_insert_table, prepare_remove_column, prepare_remove_row,
-    prepare_set_cell, table_at_byte,
+    MAX_MARKDOWN_CUSTOM_TABLE_DIMENSION, MAX_MARKDOWN_TABLE_CELLS, MAX_MARKDOWN_TABLES,
+    MarkdownTableAlignment, MarkdownTableRow, ParsedMarkdownTable, TableEditError,
+    parse_markdown_tables, prepare_insert_column, prepare_insert_row, prepare_insert_table,
+    prepare_insert_table_with_rows, prepare_remove_column, prepare_remove_row, prepare_set_cell,
+    table_at_byte,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
