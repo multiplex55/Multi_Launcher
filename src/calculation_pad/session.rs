@@ -738,7 +738,7 @@ impl CalculationPadSession {
     }
 
     #[cfg(test)]
-    fn evaluation_count(&self) -> usize {
+    pub(crate) fn evaluation_count(&self) -> usize {
         self.current
             .as_ref()
             .map_or(0, |document| document.evaluation_count)

@@ -25,6 +25,7 @@ enum DialogCopyOwner {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RootDialogEffect {
+    ShowRoot,
     CopyText {
         owner: DialogCopyOwner,
         text: String,
@@ -2132,7 +2133,7 @@ impl LauncherApp {
             Panel::JsonUtilityDialog => NavigationDialogKind::JsonUtility.layer_id(),
             Panel::ZipExtractorDialog => NavigationDialogKind::ZipExtractor.layer_id(),
             Panel::RegexTesterDialog => NavigationDialogKind::RegexTester.layer_id(),
-            Panel::CalculationPadDialog => middle(egui::Id::new("calculation-pad-window")),
+            Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
             Panel::DateTimeStudioDialog => middle(egui::Id::new("date-time-studio-window")),
             Panel::MarkdownStudioDialog => middle(egui::Id::new("markdown-studio-window")),
             Panel::BatchRenameDialog => NavigationDialogKind::BatchRename.layer_id(),
@@ -4720,7 +4721,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 7] {
+    fn viewport_bootstrap_state(&self) -> [bool; 8] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4728,6 +4729,7 @@ impl LauncherApp {
             self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
             self.xml_toolkit_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
+            self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
         ]
     }
@@ -4741,7 +4743,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 7],
+        previously_pending: [bool; 8],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -7792,6 +7794,9 @@ impl LauncherApp {
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
+                    && !self
+                        .calculation_pad_dialog
+                        .embedded_host_owns_root_input(&ctx)
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     #[cfg(test)]
@@ -7864,6 +7869,9 @@ impl LauncherApp {
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
+                    && !self
+                        .calculation_pad_dialog
+                        .embedded_host_owns_root_input(&ctx)
                     && self.close_front_dialog()
                 {
                     let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
@@ -10206,7 +10214,15 @@ impl LauncherApp {
         #[cfg(not(feature = "qa-framebuffer-capture"))]
         self.qr_dialog.show(&ctx);
         self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        let _ = self.calculation_pad_dialog.show(&ctx, first_ui_pass);
+        let application_input_allowed = self.native_ui_application_input_allowed(&ctx);
+        let root_input_allowed =
+            self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible);
+        self.calculation_pad_dialog.show(
+            &ctx,
+            first_ui_pass,
+            application_input_allowed,
+            root_input_allowed,
+        );
         self.markdown_studio_dialog.show(&ctx, first_ui_pass);
         let calendar_editor_open = self.calendar_editor_open;
         let _ = self
@@ -10804,13 +10820,18 @@ impl LauncherApp {
 
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
         let mut effects = Vec::new();
-        if let Some(super::CalculationPadDialogEffect::CopyText(text)) =
-            self.calculation_pad_dialog.on_ui_frame_complete(ctx)
-        {
-            effects.push(RootDialogEffect::CopyText {
-                owner: DialogCopyOwner::CalculationPad,
-                text,
-            });
+        for pad_effect in self.calculation_pad_dialog.on_ui_frame_complete(ctx) {
+            match pad_effect {
+                super::CalculationPadDialogEffect::ShowRoot => {
+                    effects.push(RootDialogEffect::ShowRoot);
+                }
+                super::CalculationPadDialogEffect::CopyText(text) => {
+                    effects.push(RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::CalculationPad,
+                        text,
+                    });
+                }
+            }
         }
         match self.date_time_studio_dialog.on_ui_frame_complete(ctx) {
             Some(super::DateTimeStudioEffect::CopyText(text)) => {
@@ -10874,6 +10895,9 @@ impl LauncherApp {
 
         for effect in effects {
             match effect {
+                RootDialogEffect::ShowRoot => {
+                    self.request_launcher_visibility(true);
+                }
                 RootDialogEffect::CopyText { owner, text } => {
                     #[cfg(test)]
                     let result = {
@@ -14714,6 +14738,20 @@ mod tests {
                     egui::Id::new("calculation-pad-window"),
                 ))
         );
+    }
+
+    #[test]
+    fn studio_usability_calculation_show_root_uses_launcher_visibility_owner() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.request_launcher_visibility(false);
+        assert!(!app.visible_flag_state());
+
+        app.dispatch_root_dialog_effects(&ctx, vec![RootDialogEffect::ShowRoot]);
+
+        assert!(app.visible_flag_state());
+        assert!(app.restore_flag_state());
     }
 
     #[test]
