@@ -32,19 +32,44 @@ pub enum DiagramFamily {
     Flowchart,
     Mindmap,
     Sequence,
+    Class,
+    State,
+    EntityRelationship,
+    Gantt,
+    Timeline,
+    UserJourney,
+    Pie,
+    GitGraph,
     Other,
 }
 
-/// Whether the accepted source is in one of the generic families routed to
-/// the Mermaid renderer. Native flowcharts stay on the Studio session path.
+/// Selects one of the bounded source-rendered Mermaid families. The strict
+/// parser and family admission checks still decide whether its source renders.
+pub(crate) fn generic_preview_family(source: &str) -> Option<DiagramFamily> {
+    let header = source.lines().find_map(|raw_line| {
+        let line = strip_trailing_mermaid_comment(raw_line).trim();
+        (!line.is_empty() && !line.starts_with("%%")).then_some(line)
+    })?;
+    let token = header.split_whitespace().next()?.to_ascii_lowercase();
+    match token.as_str() {
+        "mindmap" => Some(DiagramFamily::Mindmap),
+        "sequencediagram" => Some(DiagramFamily::Sequence),
+        "classdiagram" => Some(DiagramFamily::Class),
+        "statediagram" | "statediagram-v2" => Some(DiagramFamily::State),
+        "erdiagram" => Some(DiagramFamily::EntityRelationship),
+        "gantt" => Some(DiagramFamily::Gantt),
+        "timeline" => Some(DiagramFamily::Timeline),
+        "journey" => Some(DiagramFamily::UserJourney),
+        "pie" => Some(DiagramFamily::Pie),
+        "gitgraph" => Some(DiagramFamily::GitGraph),
+        _ => None,
+    }
+}
+
+/// Native flowcharts remain on the graph-session path; the ten additional
+/// families use the source-rendered adapter.
 pub(crate) fn is_generic_preview_candidate(source: &str) -> bool {
-    source
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("%%"))
-        .is_some_and(|header| {
-            header.eq_ignore_ascii_case("mindmap") || header.eq_ignore_ascii_case("sequencediagram")
-        })
+    generic_preview_family(source).is_some()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -252,6 +277,38 @@ fn build_render_artifact(
             validate_sequence_capability(source, &parsed.graph)?;
             DiagramFamily::Sequence
         }
+        DiagramKind::Class => {
+            validate_class_capability(source, &parsed.graph)?;
+            DiagramFamily::Class
+        }
+        DiagramKind::State => {
+            validate_state_capability(source, &parsed.graph)?;
+            DiagramFamily::State
+        }
+        DiagramKind::Er => {
+            validate_entity_relationship_capability(source, &parsed.graph)?;
+            DiagramFamily::EntityRelationship
+        }
+        DiagramKind::Gantt => {
+            validate_gantt_capability(source, &parsed.graph)?;
+            DiagramFamily::Gantt
+        }
+        DiagramKind::Timeline => {
+            validate_timeline_capability(source, &parsed.graph)?;
+            DiagramFamily::Timeline
+        }
+        DiagramKind::Journey => {
+            validate_user_journey_capability(source, &parsed.graph)?;
+            DiagramFamily::UserJourney
+        }
+        DiagramKind::Pie => {
+            validate_pie_capability(source, &parsed.graph)?;
+            DiagramFamily::Pie
+        }
+        DiagramKind::GitGraph => {
+            validate_gitgraph_capability(source, &parsed.graph)?;
+            DiagramFamily::GitGraph
+        }
         _ => return Err(DiagramRenderError::UnqualifiedFamily),
     };
 
@@ -375,6 +432,365 @@ fn validate_sequence_capability(
     Ok(())
 }
 
+fn family_statements<'a>(
+    source: &'a str,
+    headers: &[&str],
+) -> Result<Vec<&'a str>, DiagramRenderError> {
+    let mut header_seen = false;
+    let mut statements = Vec::new();
+    for raw_line in source.lines() {
+        if raw_line.trim_start().starts_with("%%{") {
+            return Err(DiagramRenderError::InvalidSource);
+        }
+        let line = strip_trailing_mermaid_comment(raw_line).trim();
+        if line.is_empty() || line.starts_with("%%") {
+            if line.starts_with("%%{") {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            continue;
+        }
+        if line == "---" {
+            return Err(DiagramRenderError::InvalidSource);
+        }
+        if !header_seen {
+            let token = line.split_whitespace().next().unwrap_or_default();
+            if headers
+                .iter()
+                .any(|header| token.eq_ignore_ascii_case(header))
+            {
+                header_seen = true;
+                continue;
+            }
+            return Err(DiagramRenderError::InvalidSource);
+        }
+        statements.push(line);
+    }
+    if header_seen {
+        Ok(statements)
+    } else {
+        Err(DiagramRenderError::InvalidSource)
+    }
+}
+
+fn validate_class_capability(
+    source: &str,
+    graph: &mermaid_rs_renderer::Graph,
+) -> Result<(), DiagramRenderError> {
+    let statements = family_statements(source, &["classDiagram"])?;
+    let mut declarations = 0usize;
+    let mut relations = 0usize;
+    let mut open_class = false;
+    let mut members = Vec::new();
+    for line in statements {
+        if open_class {
+            if line == "}" {
+                open_class = false;
+            } else if line.len() > 1 && matches!(line.as_bytes()[0], b'+' | b'-' | b'#' | b'~') {
+                members.push(line);
+            } else {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            continue;
+        }
+        if let Some(declaration) = line.strip_prefix("class ") {
+            let declaration = declaration.trim();
+            let (identifier, has_body) = declaration
+                .strip_suffix('{')
+                .map_or((declaration, false), |identifier| (identifier.trim(), true));
+            if !is_simple_identifier(identifier) {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            declarations = declarations.saturating_add(1);
+            open_class = has_body;
+        } else if has_class_relation_operator(line) {
+            relations = relations.saturating_add(1);
+        } else {
+            return Err(DiagramRenderError::InvalidSource);
+        }
+    }
+    if open_class
+        || declarations == 0
+        || graph.nodes.len() < declarations
+        || graph.edges.len() != relations
+        || members.iter().any(|member| {
+            !graph
+                .nodes
+                .values()
+                .any(|node| node.label.contains(member.trim()))
+        })
+    {
+        return Err(DiagramRenderError::InvalidSource);
+    }
+    Ok(())
+}
+
+fn has_class_relation_operator(line: &str) -> bool {
+    [
+        "<|--", "--|>", "*--", "--*", "o--", "--o", "<|..", "..|>", "<..", "..>", "<--", "-->",
+        "..", "--",
+    ]
+    .iter()
+    .any(|operator| line.contains(operator))
+}
+
+fn is_simple_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn validate_state_capability(
+    source: &str,
+    graph: &mermaid_rs_renderer::Graph,
+) -> Result<(), DiagramRenderError> {
+    let statements = family_statements(source, &["stateDiagram", "stateDiagram-v2"])?;
+    if statements.is_empty()
+        || statements.iter().any(|line| !line.contains("-->"))
+        || graph.edges.len() != statements.len()
+    {
+        return Err(DiagramRenderError::InvalidSource);
+    }
+    Ok(())
+}
+
+fn validate_entity_relationship_capability(
+    source: &str,
+    graph: &mermaid_rs_renderer::Graph,
+) -> Result<(), DiagramRenderError> {
+    let statements = family_statements(source, &["erDiagram"])?;
+    if statements.is_empty()
+        || statements
+            .iter()
+            .any(|line| !line.contains("--") || !line.contains(':'))
+        || graph.edges.len() != statements.len()
+    {
+        return Err(DiagramRenderError::InvalidSource);
+    }
+    Ok(())
+}
+
+fn validate_gantt_capability(
+    source: &str,
+    graph: &mermaid_rs_renderer::Graph,
+) -> Result<(), DiagramRenderError> {
+    let statements = family_statements(source, &["gantt"])?;
+    let mut title_count = 0usize;
+    let mut section_count = 0usize;
+    let mut task_count = 0usize;
+    for line in statements {
+        let lower = line.to_ascii_lowercase();
+        if let Some(title) = lower.strip_prefix("title ") {
+            if title.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            title_count = title_count.saturating_add(1);
+        } else if let Some(section) = lower.strip_prefix("section ") {
+            if section.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            section_count = section_count.saturating_add(1);
+        } else if let Some(format) = lower.strip_prefix("dateformat ") {
+            if format.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+        } else if let Some((label, details)) = line.split_once(':') {
+            if label.trim().is_empty() || details.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            task_count = task_count.saturating_add(1);
+        } else {
+            return Err(DiagramRenderError::InvalidSource);
+        }
+    }
+    if title_count > 1
+        || (title_count == 1) != graph.gantt_title.is_some()
+        || section_count != graph.gantt_sections.len()
+        || task_count != graph.gantt_tasks.len()
+    {
+        return Err(DiagramRenderError::InvalidSource);
+    }
+    Ok(())
+}
+
+fn validate_timeline_capability(
+    source: &str,
+    graph: &mermaid_rs_renderer::Graph,
+) -> Result<(), DiagramRenderError> {
+    let statements = family_statements(source, &["timeline"])?;
+    let mut title_count = 0usize;
+    let mut section_count = 0usize;
+    let mut event_count = 0usize;
+    for line in statements {
+        let lower = line.to_ascii_lowercase();
+        if let Some(title) = lower.strip_prefix("title ") {
+            if title.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            title_count = title_count.saturating_add(1);
+        } else if let Some(section) = lower.strip_prefix("section ") {
+            if section.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            section_count = section_count.saturating_add(1);
+        } else if let Some((time, event)) = line.split_once(':') {
+            if time.trim().is_empty() || event.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            event_count = event_count.saturating_add(1);
+        } else {
+            return Err(DiagramRenderError::InvalidSource);
+        }
+    }
+    if title_count > 1
+        || (title_count == 1) != graph.timeline.title.is_some()
+        || section_count != graph.timeline.sections.len()
+        || event_count != graph.timeline.events.len()
+    {
+        return Err(DiagramRenderError::InvalidSource);
+    }
+    Ok(())
+}
+
+fn validate_user_journey_capability(
+    source: &str,
+    graph: &mermaid_rs_renderer::Graph,
+) -> Result<(), DiagramRenderError> {
+    let statements = family_statements(source, &["journey"])?;
+    let mut title_count = 0usize;
+    let mut section_count = 0usize;
+    let mut task_count = 0usize;
+    for line in statements {
+        let lower = line.to_ascii_lowercase();
+        if let Some(title) = lower.strip_prefix("title ") {
+            if title.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            title_count = title_count.saturating_add(1);
+        } else if let Some(section) = lower.strip_prefix("section ") {
+            if section.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            section_count = section_count.saturating_add(1);
+        } else {
+            let mut parts = line.split(':').map(str::trim);
+            let label = parts.next().unwrap_or_default();
+            let score = parts.next().and_then(|value| value.parse::<f32>().ok());
+            if label.is_empty()
+                || !score.is_some_and(|score| score.is_finite() && (0.0..=5.0).contains(&score))
+            {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            task_count = task_count.saturating_add(1);
+        }
+    }
+    if title_count > 1
+        || (title_count == 1) != graph.journey_title.is_some()
+        || section_count != graph.subgraphs.len()
+        || task_count != graph.nodes.len()
+    {
+        return Err(DiagramRenderError::InvalidSource);
+    }
+    Ok(())
+}
+
+fn validate_pie_capability(
+    source: &str,
+    graph: &mermaid_rs_renderer::Graph,
+) -> Result<(), DiagramRenderError> {
+    let statements = family_statements(source, &["pie"])?;
+    let mut title_count = 0usize;
+    let mut slice_count = 0usize;
+    for line in statements {
+        let lower = line.to_ascii_lowercase();
+        if lower == "showdata" {
+            continue;
+        }
+        if let Some(title) = lower.strip_prefix("title ") {
+            if title.trim().is_empty() {
+                return Err(DiagramRenderError::InvalidSource);
+            }
+            title_count = title_count.saturating_add(1);
+            continue;
+        }
+        let Some((label, value)) = line.split_once(':') else {
+            return Err(DiagramRenderError::InvalidSource);
+        };
+        let value = value.trim().parse::<f32>().ok();
+        if label.trim().is_empty() || !value.is_some_and(|value| value.is_finite() && value > 0.0) {
+            return Err(DiagramRenderError::InvalidSource);
+        }
+        slice_count = slice_count.saturating_add(1);
+    }
+    if title_count > 1
+        || (title_count == 1) != graph.pie_title.is_some()
+        || slice_count != graph.pie_slices.len()
+    {
+        return Err(DiagramRenderError::InvalidSource);
+    }
+    Ok(())
+}
+
+fn validate_gitgraph_capability(
+    source: &str,
+    graph: &mermaid_rs_renderer::Graph,
+) -> Result<(), DiagramRenderError> {
+    let statements = family_statements(source, &["gitgraph"])?;
+    let mut commit_count = 0usize;
+    let mut branches = std::collections::HashSet::from(["main".to_owned()]);
+    for line in statements {
+        let mut parts = line.split_whitespace();
+        match parts
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "commit" => {
+                let remainder = line.strip_prefix("commit").unwrap_or_default().trim();
+                if !remainder.is_empty()
+                    && !(remainder.starts_with("id:") && remainder.contains('"'))
+                {
+                    return Err(DiagramRenderError::InvalidSource);
+                }
+                commit_count = commit_count.saturating_add(1);
+            }
+            "branch" | "checkout" | "switch" => {
+                let command = parts.next().unwrap_or_default();
+                if !is_simple_identifier(command) || parts.next().is_some() {
+                    return Err(DiagramRenderError::InvalidSource);
+                }
+                branches.insert(command.to_owned());
+            }
+            "merge" => {
+                let branch = parts.next().unwrap_or_default();
+                if !is_simple_identifier(branch) || parts.next().is_some() {
+                    return Err(DiagramRenderError::InvalidSource);
+                }
+                commit_count = commit_count.saturating_add(1);
+            }
+            _ => return Err(DiagramRenderError::InvalidSource),
+        }
+    }
+    let parsed_branches = graph
+        .gitgraph
+        .branches
+        .iter()
+        .map(|branch| branch.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if commit_count == 0
+        || commit_count != graph.gitgraph.commits.len()
+        || branches.len() != parsed_branches.len()
+        || !branches
+            .iter()
+            .all(|branch| parsed_branches.contains(branch.as_str()))
+    {
+        return Err(DiagramRenderError::InvalidSource);
+    }
+    Ok(())
+}
+
 fn is_sequence_message_statement(line: &str) -> bool {
     line.contains(':')
         && ["->", "--", "-x", "--x", "-)", "--)"]
@@ -457,6 +873,13 @@ fn rasterize_svg(
         height: raster_size.height,
         rgba: Arc::from(rgba),
     })
+}
+
+pub(crate) fn rasterize_output_svg(
+    output: &DiagramRenderOutput,
+    raster_size: RasterSize,
+) -> Result<RasterImage, DiagramRenderError> {
+    rasterize_svg(&output.svg, raster_size, None)
 }
 
 fn validate_svg_dimensions(width: f32, height: f32) -> Result<(), DiagramRenderError> {
@@ -1114,11 +1537,26 @@ mod tests {
     const SEQUENCE: &str = "sequenceDiagram\nparticipant User\nparticipant Studio\nUser->>Studio: Submit diagram\nStudio-->>User: Preview ready";
 
     #[test]
-    fn generic_preview_candidates_exclude_native_flowcharts() {
+    fn generic_preview_candidates_include_only_the_source_rendered_families() {
         assert!(!is_generic_preview_candidate(FLOWCHART));
-        assert!(is_generic_preview_candidate(MINDMAP));
-        assert!(is_generic_preview_candidate(SEQUENCE));
-        assert!(!is_generic_preview_candidate("classDiagram\nclass Example"));
+        for source in [
+            MINDMAP,
+            SEQUENCE,
+            "classDiagram\nclass Example",
+            "stateDiagram-v2\n[*] --> Ready",
+            "erDiagram\nA ||--o{ B : links",
+            "gantt\nTask : 1d",
+            "timeline\n2026 : Event",
+            "journey\nTask: 4: User",
+            "pie\n\"A\" : 1",
+            "gitGraph\ncommit",
+        ] {
+            assert!(is_generic_preview_candidate(source), "{source}");
+        }
+        assert!(!is_generic_preview_candidate("flowchart TD\nA --> B"));
+        assert!(!is_generic_preview_candidate(
+            "classDiagramExtra\nclass Example"
+        ));
     }
 
     #[test]
@@ -1226,9 +1664,20 @@ mod tests {
             DiagramRenderError::InvalidSource
         );
         assert_eq!(
-            render_mermaid_preview("classDiagram\nclass Example", target).unwrap_err(),
-            DiagramRenderError::UnqualifiedFamily
+            render_mermaid_preview("classDiagram\nclass Example\nignored statement", target)
+                .unwrap_err(),
+            DiagramRenderError::InvalidSource
         );
+        for source in [
+            "pie\n%%{init: {\"theme\": \"dark\"}}\n\"A\" : 1",
+            "pie\n---\ntitle: ignored frontmatter\n---\n\"A\" : 1",
+        ] {
+            assert_eq!(
+                render_mermaid_preview(source, target).unwrap_err(),
+                DiagramRenderError::InvalidSource,
+                "unsupported directives and frontmatter are never admitted"
+            );
+        }
     }
 
     #[test]

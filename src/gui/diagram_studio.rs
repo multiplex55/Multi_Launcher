@@ -2,13 +2,14 @@
 use super::native_keyboard::reserve_windows_system_menu_alt_space;
 use crate::diagram::{
     DiagramDocument, DiagramDocumentController, DiagramDocumentError, DiagramExportFormat,
-    DiagramImageSnapshot, DiagramScene, DiagramSession, DiagramSourceCopy, DiagramSourceCopyOrigin,
-    DiagramSourceSnapshot, DiagramTemplate, EdgeId, FlowDirection, GenericPreviewStatus,
-    GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, MermaidFile, NodeId,
-    NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText, PreviewState,
-    RasterSize, RenderDocumentIdentity, RenderKey, RenderOptions, RendererService, SceneMetrics,
-    ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment, TransitionDecision,
-    TransitionOutcome, build_scene, is_generic_preview_candidate,
+    DiagramImageSnapshot, DiagramRenderOutput, DiagramRenderedImageSnapshot, DiagramScene,
+    DiagramSession, DiagramSourceCopy, DiagramSourceCopyOrigin, DiagramSourceSnapshot,
+    DiagramTemplate, EdgeId, FlowDirection, GenericPreviewStatus, GraphOperation, GroupId,
+    MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, MermaidFile, NodeId, NodePosition, NodeShape,
+    PendingDiagramTransition, Position, PreparedText, PreviewState, RasterSize,
+    RenderDocumentIdentity, RenderKey, RenderOptions, RendererService, SceneMetrics, ScenePoint,
+    SceneRect, SessionStatus, TextHorizontalAlignment, TransitionDecision, TransitionOutcome,
+    build_scene, generic_preview_family, is_generic_preview_candidate,
 };
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -415,6 +416,14 @@ struct RevisionCache {
     scene_error: Option<String>,
 }
 
+struct GenericPreviewTexture {
+    key: RenderKey,
+    texture: egui::TextureHandle,
+    natural_width: f32,
+    natural_height: f32,
+    content_uv: egui::Rect,
+}
+
 enum PendingMutation {
     ReplaceSource(String),
     Transaction {
@@ -511,6 +520,7 @@ pub(crate) struct DiagramStudioDialog {
     render_document: RenderDocumentIdentity,
     render_options: RenderOptions,
     generic_preview: GenericPreviewStatus,
+    generic_texture: Option<GenericPreviewTexture>,
     selection: Option<DiagramElement>,
     selected_nodes: BTreeSet<NodeId>,
     property_draft: Option<PropertyDraft>,
@@ -520,6 +530,8 @@ pub(crate) struct DiagramStudioDialog {
     test_source_editor_id: Option<egui::Id>,
     #[cfg(test)]
     test_source_editor_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_source_editor_enabled: bool,
     #[cfg(test)]
     test_canvas_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -554,6 +566,18 @@ pub(crate) struct DiagramStudioDialog {
     test_file_picker_calls: usize,
     #[cfg(test)]
     test_scene_build_count: usize,
+    #[cfg(test)]
+    test_action_enabled: Vec<(String, bool)>,
+    #[cfg(test)]
+    test_generic_preview_drawn: bool,
+    #[cfg(test)]
+    test_preview_status_text: Option<String>,
+    #[cfg(test)]
+    test_generic_canvas_placeholder: Option<String>,
+    #[cfg(test)]
+    test_native_inspector_visible: bool,
+    #[cfg(test)]
+    test_picker_source_change: Option<String>,
 }
 
 pub(crate) struct DiagramMarkdownSource {
@@ -597,6 +621,7 @@ impl DiagramStudioDialog {
             render_document: RenderDocumentIdentity::fresh(),
             render_options: RenderOptions::default(),
             generic_preview: GenericPreviewStatus::Idle,
+            generic_texture: None,
             selection: None,
             selected_nodes: BTreeSet::new(),
             property_draft: None,
@@ -606,6 +631,8 @@ impl DiagramStudioDialog {
             test_source_editor_id: None,
             #[cfg(test)]
             test_source_editor_rect: None,
+            #[cfg(test)]
+            test_source_editor_enabled: false,
             #[cfg(test)]
             test_canvas_rect: None,
             #[cfg(test)]
@@ -640,6 +667,18 @@ impl DiagramStudioDialog {
             test_file_picker_calls: 0,
             #[cfg(test)]
             test_scene_build_count: 0,
+            #[cfg(test)]
+            test_action_enabled: Vec::new(),
+            #[cfg(test)]
+            test_generic_preview_drawn: false,
+            #[cfg(test)]
+            test_preview_status_text: None,
+            #[cfg(test)]
+            test_generic_canvas_placeholder: None,
+            #[cfg(test)]
+            test_native_inspector_visible: false,
+            #[cfg(test)]
+            test_picker_source_change: None,
         }
     }
 
@@ -1396,13 +1435,46 @@ impl DiagramStudioDialog {
         };
         let artifact = match format {
             DiagramExportFormat::Mermaid => Ok(DiagramSourceSnapshot::capture(session).encode()),
-            DiagramExportFormat::Svg => {
-                DiagramImageSnapshot::capture(session, SceneMetrics::default())
-                    .and_then(|snapshot| snapshot.encode_svg(scale.factor()))
-            }
-            DiagramExportFormat::Png => {
-                DiagramImageSnapshot::capture(session, SceneMetrics::default())
-                    .and_then(|snapshot| snapshot.encode_png(scale.factor()))
+            DiagramExportFormat::Svg | DiagramExportFormat::Png => {
+                if let Some(family) = generic_preview_family(session.draft()) {
+                    let key = RenderKey::new(
+                        self.render_document.clone(),
+                        session.revision(),
+                        self.render_options,
+                    );
+                    let Some(output) = generic_preview_output(&self.generic_preview, &key).cloned()
+                    else {
+                        self.message = Some(StudioNotice::error(
+                            "The current Mermaid render is not ready for image export.",
+                        ));
+                        return;
+                    };
+                    if output.family != family {
+                        self.message = Some(StudioNotice::error(
+                            "The current Mermaid render does not match the active source family.",
+                        ));
+                        return;
+                    }
+                    let snapshot =
+                        DiagramRenderedImageSnapshot::capture(session.revision(), output);
+                    match format {
+                        DiagramExportFormat::Svg => snapshot.encode_svg(scale.factor()),
+                        DiagramExportFormat::Png => snapshot.encode_png(scale.factor()),
+                        DiagramExportFormat::Mermaid => unreachable!("handled above"),
+                    }
+                } else {
+                    let snapshot = DiagramImageSnapshot::capture(session, SceneMetrics::default());
+                    match (format, snapshot) {
+                        (DiagramExportFormat::Svg, Ok(snapshot)) => {
+                            snapshot.encode_svg(scale.factor())
+                        }
+                        (DiagramExportFormat::Png, Ok(snapshot)) => {
+                            snapshot.encode_png(scale.factor())
+                        }
+                        (_, Err(error)) => Err(error),
+                        (DiagramExportFormat::Mermaid, _) => unreachable!("handled above"),
+                    }
+                }
             }
         };
         let artifact = match artifact {
@@ -1488,6 +1560,10 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
+            if let Some(source) = self.test_picker_source_change.take() {
+                let _ = self.documents.replace_source(&source);
+                self.refresh_cache();
+            }
             return self
                 .test_next_file_picker_result
                 .take()
@@ -1619,12 +1695,18 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_source_editor_rect = None;
+            self.test_source_editor_enabled = false;
             self.test_canvas_rect = None;
             self.test_canvas_id = None;
             self.test_action_rects.clear();
             self.test_action_focus_ids.clear();
             self.test_discard_button_id = None;
             self.test_body_rendered = false;
+            self.test_action_enabled.clear();
+            self.test_generic_preview_drawn = false;
+            self.test_preview_status_text = None;
+            self.test_generic_canvas_placeholder = None;
+            self.test_native_inspector_visible = false;
         }
     }
 
@@ -1683,6 +1765,7 @@ impl DiagramStudioDialog {
                 }
                 self.generic_preview = GenericPreviewStatus::Idle;
             }
+            self.generic_texture = None;
             return;
         };
         let revision = session.revision();
@@ -1694,6 +1777,7 @@ impl DiagramStudioDialog {
                 }
                 self.generic_preview = GenericPreviewStatus::Idle;
             }
+            self.generic_texture = None;
             return;
         }
 
@@ -1751,6 +1835,53 @@ impl DiagramStudioDialog {
         {
             self.generic_preview.apply(completion);
         }
+    }
+
+    fn current_generic_key(&self) -> Option<RenderKey> {
+        let session = self.documents.session()?;
+        generic_preview_family(session.draft())?;
+        Some(RenderKey::new(
+            self.render_document.clone(),
+            session.revision(),
+            self.render_options,
+        ))
+    }
+
+    fn ensure_generic_texture(&mut self, ctx: &egui::Context) {
+        let Some(key) = self.current_generic_key() else {
+            return;
+        };
+        let Some(output) = generic_preview_output(&self.generic_preview, &key).cloned() else {
+            return;
+        };
+        if self
+            .generic_texture
+            .as_ref()
+            .is_some_and(|texture| texture.key == key)
+        {
+            return;
+        }
+
+        let raster = &output.raster;
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [raster.width as usize, raster.height as usize],
+            &raster.rgba,
+        );
+        let texture = ctx.load_texture(
+            "diagram-studio-generic-preview",
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        if self.generic_texture.is_none() {
+            self.camera.fit_next = true;
+        }
+        self.generic_texture = Some(GenericPreviewTexture {
+            key,
+            texture,
+            natural_width: output.natural_width,
+            natural_height: output.natural_height,
+            content_uv: raster_content_uv(raster),
+        });
     }
 
     fn revalidate_selection(&mut self) {
@@ -1851,6 +1982,7 @@ impl DiagramStudioDialog {
         }
         self.render_document = RenderDocumentIdentity::fresh();
         self.generic_preview = GenericPreviewStatus::Idle;
+        self.generic_texture = None;
         self.cache = None;
         self.selection = None;
         self.selected_nodes.clear();
@@ -1936,6 +2068,39 @@ impl DiagramStudioDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_action_enabled(&self, name: &str) -> Option<bool> {
+        self.test_action_enabled
+            .iter()
+            .find(|(action, _)| action == name)
+            .map(|(_, enabled)| *enabled)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_generic_preview_drawn(&self) -> bool {
+        self.test_generic_preview_drawn
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_preview_status_text(&self) -> Option<&str> {
+        self.test_preview_status_text.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_generic_canvas_placeholder(&self) -> Option<&str> {
+        self.test_generic_canvas_placeholder.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_native_inspector_visible(&self) -> bool {
+        self.test_native_inspector_visible
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_picker_source_change(&mut self, source: impl Into<String>) {
+        self.test_picker_source_change = Some(source.into());
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_action_rect(&self, name: &str) -> Option<(egui::Rect, egui::Rect)> {
         self.test_action_rects
             .iter()
@@ -1966,6 +2131,11 @@ impl DiagramStudioDialog {
             super::render::immediate_viewport_test_focused_id()
                 .is_some_and(|(viewport, focused)| viewport == viewport_id() && focused == Some(id))
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_source_editor_enabled(&self) -> bool {
+        self.test_source_editor_enabled
     }
 
     #[cfg(test)]
@@ -2031,6 +2201,7 @@ impl DiagramStudioDialog {
         source_focus_requested: &mut Option<egui::Id>,
         source_focus_allowed: bool,
     ) -> DrawBodyEffects {
+        self.ensure_generic_texture(ui.ctx());
         self.refresh_cache();
         let focused_at_start = ui.memory(|memory| memory.focused());
         let previous_menu_scope = self.active_menu_scope.as_ref().cloned();
@@ -2056,6 +2227,10 @@ impl DiagramStudioDialog {
             export_scale,
             cache,
             camera,
+            render_document,
+            render_options,
+            generic_preview,
+            generic_texture,
             selection,
             selected_nodes,
             property_draft,
@@ -2067,11 +2242,23 @@ impl DiagramStudioDialog {
             #[cfg(test)]
             test_source_editor_rect,
             #[cfg(test)]
+            test_source_editor_enabled,
+            #[cfg(test)]
             test_canvas_rect,
             #[cfg(test)]
             test_canvas_id,
             #[cfg(test)]
             test_action_rects,
+            #[cfg(test)]
+            test_action_enabled,
+            #[cfg(test)]
+            test_generic_preview_drawn,
+            #[cfg(test)]
+            test_preview_status_text,
+            #[cfg(test)]
+            test_generic_canvas_placeholder,
+            #[cfg(test)]
+            test_native_inspector_visible,
             #[cfg(test)]
             test_action_focus_ids,
             #[cfg(test)]
@@ -2097,6 +2284,27 @@ impl DiagramStudioDialog {
         let cache = cache.as_ref().expect("cache refreshed before drawing");
         let status = &cache.status;
         let graph = session.preview_graph();
+        let generic_family = generic_preview_family(session.draft());
+        let native_editable = status.preview == PreviewState::Current && graph.is_some();
+        let generic_key = generic_family
+            .map(|_| RenderKey::new(render_document.clone(), revision, *render_options));
+        let generic_output = generic_key
+            .as_ref()
+            .and_then(|key| generic_preview_output(generic_preview, key));
+        let image_export_available = native_editable || generic_output.is_some();
+        let generic_texture = generic_texture.as_ref().filter(|texture| {
+            texture.key.document == *render_document && texture.key.options == *render_options
+        });
+        let showing_stale_generic =
+            generic_texture.is_some_and(|texture| texture.key.accepted_revision != revision);
+        let generic_status = generic_key.as_ref().and_then(|key| {
+            generic_preview_status_text(generic_preview, key, showing_stale_generic)
+        });
+        let generic_canvas_placeholder = generic_key
+            .as_ref()
+            .map_or("Preparing Mermaid preview…", |key| {
+                generic_preview_canvas_placeholder(generic_preview, key)
+            });
         let base_editing_allowed =
             actions_allowed && !closing_requested && pending_transition.is_none();
 
@@ -2270,8 +2478,10 @@ impl DiagramStudioDialog {
                         ] {
                             let enabled = menu_actions_allowed
                                 && (format == DiagramExportFormat::Mermaid
-                                    || status.preview == PreviewState::Current);
+                                    || image_export_available);
                             let response = menu_ui.add_enabled(enabled, egui::Button::new(label));
+                            #[cfg(test)]
+                            test_action_enabled.push((format!("export_{_name}"), enabled));
                             if response.enabled() {
                                 export_item_ids.push(response.id);
                             }
@@ -2414,11 +2624,11 @@ impl DiagramStudioDialog {
                             .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
                         camera.fit_next = false;
                     }
-                    let zoom_percentage = ui.label(format!("{:.0}%", camera.zoom * 100.0));
+                    let _zoom_percentage = ui.label(format!("{:.0}%", camera.zoom * 100.0));
                     #[cfg(test)]
                     test_action_rects.push((
                         "zoom_percentage".into(),
-                        zoom_percentage.rect,
+                        _zoom_percentage.rect,
                         ui.clip_rect(),
                     ));
                     let zoom_in =
@@ -2458,8 +2668,7 @@ impl DiagramStudioDialog {
                 let editing_allowed = base_editing_allowed && !menu_open;
                 let source_edit_allowed =
                     actions_allowed && pending_transition.is_none() && !menu_open;
-                let visual_mutations_allowed =
-                    editing_allowed && status.preview == PreviewState::Current;
+                let visual_mutations_allowed = editing_allowed && native_editable;
                 let decision_actions_allowed = actions_allowed && !closing_requested && !menu_open;
 
                 ui.horizontal_wrapped(|ui| {
@@ -2468,6 +2677,8 @@ impl DiagramStudioDialog {
                             && graph.is_some_and(|graph| graph.nodes.len() < MAX_DIAGRAM_NODES),
                         egui::Button::new("Add node"),
                     );
+                    #[cfg(test)]
+                    test_action_enabled.push(("add_node".into(), add_node.enabled()));
                     #[cfg(test)]
                     test_action_rects.push(("add_node".into(), add_node.rect, ui.clip_rect()));
                     if add_node.clicked()
@@ -2566,6 +2777,8 @@ impl DiagramStudioDialog {
                     let auto_layout =
                         ui.add_enabled(visual_mutations_allowed, egui::Button::new("Auto-layout"));
                     #[cfg(test)]
+                    test_action_enabled.push(("auto_layout".into(), auto_layout.enabled()));
+                    #[cfg(test)]
                     test_action_rects.push((
                         "auto_layout".into(),
                         auto_layout.rect,
@@ -2580,7 +2793,7 @@ impl DiagramStudioDialog {
                     direction_control(
                         ui,
                         graph,
-                        status.preview == PreviewState::Current,
+                        native_editable,
                         editing_allowed,
                         revision,
                         pending,
@@ -2717,7 +2930,16 @@ impl DiagramStudioDialog {
                     });
                 }
 
-                if status.preview == PreviewState::Stale {
+                if generic_family.is_some() {
+                    #[cfg(test)]
+                    {
+                        *test_preview_status_text =
+                            generic_status.as_ref().map(|(_, text)| text.clone());
+                    }
+                    if let Some((color, text)) = generic_status.as_ref() {
+                        ui.colored_label(*color, text);
+                    }
+                } else if status.preview == PreviewState::Stale {
                     let diagnostic = status
                         .diagnostic
                         .as_ref()
@@ -2762,12 +2984,17 @@ impl DiagramStudioDialog {
                         test_source_editor_id,
                         #[cfg(test)]
                         test_source_editor_rect,
+                        #[cfg(test)]
+                        test_source_editor_enabled,
                     ),
-                    ViewMode::Visual => visual_workspace(
+                    ViewMode::Visual => preview_workspace(
                         ui,
+                        generic_family.is_some(),
+                        generic_texture,
+                        generic_canvas_placeholder,
                         graph,
                         cache.scene.as_ref(),
-                        status.preview == PreviewState::Current,
+                        native_editable,
                         revision,
                         camera,
                         inspector_canvas_split_ratio,
@@ -2785,6 +3012,12 @@ impl DiagramStudioDialog {
                         test_canvas_id,
                         #[cfg(test)]
                         test_action_rects,
+                        #[cfg(test)]
+                        test_generic_preview_drawn,
+                        #[cfg(test)]
+                        test_native_inspector_visible,
+                        #[cfg(test)]
+                        test_generic_canvas_placeholder,
                     ),
                     ViewMode::Split => {
                         #[cfg(test)]
@@ -2807,13 +3040,18 @@ impl DiagramStudioDialog {
                                 &mut source_id,
                                 #[cfg(test)]
                                 &mut source_rect,
+                                #[cfg(test)]
+                                test_source_editor_enabled,
                             );
                             ui.separator();
-                            visual_workspace(
+                            preview_workspace(
                                 ui,
+                                generic_family.is_some(),
+                                generic_texture,
+                                generic_canvas_placeholder,
                                 graph,
                                 cache.scene.as_ref(),
-                                status.preview == PreviewState::Current,
+                                native_editable,
                                 revision,
                                 camera,
                                 inspector_canvas_split_ratio,
@@ -2831,6 +3069,12 @@ impl DiagramStudioDialog {
                                 &mut canvas_id,
                                 #[cfg(test)]
                                 test_action_rects,
+                                #[cfg(test)]
+                                test_generic_preview_drawn,
+                                #[cfg(test)]
+                                test_native_inspector_visible,
+                                #[cfg(test)]
+                                test_generic_canvas_placeholder,
                             );
                         } else {
                             let available_width = ui.available_width();
@@ -2867,6 +3111,8 @@ impl DiagramStudioDialog {
                                             &mut source_id,
                                             #[cfg(test)]
                                             &mut source_rect,
+                                            #[cfg(test)]
+                                            test_source_editor_enabled,
                                         );
                                     },
                                 );
@@ -2904,11 +3150,14 @@ impl DiagramStudioDialog {
                                     egui::vec2(preview_width, available_height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        visual_workspace(
+                                        preview_workspace(
                                             ui,
+                                            generic_family.is_some(),
+                                            generic_texture,
+                                            generic_canvas_placeholder,
                                             graph,
                                             cache.scene.as_ref(),
-                                            status.preview == PreviewState::Current,
+                                            native_editable,
                                             revision,
                                             camera,
                                             inspector_canvas_split_ratio,
@@ -2926,6 +3175,12 @@ impl DiagramStudioDialog {
                                             &mut canvas_id,
                                             #[cfg(test)]
                                             test_action_rects,
+                                            #[cfg(test)]
+                                            test_generic_preview_drawn,
+                                            #[cfg(test)]
+                                            test_native_inspector_visible,
+                                            #[cfg(test)]
+                                            test_generic_canvas_placeholder,
                                         );
                                     },
                                 );
@@ -2945,6 +3200,97 @@ impl DiagramStudioDialog {
     }
 }
 
+fn generic_preview_output<'a>(
+    status: &'a GenericPreviewStatus,
+    expected_key: &RenderKey,
+) -> Option<&'a std::sync::Arc<DiagramRenderOutput>> {
+    match status {
+        GenericPreviewStatus::Ready { key, output, .. } if key == expected_key => Some(output),
+        _ => None,
+    }
+}
+
+fn generic_preview_status_text(
+    status: &GenericPreviewStatus,
+    expected_key: &RenderKey,
+    showing_stale: bool,
+) -> Option<(egui::Color32, String)> {
+    match status {
+        GenericPreviewStatus::Ready { key, .. } if key == expected_key => None,
+        GenericPreviewStatus::Pending { key, .. } if key == expected_key => Some((
+            egui::Color32::from_rgb(190, 104, 18),
+            if showing_stale {
+                "STALE PREVIEW — rendering the current source; showing the previous render.".into()
+            } else {
+                "Rendering Mermaid preview…".into()
+            },
+        )),
+        GenericPreviewStatus::Failed { key, error, .. } if key == expected_key => Some((
+            egui::Color32::from_rgb(185, 65, 65),
+            if showing_stale {
+                format!("STALE PREVIEW — {error}; showing the previous render.")
+            } else {
+                format!("Mermaid preview unavailable: {error}")
+            },
+        )),
+        _ => Some((
+            egui::Color32::from_rgb(110, 118, 129),
+            if showing_stale {
+                "STALE PREVIEW — preparing the current Mermaid render; showing the previous render."
+                    .into()
+            } else {
+                "Preparing Mermaid preview…".into()
+            },
+        )),
+    }
+}
+
+fn generic_preview_canvas_placeholder(
+    status: &GenericPreviewStatus,
+    expected_key: &RenderKey,
+) -> &'static str {
+    match status {
+        GenericPreviewStatus::Pending { key, .. } if key == expected_key => {
+            "Rendering Mermaid preview…"
+        }
+        GenericPreviewStatus::Failed { key, .. } if key == expected_key => {
+            "No preview image is available."
+        }
+        _ => "Preparing Mermaid preview…",
+    }
+}
+
+fn raster_content_uv(raster: &crate::diagram::RasterImage) -> egui::Rect {
+    let mut min_x = raster.width;
+    let mut min_y = raster.height;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    for (index, pixel) in raster.rgba.chunks_exact(4).enumerate() {
+        if pixel[3] == 0 {
+            continue;
+        }
+        let x = (index % raster.width as usize) as u32;
+        let y = (index / raster.width as usize) as u32;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x.saturating_add(1));
+        max_y = max_y.max(y.saturating_add(1));
+    }
+    if min_x >= max_x || min_y >= max_y {
+        return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    }
+    egui::Rect::from_min_max(
+        egui::pos2(
+            min_x as f32 / raster.width as f32,
+            min_y as f32 / raster.height as f32,
+        ),
+        egui::pos2(
+            max_x as f32 / raster.width as f32,
+            max_y as f32 / raster.height as f32,
+        ),
+    )
+}
+
 fn source_editor(
     ui: &mut egui::Ui,
     session: &DiagramSession,
@@ -2954,6 +3300,7 @@ fn source_editor(
     source_focus_requested: &mut Option<egui::Id>,
     #[cfg(test)] test_editor_id: &mut Option<egui::Id>,
     #[cfg(test)] test_editor_rect: &mut Option<egui::Rect>,
+    #[cfg(test)] test_editor_enabled: &mut bool,
 ) {
     ui.label("Mermaid source (raw text is retained exactly)");
     let editor_id = ui.make_persistent_id("diagram-studio-source-editor");
@@ -2975,6 +3322,7 @@ fn source_editor(
     {
         *test_editor_id = Some(editor_id);
         *test_editor_rect = Some(response.rect);
+        *test_editor_enabled = response.enabled();
     }
     if response.changed() && actions_allowed && pending.is_none() {
         *pending = Some(PendingMutation::ReplaceSource(source));
@@ -3130,6 +3478,160 @@ fn draw_splitter(
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
     (rect, response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn preview_workspace(
+    ui: &mut egui::Ui,
+    generic_source: bool,
+    generic_texture: Option<&GenericPreviewTexture>,
+    generic_empty_message: &str,
+    graph: Option<&DiagramDocument>,
+    scene: Option<&DiagramScene>,
+    graph_is_current: bool,
+    revision: u64,
+    camera: &mut Camera,
+    inspector_canvas_split_ratio: &mut f32,
+    selection: &mut Option<DiagramElement>,
+    selected_nodes: &mut BTreeSet<NodeId>,
+    property_draft: &mut Option<PropertyDraft>,
+    drag: &mut Option<DragState>,
+    actions_allowed: bool,
+    pending: &mut Option<PendingMutation>,
+    message: &mut Option<StudioNotice>,
+    canvas_focus_requested: &mut Option<egui::Id>,
+    #[cfg(test)] test_canvas_rect: &mut Option<egui::Rect>,
+    #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+    #[cfg(test)] test_generic_preview_drawn: &mut bool,
+    #[cfg(test)] test_native_inspector_visible: &mut bool,
+    #[cfg(test)] test_generic_canvas_placeholder: &mut Option<String>,
+) {
+    if generic_source {
+        #[cfg(test)]
+        {
+            *test_native_inspector_visible = false;
+        }
+        let _rect = draw_generic_canvas(
+            ui,
+            generic_texture,
+            camera,
+            actions_allowed,
+            generic_empty_message,
+            #[cfg(test)]
+            test_canvas_id,
+            #[cfg(test)]
+            test_generic_preview_drawn,
+            #[cfg(test)]
+            test_generic_canvas_placeholder,
+        );
+        #[cfg(test)]
+        {
+            *test_canvas_rect = Some(_rect);
+        }
+    } else {
+        #[cfg(test)]
+        {
+            *test_native_inspector_visible = true;
+        }
+        visual_workspace(
+            ui,
+            graph,
+            scene,
+            graph_is_current,
+            revision,
+            camera,
+            inspector_canvas_split_ratio,
+            selection,
+            selected_nodes,
+            property_draft,
+            drag,
+            actions_allowed,
+            pending,
+            message,
+            canvas_focus_requested,
+            #[cfg(test)]
+            test_canvas_rect,
+            #[cfg(test)]
+            test_canvas_id,
+            #[cfg(test)]
+            test_action_rects,
+        );
+    }
+}
+
+fn draw_generic_canvas(
+    ui: &mut egui::Ui,
+    texture: Option<&GenericPreviewTexture>,
+    camera: &mut Camera,
+    actions_allowed: bool,
+    empty_message: &str,
+    #[cfg(test)] test_canvas_id: &mut Option<egui::Id>,
+    #[cfg(test)] test_generic_preview_drawn: &mut bool,
+    #[cfg(test)] test_generic_canvas_placeholder: &mut Option<String>,
+) -> egui::Rect {
+    let width = ui.available_width().max(CANVAS_MIN_WIDTH);
+    let height = ui.available_height().max(CANVAS_MIN_HEIGHT);
+    let (canvas_response, painter) =
+        ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
+    let canvas_rect = canvas_response.rect;
+    #[cfg(test)]
+    {
+        *test_canvas_id = Some(canvas_response.id);
+    }
+    let painter = painter.with_clip_rect(painter.clip_rect().intersect(canvas_rect));
+    painter.rect_filled(canvas_rect, 0.0, egui::Color32::from_rgb(248, 249, 251));
+
+    let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+    if actions_allowed && pointer.is_some_and(|pointer| canvas_rect.contains(pointer)) {
+        let scroll = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+        if scroll.abs() > 0.01 {
+            camera.zoom =
+                (camera.zoom * (scroll * 0.001).exp()).clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+        }
+    }
+    if actions_allowed && canvas_response.dragged_by(egui::PointerButton::Middle) {
+        let delta = canvas_response.drag_delta();
+        camera.center.x -= f64::from(delta.x / camera.zoom);
+        camera.center.y -= f64::from(delta.y / camera.zoom);
+    }
+
+    if let Some(texture) = texture {
+        let bounds = SceneRect {
+            min: ScenePoint::default(),
+            max: ScenePoint {
+                x: f64::from(texture.natural_width),
+                y: f64::from(texture.natural_height),
+            },
+        };
+        if camera.fit_next {
+            fit_camera(camera, bounds, canvas_rect);
+        }
+        let image_rect = world_rect_to_screen(bounds, canvas_rect, *camera);
+        painter.image(
+            texture.texture.id(),
+            image_rect,
+            texture.content_uv,
+            egui::Color32::WHITE,
+        );
+        #[cfg(test)]
+        {
+            *test_generic_preview_drawn = true;
+        }
+    } else {
+        painter.text(
+            canvas_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            empty_message,
+            egui::TextStyle::Body.resolve(ui.style()),
+            ui.visuals().text_color(),
+        );
+        #[cfg(test)]
+        {
+            *test_generic_canvas_placeholder = Some(empty_message.to_owned());
+        }
+    }
+    canvas_rect
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4542,6 +5044,59 @@ mod tests {
         dialog
     }
 
+    fn wait_for_generic_preview(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+    ) -> std::sync::Arc<DiagramRenderOutput> {
+        for _ in 0..300 {
+            frame(dialog, ctx);
+            let key = dialog
+                .current_generic_key()
+                .expect("the test document uses a source-rendered family");
+            match &dialog.generic_preview {
+                GenericPreviewStatus::Ready {
+                    key: ready_key,
+                    output,
+                    ..
+                } if ready_key == &key && dialog.test_generic_preview_drawn() => {
+                    return std::sync::Arc::clone(output);
+                }
+                GenericPreviewStatus::Failed {
+                    key: failed_key,
+                    error,
+                    ..
+                } if failed_key == &key => {
+                    panic!("generic fixture failed to render: {error}");
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        panic!("generic preview did not complete within the bounded test wait");
+    }
+
+    fn svg_root_dimensions(svg: &str) -> (u32, u32) {
+        let root = svg
+            .split_once("<svg")
+            .and_then(|(_, rest)| rest.split_once('>'))
+            .map(|(root, _)| root)
+            .expect("encoded SVG has a root element");
+        let attribute = |name: &str| {
+            let marker = format!("{name}=\"");
+            root.split_once(&marker)
+                .and_then(|(_, value)| value.split_once('"'))
+                .and_then(|(value, _)| value.parse::<u32>().ok())
+                .expect("encoded SVG root has integer natural dimensions")
+        };
+        (attribute("width"), attribute("height"))
+    }
+
+    fn generic_dialog(source: &str) -> DiagramStudioDialog {
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.test_replace_source(source);
+        dialog.open();
+        dialog
+    }
+
     #[test]
     fn diagram_studio_submits_generic_preview_only_after_retained_source_acceptance() {
         let mut dialog = DiagramStudioDialog::default();
@@ -4583,6 +5138,248 @@ mod tests {
         assert!(dialog.renderer.is_some());
         dialog.open();
         assert!(dialog.renderer.is_some());
+    }
+
+    #[test]
+    fn studio_usability_diagram_generic_preview_is_current_and_stale_images_stay_editable() {
+        let source = "mindmap\r\n  root((Launch))\r\n    Preview branch\r\n";
+        let mut dialog = generic_dialog(source);
+        let ctx = egui::Context::default();
+        let output = wait_for_generic_preview(&mut dialog, &ctx);
+
+        assert_eq!(output.family, crate::diagram::DiagramFamily::Mindmap);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().status().preview, PreviewState::Stale);
+        assert!(dialog.test_session().preview_graph().is_some());
+        assert!(dialog.test_session().current_graph().is_none());
+        assert!(dialog.test_generic_preview_drawn());
+        assert!(!dialog.test_native_inspector_visible());
+        assert!(dialog.test_source_editor_enabled());
+        assert_eq!(dialog.test_preview_status_text(), None);
+
+        click_action(&mut dialog, &ctx, "menu_export");
+        assert_eq!(dialog.test_action_enabled("export_svg"), Some(true));
+        assert_eq!(dialog.test_action_enabled("export_png"), Some(true));
+        click_action(&mut dialog, &ctx, "menu_export");
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_action_enabled("add_node"), Some(false));
+        assert_eq!(dialog.test_action_enabled("auto_layout"), Some(false));
+        assert_eq!(
+            dialog
+                .generic_texture
+                .as_ref()
+                .map(|texture| texture.key.accepted_revision),
+            Some(dialog.test_session().revision())
+        );
+
+        let invalid_source = "gantt\r\n    title Stale plan\r\n    this statement is outside the supported source subset\r\n";
+        dialog.test_replace_source(invalid_source);
+        let invalid_revision = dialog.test_session().revision();
+        let mut saw_stale_failure = false;
+        for _ in 0..300 {
+            frame(&mut dialog, &ctx);
+            if matches!(
+                &dialog.generic_preview,
+                GenericPreviewStatus::Failed { key, .. }
+                    if key.accepted_revision == invalid_revision
+            ) {
+                saw_stale_failure = dialog
+                    .test_preview_status_text()
+                    .is_some_and(|text| text.contains("STALE PREVIEW"));
+                if saw_stale_failure {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            saw_stale_failure,
+            "failed generic render must expose stale image state"
+        );
+        assert_eq!(dialog.test_session().draft(), invalid_source);
+        assert!(dialog.test_generic_preview_drawn());
+        assert!(dialog.test_source_editor_enabled());
+        assert!(!dialog.test_native_inspector_visible());
+        assert_eq!(dialog.test_action_enabled("add_node"), Some(false));
+        assert_eq!(dialog.test_action_enabled("auto_layout"), Some(false));
+    }
+
+    #[test]
+    fn studio_usability_diagram_generic_first_render_failure_has_no_false_pending_message() {
+        let source = "pie\n    \"Unreadable value\" : not-a-number\n";
+        let mut dialog = DiagramStudioDialog::default();
+        dialog
+            .documents
+            .request_source_copy(DiagramSourceCopy::new(source).unwrap())
+            .unwrap();
+        dialog.open();
+        let ctx = egui::Context::default();
+        let revision = dialog.test_session().revision();
+
+        let mut failed_without_image = false;
+        for _ in 0..300 {
+            frame(&mut dialog, &ctx);
+            if matches!(
+                &dialog.generic_preview,
+                GenericPreviewStatus::Failed { key, .. } if key.accepted_revision == revision
+            ) && dialog.test_generic_canvas_placeholder()
+                == Some("No preview image is available.")
+            {
+                failed_without_image = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(failed_without_image);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(
+            dialog.test_session().status().preview,
+            PreviewState::NoPreview
+        );
+        assert!(dialog.test_session().current_graph().is_none());
+        assert!(dialog.generic_texture.is_none());
+        assert!(!dialog.test_generic_preview_drawn());
+        assert!(dialog.test_source_editor_enabled());
+        assert!(
+            dialog
+                .test_preview_status_text()
+                .is_some_and(|text| text.starts_with("Mermaid preview unavailable:"))
+        );
+    }
+
+    #[test]
+    fn studio_usability_diagram_generic_exports_use_current_image_and_freeze_before_picker() {
+        let directory = tempfile::tempdir().expect("temporary generic export directory");
+        let source = "pie showData\r\n    title FrozenOriginal\r\n    \"Tea 🍵\" : 12\r\n    \"Bread\" : 8\r\n";
+        let replacement = "pie showData\r\n    title FrozenReplacement\r\n    \"Rice\" : 20\r\n";
+        let mut dialog = generic_dialog(source);
+        let ctx = egui::Context::default();
+        let output = wait_for_generic_preview(&mut dialog, &ctx);
+        let revision = dialog.test_session().revision();
+        let expected_dimensions = (
+            output.natural_width.ceil() as u32,
+            output.natural_height.ceil() as u32,
+        );
+
+        let png_path = directory.path().join("current.png");
+        dialog.test_set_next_file_picker_result(Some(png_path.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Png,
+            ExportScale::OneAndHalf,
+        ));
+        frame(&mut dialog, &ctx);
+        let png = std::fs::read(&png_path).expect("generic PNG export was published");
+        let decoded = image::load_from_memory(&png)
+            .expect("generic PNG export decodes")
+            .to_rgba8();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (
+                (f64::from(output.natural_width) * 1.5).ceil() as u32,
+                (f64::from(output.natural_height) * 1.5).ceil() as u32,
+            )
+        );
+        assert!(
+            decoded.pixels().filter(|pixel| pixel.0[3] > 0).count() > 500,
+            "generic PNG export should contain rendered pixels"
+        );
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message)) if message.contains(&format!("revision {revision}"))
+        ));
+
+        let mermaid_path = directory.path().join("exact-source.mmd");
+        dialog.test_set_next_file_picker_result(Some(mermaid_path.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Mermaid,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        assert_eq!(std::fs::read(&mermaid_path).unwrap(), source.as_bytes());
+
+        let occupied_path = directory.path().join("occupied.svg");
+        let occupied_bytes = b"preserve existing generic export target";
+        std::fs::write(&occupied_path, occupied_bytes).expect("prepare occupied SVG destination");
+        dialog.test_set_next_file_picker_result(Some(occupied_path.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        assert_eq!(std::fs::read(&occupied_path).unwrap(), occupied_bytes);
+        assert!(matches!(&dialog.message, Some(StudioNotice::Error(_))));
+
+        let svg_path = directory.path().join("frozen.svg");
+        dialog.test_set_next_file_picker_result(Some(svg_path.clone()));
+        dialog.test_set_picker_source_change(replacement);
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        let svg = std::fs::read_to_string(&svg_path).expect("frozen generic SVG was published");
+        assert!(svg.contains("FrozenOriginal"));
+        assert!(!svg.contains("FrozenReplacement"));
+        assert_eq!(svg_root_dimensions(&svg), expected_dimensions);
+        assert_eq!(dialog.test_session().draft(), replacement);
+        assert_eq!(dialog.test_session().revision(), revision + 1);
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message)) if message.contains(&format!("revision {revision}"))
+        ));
+        assert_eq!(dialog.test_file_picker_calls(), 4);
+    }
+
+    #[test]
+    fn studio_usability_diagram_generic_same_frame_edit_waits_for_matching_render_before_export() {
+        let directory = tempfile::tempdir().expect("temporary generic export directory");
+        let destination = directory.path().join("too-early.svg");
+        let source = "timeline\n    title Original\n    2025 : Planning\n";
+        let updated = "timeline\n    title AcceptedEdit\n    2026 : Delivery\n";
+        let mut dialog = generic_dialog(source);
+        let ctx = egui::Context::default();
+        let _ = wait_for_generic_preview(&mut dialog, &ctx);
+        let original_revision = dialog.test_session().revision();
+
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_pending_mutation = Some(PendingMutation::ReplaceSource(updated.to_owned()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+
+        assert_eq!(dialog.test_session().draft(), updated);
+        assert_eq!(dialog.test_session().revision(), original_revision + 1);
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert!(!destination.exists());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Error(message)) if message.contains("render is not ready")
+        ));
+        let output = wait_for_generic_preview(&mut dialog, &ctx);
+        assert_eq!(output.family, crate::diagram::DiagramFamily::Timeline);
+        assert!(output.svg.contains("AcceptedEdit"));
+    }
+
+    #[test]
+    fn studio_usability_diagram_generic_discarded_export_pass_does_not_open_picker() {
+        let directory = tempfile::tempdir().expect("temporary generic export directory");
+        let destination = directory.path().join("discarded.svg");
+        let source = "stateDiagram-v2\n    [*] --> Draft\n    Draft --> Review : submit\n";
+        let mut dialog = generic_dialog(source);
+        let ctx = egui::Context::default();
+        let _ = wait_for_generic_preview(&mut dialog, &ctx);
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame_with_root_discard(&mut dialog, &ctx);
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert!(!destination.exists());
+        assert_eq!(dialog.test_session().draft(), source);
     }
 
     fn current_node_count(dialog: &DiagramStudioDialog) -> usize {

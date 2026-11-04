@@ -127,3 +127,5 @@ Objective: qualify exact offline Mermaid library and establish one bounded async
 ## M6-A
 
 Follow Goal H/I/J/K exactly: scoped cumulative integration, one cached Windows build, one bounded native smoke session, one final first-party Clippy pass and one independent cumulative review; resolve substantive task defects with affected reruns only. Inspect actual baseline..HEAD diff, stale paths, final Git state. Goal F supplies acceptance/commit boundary; no full-suite default or merge. Final handoff uses actual SHA after last commit with exact-parent instruction and truthful unverified gaps.
+
+Concrete dependency delta from B: shared regex lock version 1.11.2→1.13.1. Include one existing direct consumer smoke case, `regex_tester::engine::tests::retains_numbered_named_and_unmatched_optional_captures`, in final focused integration selection. It checks named/numbered/optional captures and Unicode byte spans against fixed expected values. This is evidence for an actual shared dependency upgrade, not permission for a Regex plugin suite or historical regression campaign.

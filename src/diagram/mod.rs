@@ -22,8 +22,8 @@ pub use document::{
 };
 pub use export::{
     DiagramExportArtifact, DiagramExportError, DiagramExportFormat, DiagramExportWarnings,
-    DiagramImageSnapshot, DiagramSourceSnapshot, MAX_EXPORT_PIXELS, MAX_EXPORT_SIDE, MAX_PNG_BYTES,
-    MAX_PREPARED_GLYPHS, MAX_RASTER_PIXEL_VISITS, MAX_SVG_BYTES,
+    DiagramImageSnapshot, DiagramRenderedImageSnapshot, DiagramSourceSnapshot, MAX_EXPORT_PIXELS,
+    MAX_EXPORT_SIDE, MAX_PNG_BYTES, MAX_PREPARED_GLYPHS, MAX_RASTER_PIXEL_VISITS, MAX_SVG_BYTES,
 };
 
 pub use layout::{DiagramLayoutError, layout_positions};
@@ -46,7 +46,9 @@ pub use rendering::{
     RenderDocumentIdentity, RenderKey, RenderOptions, RenderTheme, render_mermaid_preview,
     render_mermaid_preview_with_options,
 };
-pub(crate) use rendering::{GenericPreviewStatus, RendererService, is_generic_preview_candidate};
+pub(crate) use rendering::{
+    GenericPreviewStatus, RendererService, generic_preview_family, is_generic_preview_candidate,
+};
 pub use scene::{
     ArrowHead, CubicBezier, DiagramScene, MAX_SCENE_COORDINATE_ABS, PreparedText, PreparedTextLine,
     SceneEdge, SceneError, SceneGroup, SceneMetrics, SceneNode, ScenePoint, SceneRect,
@@ -57,4 +59,4 @@ pub use session::{
     MAX_DIAGRAM_HISTORY_ENTRIES, MAX_DIAGRAM_TRANSACTION_OPERATIONS, NodePosition, PreviewState,
     SavedContentSnapshot, SessionStatus,
 };
-pub use templates::{DiagramTemplate, DiagramTemplateError};
+pub use templates::{DiagramTemplate, DiagramTemplateCapability, DiagramTemplateError};
