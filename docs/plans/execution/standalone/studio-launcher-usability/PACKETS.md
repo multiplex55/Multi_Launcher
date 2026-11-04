@@ -17,6 +17,7 @@ Objective: full real query workflow and dashboard access with tool drafts intact
 - Verification: focused nonempty Nextest `-p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E 'test(studio_usability_) | test(notes_query_activation_mouse_workflow_runs_current_result_beside_notes) | test(ordinary_enter_cannot_activate_root_results_behind_timer_or_paste_dialogs)'`, plus directly implicated Notes transfer cases. No full render suite.
 - Non-goals: search redesign, dashboard save/content work, universal hosting/global hotkeys. Confirm real today-note fixture locally; no product decision needed.
 - Done: real query dispatch once in both modes, editing routes/dashboard work, drafts and safety preserved; inspect scoped diff; parent commits `fix(gui): [M1-B] route query actions by focused owner` and attempts push. Implementer stops.
+- Fixture lookup: `NotePlugin::fixture_for_authoring_search` in plugins/note.rs ~2016, existing universal_action_catalog.rs ~2100 usage, supplies watcher-free real provider. IsolatedWorkspace redirects notes, but ALSO write matching root/notes/today.md because open_note_panel reads disk (otherwise opens blank). Root-list fixture disables providers via Some(empty); enable note provider. `note list today` is synchronous; only literal `note search` debounces, so no sleep/drain harness required. Activation trace does not replace opened slug/content assertion.
 
 ## M2-A — pending M1
 

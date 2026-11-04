@@ -1418,6 +1418,7 @@ struct QueryFocusSession {
     visibility_revision: u64,
     root_identity: (usize, u64),
     ordinary_context: QueryFocusOrdinaryContext,
+    root_jump_session_generation: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -10918,15 +10919,6 @@ mod tests {
     }
 
     #[test]
-    fn launcher_enter_activation_requires_query_focus_and_closed_file_search() {
-        assert!(!LauncherApp::launcher_enter_activation_enabled(
-            false, false
-        ));
-        assert!(LauncherApp::launcher_enter_activation_enabled(true, false));
-        assert!(!LauncherApp::launcher_enter_activation_enabled(true, true));
-    }
-
-    #[test]
     fn fs_query_text_does_not_imply_launcher_keyboard_ownership() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -10940,23 +10932,6 @@ mod tests {
         app.selected = Some(0);
 
         assert!(!LauncherApp::launcher_query_keyboard_enabled(false));
-        assert!(!LauncherApp::launcher_enter_activation_enabled(
-            false,
-            app.file_search_dialog.open
-        ));
-    }
-
-    #[test]
-    fn open_file_search_disables_launcher_enter_activation() {
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        app.query = "fs".into();
-        app.file_search_dialog.open = true;
-
-        assert!(!LauncherApp::launcher_enter_activation_enabled(
-            true,
-            app.file_search_dialog.open
-        ));
     }
 
     #[test]

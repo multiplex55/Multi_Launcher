@@ -2076,6 +2076,7 @@ pub(crate) struct JumpModeUi {
     paste_sequence_instance: u64,
     observed_dialogs: [ObservedNavigationDialog; NavigationDialogKind::ALL.len()],
     active_session: Option<HintSession>,
+    hint_session_generation: u64,
     last_outcome: Option<MatchOutcome>,
     root_input_frame: RootInputFrame,
     held_captured_keys: HashSet<egui::Key>,
@@ -2116,6 +2117,31 @@ impl JumpModeUi {
 
     pub(crate) fn configuration(&self) -> (JumpModeChord, HintAlphabet) {
         (self.activation_chord, self.hint_alphabet.clone())
+    }
+
+    pub(crate) fn activation_chord_pressed(&self, ctx: &egui::Context) -> bool {
+        ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if self.activation_chord_event_matches(*key, *modifiers)
+                )
+            })
+        })
+    }
+
+    pub(crate) fn activation_chord_event_matches(
+        &self,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        self.is_leader_key(key, modifiers)
     }
 
     pub(crate) fn set_configuration(
@@ -2546,6 +2572,10 @@ impl JumpModeUi {
         self.active_session
             .as_ref()
             .filter(|session| matches!(session.lifecycle(), SessionLifecycle::Active))
+    }
+
+    pub(crate) fn active_session_generation(&self) -> Option<u64> {
+        self.active_session().map(|_| self.hint_session_generation)
     }
 
     #[cfg(test)]
@@ -3439,6 +3469,7 @@ impl JumpModeUi {
                 matching_targets: map.len(),
             }
         });
+        self.hint_session_generation = self.hint_session_generation.wrapping_add(1);
         self.active_session = Some(HintSession::new(map));
         false
     }

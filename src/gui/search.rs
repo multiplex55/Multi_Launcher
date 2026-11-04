@@ -838,6 +838,10 @@ impl LauncherApp {
         self.last_stopwatch_query = trimmed.starts_with("sw list");
         if trimmed.is_empty() {
             self.last_search_provider_deferral = ProviderSearchDeferral::None;
+            // Empty browse results are deliberately uncached. Retire the
+            // previous query's validity before installing them so retyping
+            // that query cannot hit the stale-result fast path.
+            self.last_results_valid = false;
             self.autocomplete_index = 0;
             self.suggestions.clear();
             let outcome = self.search_read_only_outcome(&self.query);
