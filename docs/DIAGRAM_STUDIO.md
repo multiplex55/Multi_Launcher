@@ -74,3 +74,12 @@ to frame the current native graph or source-rendered image. **100%** uses the
 renderer SVG's natural dimensions. **Reset view** returns to the default camera.
 The Diagram Studio child window remains usable while the launcher window is
 hidden.
+
+Choose **Open viewer** in the toolbar to open a read-only **Diagram Viewer**
+window, or **Focus viewer** to bring its existing window forward. It follows the
+current document, showing the shared native graph or the current and stale
+source-rendered preview. The viewer has its own camera: wheel, middle-button
+drag, Ctrl+Arrow, and Ctrl+=/Ctrl+- affect only that view while it has focus.
+Closing the viewer window leaves Diagram Studio and its draft open. Saving or
+discarding an accepted Diagram Studio close also closes the viewer; Cancel keeps
+both windows open. The viewer remains synchronized while the launcher is hidden.

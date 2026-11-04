@@ -1423,6 +1423,12 @@ impl RendererService {
             .completion
             .take()
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_counter_snapshot(&self) -> (usize, usize, usize) {
+        let counters = self.shared.counters.snapshot();
+        (counters.parses, counters.layouts, counters.rasters)
+    }
 }
 
 impl Drop for RendererService {

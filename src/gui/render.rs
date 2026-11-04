@@ -2071,6 +2071,7 @@ impl LauncherApp {
                 egui::Order::Middle,
                 egui::Id::new("Plugin Settings"),
             )))
+            .chain(self.diagram_studio_dialog.embedded_viewer_layer_if_root())
             .collect::<std::collections::HashSet<_>>();
         (Self::TRACKED_PANELS
             .into_iter()
@@ -7787,6 +7788,9 @@ impl LauncherApp {
                         self.file_search_dialog.open,
                         egui::Popup::is_any_open(&ctx),
                     )
+                    && !self
+                        .diagram_studio_dialog
+                        .embedded_viewer_owns_root_input(&ctx)
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     #[cfg(test)]
@@ -7856,6 +7860,9 @@ impl LauncherApp {
                 if first_ui_pass
                     && close_panel_shortcut_modifiers.is_some()
                     && self.any_panel_open()
+                    && !self
+                        .diagram_studio_dialog
+                        .embedded_viewer_owns_root_input(&ctx)
                     && self.close_front_dialog()
                 {
                     let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
@@ -11231,7 +11238,9 @@ thread_local! {
     static IMMEDIATE_VIEWPORT_RENDERER_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE: std::cell::Cell<Option<(egui::ViewportId, bool)>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
+    static IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS: std::cell::RefCell<Option<(egui::ViewportId, Vec<egui::Event>)>> = const { std::cell::RefCell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
+    static IMMEDIATE_VIEWPORT_TEST_SIZE: std::cell::Cell<Option<(egui::ViewportId, egui::Vec2)>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID: std::cell::RefCell<Option<(egui::ViewportId, Option<egui::Id>)>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -11269,13 +11278,20 @@ pub(super) fn with_immediate_viewport_renderer<R>(
                     .get()
                     .map(|(id, is_focused)| id == viewport_id && is_focused)
             });
-            let screen_rect = egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                viewport
-                    .builder
-                    .inner_size
-                    .unwrap_or_else(|| ctx.content_rect().size()),
-            );
+            let size = IMMEDIATE_VIEWPORT_TEST_SIZE
+                .with(|desired| {
+                    desired
+                        .get()
+                        .filter(|(id, _)| *id == viewport_id)
+                        .map(|(_, size)| size)
+                })
+                .unwrap_or_else(|| {
+                    viewport
+                        .builder
+                        .inner_size
+                        .unwrap_or_else(|| ctx.content_rect().size())
+                });
+            let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
             let close_requested = IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST.with(|request| {
                 if request.get() == Some(viewport_id) {
                     request.set(None);
@@ -11296,8 +11312,21 @@ pub(super) fn with_immediate_viewport_renderer<R>(
             }
             let mut viewports = ctx.input(|input| input.raw.viewports.clone());
             viewports.insert(viewport_id, viewport_info);
-            let events = IMMEDIATE_VIEWPORT_TEST_EVENTS
-                .with(|events| std::mem::take(&mut *events.borrow_mut()));
+            let targeted_events = IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS.with(|events| {
+                let mut events = events.borrow_mut();
+                if events
+                    .as_ref()
+                    .is_some_and(|(target, _)| *target == viewport_id)
+                {
+                    events.take().map(|(_, events)| events)
+                } else {
+                    None
+                }
+            });
+            let events = targeted_events.unwrap_or_else(|| {
+                IMMEDIATE_VIEWPORT_TEST_EVENTS
+                    .with(|events| std::mem::take(&mut *events.borrow_mut()))
+            });
             let input = egui::RawInput {
                 viewport_id,
                 viewports,
@@ -11354,6 +11383,30 @@ pub(super) fn with_immediate_viewport_test_events<R>(
 }
 
 #[cfg(test)]
+pub(super) fn with_immediate_viewport_test_events_for<R>(
+    viewport_id: egui::ViewportId,
+    events: Vec<egui::Event>,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct EventsGuard(Option<(egui::ViewportId, Vec<egui::Event>)>);
+
+    impl Drop for EventsGuard {
+        fn drop(&mut self) {
+            IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS.with(|current| {
+                *current.borrow_mut() = self.0.take();
+            });
+        }
+    }
+
+    let previous = IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS
+        .with(|current| std::mem::replace(&mut *current.borrow_mut(), Some((viewport_id, events))));
+    let guard = EventsGuard(previous);
+    let output = run();
+    drop(guard);
+    output
+}
+
+#[cfg(test)]
 pub(super) fn with_immediate_viewport_test_close_request<R>(
     viewport_id: egui::ViewportId,
     run: impl FnOnce() -> R,
@@ -11369,6 +11422,28 @@ pub(super) fn with_immediate_viewport_test_close_request<R>(
     let previous =
         IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST.with(|request| request.replace(Some(viewport_id)));
     let guard = CloseRequestGuard(previous);
+    let output = run();
+    drop(guard);
+    output
+}
+
+#[cfg(test)]
+pub(super) fn with_immediate_viewport_test_size<R>(
+    viewport_id: egui::ViewportId,
+    size: egui::Vec2,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct SizeGuard(Option<(egui::ViewportId, egui::Vec2)>);
+
+    impl Drop for SizeGuard {
+        fn drop(&mut self) {
+            IMMEDIATE_VIEWPORT_TEST_SIZE.with(|current| current.set(self.0));
+        }
+    }
+
+    let previous =
+        IMMEDIATE_VIEWPORT_TEST_SIZE.with(|current| current.replace(Some((viewport_id, size))));
+    let guard = SizeGuard(previous);
     let output = run();
     drop(guard);
     output

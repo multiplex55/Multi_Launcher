@@ -75,6 +75,7 @@ Objective: qualify exact offline Mermaid library and establish one bounded async
 - Tests: requested sum=5002; valid/invalid prefixes/precision boundary/overflow, >64 constants without identifier exhaustion, names/references/Unicode/CRLF/source untouched; negative/zero/nonfinite modulo and mixed chains; bare/braced mod and nested calls. Preserve existing intermediate-finite, exact-base and resource/reference coverage. Catalog through real document evaluator; actual GUI help open/copy source/dirty/history invariant.
 - Nextest fast-dev/lib/no-fail-fast nonempty: `test(calculation_pad::document::tests::) | test(calculation_pad::operators::) | test(calculation_pad::examples::) | test(studio_usability_calculation_help)` (actual new module may vary). No unrelated suite/build.
 - Done: new grammar/corpus/help works with old scalar/physical/exact/source/cache semantics preserved. exmex contextual lowering/associativity needs scoped characterization, no user decision. Parent commits `feat(calculation): [M3-A] add mixed bases modulo and examples`, pushes; worker stops.
+- New nonmodal ROOT examples/reference window must expose its actual ordinary-owner layer through the shared query ownership boundary; ordinary presence must not make query unusable or gain blanket keyboard authority. Reuse owner-derived layer provenance, no guessed/global bypass; frozen M1-B Root-hint defect is not reopened.
 
 ## M3-B — pending A; independent of renderer
 
@@ -104,6 +105,7 @@ Objective: qualify exact offline Mermaid library and establish one bounded async
 - Tests pure 2x3/5x2 parsed counts/headers, Unicode/escape/LF/CRLF, zero/huge/overflow/limits/stale. Actual builder production/history path one undo exact bytes/redo; two notes plus query focus cannot retarget, changed source refuses.
 - Nextest fast-dev/lib/no-fail-fast nonempty: `test(notes_markdown::tables::) | test(contextual_table_edit_uses_parser_cell_position_and_note_history) | test(studio_usability_note_table)`.
 - Done: menu/builder creates shapes once at captured origin with validation/history. No general table/global-dialog redesign. Actual note accepted-pass integration is implementation detail, keep current lifecycle. Parent commits `feat(notes): [M4-A] add custom Markdown table builder`, pushes; worker stops.
+- The custom builder is a nonmodal ordinary note-owned window: expose its real layer to the shared query owner so the required query/second-note transfer can happen through real focus. Preserve originating note/source/caret identity; do not classify the builder itself as a destructive confirmation or globally exclusive operation. No Root-hint remediation.
 
 ## M4-B — pending A
 
