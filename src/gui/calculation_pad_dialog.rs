@@ -715,7 +715,7 @@ impl CalculationPadDialog {
 
                         let mut body_rendered = false;
                         if independent {
-                            let output = egui::CentralPanel::default().show(child, |ui| {
+                            let _output = egui::CentralPanel::default().show(child, |ui| {
                                 body_rendered = ui.is_visible() && !ui.is_sizing_pass();
                                 self.draw_host_contents(
                                     ui,
@@ -729,7 +729,7 @@ impl CalculationPadDialog {
                             });
                             #[cfg(test)]
                             {
-                                self.test_window_rect = Some(output.response.rect);
+                                self.test_window_rect = Some(_output.response.rect);
                             }
                         } else {
                             body_rendered = child.is_visible() && !child.is_sizing_pass();
@@ -953,7 +953,7 @@ impl CalculationPadDialog {
             return delivered;
         }
 
-        let mut needs_repaint = host.edited_source.is_some()
+        let needs_repaint = host.edited_source.is_some()
             || host.save_as_name.is_some()
             || host.source_focus_requested
             || host.editor_history_action.is_some()
@@ -1077,10 +1077,9 @@ impl CalculationPadDialog {
         if let Some(requested_host) = host.host_request.take()
             && self.open
             && self.apply_host_request(ctx, requested_host)
+            && requested_host == PadHost::Docked
         {
-            if requested_host == PadHost::Docked {
-                delivered.push(CalculationPadDialogEffect::ShowRoot);
-            }
+            delivered.push(CalculationPadDialogEffect::ShowRoot);
         }
 
         if host.source_focus_requested {
@@ -1455,15 +1454,15 @@ impl CalculationPadDialog {
             {
                 self.test_copy_all_rect = Some(response.rect);
             }
-            if response.clicked() {
-                if let Some(document_id) = self.session.current_id() {
-                    *result_copy = Some(ResultCopyIntent {
-                        host: host_identity,
-                        viewport_id,
-                        document_id,
-                        target: ResultCopyTarget::All,
-                    });
-                }
+            if response.clicked()
+                && let Some(document_id) = self.session.current_id()
+            {
+                *result_copy = Some(ResultCopyIntent {
+                    host: host_identity,
+                    viewport_id,
+                    document_id,
+                    target: ResultCopyTarget::All,
+                });
             }
         });
 
@@ -1516,15 +1515,15 @@ impl CalculationPadDialog {
                                     #[cfg(test)]
                                     self.test_line_copy_rects
                                         .push((line.line_index, response.rect));
-                                    if response.clicked() {
-                                        if let Some(document_id) = self.session.current_id() {
-                                            *result_copy = Some(ResultCopyIntent {
-                                                host: host_identity,
-                                                viewport_id,
-                                                document_id,
-                                                target: ResultCopyTarget::Line(line.id),
-                                            });
-                                        }
+                                    if response.clicked()
+                                        && let Some(document_id) = self.session.current_id()
+                                    {
+                                        *result_copy = Some(ResultCopyIntent {
+                                            host: host_identity,
+                                            viewport_id,
+                                            document_id,
+                                            target: ResultCopyTarget::Line(line.id),
+                                        });
                                     }
                                 }
                                 LineOutcome::Error(error) => {

@@ -899,7 +899,7 @@ fn validate_svg_dimensions(width: f32, height: f32) -> Result<(), DiagramRenderE
 }
 
 fn unpremultiply_rgba(rgba: &mut [u8]) {
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = u16::from(pixel[3]);
         if alpha == 0 {
             pixel[..3].fill(0);
@@ -989,13 +989,12 @@ fn preflight_source(source: &str) -> Result<(), DiagramRenderError> {
                         return Err(DiagramRenderError::ExcessiveNesting);
                     }
                 }
-                ']' | ')' | '}' => {
+                ']' | ')' | '}'
                     if delimiter_stack
                         .last()
-                        .is_some_and(|open| delimiters_match(*open, ch))
-                    {
-                        delimiter_stack.pop();
-                    }
+                        .is_some_and(|open| delimiters_match(*open, ch)) =>
+                {
+                    delimiter_stack.pop();
                 }
                 _ => {}
             }

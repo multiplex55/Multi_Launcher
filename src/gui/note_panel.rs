@@ -4198,7 +4198,7 @@ impl NotePanel {
                     });
                     builder
                         .header_cells
-                        .resize_with(builder.columns, || String::new());
+                        .resize_with(builder.columns, String::new);
                     ui.separator();
                     let rows_max_height = (ui.available_height() - 48.0).max(64.0);
                     egui::ScrollArea::vertical()

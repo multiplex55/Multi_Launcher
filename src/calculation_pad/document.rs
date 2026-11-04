@@ -1144,7 +1144,7 @@ fn lower_mod_function_calls(expression: &str) -> String {
 
         while let Some((start, character)) = characters.next() {
             if character == '{' {
-                while let Some((_, next)) = characters.next() {
+                for (_, next) in characters.by_ref() {
                     if next == '}' {
                         break;
                     }
@@ -1222,10 +1222,8 @@ fn mod_call_delimiters(expression: &str, open: usize) -> Option<(usize, Option<u
                     return Some((index, comma, multiple_commas));
                 }
             }
-            ',' if !in_braces && depth == 1 => {
-                if comma.replace(index).is_some() {
-                    multiple_commas = true;
-                }
+            ',' if !in_braces && depth == 1 && comma.replace(index).is_some() => {
+                multiple_commas = true;
             }
             _ => {}
         }

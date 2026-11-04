@@ -3993,7 +3993,7 @@ fn raster_content_uv(raster: &crate::diagram::RasterImage) -> egui::Rect {
     let mut min_y = raster.height;
     let mut max_x = 0u32;
     let mut max_y = 0u32;
-    for (index, pixel) in raster.rgba.chunks_exact(4).enumerate() {
+    for (index, pixel) in raster.rgba.as_chunks::<4>().0.iter().enumerate() {
         if pixel[3] == 0 {
             continue;
         }
