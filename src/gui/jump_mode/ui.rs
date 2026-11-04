@@ -1761,6 +1761,36 @@ impl JumpModeScope {
         self.register_metadata_with_paint_label_rect(ui, response, metadata, None, None)
     }
 
+    /// Keep the real root query in the active hint population while its editor
+    /// is noninteractive for an accepted Root Jump session. The caller only
+    /// uses this path while the existing query-focus session still proves
+    /// current Root ownership; all other scope, layer, viewport, enabled, and
+    /// geometry checks remain identical to ordinary registration.
+    pub(crate) fn register_root_query_focus_continuity_target(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+    ) -> RegistrationResult {
+        if self.surface != SurfaceId::LauncherResults
+            || self.navigation_owner != Some(NavigationOwner::Root)
+            || !self.root_owner_allowed
+            || self.viewport != egui::ViewportId::ROOT
+            || response.id != egui::Id::new("query_input")
+        {
+            return RegistrationResult::Rejected(RegistrationRejection::IdentityOutsideScope);
+        }
+
+        let metadata = TargetMetadata::new(
+            self.target_id("query_input"),
+            "Search query",
+            TargetKind::TextEntry,
+            0,
+        );
+        self.register_metadata_with_paint_label_rect_and_interactivity(
+            ui, response, metadata, None, None, false,
+        )
+    }
+
     /// Register the one real ROOT query response on the exact Notes surface.
     /// The target remains owned by Notes so it cannot unlock Dashboard or
     /// launcher-result navigation while Notes is foreground.
@@ -1847,6 +1877,25 @@ impl JumpModeScope {
         paint_label_rect: Option<egui::Rect>,
         provenance: Option<TargetProvenance>,
     ) -> RegistrationResult {
+        self.register_metadata_with_paint_label_rect_and_interactivity(
+            ui,
+            response,
+            metadata,
+            paint_label_rect,
+            provenance,
+            true,
+        )
+    }
+
+    fn register_metadata_with_paint_label_rect_and_interactivity(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        metadata: TargetMetadata,
+        paint_label_rect: Option<egui::Rect>,
+        provenance: Option<TargetProvenance>,
+        require_interactive_response: bool,
+    ) -> RegistrationResult {
         if metadata.id().surface() != &self.surface || metadata.id().generation() != self.generation
         {
             return RegistrationResult::Rejected(RegistrationRejection::IdentityOutsideScope);
@@ -1886,7 +1935,10 @@ impl JumpModeScope {
         if !ui.is_enabled() || !response.enabled() {
             return RegistrationResult::Rejected(RegistrationRejection::Disabled);
         }
-        if !response.sense.interactive() && !response.sense.is_focusable() {
+        if require_interactive_response
+            && !response.sense.interactive()
+            && !response.sense.is_focusable()
+        {
             return RegistrationResult::Rejected(RegistrationRejection::NonInteractive);
         }
 
@@ -2576,6 +2628,42 @@ impl JumpModeUi {
 
     pub(crate) fn active_session_generation(&self) -> Option<u64> {
         self.active_session().map(|_| self.hint_session_generation)
+    }
+
+    pub(crate) fn pending_completed_root_hint_focus_target(
+        &self,
+        session_generation: u64,
+        viewport: egui::ViewportId,
+    ) -> Option<TargetId> {
+        if !self.enabled
+            || self.active_session().is_some()
+            || self.hint_session_generation != session_generation
+            || self.navigation_owner != NavigationOwner::Root
+            || self.frame_navigation_owner != NavigationOwner::Root
+            || self.navigation_owner_transitioned
+            || !self.root_input_frame.resolved
+            || self.root_input_frame.viewport != viewport
+        {
+            return None;
+        }
+
+        let Some(MatchOutcome::Completed(target)) = self.last_outcome.as_ref() else {
+            return None;
+        };
+        let intent_is_current = |intent: &FocusIntent| {
+            intent.target == *target
+                && intent.viewport == viewport
+                && intent.epoch == self.navigation_epoch
+        };
+        (self
+            .pending_focus_intent
+            .as_ref()
+            .is_some_and(intent_is_current)
+            || self
+                .frame_consumed_focus_intent
+                .as_ref()
+                .is_some_and(|consumed| intent_is_current(&consumed.intent)))
+        .then(|| target.clone())
     }
 
     #[cfg(test)]
@@ -7254,6 +7342,64 @@ mod tests {
         jump.finish_ui_pass();
         jump.complete_frame(&egui::Context::default(), true, true);
         assert!(jump.pending_focus_intent.is_none());
+    }
+
+    #[test]
+    fn completed_root_hint_focus_authority_is_current_frame_and_epoch_bound() {
+        let mut jump = JumpModeUi::new(true);
+        jump.begin_frame();
+        jump.navigation_owner = NavigationOwner::Root;
+        jump.frame_navigation_owner = NavigationOwner::Root;
+        jump.root_input_frame.viewport = egui::ViewportId::ROOT;
+        jump.root_input_frame.resolved = true;
+        jump.hint_session_generation = 7;
+        let target = TargetId::root_result(TargetGeneration(4), 0);
+        jump.last_outcome = Some(MatchOutcome::Completed(target.clone()));
+        jump.pending_focus_intent = Some(FocusIntent {
+            target: target.clone(),
+            viewport: egui::ViewportId::ROOT,
+            epoch: jump.navigation_epoch,
+        });
+
+        assert_eq!(
+            jump.pending_completed_root_hint_focus_target(7, egui::ViewportId::ROOT),
+            Some(target.clone())
+        );
+
+        // The resolved flag is scoped to one frame. Persisted outcome and
+        // pending intent cannot resurrect Root authority on the next frame.
+        jump.begin_frame();
+        assert_eq!(
+            jump.pending_completed_root_hint_focus_target(7, egui::ViewportId::ROOT),
+            None
+        );
+
+        // A stale intent epoch cannot authorize the old completion even if
+        // another caller marks the current root frame resolved.
+        jump.root_input_frame.viewport = egui::ViewportId::ROOT;
+        jump.root_input_frame.resolved = true;
+        jump.navigation_epoch = jump.navigation_epoch.next();
+        assert_eq!(
+            jump.pending_completed_root_hint_focus_target(7, egui::ViewportId::ROOT),
+            None
+        );
+
+        // The exact current intent remains valid after its target has been
+        // consumed by this frame's retained UI pass.
+        jump.pending_focus_intent = None;
+        jump.frame_consumed_focus_intent = Some(ConsumedFocusIntent {
+            intent: FocusIntent {
+                target: target.clone(),
+                viewport: egui::ViewportId::ROOT,
+                epoch: jump.navigation_epoch,
+            },
+            target_response_id: egui::Id::new("root-result"),
+            native_focus_owner_id: None,
+        });
+        assert_eq!(
+            jump.pending_completed_root_hint_focus_target(7, egui::ViewportId::ROOT),
+            Some(target)
+        );
     }
 
     #[test]
