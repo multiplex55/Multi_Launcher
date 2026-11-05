@@ -2,9 +2,9 @@
 
 Canonical execution ledger: [EXECUTION.md](EXECUTION.md).
 
-- **PARTIAL / BLOCKED** at C01/M1-B.2; [bounded stop and evidence](stalls/20261105T035337Z.md).
-- Branch `feat/utility-dock-popout`; accepted source through `f04ff2ed4f3b547662b7c87d7a31bceec38a428d`, pushed. M0-A/M0-B/M1-A/M1-B.1 complete; M1-A12/12 and M1-B.1 22/22 focused tests.
-- B.2 source preserved uncommitted; final selected evidence52/54 passed across scoped runs, two click-path failures remain. No more automatic correction/test attempts in this run.
-- C01 M2–M4 and C02–C07 not started; all required selected-feature omissions remain explicit in the ledger/report.
-- Native N1–N12 unverified; inherited capture timeout not reprobed. This stop is caused by feature failures, not that environment gap.
-- Reporting-only commit/push and actual final SHA will be recorded in target/desktop-productivity-expansion/final-handoff.json. Source dirty state is intentional; no partial source is included in the report commit.
+- **Goal in progress through authorized independent continuation.** C01 remains **Partial / Blocked** at M1-B.2; [original bounded stop/evidence](stalls/20261105T035337Z.md) is historical, not a renewed repair budget.
+- C01 accepted source through `f04ff2ed4f3b547662b7c87d7a31bceec38a428d`: M0-A/M0-B/M1-A/M1-B.1 complete; M1-A12/12 and B.1 22/22 focused tests.
+- Failed B.2 source/tests are inactive in the checkout and fully preserved in the verified ignored recovery patch. Its result remains52/54 across scoped runs, two persistent click-path failures. No further B.2 fixes/checks occurred.
+- Active source equals accepted B.1; no unsafe failed increment is carried forward. C01 M2–M4 remain unimplemented. Native N1–N12 remain unverified; inherited capture timeout not reprobed.
+- Read-only dependency audit confirms C02/M5-A domain primitives can proceed independently. After this C01 handoff commit, C02 will branch from its exact final tip and create a new M0-A. M6 hosting dependency remains explicit.
+- Actual category ancestry/push/checkout receipts are under target/desktop-productivity-expansion/. No worktrees/auxiliary checkouts/intermediate merges or unrelated user-change loss.
