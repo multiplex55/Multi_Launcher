@@ -332,3 +332,11 @@ cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fas
 C02 is frozen **PARTIAL / BLOCKED** at its coherent final examples/report increment. Accepted M0-A, M5-A, M5-B, M7-A and M7-B examples/reference subset; IDs1–4,7,9,10 implemented with scoped evidence (M17 pending). ID12 partially delivered. IDs5–6,8,11 unimplemented: M6-A separate inspector, working-copy bitfield toggles/labels, copy formats, fenced insert/undo; M6-B comparison. Both require missing C01 hosting behavior; no workaround or retry budget renewal. Full M7-B/C02 acceptance and native N5 unavailable; N1–N12 remain unverified overall, inherited capture blocker not reprobed. No failed or partial active C02 source inherited. Preserve C01 historical stop and recovery patch. No worktrees/clones/history rewrite/intermediate merges or unrelated user changes discarded.
 
 After committing this increment, attempt one normal push, verify actual HEAD/upstream and clean checkout/index, record C02 external final-tip receipt, then create C03 directly from that exact SHA, verify own M0-A parent and attempt initial push before source. M8-A alone is independently authorized by the recorded dependency audit. No new B.2 attempt or narrower overall success definition.
+
+## C03/M0-A — Diagram Visual Canvas baseline
+
+- parent_branch: `feat/calculation-programmer-tools`.
+- parent_tip_sha / C02 actual final frozen tip: `18632f794e7134c1633e13f377bd9e8c53d4f375`; final examples/report checkpoint normally pushed, upstream matches, checkout/index clean. External `C02-handoff.json` records all accepted checkpoint SHAs and omissions.
+- category_branch: `feat/diagram-visual-canvas`; created fresh in the single existing checkout, initial HEAD verified equal to the exact parent tip. No C03 source/test/build work before baseline. No worktree/clone/agent branch/intermediate merge/rebase.
+- This separate M0-A baseline records C03 ancestry. Verify its direct parent and attempt one initial upstream push before source; SHA and push receipt follow after commit.
+- C01 and C02 remain Partial/Blocked; B.2 inactive and archived, M2–M4/M6 absent, native gates unverified. Independent scope starts M8-A only using accepted M1-A provenance and existing Diagram Studio host. Do not reuse failed/inactive source or claim that remaining categories are already cleared.
