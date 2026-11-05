@@ -6,6 +6,7 @@ mod document;
 mod export;
 mod layout;
 mod mermaid;
+mod mermaid_assistance;
 mod model;
 mod persistence;
 mod rendering;
@@ -75,6 +76,10 @@ pub use layout::{DiagramLayoutError, layout_positions};
 pub use mermaid::{
     MAX_MERMAID_LINE_BYTES, MAX_MERMAID_SOURCE_BYTES, MAX_MERMAID_SOURCE_LINES, MermaidDiagnostic,
     MermaidDiagnosticKind, MermaidFormatError, SourceSpan, format_mermaid, parse_mermaid,
+};
+pub use mermaid_assistance::{
+    MermaidAssistance, MermaidAssistanceContext, MermaidAssistanceSuggestion,
+    apply_mermaid_assistance, mermaid_assistance_at,
 };
 pub use model::{
     DiagramDocument, DiagramEdge, DiagramGroup, DiagramNode, EdgeId, FlowDirection,

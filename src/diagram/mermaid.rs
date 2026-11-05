@@ -115,22 +115,6 @@ pub fn parse_mermaid(source: &str) -> Result<DiagramDocument, MermaidDiagnostic>
             .strip_suffix('\n')
             .unwrap_or(line_with_newline);
         let line = line_with_cr.strip_suffix('\r').unwrap_or(line_with_cr);
-        if line.len() > MAX_MERMAID_LINE_BYTES {
-            let start = line
-                .char_indices()
-                .find_map(|(offset, _)| (offset >= MAX_MERMAID_LINE_BYTES).then_some(offset))
-                .unwrap_or(line.len());
-            return Err(diagnostic(
-                MermaidDiagnosticKind::LimitExceeded,
-                format!("line exceeds the {MAX_MERMAID_LINE_BYTES}-byte limit"),
-                line,
-                byte_offset,
-                line_number,
-                start,
-                line.len(),
-            ));
-        }
-
         let trimmed = line.trim();
         if !trimmed.is_empty() {
             if !saw_header {
@@ -470,7 +454,7 @@ fn encode_mermaid_text(text: &str, output: &mut String) {
     }
 }
 
-fn preflight_source(source: &str) -> Result<(), MermaidDiagnostic> {
+pub(super) fn preflight_source(source: &str) -> Result<(), MermaidDiagnostic> {
     if source.len() > MAX_MERMAID_SOURCE_BYTES {
         return Err(diagnostic(
             MermaidDiagnosticKind::LimitExceeded,
@@ -501,6 +485,29 @@ fn preflight_source(source: &str) -> Result<(), MermaidDiagnostic> {
             0,
             offending_line.len(),
         ));
+    }
+    let mut byte_offset = 0usize;
+    for (line_index, line_with_newline) in source.split_inclusive('\n').enumerate() {
+        let line_with_cr = line_with_newline
+            .strip_suffix('\n')
+            .unwrap_or(line_with_newline);
+        let line = line_with_cr.strip_suffix('\r').unwrap_or(line_with_cr);
+        if line.len() > MAX_MERMAID_LINE_BYTES {
+            let start = line
+                .char_indices()
+                .find_map(|(offset, _)| (offset >= MAX_MERMAID_LINE_BYTES).then_some(offset))
+                .unwrap_or(line.len());
+            return Err(diagnostic(
+                MermaidDiagnosticKind::LimitExceeded,
+                format!("line exceeds the {MAX_MERMAID_LINE_BYTES}-byte limit"),
+                line,
+                byte_offset,
+                line_index + 1,
+                start,
+                line.len(),
+            ));
+        }
+        byte_offset = byte_offset.saturating_add(line_with_newline.len());
     }
     Ok(())
 }
@@ -585,6 +592,137 @@ fn parse_subgraph(
     }
     parser.finish()?;
     Ok((group, label))
+}
+
+/// Return bounded grammar-recognized IDs and edge count for completion UI.
+/// This scans individual supported statements without building a graph or
+/// running the renderer on every editor frame.
+pub(super) fn assistance_symbols(source: &str) -> (Vec<String>, Vec<String>, usize) {
+    if preflight_source(source).is_err() {
+        return (Vec::new(), Vec::new(), 0);
+    }
+
+    let mut nodes = Vec::new();
+    let mut seen_nodes = std::collections::HashSet::new();
+    let mut groups = Vec::new();
+    let mut seen_groups = std::collections::HashSet::new();
+    let mut edges = 0usize;
+    let mut skipped_header = false;
+    let mut byte_offset = 0usize;
+
+    for (line_index, line_with_newline) in source.split_inclusive('\n').enumerate() {
+        let line_with_cr = line_with_newline
+            .strip_suffix('\n')
+            .unwrap_or(line_with_newline);
+        let line = line_with_cr.strip_suffix('\r').unwrap_or(line_with_cr);
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            if !skipped_header {
+                skipped_header = true;
+            } else if !trimmed.starts_with("%%") && trimmed != "end" {
+                let line_number = line_index + 1;
+                if is_subgraph_keyword(trimmed) {
+                    if let Ok((group, _)) = parse_subgraph(line, byte_offset, line_number)
+                        && seen_groups.insert(group.as_str().to_owned())
+                    {
+                        groups.push(group.as_str().to_owned());
+                        if groups.len() == MAX_DIAGRAM_GROUPS {
+                            break;
+                        }
+                    }
+                } else {
+                    let mut parser = StatementParser::new(line, byte_offset, line_number);
+                    parser.skip_whitespace();
+                    if let Ok(first) = parser.parse_node_term() {
+                        let mut line_nodes = vec![first.id.as_str().to_owned()];
+                        parser.skip_whitespace();
+                        let mut is_edge = false;
+                        let mut valid_statement = true;
+                        if parser.remaining().starts_with("-->") {
+                            parser.position += 3;
+                            parser.skip_whitespace();
+                            if parser.remaining().starts_with('|') {
+                                if parser.parse_edge_label().is_err() {
+                                    valid_statement = false;
+                                } else if valid_statement {
+                                    parser.skip_whitespace();
+                                    match parser.parse_node_term() {
+                                        Ok(second) => {
+                                            line_nodes.push(second.id.as_str().to_owned());
+                                            is_edge = true;
+                                        }
+                                        Err(_) => valid_statement = false,
+                                    }
+                                }
+                            } else if let Ok(second) = parser.parse_node_term() {
+                                line_nodes.push(second.id.as_str().to_owned());
+                                is_edge = true;
+                            } else {
+                                valid_statement = false;
+                            }
+                        }
+                        parser.skip_whitespace();
+                        if valid_statement && parser.finish().is_ok() {
+                            for id in line_nodes {
+                                if seen_nodes.insert(id.clone()) {
+                                    nodes.push(id);
+                                }
+                            }
+                            if is_edge {
+                                edges = edges.saturating_add(1).min(MAX_DIAGRAM_EDGES);
+                            }
+                            if nodes.len() >= MAX_DIAGRAM_NODES || edges >= MAX_DIAGRAM_EDGES {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        byte_offset = byte_offset.saturating_add(line_with_newline.len());
+    }
+    (nodes, groups, edges)
+}
+
+/// Locate an identifier only when the caret is in the target term of one
+/// complete supported edge prefix. The parser validates source terms and
+/// labels, and trailing/chained syntax prevents completion.
+pub(super) fn assistance_edge_target_span(line: &str, cursor: usize) -> Option<(usize, usize)> {
+    if line.len() > MAX_MERMAID_LINE_BYTES || cursor > line.len() || !line.is_char_boundary(cursor)
+    {
+        return None;
+    }
+    let mut parser = StatementParser::new(line, 0, 1);
+    parser.skip_whitespace();
+    parser.parse_node_term().ok()?;
+    parser.skip_whitespace();
+    if !parser.remaining().starts_with("-->") {
+        return None;
+    }
+    parser.position += 3;
+    parser.skip_whitespace();
+    if parser.remaining().starts_with('|') {
+        parser.parse_edge_label().ok()?;
+        parser.skip_whitespace();
+    }
+
+    let start = parser.position;
+    if parser.remaining().is_empty() {
+        return (cursor == start).then_some((start, start));
+    }
+    parser.parse_identifier(MAX_NODE_ID_BYTES).ok()?;
+    let end = parser.position;
+    parser.skip_whitespace();
+    if parser
+        .remaining()
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| matches!(byte, b'[' | b'(' | b'{'))
+    {
+        parser.parse_shape_label().ok()?;
+    }
+    parser.finish().ok()?;
+    (start <= cursor && cursor <= end).then_some((start, end))
 }
 
 fn is_subgraph_keyword(trimmed: &str) -> bool {

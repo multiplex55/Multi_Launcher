@@ -557,6 +557,13 @@ struct VisualGesture {
 
 enum PendingMutation {
     ReplaceSource(String),
+    ReplaceSourceWithCursor {
+        source: String,
+        expected_document: RenderDocumentIdentity,
+        expected_revision: u64,
+        editor_id: egui::Id,
+        cursor_character: usize,
+    },
     ReplaceVisualLabel {
         label: String,
         expected_document: RenderDocumentIdentity,
@@ -1367,6 +1374,21 @@ impl DiagramStudioDialog {
                 document_intent = Some(DocumentIntent::Close);
             }
 
+            // Restore an accepted source-suggestion focus transfer before the
+            // TextEdit is drawn, so the next input event reaches the editor.
+            if child.is_visible()
+                && !child.is_sizing_pass()
+                && pass_authorized
+                && surface_input_allowed
+                && !modal_open
+                && !close_requested
+                && let Some((target_viewport, id)) = self.deferred_source_focus
+                && target_viewport == child_context.viewport_id()
+            {
+                self.deferred_source_focus = None;
+                child.memory_mut(|memory| memory.request_focus(id));
+            }
+
             if independent {
                 egui::CentralPanel::default().show(child, |ui| {
                     body_rendered = ui.is_visible() && !ui.is_sizing_pass();
@@ -1420,12 +1442,6 @@ impl DiagramStudioDialog {
                     && target_viewport == child_context.viewport_id()
                 {
                     self.deferred_canvas_focus = None;
-                    child.memory_mut(|memory| memory.request_focus(id));
-                }
-                if let Some((target_viewport, id)) = self.deferred_source_focus
-                    && target_viewport == child_context.viewport_id()
-                {
-                    self.deferred_source_focus = None;
                     child.memory_mut(|memory| memory.request_focus(id));
                 }
                 if let Some((target_viewport, request)) = self.deferred_menu_focus
@@ -2298,6 +2314,18 @@ impl DiagramStudioDialog {
             self.focus_viewport = false;
         }
         let source_mutation_requested = effects.mutation.is_some();
+        let source_cursor_request = effects
+            .mutation
+            .as_ref()
+            .and_then(|mutation| match mutation {
+                PendingMutation::ReplaceSourceWithCursor {
+                    editor_id,
+                    cursor_character,
+                    ..
+                } => Some((*editor_id, *cursor_character)),
+                _ => None,
+            });
+        let source_cursor_mutation_requested = source_cursor_request.is_some();
         let visual_mutation_requested = effects.mutation.as_ref().is_some_and(|mutation| {
             matches!(
                 mutation,
@@ -2332,10 +2360,24 @@ impl DiagramStudioDialog {
             };
             if visual_mutation_requested && (!owner_pass_current || !gesture_capture_is_current) {
                 self.reject_stale_visual_intent()
+            } else if source_cursor_mutation_requested && !owner_pass_current {
+                self.message = Some(StudioNotice::error(
+                    "The editor pass was discarded; choose the Mermaid suggestion again.",
+                ));
+                false
             } else {
                 self.apply_pending(mutation)
             }
         });
+        if mutation_succeeded
+            && effects.document_intent.is_none()
+            && let Some((editor_id, cursor_character)) = source_cursor_request
+        {
+            install_text_edit_cursor(ctx, editor_id, cursor_character);
+            if let Some(target_viewport) = child_viewport_id {
+                self.deferred_source_focus = Some((target_viewport, editor_id));
+            }
+        }
         let debounce_accepted_source = source_mutation_requested && mutation_succeeded;
         let viewer_was_open = self.viewer_open;
         let accepted_close = mutation_succeeded
@@ -3730,6 +3772,28 @@ impl DiagramStudioDialog {
 
     fn apply_pending(&mut self, pending: PendingMutation) -> bool {
         match pending {
+            PendingMutation::ReplaceSourceWithCursor {
+                source,
+                expected_document,
+                expected_revision,
+                ..
+            } => {
+                let source_is_current = self.render_document == expected_document
+                    && self.documents.authoring_kind()
+                        == Some(crate::diagram::DiagramAuthoringKind::Mermaid)
+                    && self
+                        .documents
+                        .session()
+                        .is_some_and(|session| session.revision() == expected_revision)
+                    && self.documents.pending_transition().is_none();
+                if !source_is_current {
+                    self.message = Some(StudioNotice::error(
+                        "The Mermaid source changed while this suggestion was open. Choose a suggestion again.",
+                    ));
+                    return false;
+                }
+                self.apply_mermaid_pending(PendingMutation::ReplaceSource(source))
+            }
             PendingMutation::ReplaceVisualLabel {
                 label,
                 expected_document,
@@ -3941,6 +4005,9 @@ impl DiagramStudioDialog {
             | PendingMutation::VisualGestureTransaction { .. }
             | PendingMutation::VisualHistory { .. } => {
                 unreachable!("visual mutation dispatched above")
+            }
+            PendingMutation::ReplaceSourceWithCursor { .. } => {
+                unreachable!("source assistance mutation dispatched above")
             }
             PendingMutation::Transaction {
                 operations,
@@ -5099,6 +5166,7 @@ impl DiagramStudioDialog {
                     ViewMode::Source { .. } => source_editor(
                         ui,
                         session,
+                        render_document,
                         source_edit_allowed,
                         pending,
                         *focus_source && source_focus_allowed,
@@ -5109,6 +5177,10 @@ impl DiagramStudioDialog {
                         test_source_editor_rect,
                         #[cfg(test)]
                         test_source_editor_enabled,
+                        #[cfg(test)]
+                        test_action_rects,
+                        #[cfg(test)]
+                        test_action_focus_ids,
                     ),
                     ViewMode::Visual => preview_workspace(
                         ui,
@@ -5155,6 +5227,7 @@ impl DiagramStudioDialog {
                             source_editor(
                                 ui,
                                 session,
+                                render_document,
                                 source_edit_allowed,
                                 pending,
                                 *focus_source && source_focus_allowed,
@@ -5165,6 +5238,10 @@ impl DiagramStudioDialog {
                                 &mut source_rect,
                                 #[cfg(test)]
                                 test_source_editor_enabled,
+                                #[cfg(test)]
+                                test_action_rects,
+                                #[cfg(test)]
+                                test_action_focus_ids,
                             );
                             ui.separator();
                             preview_workspace(
@@ -5226,6 +5303,7 @@ impl DiagramStudioDialog {
                                         source_editor(
                                             ui,
                                             session,
+                                            render_document,
                                             source_edit_allowed,
                                             pending,
                                             *focus_source && source_focus_allowed,
@@ -5236,6 +5314,10 @@ impl DiagramStudioDialog {
                                             &mut source_rect,
                                             #[cfg(test)]
                                             test_source_editor_enabled,
+                                            #[cfg(test)]
+                                            test_action_rects,
+                                            #[cfg(test)]
+                                            test_action_focus_ids,
                                         );
                                     },
                                 );
@@ -8072,6 +8154,7 @@ fn raster_content_uv(raster: &crate::diagram::RasterImage) -> egui::Rect {
 fn source_editor(
     ui: &mut egui::Ui,
     session: &DiagramSession,
+    render_document: &RenderDocumentIdentity,
     actions_allowed: bool,
     pending: &mut Option<PendingMutation>,
     focus_source: bool,
@@ -8079,6 +8162,8 @@ fn source_editor(
     #[cfg(test)] test_editor_id: &mut Option<egui::Id>,
     #[cfg(test)] test_editor_rect: &mut Option<egui::Rect>,
     #[cfg(test)] test_editor_enabled: &mut bool,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+    #[cfg(test)] test_action_focus_ids: &mut Vec<(String, egui::Id)>,
 ) {
     ui.label("Mermaid source (raw text is retained exactly)");
     let editor_id = ui.make_persistent_id("diagram-studio-source-editor");
@@ -8102,7 +8187,70 @@ fn source_editor(
         *test_editor_rect = Some(response.rect);
         *test_editor_enabled = response.enabled();
     }
-    if response.changed() && actions_allowed && pending.is_none() {
+    let source_changed = response.changed() && actions_allowed && pending.is_none();
+    let mut suggestion_action_index = 0usize;
+    let _assistance_menu = ui.menu_button("Suggestions", |menu_ui| {
+        let cursor_character =
+            egui::widgets::text_edit::TextEditState::load(menu_ui.ctx(), editor_id)
+                .and_then(|state| state.cursor.char_range())
+                .map_or(source.chars().count(), |range| range.primary.index.into());
+        let cursor_byte = char_index_to_byte(&source, cursor_character);
+        if let Some(assistance) = crate::diagram::mermaid_assistance_at(&source, cursor_byte) {
+            let context_label = match assistance.context {
+                crate::diagram::MermaidAssistanceContext::Header => "Supported flowchart headers",
+                crate::diagram::MermaidAssistanceContext::Direction => "Flowchart direction",
+                crate::diagram::MermaidAssistanceContext::Statement => "Supported statements",
+                crate::diagram::MermaidAssistanceContext::EdgeTarget => "Existing node IDs",
+            };
+            menu_ui.weak(context_label);
+            for suggestion in &assistance.suggestions {
+                let index = suggestion_action_index;
+                suggestion_action_index += 1;
+                let _action_name = format!("mermaid_assist_suggestion_{index}");
+                let suggestion_response = menu_ui.add_enabled(
+                    actions_allowed && pending.is_none() && !source_changed,
+                    egui::Button::new(&suggestion.label),
+                );
+                #[cfg(test)]
+                {
+                    test_action_rects.push((
+                        _action_name.clone(),
+                        suggestion_response.rect,
+                        menu_ui.clip_rect(),
+                    ));
+                    test_action_focus_ids.push((_action_name, suggestion_response.id));
+                }
+                if suggestion_response.clicked()
+                    && pending.is_none()
+                    && !source_changed
+                    && let Some((updated, cursor_byte)) =
+                        crate::diagram::apply_mermaid_assistance(&source, suggestion)
+                {
+                    let cursor_character = updated[..cursor_byte].chars().count();
+                    *pending = Some(PendingMutation::ReplaceSourceWithCursor {
+                        source: updated,
+                        expected_document: render_document.clone(),
+                        expected_revision: session.revision(),
+                        editor_id,
+                        cursor_character,
+                    });
+                    menu_ui.close();
+                }
+            }
+        } else {
+            menu_ui.weak("No supported suggestion at this position.");
+        }
+    });
+    #[cfg(test)]
+    {
+        test_action_rects.push((
+            "mermaid_assist_menu".into(),
+            _assistance_menu.response.rect,
+            ui.clip_rect(),
+        ));
+        test_action_focus_ids.push(("mermaid_assist_menu".into(), _assistance_menu.response.id));
+    }
+    if source_changed && pending.is_none() {
         *pending = Some(PendingMutation::ReplaceSource(source));
     }
     ui.small("Supported syntax is documented in the Diagram Studio help section.");
@@ -8113,6 +8261,23 @@ fn clear_text_edit_undoer(ctx: &egui::Context, id: egui::Id) {
         state.clear_undoer();
         state.store(ctx, id);
     }
+}
+
+fn install_text_edit_cursor(ctx: &egui::Context, id: egui::Id, character_index: usize) {
+    let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(character_index),
+        )));
+    state.store(ctx, id);
+}
+
+fn char_index_to_byte(source: &str, character_index: usize) -> usize {
+    source
+        .char_indices()
+        .nth(character_index)
+        .map_or(source.len(), |(byte_index, _)| byte_index)
 }
 
 fn direction_control(
@@ -13264,6 +13429,84 @@ mod tests {
             revision_before_collapsed_modifiers + 1,
             "an idle frame must not repeat a consumed Shift-arrow edit"
         );
+    }
+
+    #[test]
+    fn diagram_studio_mermaid_assistance_accepted_suggestion_is_one_undo_step_and_preserves_utf8_source()
+     {
+        let source = "flowchart TD\r\nA[\"東京\"]\r\n";
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.test_replace_source(source);
+        dialog.view_mode = ViewMode::Source {
+            restore: PreviewMode::Split,
+        };
+        dialog.open();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        let editor_id = dialog
+            .test_source_editor_id
+            .expect("the Mermaid source editor was rendered");
+        super::install_text_edit_cursor(&ctx, editor_id, source.chars().count());
+        let revision = dialog.test_session().revision();
+        let undo_depth = dialog.test_session().undo_depth();
+
+        click_action(&mut dialog, &ctx, "mermaid_assist_menu");
+        assert!(
+            dialog
+                .test_action_rects
+                .iter()
+                .any(|(action, _, _)| action == "mermaid_assist_suggestion_0")
+        );
+        click_action(&mut dialog, &ctx, "mermaid_assist_suggestion_0");
+
+        let assisted = "flowchart TD\r\nA[\"東京\"]\r\nNode[\"New node\"]";
+        assert_eq!(dialog.test_session().draft(), assisted);
+        assert_eq!(dialog.test_session().revision(), revision + 1);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth + 1);
+        assert_eq!(
+            dialog.deferred_source_focus,
+            Some((viewport_id(), editor_id))
+        );
+
+        // No idle frame is inserted between the accepted suggestion and the
+        // next editor input. Focus must be restored before TextEdit processes it.
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Text("!".into())]);
+        assert_eq!(dialog.test_session().draft(), format!("{assisted}!"));
+        assert!(dialog.test_source_editor_has_focus(&ctx));
+        assert!(dialog.deferred_source_focus.is_none());
+    }
+
+    #[test]
+    fn diagram_studio_mermaid_assistance_discarded_child_pass_keeps_source_unchanged() {
+        let source = "flowchart TD\r\nA[\"東京\"]\r\n";
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.test_replace_source(source);
+        dialog.view_mode = ViewMode::Source {
+            restore: PreviewMode::Split,
+        };
+        dialog.open();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let editor_id = dialog
+            .test_source_editor_id
+            .expect("the Mermaid source editor was rendered");
+        super::install_text_edit_cursor(&ctx, editor_id, source.chars().count());
+        let revision = dialog.test_session().revision();
+        let undo_depth = dialog.test_session().undo_depth();
+
+        click_action(&mut dialog, &ctx, "mermaid_assist_menu");
+        click_action_with_child_discard(&mut dialog, &ctx, "mermaid_assist_suggestion_0");
+
+        assert!(dialog.test_child_discard_requested);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+        assert_eq!(dialog.test_session().undo_depth(), undo_depth);
+        assert!(dialog.deferred_source_focus.is_none());
     }
 
     #[test]
