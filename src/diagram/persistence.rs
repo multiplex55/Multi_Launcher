@@ -1,6 +1,9 @@
 //! Bounded, explicit-path persistence for native Diagram Studio documents.
 
-use super::codec::{DiagramCodecError, MAX_DIAGRAM_SESSION_BYTES};
+use super::codec::{
+    DiagramCodecError, DiagramFileDocument, DiagramFileDocumentRef, MAX_DIAGRAM_SESSION_BYTES,
+    decode_document, encode_document,
+};
 use super::export::DiagramExportFormat;
 use super::mermaid::MAX_MERMAID_SOURCE_BYTES;
 use super::session::DiagramSession;
@@ -306,7 +309,7 @@ impl std::error::Error for DiagramPersistenceError {
 
 #[derive(Debug)]
 pub(super) struct LoadedDiagramDocument {
-    pub session: DiagramSession,
+    pub document: DiagramFileDocument,
     pub disk_digest: [u8; 32],
 }
 
@@ -381,27 +384,25 @@ impl DiagramDocumentStore {
     ) -> Result<LoadedDiagramDocument, DiagramPersistenceError> {
         let path = path.as_ref();
         let bytes = read_required(path)?;
-        let session =
-            DiagramSession::decode(&bytes).map_err(|source| DiagramPersistenceError::Codec {
+        let document =
+            decode_document(&bytes).map_err(|source| DiagramPersistenceError::Codec {
                 operation: "decode",
                 path: path.to_path_buf(),
                 source,
             })?;
         Ok(LoadedDiagramDocument {
-            session,
+            document,
             disk_digest: digest(&bytes),
         })
     }
 
-    /// Save As refuses a path that is already occupied at the preflight check.
-    /// The destination is then published using the durable shared atomic writer.
-    pub(super) fn save_as_with_writer(
+    pub(super) fn save_document_as_with_writer(
         &self,
         path: &Path,
-        session: &DiagramSession,
+        document: DiagramFileDocumentRef<'_>,
         writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
     ) -> Result<[u8; 32], DiagramPersistenceError> {
-        let bytes = encode_for_path(path, session)?;
+        let bytes = encode_document_for_path(path, document)?;
         ensure_unoccupied(path)?;
         writer(path, &bytes).map_err(|source| DiagramPersistenceError::AtomicWrite {
             path: path.to_path_buf(),
@@ -410,14 +411,14 @@ impl DiagramDocumentStore {
         Ok(digest(&bytes))
     }
 
-    pub(super) fn save_existing_with_writer(
+    pub(super) fn save_document_existing_with_writer(
         &self,
         path: &Path,
         expected_digest: [u8; 32],
-        session: &DiagramSession,
+        document: DiagramFileDocumentRef<'_>,
         writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
     ) -> Result<[u8; 32], DiagramPersistenceError> {
-        let bytes = encode_for_path(path, session)?;
+        let bytes = encode_document_for_path(path, document)?;
         let current = match read_limited(path)? {
             Some(bytes) => bytes,
             None => {
@@ -439,19 +440,45 @@ impl DiagramDocumentStore {
         })?;
         Ok(digest(&bytes))
     }
+
+    /// Save As refuses a path that is already occupied at the preflight check.
+    /// The destination is then published using the durable shared atomic writer.
+    #[cfg(test)]
+    pub(super) fn save_as_with_writer(
+        &self,
+        path: &Path,
+        session: &DiagramSession,
+        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+    ) -> Result<[u8; 32], DiagramPersistenceError> {
+        self.save_document_as_with_writer(path, DiagramFileDocumentRef::Mermaid(session), writer)
+    }
+
+    #[cfg(test)]
+    pub(super) fn save_existing_with_writer(
+        &self,
+        path: &Path,
+        expected_digest: [u8; 32],
+        session: &DiagramSession,
+        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+    ) -> Result<[u8; 32], DiagramPersistenceError> {
+        self.save_document_existing_with_writer(
+            path,
+            expected_digest,
+            DiagramFileDocumentRef::Mermaid(session),
+            writer,
+        )
+    }
 }
 
-fn encode_for_path(
+fn encode_document_for_path(
     path: &Path,
-    session: &DiagramSession,
+    document: DiagramFileDocumentRef<'_>,
 ) -> Result<Vec<u8>, DiagramPersistenceError> {
-    session
-        .encode()
-        .map_err(|source| DiagramPersistenceError::Codec {
-            operation: "encode",
-            path: path.to_path_buf(),
-            source,
-        })
+    encode_document(document).map_err(|source| DiagramPersistenceError::Codec {
+        operation: "encode",
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn ensure_unoccupied(path: &Path) -> Result<(), DiagramPersistenceError> {

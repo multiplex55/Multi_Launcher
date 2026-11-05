@@ -13,12 +13,13 @@ mod session;
 mod templates;
 
 pub use codec::{
-    DIAGRAM_SESSION_FORMAT_VERSION, DiagramCodecError, MAX_DIAGRAM_SESSION_BYTES, decode_session,
-    encode_session,
+    DIAGRAM_SESSION_FORMAT_VERSION, DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION, DiagramCodecError,
+    MAX_DIAGRAM_SESSION_BYTES, MAX_VISUAL_DOCUMENT_TITLE_BYTES, decode_session, encode_session,
 };
 pub use document::{
-    DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy, DiagramSourceCopyOrigin,
-    PendingDiagramTransition, TransitionDecision, TransitionOutcome,
+    DiagramAuthoringKind, DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
+    DiagramSourceCopyOrigin, PendingDiagramTransition, TransitionDecision, TransitionOutcome,
+    VisualDiagramDocument,
 };
 pub use export::{
     DiagramExportArtifact, DiagramExportError, DiagramExportFormat, DiagramExportWarnings,

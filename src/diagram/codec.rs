@@ -11,7 +11,26 @@ use std::collections::VecDeque;
 use std::fmt;
 
 pub const DIAGRAM_SESSION_FORMAT_VERSION: u32 = 1;
+pub const DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION: u32 = 2;
 pub const MAX_DIAGRAM_SESSION_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_VISUAL_DOCUMENT_TITLE_BYTES: usize = 4 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct VisualDocumentData {
+    pub title: String,
+    pub revision: u64,
+}
+
+#[derive(Debug)]
+pub(super) enum DiagramFileDocument {
+    Mermaid(DiagramSession),
+    Visual(VisualDocumentData),
+}
+
+pub(super) enum DiagramFileDocumentRef<'a> {
+    Mermaid(&'a DiagramSession),
+    Visual { title: &'a str, revision: u64 },
+}
 
 #[derive(Debug)]
 pub enum DiagramCodecError {
@@ -73,6 +92,109 @@ struct SessionWire {
     undo_len: usize,
     #[serde(deserialize_with = "deserialize_bounded_history")]
     history: Vec<HistoryEntry>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct VisualDocumentWireRef<'a> {
+    format_version: u32,
+    authoring_kind: VisualAuthoringKind,
+    revision: u64,
+    #[serde(borrow)]
+    title: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VisualDocumentWire {
+    format_version: u32,
+    authoring_kind: VisualAuthoringKind,
+    revision: u64,
+    #[serde(deserialize_with = "deserialize_visual_title")]
+    title: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum VisualAuthoringKind {
+    Visual,
+}
+
+#[derive(Deserialize)]
+struct FormatVersionHeader {
+    format_version: u32,
+}
+
+pub(super) fn encode_document(
+    document: DiagramFileDocumentRef<'_>,
+) -> Result<Vec<u8>, DiagramCodecError> {
+    match document {
+        DiagramFileDocumentRef::Mermaid(session) => encode_session(session),
+        DiagramFileDocumentRef::Visual { title, revision } => {
+            if title.len() > MAX_VISUAL_DOCUMENT_TITLE_BYTES {
+                return Err(DiagramCodecError::InvalidState(format!(
+                    "visual title exceeds the {MAX_VISUAL_DOCUMENT_TITLE_BYTES}-byte limit"
+                )));
+            }
+            let wire = VisualDocumentWireRef {
+                format_version: DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
+                authoring_kind: VisualAuthoringKind::Visual,
+                revision,
+                title,
+            };
+            let bytes = serde_json::to_vec(&wire).map_err(DiagramCodecError::Serialization)?;
+            if bytes.len() > MAX_DIAGRAM_SESSION_BYTES {
+                return Err(DiagramCodecError::PayloadTooLarge {
+                    max_bytes: MAX_DIAGRAM_SESSION_BYTES,
+                });
+            }
+            Ok(bytes)
+        }
+    }
+}
+
+pub(super) fn decode_document(bytes: &[u8]) -> Result<DiagramFileDocument, DiagramCodecError> {
+    if bytes.len() > MAX_DIAGRAM_SESSION_BYTES {
+        return Err(DiagramCodecError::PayloadTooLarge {
+            max_bytes: MAX_DIAGRAM_SESSION_BYTES,
+        });
+    }
+    let header: FormatVersionHeader =
+        serde_json::from_slice(bytes).map_err(DiagramCodecError::Malformed)?;
+    match header.format_version {
+        DIAGRAM_SESSION_FORMAT_VERSION => decode_session(bytes).map(DiagramFileDocument::Mermaid),
+        DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION => {
+            let wire: VisualDocumentWire =
+                serde_json::from_slice(bytes).map_err(DiagramCodecError::Malformed)?;
+            if wire.format_version != DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION {
+                return Err(DiagramCodecError::InvalidState(
+                    "visual document version changed during decoding".into(),
+                ));
+            }
+            let VisualAuthoringKind::Visual = wire.authoring_kind;
+            Ok(DiagramFileDocument::Visual(VisualDocumentData {
+                title: wire.title,
+                revision: wire.revision,
+            }))
+        }
+        found => Err(DiagramCodecError::UnsupportedVersion {
+            found,
+            supported: DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
+        }),
+    }
+}
+
+fn deserialize_visual_title<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let title = String::deserialize(deserializer)?;
+    if title.len() > MAX_VISUAL_DOCUMENT_TITLE_BYTES {
+        return Err(de::Error::custom(format!(
+            "visual title exceeds the {MAX_VISUAL_DOCUMENT_TITLE_BYTES}-byte limit"
+        )));
+    }
+    Ok(title)
 }
 
 pub fn encode_session(session: &DiagramSession) -> Result<Vec<u8>, DiagramCodecError> {
@@ -354,8 +476,9 @@ fn validate_history_chain(session: &DiagramSession) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DIAGRAM_SESSION_FORMAT_VERSION, DiagramCodecError, DiagramSession,
-        MAX_DIAGRAM_SESSION_BYTES, decode_session,
+        DIAGRAM_SESSION_FORMAT_VERSION, DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION, DiagramCodecError,
+        DiagramFileDocument, DiagramFileDocumentRef, DiagramSession, MAX_DIAGRAM_SESSION_BYTES,
+        MAX_VISUAL_DOCUMENT_TITLE_BYTES, decode_document, decode_session, encode_document,
     };
     use crate::diagram::{GraphOperation, NodeId, PreviewState};
 
@@ -378,6 +501,79 @@ mod tests {
     }
 
     #[test]
+    fn diagram_codec_roundtrips_bounded_visual_documents_with_explicit_kind() {
+        let bytes = encode_document(DiagramFileDocumentRef::Visual {
+            title: "交付計画 — Phase 1",
+            revision: 12,
+        })
+        .unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            wire["format_version"],
+            DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION
+        );
+        assert_eq!(wire["authoring_kind"], "visual");
+        assert_eq!(wire["revision"], 12);
+        assert_eq!(wire["title"], "交付計画 — Phase 1");
+        match decode_document(&bytes).unwrap() {
+            DiagramFileDocument::Visual(visual) => {
+                assert_eq!(visual.title, "交付計画 — Phase 1");
+                assert_eq!(visual.revision, 12);
+            }
+            DiagramFileDocument::Mermaid(_) => panic!("visual payload decoded as Mermaid"),
+        }
+
+        assert!(matches!(
+            encode_document(DiagramFileDocumentRef::Visual {
+                title: &"x".repeat(MAX_VISUAL_DOCUMENT_TITLE_BYTES + 1),
+                revision: 0,
+            }),
+            Err(DiagramCodecError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn diagram_codec_rejects_unknown_visual_kinds_malformed_payloads_and_future_versions() {
+        let mut visual = serde_json::json!({
+            "format_version": DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
+            "authoring_kind": "visual",
+            "revision": 0,
+            "title": "Canvas"
+        });
+        visual["authoring_kind"] = serde_json::json!("mermaid");
+        assert!(matches!(
+            decode_document(&serde_json::to_vec(&visual).unwrap()),
+            Err(DiagramCodecError::Malformed(_))
+        ));
+
+        visual["authoring_kind"] = serde_json::json!("visual");
+        visual["future_field"] = serde_json::json!(true);
+        assert!(matches!(
+            decode_document(&serde_json::to_vec(&visual).unwrap()),
+            Err(DiagramCodecError::Malformed(_))
+        ));
+
+        visual.as_object_mut().unwrap().remove("future_field");
+        visual["format_version"] = serde_json::json!(99);
+        assert!(matches!(
+            decode_document(&serde_json::to_vec(&visual).unwrap()),
+            Err(DiagramCodecError::UnsupportedVersion { found: 99, .. })
+        ));
+
+        visual["format_version"] = serde_json::json!(DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION);
+        visual["title"] = serde_json::json!("x".repeat(MAX_VISUAL_DOCUMENT_TITLE_BYTES + 1));
+        assert!(matches!(
+            decode_document(&serde_json::to_vec(&visual).unwrap()),
+            Err(DiagramCodecError::Malformed(_))
+        ));
+
+        assert!(matches!(
+            decode_document(&vec![b' '; MAX_DIAGRAM_SESSION_BYTES + 1]),
+            Err(DiagramCodecError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
     fn diagram_codec_roundtrips_current_history_invalid_draft_and_revisions() {
         let mut session = session_with_history();
         let previous_supported_source = session.draft().to_owned();
@@ -388,6 +584,10 @@ mod tests {
         let expected_allocator = session.next_edge_id();
         let bytes = session.encode().unwrap();
         let mut decoded = decode_session(&bytes).unwrap();
+        assert!(matches!(
+            decode_document(&bytes).unwrap(),
+            DiagramFileDocument::Mermaid(_)
+        ));
         assert_eq!(decoded.encode().unwrap(), bytes);
         assert_eq!(decoded.draft(), session.draft());
         assert_eq!(decoded.last_good_source(), session.last_good_source());

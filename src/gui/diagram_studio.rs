@@ -448,6 +448,7 @@ struct GenericPreviewTexture {
 
 enum PendingMutation {
     ReplaceSource(String),
+    ReplaceVisualLabel(String),
     Transaction {
         operations: Vec<GraphOperation>,
         expected_revision: u64,
@@ -460,6 +461,7 @@ enum PendingMutation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DocumentIntent {
     New,
+    NewVisual,
     Open,
     ImportMermaid,
     ApplyTemplate(DiagramTemplate),
@@ -810,7 +812,7 @@ impl DiagramStudioDialog {
     pub(crate) fn ensure_open(&mut self) {
         // Passive maintenance must not resurrect a document accepted as
         // closed. A later explicit opener creates the next blank session.
-        if self.documents.session().is_none() {
+        if !self.documents.has_active_document() {
             return;
         }
         if !self.open {
@@ -905,7 +907,7 @@ impl DiagramStudioDialog {
     }
 
     fn ensure_blank_after_close(&mut self) -> bool {
-        if self.documents.session().is_some() {
+        if self.documents.has_active_document() {
             return true;
         }
         match self.documents.request_new() {
@@ -1513,6 +1515,9 @@ impl DiagramStudioDialog {
         actions_allowed: bool,
         canvas_focus_requested: &mut Option<egui::Id>,
     ) -> bool {
+        if let Some(label) = self.documents.visual_label().map(str::to_owned) {
+            return self.draw_visual_viewer_body(ui, actions_allowed, &label);
+        }
         self.ensure_generic_texture(ui.ctx());
         let Self {
             documents,
@@ -1704,6 +1709,30 @@ impl DiagramStudioDialog {
                 *test_viewer_canvas_rect = Some(_rect);
             }
         }
+        close_requested
+    }
+
+    fn draw_visual_viewer_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        actions_allowed: bool,
+        label: &str,
+    ) -> bool {
+        let mut close_requested = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Diagram Viewer");
+            ui.separator();
+            close_requested = ui
+                .add_enabled(actions_allowed, egui::Button::new("Close viewer"))
+                .clicked();
+        });
+        ui.separator();
+        ui.label("Visual document preview");
+        ui.group(|ui| {
+            ui.centered_and_justified(|ui| {
+                ui.heading(label);
+            });
+        });
         close_requested
     }
 
@@ -1903,6 +1932,21 @@ impl DiagramStudioDialog {
     }
 
     fn apply_document_intent(&mut self, intent: DocumentIntent) -> bool {
+        if self.documents.authoring_kind() == Some(crate::diagram::DiagramAuthoringKind::Visual)
+            && matches!(
+                &intent,
+                DocumentIntent::ImportMermaid
+                    | DocumentIntent::ApplyTemplate(_)
+                    | DocumentIntent::AutoLayout
+                    | DocumentIntent::Export(_, _)
+                    | DocumentIntent::UseSourceInMarkdown(_)
+            )
+        {
+            self.message = Some(StudioNotice::error(
+                "This action is only available for Mermaid documents.",
+            ));
+            return false;
+        }
         if self.documents.pending_transition().is_some()
             && matches!(
                 &intent,
@@ -1934,6 +1978,14 @@ impl DiagramStudioDialog {
                 }
                 Err(error) => {
                     self.show_document_error("create a new document", None, error);
+                }
+            },
+            DocumentIntent::NewVisual => match self.documents.request_new_visual() {
+                Ok(outcome) => {
+                    self.finish_transition(outcome, false);
+                }
+                Err(error) => {
+                    self.show_document_error("create a new visual document", None, error);
                 }
             },
             DocumentIntent::Open => {
@@ -2584,6 +2636,10 @@ impl DiagramStudioDialog {
                 .documents
                 .replace_source(source)
                 .map(|changed| (changed, None)),
+            PendingMutation::ReplaceVisualLabel(label) => self
+                .documents
+                .replace_visual_label(label)
+                .map(|changed| (changed, None)),
             PendingMutation::Transaction {
                 operations,
                 expected_revision,
@@ -2740,7 +2796,7 @@ impl DiagramStudioDialog {
 
     #[cfg(test)]
     pub(crate) fn test_has_active_document(&self) -> bool {
-        self.documents.session().is_some()
+        self.documents.has_active_document()
     }
 
     #[cfg(test)]
@@ -2897,6 +2953,15 @@ impl DiagramStudioDialog {
         source_focus_requested: &mut Option<egui::Id>,
         source_focus_allowed: bool,
     ) -> DrawBodyEffects {
+        if self.documents.authoring_kind() == Some(crate::diagram::DiagramAuthoringKind::Visual) {
+            return self.draw_visual_body(
+                ui,
+                actions_allowed,
+                closing_requested,
+                pending,
+                document_intent,
+            );
+        }
         self.ensure_generic_texture(ui.ctx());
         self.refresh_cache();
         let focused_at_start = ui.memory(|memory| memory.focused());
@@ -3041,6 +3106,12 @@ impl DiagramStudioDialog {
                             "document_new",
                             "New",
                             DocumentIntent::New,
+                            document_actions_allowed,
+                        ),
+                        (
+                            "document_new_visual",
+                            "New Visual",
+                            DocumentIntent::NewVisual,
                             document_actions_allowed,
                         ),
                         (
@@ -3599,7 +3670,12 @@ impl DiagramStudioDialog {
                 if let Some(transition) = pending_transition.as_ref() {
                     ui.group(|ui| {
                         let description = match transition {
-                            PendingDiagramTransition::New => "starting a new diagram".to_owned(),
+                            PendingDiagramTransition::New => {
+                                "starting a new Mermaid document".to_owned()
+                            }
+                            PendingDiagramTransition::NewVisual => {
+                                "starting a new visual document".to_owned()
+                            }
                             PendingDiagramTransition::Open(path) => {
                                 format!("opening {}", path.display())
                             }
@@ -3911,6 +3987,162 @@ impl DiagramStudioDialog {
                 }
             });
         draw_effects
+    }
+
+    fn draw_visual_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        actions_allowed: bool,
+        closing_requested: bool,
+        pending: &mut Option<PendingMutation>,
+        document_intent: &mut Option<DocumentIntent>,
+    ) -> DrawBodyEffects {
+        #[cfg(test)]
+        if !closing_requested && pending.is_none() {
+            *pending = self.test_pending_mutation.take();
+        }
+        #[cfg(test)]
+        if !closing_requested && document_intent.is_none() {
+            *document_intent = self.test_pending_document_intent.take();
+        }
+        #[cfg(test)]
+        {
+            self.test_body_rendered = true;
+        }
+
+        let pending_transition = self.documents.pending_transition().cloned();
+        let path = self.documents.path().map(Path::to_path_buf);
+        let document_actions_allowed = actions_allowed
+            && !closing_requested
+            && pending_transition.is_none()
+            && !egui::Popup::is_any_open(ui.ctx());
+        let mut effects = DrawBodyEffects::default();
+        egui::ScrollArea::vertical()
+            .id_salt("diagram-studio-visual-document-scroll")
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.heading("Diagram Studio");
+                    ui.strong("Visual document");
+                    ui.separator();
+                    let viewer = ui.add_enabled(
+                        document_actions_allowed,
+                        egui::Button::new(if self.viewer_open {
+                            "Focus viewer"
+                        } else {
+                            "Open viewer"
+                        }),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "open_viewer".into(),
+                        viewer.rect,
+                        ui.clip_rect(),
+                    ));
+                    if viewer.clicked() {
+                        effects.open_viewer_requested = true;
+                    }
+                    for (name, label, intent) in [
+                        ("document_new", "New Mermaid", DocumentIntent::New),
+                        ("document_new_visual", "New Visual", DocumentIntent::NewVisual),
+                        ("document_open", "Open…", DocumentIntent::Open),
+                        ("document_save", "Save", DocumentIntent::Save),
+                        ("document_save_as", "Save As…", DocumentIntent::SaveAs),
+                        ("document_close", "Close", DocumentIntent::Close),
+                    ] {
+                        let response = ui.add_enabled(
+                            document_actions_allowed,
+                            egui::Button::new(label),
+                        );
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            name.to_owned(),
+                            response.rect,
+                            ui.clip_rect(),
+                        ));
+                        if response.clicked() && document_intent.is_none() {
+                            *document_intent = Some(intent);
+                        }
+                    }
+                    if let Some(path) = path.as_deref() {
+                        ui.weak(path.file_name().and_then(|name| name.to_str()).unwrap_or("diagram.mld"));
+                    } else {
+                        ui.weak("Untitled");
+                    }
+                    if self.documents.is_dirty() {
+                        ui.weak("Modified");
+                    }
+                });
+
+                let mut label = self.documents.visual_label().unwrap_or_default().to_owned();
+                let label_editor_id = ui.make_persistent_id("diagram-studio-visual-label-editor");
+                clear_text_edit_undoer(ui.ctx(), label_editor_id);
+                let label_response = ui.add_enabled(
+                    document_actions_allowed && pending.is_none(),
+                    egui::TextEdit::singleline(&mut label)
+                        .id(label_editor_id)
+                        .hint_text("Visual canvas label")
+                        .desired_width(f32::INFINITY),
+                );
+                #[cfg(test)]
+                self.test_action_rects.push((
+                    "visual_label".into(),
+                    label_response.rect,
+                    ui.clip_rect(),
+                ));
+                if label_response.changed() && pending.is_none() {
+                    *pending = Some(PendingMutation::ReplaceVisualLabel(label.clone()));
+                }
+
+                ui.group(|ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.heading(&label);
+                            ui.label("Visual diagram preview");
+                            ui.label("This document is stored as visual data and is not converted to Mermaid.");
+                        });
+                    });
+                });
+
+                if let Some(message) = self.message.as_ref() {
+                    match message {
+                        StudioNotice::Info(text) => {
+                            ui.label(text);
+                        }
+                        StudioNotice::Error(text) => {
+                            ui.colored_label(egui::Color32::from_rgb(185, 65, 65), text);
+                        }
+                    }
+                }
+
+                if let Some(transition) = pending_transition.as_ref() {
+                    let description = match transition {
+                        PendingDiagramTransition::New => "starting a new Mermaid document".to_owned(),
+                        PendingDiagramTransition::NewVisual => "starting a new visual document".to_owned(),
+                        PendingDiagramTransition::Open(path) => format!("opening {}", path.display()),
+                        PendingDiagramTransition::ImportMermaid(file) => format!("importing {}", file.path().display()),
+                        PendingDiagramTransition::CopySource(_) => "copying Mermaid source from Markdown".to_owned(),
+                        PendingDiagramTransition::ApplyTemplate(template) => format!("using the {} template", template.name()),
+                        PendingDiagramTransition::Close => "closing this document".to_owned(),
+                    };
+                    ui.group(|ui| {
+                        ui.label(format!("Save changes before {description}?"));
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, decision) in [
+                                ("Save", TransitionDecision::Save),
+                                ("Discard", TransitionDecision::Discard),
+                                ("Cancel", TransitionDecision::Cancel),
+                            ] {
+                                if ui.add_enabled(actions_allowed && !closing_requested, egui::Button::new(label)).clicked()
+                                    && document_intent.is_none()
+                                {
+                                    *document_intent = Some(DocumentIntent::ResolvePending(decision));
+                                }
+                            }
+                        });
+                    });
+                }
+            });
+        effects
     }
 }
 
@@ -9616,5 +9848,116 @@ mod tests {
         send_embedded_fallback_key(&mut dialog, &ctx, egui::Key::W, egui::Modifiers::COMMAND);
         assert!(dialog.open, "viewer Cmd+W does not close the owner editor");
         assert!(dialog.viewer_open);
+    }
+
+    #[test]
+    fn diagram_studio_authoring_visual_intent_is_accepted_and_retires_equal_revision_preview() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        dialog.view_mode = ViewMode::Source {
+            restore: PreviewMode::Visual,
+        };
+        open_viewer(&mut dialog, &ctx);
+        let old_document_identity = dialog.render_document.clone();
+        let old_revision = dialog.documents.session().unwrap().revision();
+        assert_eq!(old_revision, 1);
+        assert!(dialog.test_viewer_render_key.is_some());
+
+        click_action_with_child_discard(&mut dialog, &ctx, "document_new_visual");
+        assert_eq!(
+            dialog.documents.authoring_kind(),
+            Some(crate::diagram::DiagramAuthoringKind::Mermaid)
+        );
+        assert_eq!(dialog.documents.session().unwrap().revision(), old_revision);
+        assert_eq!(dialog.render_document, old_document_identity);
+
+        click_action(&mut dialog, &ctx, "document_new_visual");
+        assert_eq!(
+            dialog.documents.pending_transition(),
+            Some(&PendingDiagramTransition::NewVisual)
+        );
+        assert_eq!(
+            dialog.documents.authoring_kind(),
+            Some(crate::diagram::DiagramAuthoringKind::Mermaid)
+        );
+        assert_eq!(dialog.render_document, old_document_identity);
+
+        click_action(&mut dialog, &ctx, "decision_discard");
+        assert_eq!(
+            dialog.documents.authoring_kind(),
+            Some(crate::diagram::DiagramAuthoringKind::Visual)
+        );
+        assert!(dialog.documents.has_active_document());
+        assert!(dialog.documents.session().is_none());
+        assert_ne!(dialog.render_document, old_document_identity);
+        assert!(dialog.viewer_open);
+        assert_eq!(
+            dialog.view_mode,
+            ViewMode::Source {
+                restore: PreviewMode::Visual,
+            }
+        );
+
+        dialog
+            .documents
+            .replace_visual_label("Visual at revision one")
+            .unwrap();
+        assert_eq!(dialog.documents.visual_revision(), Some(old_revision));
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_viewer_render_key, None);
+        assert_eq!(
+            dialog.documents.visual_label(),
+            Some("Visual at revision one")
+        );
+        assert!(dialog.test_action_rect("visual_label").is_some());
+    }
+
+    #[test]
+    fn diagram_studio_authoring_visual_text_undo_does_not_cross_document_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("visual.mld");
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.documents.request_new_visual().unwrap();
+        dialog
+            .documents
+            .replace_visual_label("Older document label")
+            .unwrap();
+        dialog.documents.save_as(&path).unwrap();
+        dialog.open();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+
+        click_action(&mut dialog, &ctx, "visual_label");
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::Text(" discarded edit".into())],
+        );
+        assert_ne!(
+            dialog.documents.visual_label(),
+            Some("Untitled visual diagram")
+        );
+        assert!(dialog.documents.is_dirty());
+
+        dialog.test_stage_document_intent(DocumentIntent::NewVisual);
+        frame(&mut dialog, &ctx);
+        assert_eq!(
+            dialog.documents.pending_transition(),
+            Some(&PendingDiagramTransition::NewVisual)
+        );
+        dialog.test_stage_document_intent(DocumentIntent::ResolvePending(
+            TransitionDecision::Discard,
+        ));
+        frame(&mut dialog, &ctx);
+        assert_eq!(
+            dialog.documents.visual_label(),
+            Some("Untitled visual diagram")
+        );
+        click_action(&mut dialog, &ctx, "visual_label");
+        send_child_key(&mut dialog, &ctx, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(
+            dialog.documents.visual_label(),
+            Some("Untitled visual diagram")
+        );
     }
 }
