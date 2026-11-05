@@ -100,6 +100,7 @@ regex = "1"
 regex-syntax = "0.8"
 regex-automata = { version = "0.4", default-features = false, features = ["alloc"] }
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+quick-xml = { version = "=0.41.0", default-features = false }
 slug = "0.1"
 hashlink = "0.8"
 siphasher = "0.3"

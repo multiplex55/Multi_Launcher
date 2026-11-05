@@ -4,6 +4,7 @@ mod assets;
 mod codec;
 mod conversion;
 mod document;
+mod drawio;
 mod export;
 mod layout;
 mod mermaid;
@@ -33,6 +34,13 @@ pub(crate) use conversion::mermaid_visual_copy;
 pub use document::{
     DiagramAuthoringKind, DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
     DiagramSourceCopyOrigin, PendingDiagramTransition, TransitionDecision, TransitionOutcome,
+};
+pub use drawio::{
+    DrawioExportResult, DrawioImportResult, DrawioIssue, DrawioReport, DrawioWireError,
+    MAX_DRAWIO_ATTRIBUTE_NAME_BYTES, MAX_DRAWIO_ATTRIBUTE_VALUE_BYTES,
+    MAX_DRAWIO_ATTRIBUTES_PER_ELEMENT, MAX_DRAWIO_CELLS, MAX_DRAWIO_ENCODED_ATTRIBUTE_BYTES,
+    MAX_DRAWIO_ID_BYTES, MAX_DRAWIO_ISSUES, MAX_DRAWIO_STYLE_BYTES, MAX_DRAWIO_XML_BYTES,
+    MAX_DRAWIO_XML_DEPTH, export_drawio_xml, import_drawio_xml,
 };
 pub use export::{
     DiagramExportArtifact, DiagramExportError, DiagramExportFormat, DiagramExportWarnings,

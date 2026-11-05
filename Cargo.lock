@@ -3215,6 +3215,7 @@ dependencies = [
  "open",
  "pulldown-cmark",
  "qrcode",
+ "quick-xml 0.41.0",
  "rand 0.10.1",
  "raw-window-handle",
  "rdev",

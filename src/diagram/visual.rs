@@ -52,6 +52,10 @@ impl VisualLayerId {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    pub(super) const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
