@@ -8,19 +8,21 @@ use crate::diagram::{
     DiagramRenderedImageSnapshot, DiagramScene, DiagramSession, DiagramSourceCopy,
     DiagramSourceCopyOrigin, DiagramSourceSnapshot, DiagramTemplate, EdgeId, FlowDirection,
     GenericPreviewStatus, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES,
-    MAX_VISUAL_TRANSACTION_OPERATIONS, MermaidFile, NodeId, NodePosition, NodeShape,
-    PendingDiagramTransition, Position, PreparedText, PreviewState, ProjectedStrokePrimitive,
-    RasterSize, RenderDocumentIdentity, RenderKey, RenderOptions, RendererService, SceneMetrics,
-    ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment, TransitionDecision,
-    TransitionOutcome, VisualAlign, VisualColor, VisualDistribution, VisualLineStyle, VisualObject,
-    VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualPresetDraft,
-    VisualPrimitiveComponent, VisualPrimitiveShape, VisualProjectedKind, VisualProjectionError,
-    VisualScene, VisualSceneProjection, VisualShadow, VisualStyle, VisualTransform,
-    VisualTransformMode, build_scene, color_with_opacity, generic_preview_family,
-    is_generic_preview_candidate, preview_visual_transforms, project_visual_scene,
-    visual_canvas_align_selection, visual_canvas_distribute_selection, visual_canvas_hit_test,
-    visual_canvas_marquee_selection, visual_canvas_minimap_layout, visual_canvas_selection_bounds,
-    visual_canvas_selection_handles, visual_canvas_snap_translation_delta,
+    MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_TRANSACTION_OPERATIONS, MermaidFile, NodeId,
+    NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText, PreviewState,
+    ProjectedStrokePrimitive, RasterSize, RenderDocumentIdentity, RenderKey, RenderOptions,
+    RendererService, SceneMetrics, ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment,
+    TransitionDecision, TransitionOutcome, VisualAlign, VisualAnchor, VisualColor, VisualConnector,
+    VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute, VisualDistribution,
+    VisualLineStyle, VisualObject, VisualObjectDraft, VisualObjectId, VisualObjectKind,
+    VisualOperation, VisualPresetDraft, VisualPrimitiveComponent, VisualPrimitiveShape,
+    VisualProjectedKind, VisualProjectionError, VisualScene, VisualSceneProjection, VisualShadow,
+    VisualStyle, VisualTransform, VisualTransformMode, build_scene, color_with_opacity,
+    generic_preview_family, is_generic_preview_candidate, preview_visual_transforms,
+    project_visual_scene, visual_canvas_align_selection, visual_canvas_distribute_selection,
+    visual_canvas_hit_test, visual_canvas_marquee_selection, visual_canvas_minimap_layout,
+    visual_canvas_selection_bounds, visual_canvas_selection_handles,
+    visual_canvas_snap_translation_delta,
 };
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -2046,12 +2048,14 @@ impl DiagramStudioDialog {
         if let Some(Ok(projection)) = projection.as_ref()
             && (projection.simplified_dash_paths > 0
                 || projection.truncated_text_items > 0
+                || projection.connector_route_fallbacks > 0
                 || paint_report.omitted_items > 0
                 || paint_report.suppressed_text_lines > 0)
         {
             ui.weak(format!(
-                "{} large dashed outline(s) simplified; {} text item(s) shortened, {} small text line(s) omitted; {} item(s) omitted to keep the preview responsive.",
+                "{} large dashed outline(s) simplified; {} connector route(s) shown in orange fallback; {} text item(s) shortened, {} small text line(s) omitted; {} item(s) omitted to keep the preview responsive.",
                 projection.simplified_dash_paths,
+                projection.connector_route_fallbacks,
                 projection.truncated_text_items,
                 paint_report.suppressed_text_lines,
                 paint_report.omitted_items
@@ -5046,7 +5050,13 @@ impl DiagramStudioDialog {
                         let initial_objects = scene
                             .objects
                             .iter()
-                            .filter(|object| selected_ids.contains(&object.id))
+                            .filter(|object| {
+                                selected_ids.contains(&object.id)
+                                    && !matches!(
+                                        &object.kind,
+                                        VisualObjectKind::Connector { .. }
+                                    )
+                            })
                             .cloned()
                             .collect::<Vec<_>>();
                         if !matches!(mode, VisualGestureMode::Transform(_)) || !initial_objects.is_empty() {
@@ -5346,12 +5356,14 @@ impl DiagramStudioDialog {
                 if let Some(Ok(projection)) = projection.as_ref()
                     && (projection.simplified_dash_paths > 0
                         || projection.truncated_text_items > 0
+                        || projection.connector_route_fallbacks > 0
                         || paint_report.omitted_items > 0
                         || paint_report.suppressed_text_lines > 0)
                 {
                     ui.weak(format!(
-                        "{} large dashed outline(s) simplified; {} text item(s) shortened, {} small text line(s) omitted; {} item(s) omitted to keep the canvas responsive.",
+                        "{} large dashed outline(s) simplified; {} connector route(s) shown in orange fallback; {} text item(s) shortened, {} small text line(s) omitted; {} item(s) omitted to keep the canvas responsive.",
                         projection.simplified_dash_paths,
+                        projection.connector_route_fallbacks,
                         projection.truncated_text_items,
                         paint_report.suppressed_text_lines,
                         paint_report.omitted_items
@@ -5372,15 +5384,28 @@ impl DiagramStudioDialog {
                     ));
                 }
 
+                let transformable_selection_count = base_projection.map_or(0, |projection| {
+                    projection
+                        .items
+                        .iter()
+                        .take(base_painted_prefix)
+                        .filter(|item| {
+                            selection_state.objects.contains(&item.object_id)
+                                && item.kind != VisualProjectedKind::Connector
+                        })
+                        .map(|item| item.object_id)
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                });
                 let layout_owner_available = scene_snapshot.is_some()
                     && base_projection.is_some()
-                    && selection_state.objects.len() <= MAX_VISUAL_TRANSACTION_OPERATIONS;
+                    && transformable_selection_count <= MAX_VISUAL_TRANSACTION_OPERATIONS;
                 let layout_actions_allowed = visual_canvas_editing_allowed
                     && document_intent.is_none()
                     && self.visual_gesture.is_none()
                     && layout_owner_available;
-                let align_enabled = layout_actions_allowed && selection_state.objects.len() >= 2;
-                let distribute_enabled = layout_actions_allowed && selection_state.objects.len() >= 3;
+                let align_enabled = layout_actions_allowed && transformable_selection_count >= 2;
+                let distribute_enabled = layout_actions_allowed && transformable_selection_count >= 3;
                 ui.horizontal_wrapped(|ui| {
                     ui.weak("Align");
                     for (name, label, alignment) in [
@@ -5471,7 +5496,7 @@ impl DiagramStudioDialog {
                 ui.add_enabled_ui(visual_edits_allowed && !visual_draft_active, |ui| {
                     ui.horizontal_wrapped(|ui| {
                     ui.label("Object");
-                    egui::ComboBox::from_id_salt("diagram-visual-object-selection")
+                    let _object_combo = egui::ComboBox::from_id_salt("diagram-visual-object-selection")
                         .selected_text(selected_object.map_or_else(
                             || "None".to_owned(),
                             |id| format!("#{}", id.get()),
@@ -5479,14 +5504,26 @@ impl DiagramStudioDialog {
                         .show_ui(ui, |ui| {
                             if let Some(scene) = scene_snapshot.as_ref() {
                                 for object in &scene.objects {
-                                    ui.selectable_value(
+                                    let response = ui.selectable_value(
                                         &mut selected_object,
                                         Some(object.id),
                                         visual_object_label(object),
                                     );
+                                    #[cfg(test)]
+                                    self.test_action_rects.push((
+                                        format!("visual_object_option_{}", object.id.get()),
+                                        response.rect,
+                                        ui.clip_rect(),
+                                    ));
                                 }
                             }
                         });
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "visual_object_selection".into(),
+                        _object_combo.response.rect,
+                        ui.clip_rect(),
+                    ));
                     let before_selection = self.visual_selection;
                     if selected_object != before_selection {
                         working_object = selected_object.and_then(|id| {
@@ -5543,6 +5580,68 @@ impl DiagramStudioDialog {
                                 style: VisualStyle::default(),
                                 kind: VisualObjectKind::Text {
                                     text: "New text".into(),
+                                },
+                            })],
+                            None,
+                        ));
+                    }
+                    let connector_endpoints = scene_snapshot
+                        .as_ref()
+                        .map(|scene| {
+                            scene
+                                .objects
+                                .iter()
+                                .filter(|object| {
+                                    !matches!(
+                                        &object.kind,
+                                        VisualObjectKind::Connector { .. }
+                                    )
+                                })
+                                .take(2)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let add_connector = ui.add_enabled(
+                        structural_edits_allowed && connector_endpoints.len() == 2,
+                        egui::Button::new("Add connector"),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "visual_add_connector".into(),
+                        add_connector.rect,
+                        ui.clip_rect(),
+                    ));
+                    if add_connector.clicked() && document_intent.is_none() {
+                        let source = &connector_endpoints[0];
+                        let target = &connector_endpoints[1];
+                        let source_point = ScenePoint {
+                            x: source.transform.x,
+                            y: source.transform.y,
+                        };
+                        let target_point = ScenePoint {
+                            x: target.transform.x,
+                            y: target.transform.y,
+                        };
+                        staged_operations = Some((
+                            vec![VisualOperation::AddObject(VisualObjectDraft {
+                                layer_id: DEFAULT_LAYER_ID,
+                                transform: VisualTransform::default(),
+                                style: VisualStyle::default(),
+                                kind: VisualObjectKind::Connector {
+                                    connector: VisualConnector {
+                                        from: VisualConnectorEndpoint {
+                                            object_id: source.id,
+                                            anchor: nearest_visual_anchor(source, target_point),
+                                        },
+                                        to: VisualConnectorEndpoint {
+                                            object_id: target.id,
+                                            anchor: nearest_visual_anchor(target, source_point),
+                                        },
+                                        route: VisualConnectorRoute::Elbow,
+                                        direction: VisualConnectorDirection::Forward,
+                                        label: String::new(),
+                                    },
                                 },
                             })],
                             None,
@@ -5708,14 +5807,16 @@ impl DiagramStudioDialog {
                     egui::CollapsingHeader::new("Object properties")
                         .default_open(true)
                         .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Position / size");
-                            ui.add(egui::DragValue::new(&mut object.transform.x).prefix("x ").speed(1.0));
-                            ui.add(egui::DragValue::new(&mut object.transform.y).prefix("y ").speed(1.0));
-                            ui.add(egui::DragValue::new(&mut object.transform.width).prefix("w ").speed(1.0));
-                            ui.add(egui::DragValue::new(&mut object.transform.height).prefix("h ").speed(1.0));
-                            ui.add(egui::DragValue::new(&mut object.transform.rotation_degrees).prefix("° ").speed(1.0));
-                        });
+                        if !matches!(&object.kind, VisualObjectKind::Connector { .. }) {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Position / size");
+                                ui.add(egui::DragValue::new(&mut object.transform.x).prefix("x ").speed(1.0));
+                                ui.add(egui::DragValue::new(&mut object.transform.y).prefix("y ").speed(1.0));
+                                ui.add(egui::DragValue::new(&mut object.transform.width).prefix("w ").speed(1.0));
+                                ui.add(egui::DragValue::new(&mut object.transform.height).prefix("h ").speed(1.0));
+                                ui.add(egui::DragValue::new(&mut object.transform.rotation_degrees).prefix("° ").speed(1.0));
+                            });
+                        }
                         match &mut object.kind {
                             VisualObjectKind::Text { text } => {
                                 ui.horizontal_wrapped(|ui| {
@@ -5773,8 +5874,164 @@ impl DiagramStudioDialog {
                                 });
                                 ui.weak("Primitive styles are defined in the preset.");
                             }
+                            VisualObjectKind::Connector { connector } => {
+                                visual_connector_endpoint_editor(
+                                    ui,
+                                    "From",
+                                    "diagram-visual-connector-from",
+                                    "visual_connector_from",
+                                    &mut connector.from,
+                                    selected_id,
+                                    &scene.objects,
+                                    |option_id, action, rect, clip| {
+                                        #[cfg(test)]
+                                        self.test_action_rects.push((
+                                            option_id.map_or_else(
+                                                || action.to_owned(),
+                                                |id| format!("{action}_object_{}", id.get()),
+                                            ),
+                                            rect,
+                                            clip,
+                                        ));
+                                        #[cfg(not(test))]
+                                        let _ = (option_id, action, rect, clip);
+                                    },
+                                );
+                                visual_connector_endpoint_editor(
+                                    ui,
+                                    "To",
+                                    "diagram-visual-connector-to",
+                                    "visual_connector_to",
+                                    &mut connector.to,
+                                    selected_id,
+                                    &scene.objects,
+                                    |option_id, action, rect, clip| {
+                                        #[cfg(test)]
+                                        self.test_action_rects.push((
+                                            option_id.map_or_else(
+                                                || action.to_owned(),
+                                                |id| format!("{action}_object_{}", id.get()),
+                                            ),
+                                            rect,
+                                            clip,
+                                        ));
+                                        #[cfg(not(test))]
+                                        let _ = (option_id, action, rect, clip);
+                                    },
+                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Route");
+                                    let _route_combo = egui::ComboBox::from_id_salt("diagram-visual-connector-route")
+                                        .selected_text(visual_connector_route_label(connector.route))
+                                        .show_ui(ui, |ui| {
+                                            for route in [
+                                                VisualConnectorRoute::Straight,
+                                                VisualConnectorRoute::Elbow,
+                                                VisualConnectorRoute::Curved,
+                                            ] {
+                                                let _response = ui.selectable_value(
+                                                    &mut connector.route,
+                                                    route,
+                                                    visual_connector_route_label(route),
+                                                );
+                                                #[cfg(test)]
+                                                self.test_action_rects.push((
+                                                    format!(
+                                                        "visual_connector_route_option_{}",
+                                                        visual_connector_route_label(route).to_lowercase()
+                                                    ),
+                                                    _response.rect,
+                                                    ui.clip_rect(),
+                                                ));
+                                            }
+                                        });
+                                    #[cfg(test)]
+                                    self.test_action_rects.push((
+                                        "visual_connector_route".into(),
+                                        _route_combo.response.rect,
+                                        ui.clip_rect(),
+                                    ));
+                                    ui.label("Direction");
+                                    let _direction_combo = egui::ComboBox::from_id_salt("diagram-visual-connector-direction")
+                                        .selected_text(visual_connector_direction_label(connector.direction))
+                                        .show_ui(ui, |ui| {
+                                            for direction in [
+                                                VisualConnectorDirection::None,
+                                                VisualConnectorDirection::Forward,
+                                                VisualConnectorDirection::Reverse,
+                                                VisualConnectorDirection::Both,
+                                            ] {
+                                                let _response = ui.selectable_value(
+                                                    &mut connector.direction,
+                                                    direction,
+                                                    visual_connector_direction_label(direction),
+                                                );
+                                                #[cfg(test)]
+                                                self.test_action_rects.push((
+                                                    format!(
+                                                        "visual_connector_direction_option_{}",
+                                                        visual_connector_direction_label(direction)
+                                                            .to_lowercase()
+                                                            .replace(' ', "_")
+                                                    ),
+                                                    _response.rect,
+                                                    ui.clip_rect(),
+                                                ));
+                                            }
+                                        });
+                                    #[cfg(test)]
+                                    self.test_action_rects.push((
+                                        "visual_connector_direction".into(),
+                                        _direction_combo.response.rect,
+                                        ui.clip_rect(),
+                                    ));
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Line");
+                                    egui::ComboBox::from_id_salt("diagram-visual-connector-line-style")
+                                        .selected_text(visual_line_style_label(object.style.line_style))
+                                        .show_ui(ui, |ui| {
+                                            for style in [
+                                                VisualLineStyle::Solid,
+                                                VisualLineStyle::Dashed,
+                                                VisualLineStyle::Dotted,
+                                            ] {
+                                                ui.selectable_value(
+                                                    &mut object.style.line_style,
+                                                    style,
+                                                    visual_line_style_label(style),
+                                                );
+                                            }
+                                        });
+                                    ui.label("Ink");
+                                    edit_visual_color(ui, &mut object.style.border);
+                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
+                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Label font");
+                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Size ").speed(0.5));
+                                    ui.text_edit_singleline(&mut object.style.font_family);
+                                });
+                                ui.label("Connector label");
+                                let label_edit = ui.add(
+                                    egui::TextEdit::multiline(&mut connector.label)
+                                        .desired_rows(2)
+                                        .char_limit(MAX_VISUAL_CONNECTOR_LABEL_BYTES / 4),
+                                );
+                                #[cfg(test)]
+                                self.test_action_rects.push((
+                                    "visual_connector_label".into(),
+                                    label_edit.rect,
+                                    ui.clip_rect(),
+                                ));
+                            }
                         }
-                        if !matches!(&object.kind, VisualObjectKind::PresetInstance { .. }) {
+                        if !matches!(
+                            &object.kind,
+                            VisualObjectKind::PresetInstance { .. }
+                                | VisualObjectKind::Connector { .. }
+                        ) {
                             let mut has_shadow = object.style.shadow.is_some();
                             if ui.checkbox(&mut has_shadow, "Shadow").changed() {
                                 object.style.shadow = has_shadow.then_some(VisualShadow {
@@ -5991,16 +6248,17 @@ fn paint_visual_projection(
             continue;
         }
         let is_text = item.kind == VisualProjectedKind::Text;
+        let is_connector = item.kind == VisualProjectedKind::Connector;
         let outline = item
             .outline
             .iter()
             .map(|point| mapping.point(*point))
             .collect::<Vec<_>>();
-        if outline.len() < 3 {
+        if outline.len() < 3 && !is_connector {
             continue;
         }
 
-        if let Some(shadow) = item.style.shadow {
+        if !is_connector && let Some(shadow) = item.style.shadow {
             let shadow_color = visual_color(shadow.color, item.style.opacity);
             let offset = egui::vec2(
                 (shadow.offset_x * camera.zoom as f64) as f32,
@@ -6028,7 +6286,43 @@ fn paint_visual_projection(
             }
         }
 
-        if !is_text {
+        if is_connector {
+            let style = if item.dash_simplified || item.dash_paths.is_none() {
+                VisualLineStyle::Solid
+            } else {
+                item.style.line_style
+            };
+            let color = if item.route_fallback {
+                visual_color(
+                    VisualColor::rgba(196, 91, 42, item.style.border.alpha),
+                    item.style.opacity,
+                )
+            } else {
+                visual_color(item.style.border, item.style.opacity)
+            };
+            let stroke = egui::Stroke::new(
+                (item.style.border_width * f64::from(camera.zoom)).max(0.0) as f32,
+                color,
+            );
+            for (index, path) in item.open_paths.iter().enumerate() {
+                let mapped_path = path
+                    .iter()
+                    .map(|point| mapping.point(*point))
+                    .collect::<Vec<_>>();
+                paint_styled_path(
+                    painter,
+                    &mapped_path,
+                    false,
+                    stroke,
+                    style,
+                    item.dash_paths
+                        .as_deref()
+                        .and_then(|paths| paths.get(index))
+                        .map(Vec::as_slice),
+                    &mapping,
+                );
+            }
+        } else if !is_text {
             painter.add(egui::Shape::convex_polygon(
                 outline.clone(),
                 visual_color(item.style.fill, item.style.opacity),
@@ -6112,7 +6406,8 @@ fn visual_item_paint_work(item: &crate::diagram::ProjectedVisualItem) -> usize {
     let path_points = item
         .outline
         .len()
-        .saturating_add(item.details.iter().map(Vec::len).sum::<usize>());
+        .saturating_add(item.details.iter().map(Vec::len).sum::<usize>())
+        .saturating_add(item.open_paths.iter().map(Vec::len).sum::<usize>());
     let text_work = item.text.as_ref().map_or(0, |text| {
         text.lines
             .iter()
@@ -6236,6 +6531,18 @@ fn paint_visual_minimap(painter: &egui::Painter, frame: egui::Rect, minimap: &Ca
             egui::Stroke::new(0.8, egui::Color32::from_gray(155)),
         ));
     }
+    for path in &minimap.open_paths {
+        let points = path
+            .iter()
+            .map(|point| egui::pos2(point.x as f32, point.y as f32))
+            .collect::<Vec<_>>();
+        for segment in points.windows(2) {
+            painter.line_segment(
+                [segment[0], segment[1]],
+                egui::Stroke::new(0.8, egui::Color32::from_gray(120)),
+            );
+        }
+    }
     let viewport = egui::Rect::from_min_max(
         egui::pos2(minimap.viewport.min.x as f32, minimap.viewport.min.y as f32),
         egui::pos2(minimap.viewport.max.x as f32, minimap.viewport.max.y as f32),
@@ -6338,22 +6645,39 @@ fn canvas_gesture_mode(
     painted_item_prefix: usize,
     extend: bool,
 ) -> Option<VisualGestureMode> {
+    let transformable_selection = projection
+        .items
+        .iter()
+        .take(painted_item_prefix)
+        .filter(|item| {
+            selection.objects.contains(&item.object_id)
+                && item.kind != VisualProjectedKind::Connector
+        })
+        .map(|item| item.object_id)
+        .collect::<BTreeSet<_>>();
     match hit {
         CanvasHit::Handle(CanvasHandleKind::ResizeCorner {
             object_id,
             sign_x,
             sign_y,
-        }) if selection.objects.len() == 1 && selection.objects.contains(&object_id) => Some(
-            VisualGestureMode::Transform(VisualTransformMode::ResizeCorner { sign_x, sign_y }),
-        ),
+        }) if transformable_selection.len() == 1
+            && transformable_selection.contains(&object_id) =>
+        {
+            Some(VisualGestureMode::Transform(
+                VisualTransformMode::ResizeCorner { sign_x, sign_y },
+            ))
+        }
         CanvasHit::Handle(CanvasHandleKind::RotateObject { object_id })
-            if selection.objects.len() == 1 && selection.objects.contains(&object_id) =>
+            if transformable_selection.len() == 1
+                && transformable_selection.contains(&object_id) =>
         {
             Some(VisualGestureMode::Transform(
                 VisualTransformMode::RotateObject,
             ))
         }
-        CanvasHit::Handle(CanvasHandleKind::ResizeSelection) if selection.objects.len() > 1 => {
+        CanvasHit::Handle(CanvasHandleKind::ResizeSelection)
+            if transformable_selection.len() > 1 =>
+        {
             let pivot = visual_canvas_selection_bounds(
                 projection,
                 &selection.objects,
@@ -6364,7 +6688,9 @@ fn canvas_gesture_mode(
                 VisualTransformMode::ResizeSelection { pivot },
             ))
         }
-        CanvasHit::Handle(CanvasHandleKind::RotateSelection) if selection.objects.len() > 1 => {
+        CanvasHit::Handle(CanvasHandleKind::RotateSelection)
+            if transformable_selection.len() > 1 =>
+        {
             let pivot = visual_canvas_selection_bounds(
                 projection,
                 &selection.objects,
@@ -6375,9 +6701,15 @@ fn canvas_gesture_mode(
                 VisualTransformMode::RotateSelection { pivot },
             ))
         }
-        CanvasHit::Object(id) if selection.objects.contains(&id) => {
+        CanvasHit::Object(id)
+            if selection.objects.contains(&id)
+                && !projection.items.iter().any(|item| {
+                    item.object_id == id && item.kind == VisualProjectedKind::Connector
+                }) =>
+        {
             Some(VisualGestureMode::Transform(VisualTransformMode::Translate))
         }
+        CanvasHit::Object(_) => None,
         CanvasHit::Empty => Some(VisualGestureMode::Marquee { extend }),
         _ => None,
     }
@@ -6540,9 +6872,10 @@ fn paint_visual_text(
     if text.lines.is_empty() {
         return 0;
     }
+    let text_transform = item.text_transform.unwrap_or(item.transform);
     let center = ScenePoint {
-        x: item.transform.x,
-        y: item.transform.y,
+        x: text_transform.x,
+        y: text_transform.y,
     };
     let line_count = text.lines.len() as f64;
     let scale = f64::from(mapping.camera.zoom);
@@ -6563,15 +6896,18 @@ fn paint_visual_text(
     let angle = item.text_rotation_degrees.to_radians() as f32;
     let (sin, cos) = angle.sin_cos();
     let screen_center = mapping.point(center);
-    let shadow = item.style.shadow.map(|shadow| {
-        (
-            egui::vec2(
-                (shadow.offset_x * scale) as f32,
-                (shadow.offset_y * scale) as f32,
-            ),
-            visual_color(shadow.color, item.style.opacity),
-        )
-    });
+    let shadow = (item.kind != VisualProjectedKind::Connector)
+        .then_some(item.style.shadow)
+        .flatten()
+        .map(|shadow| {
+            (
+                egui::vec2(
+                    (shadow.offset_x * scale) as f32,
+                    (shadow.offset_y * scale) as f32,
+                ),
+                visual_color(shadow.color, item.style.opacity),
+            )
+        });
 
     let mut suppressed = 0;
     for (index, line) in text.lines.iter().enumerate() {
@@ -6698,8 +7034,120 @@ fn visual_object_label(object: &VisualObject) -> String {
         VisualObjectKind::Text { .. } => "Text",
         VisualObjectKind::PresetInstance { .. } => "Preset instance",
         VisualObjectKind::ImageReference { .. } => "Image reference",
+        VisualObjectKind::Connector { .. } => "Connector",
     };
     format!("{label} #{}", object.id.get())
+}
+
+fn visual_connector_endpoint_editor(
+    ui: &mut egui::Ui,
+    label: &str,
+    id_salt: &str,
+    action_name: &str,
+    endpoint: &mut VisualConnectorEndpoint,
+    connector_id: VisualObjectId,
+    objects: &[VisualObject],
+    mut record_action: impl FnMut(Option<VisualObjectId>, &str, egui::Rect, egui::Rect),
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(label);
+        let endpoint_object = objects
+            .iter()
+            .find(|object| object.id == endpoint.object_id);
+        let object_combo = egui::ComboBox::from_id_salt((id_salt, "object"))
+            .selected_text(endpoint_object.map_or_else(
+                || format!("Missing #{}", endpoint.object_id.get()),
+                visual_object_label,
+            ))
+            .show_ui(ui, |ui| {
+                for object in objects.iter().filter(|object| {
+                    object.id != connector_id
+                        && !matches!(&object.kind, VisualObjectKind::Connector { .. })
+                }) {
+                    let response = ui.selectable_value(
+                        &mut endpoint.object_id,
+                        object.id,
+                        visual_object_label(object),
+                    );
+                    record_action(Some(object.id), action_name, response.rect, ui.clip_rect());
+                }
+            });
+        record_action(
+            None,
+            action_name,
+            object_combo.response.rect,
+            ui.clip_rect(),
+        );
+        egui::ComboBox::from_id_salt((id_salt, "anchor"))
+            .selected_text(visual_anchor_label(endpoint.anchor))
+            .show_ui(ui, |ui| {
+                for anchor in [
+                    VisualAnchor::North,
+                    VisualAnchor::NorthEast,
+                    VisualAnchor::East,
+                    VisualAnchor::SouthEast,
+                    VisualAnchor::South,
+                    VisualAnchor::SouthWest,
+                    VisualAnchor::West,
+                    VisualAnchor::NorthWest,
+                ] {
+                    ui.selectable_value(&mut endpoint.anchor, anchor, visual_anchor_label(anchor));
+                }
+            });
+    });
+}
+
+const fn visual_anchor_label(anchor: VisualAnchor) -> &'static str {
+    match anchor {
+        VisualAnchor::North => "North",
+        VisualAnchor::NorthEast => "North east",
+        VisualAnchor::East => "East",
+        VisualAnchor::SouthEast => "South east",
+        VisualAnchor::South => "South",
+        VisualAnchor::SouthWest => "South west",
+        VisualAnchor::West => "West",
+        VisualAnchor::NorthWest => "North west",
+    }
+}
+
+const fn visual_connector_route_label(route: VisualConnectorRoute) -> &'static str {
+    match route {
+        VisualConnectorRoute::Straight => "Straight",
+        VisualConnectorRoute::Elbow => "Elbow",
+        VisualConnectorRoute::Curved => "Curved",
+    }
+}
+
+const fn visual_connector_direction_label(direction: VisualConnectorDirection) -> &'static str {
+    match direction {
+        VisualConnectorDirection::None => "No arrows",
+        VisualConnectorDirection::Forward => "Forward",
+        VisualConnectorDirection::Reverse => "Reverse",
+        VisualConnectorDirection::Both => "Both ends",
+    }
+}
+
+fn nearest_visual_anchor(object: &VisualObject, target: ScenePoint) -> VisualAnchor {
+    let dx = target.x - object.transform.x;
+    let dy = target.y - object.transform.y;
+    let angle = -object.transform.rotation_degrees.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let local_x = dx * cos - dy * sin;
+    let local_y = dx * sin + dy * cos;
+    let octant = ((local_y.atan2(local_x) + std::f64::consts::FRAC_PI_8)
+        .rem_euclid(std::f64::consts::TAU)
+        / std::f64::consts::FRAC_PI_4)
+        .floor() as u8;
+    match octant {
+        0 => VisualAnchor::East,
+        1 => VisualAnchor::SouthEast,
+        2 => VisualAnchor::South,
+        3 => VisualAnchor::SouthWest,
+        4 => VisualAnchor::West,
+        5 => VisualAnchor::NorthWest,
+        6 => VisualAnchor::North,
+        _ => VisualAnchor::NorthEast,
+    }
 }
 
 fn visual_line_style_label(style: VisualLineStyle) -> &'static str {
@@ -13428,6 +13876,321 @@ mod tests {
         assert!(dialog.documents.can_redo());
         frame(&mut dialog, &ctx);
         assert_eq!(dialog.test_visual_projection_build_count, 3);
+    }
+
+    #[test]
+    fn diagram_studio_visual_connector_controls_create_edit_select_and_delete() {
+        let mut dialog = initialized_visual_dialog();
+        let endpoints = dialog
+            .documents
+            .apply_visual_transaction(&[
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: -180.0,
+                        y: 260.0,
+                        width: 100.0,
+                        height: 60.0,
+                        rotation_degrees: 0.0,
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Rectangle,
+                    },
+                }),
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 180.0,
+                        y: 260.0,
+                        width: 100.0,
+                        height: 60.0,
+                        rotation_degrees: 0.0,
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Diamond,
+                    },
+                }),
+            ])
+            .unwrap()
+            .created_objects;
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        let before_create = dialog.documents.visual_revision().unwrap();
+        click_action(&mut dialog, &ctx, "visual_add_connector");
+        assert_eq!(dialog.documents.visual_revision(), Some(before_create + 1));
+        let connector_id = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find_map(|object| {
+                matches!(&object.kind, VisualObjectKind::Connector { .. }).then_some(object.id)
+            })
+            .expect("Add connector creates a persisted connector object");
+
+        click_action(&mut dialog, &ctx, "visual_object_selection");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!("visual_object_option_{}", connector_id.get()),
+        );
+        assert_eq!(dialog.visual_selection, Some(connector_id));
+        frame(&mut dialog, &ctx);
+        assert!(dialog.test_action_rect("visual_connector_from").is_some());
+        assert!(dialog.test_action_rect("visual_connector_route").is_some());
+        assert!(
+            dialog
+                .test_action_rect("visual_connector_direction")
+                .is_some()
+        );
+        assert!(dialog.test_action_rect("visual_connector_label").is_some());
+
+        click_action(&mut dialog, &ctx, "visual_connector_from");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!("visual_connector_from_object_{}", endpoints[1].get()),
+        );
+        click_action(&mut dialog, &ctx, "visual_connector_route");
+        click_action(&mut dialog, &ctx, "visual_connector_route_option_curved");
+        click_action(&mut dialog, &ctx, "visual_connector_direction");
+        click_action(
+            &mut dialog,
+            &ctx,
+            "visual_connector_direction_option_both_ends",
+        );
+        click_action(&mut dialog, &ctx, "visual_connector_label");
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::Text("review path".into())],
+        );
+        let staged_edit = dialog
+            .visual_property_draft
+            .as_ref()
+            .expect("connector edits remain a draft until Apply")
+            .object
+            .clone();
+        let revision_before_discard = dialog.documents.visual_revision().unwrap();
+        click_action_with_child_discard(&mut dialog, &ctx, "visual_apply_properties");
+        assert_eq!(
+            dialog.documents.visual_revision(),
+            Some(revision_before_discard)
+        );
+        assert_eq!(
+            dialog
+                .visual_property_draft
+                .as_ref()
+                .map(|draft| draft.object.clone()),
+            Some(staged_edit.clone())
+        );
+        assert!(matches!(
+            &dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == connector_id)
+                .unwrap()
+                .kind,
+            VisualObjectKind::Connector { connector }
+                if connector.route == VisualConnectorRoute::Elbow
+                    && connector.direction == VisualConnectorDirection::Forward
+                    && connector.label.is_empty()
+        ));
+
+        click_action(&mut dialog, &ctx, "visual_apply_properties");
+        assert_eq!(
+            dialog.documents.visual_revision(),
+            Some(revision_before_discard + 1)
+        );
+        let connector = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == connector_id)
+            .unwrap();
+        assert!(matches!(
+            &connector.kind,
+            VisualObjectKind::Connector { connector }
+                if connector.from.object_id == endpoints[1]
+                    && connector.route == VisualConnectorRoute::Curved
+                    && connector.direction == VisualConnectorDirection::Both
+                    && connector.label.contains("review path")
+        ));
+        assert!(dialog.documents.can_undo());
+
+        frame(&mut dialog, &ctx);
+        let projection_builds = dialog.test_visual_projection_build_count;
+        open_viewer(&mut dialog, &ctx);
+        assert_eq!(dialog.test_visual_projection_build_count, projection_builds);
+        assert_eq!(dialog.test_viewer_visual_projection_items, 4);
+        let before_remove = dialog.documents.visual_revision().unwrap();
+        click_action(&mut dialog, &ctx, "visual_remove_object");
+        assert_eq!(dialog.documents.visual_revision(), Some(before_remove + 1));
+        assert!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .all(|object| object.id != connector_id)
+        );
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_viewer_visual_projection_items, 3);
+    }
+
+    #[test]
+    fn diagram_studio_visual_connector_endpoint_drag_previews_and_commits() {
+        let mut dialog = initialized_visual_dialog();
+        let endpoints = dialog
+            .documents
+            .apply_visual_transaction(&[
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: -180.0,
+                        y: 300.0,
+                        width: 100.0,
+                        height: 60.0,
+                        ..VisualTransform::default()
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Rectangle,
+                    },
+                }),
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 180.0,
+                        y: 300.0,
+                        width: 100.0,
+                        height: 60.0,
+                        ..VisualTransform::default()
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Ellipse,
+                    },
+                }),
+            ])
+            .unwrap()
+            .created_objects;
+        let connector_id = dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: endpoints[0],
+                            anchor: VisualAnchor::East,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: endpoints[1],
+                            anchor: VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Straight,
+                        direction: VisualConnectorDirection::None,
+                        label: String::new(),
+                    },
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let original_scene = dialog.documents.visual_scene().unwrap().clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        let committed_route = project_visual_scene(&original_scene)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.object_id == connector_id)
+            .unwrap()
+            .open_paths[0]
+            .clone();
+        let start = visual_canvas_world_point(
+            &dialog,
+            ScenePoint {
+                x: -180.0,
+                y: 300.0,
+            },
+        );
+        let end = visual_canvas_world_point(
+            &dialog,
+            ScenePoint {
+                x: -220.0,
+                y: 260.0,
+            },
+        );
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let active = dialog
+            .visual_gesture
+            .as_ref()
+            .expect("dragging an endpoint object retains the gesture preview");
+        let preview_route = active
+            .preview_projection
+            .as_ref()
+            .and_then(|projection| {
+                projection
+                    .items
+                    .iter()
+                    .find(|item| item.object_id == connector_id)
+            })
+            .expect("preview projection reroutes the connected edge")
+            .open_paths[0]
+            .clone();
+        assert_ne!(preview_route, committed_route);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &original_scene);
+
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(end), button(end, false)],
+        );
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        assert!(dialog.visual_gesture.is_none());
+        let committed_scene = dialog.documents.visual_scene().unwrap();
+        let moved_source = committed_scene
+            .objects
+            .iter()
+            .find(|object| object.id == endpoints[0])
+            .unwrap();
+        assert_ne!(moved_source.transform, original_scene.objects[1].transform);
+        let committed_after_release = project_visual_scene(committed_scene)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.object_id == connector_id)
+            .unwrap()
+            .open_paths[0]
+            .clone();
+        assert_eq!(committed_after_release, preview_route);
     }
 
     #[test]

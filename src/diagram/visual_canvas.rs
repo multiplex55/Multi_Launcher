@@ -6,7 +6,7 @@ use super::visual::{
     MIN_VISUAL_DIMENSION, VisualObject, VisualObjectId, VisualOperation, VisualScene,
     VisualTransform,
 };
-use super::visual_scene::VisualSceneProjection;
+use super::visual_scene::{VisualProjectedKind, VisualSceneProjection};
 use std::collections::{BTreeMap, BTreeSet};
 
 const HANDLE_WORLD_GAP_SCREEN_POINTS: f64 = 22.0;
@@ -133,6 +133,7 @@ pub enum VisualDistribution {
 pub struct CanvasMinimap {
     pub frame: SceneRect,
     pub outlines: Vec<Vec<ScenePoint>>,
+    pub open_paths: Vec<Vec<ScenePoint>>,
     pub viewport: SceneRect,
     world_center: ScenePoint,
     screen_center: ScenePoint,
@@ -163,11 +164,21 @@ pub fn snap_translation_delta(
     zoom: f64,
 ) -> Option<SnappedTranslation> {
     if selected.is_empty()
-        || selected.len() > MAX_VISUAL_TRANSACTION_OPERATIONS
         || !raw_delta.x.is_finite()
         || !raw_delta.y.is_finite()
         || !zoom.is_finite()
         || zoom <= 0.0
+    {
+        return None;
+    }
+    let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
+    let transformable_selection = selected
+        .iter()
+        .filter(|id| bounds_by_object.contains_key(id))
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if transformable_selection.is_empty()
+        || transformable_selection.len() > MAX_VISUAL_TRANSACTION_OPERATIONS
     {
         return None;
     }
@@ -177,9 +188,8 @@ pub fn snap_translation_delta(
             guides: Vec::new(),
         });
     }
-    let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
     let all_object_bounds = visible_outline_bounds(projection, projection.items.len());
-    let selection_bounds = selected_outline_bounds(selected, &all_object_bounds)?;
+    let selection_bounds = selected_outline_bounds(&transformable_selection, &all_object_bounds)?;
     let tolerance = VISUAL_GUIDE_TOLERANCE_SCREEN_POINTS / zoom;
     let x_guide = nearest_guide(
         CanvasGuideAxis::Vertical,
@@ -187,7 +197,7 @@ pub fn snap_translation_delta(
         selection_bounds.max.x,
         raw_delta.x,
         tolerance,
-        selected,
+        &transformable_selection,
         &bounds_by_object,
     );
     let y_guide = nearest_guide(
@@ -196,7 +206,7 @@ pub fn snap_translation_delta(
         selection_bounds.max.y,
         raw_delta.y,
         tolerance,
-        selected,
+        &transformable_selection,
         &bounds_by_object,
     );
     let x_delta = x_guide.map_or_else(
@@ -305,14 +315,19 @@ pub fn align_selection(
     painted_item_prefix: usize,
     alignment: VisualAlign,
 ) -> Option<Vec<VisualOperation>> {
-    if selection.len() < 2 || selection.len() > MAX_VISUAL_TRANSACTION_OPERATIONS {
+    let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
+    let selected_ids = selection
+        .iter()
+        .filter(|id| bounds_by_object.contains_key(id))
+        .copied()
+        .collect::<Vec<_>>();
+    if selected_ids.len() < 2 || selected_ids.len() > MAX_VISUAL_TRANSACTION_OPERATIONS {
         return None;
     }
-    let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
     let selected_bounds = selected_outline_bounds(selection, &bounds_by_object)?;
-    let mut operations = Vec::with_capacity(selection.len());
-    for id in selection {
-        let bounds = *bounds_by_object.get(id)?;
+    let mut operations = Vec::with_capacity(selected_ids.len());
+    for id in selected_ids {
+        let bounds = *bounds_by_object.get(&id)?;
         let (dx, dy) = match alignment {
             VisualAlign::Left => (selected_bounds.min.x - bounds.min.x, 0.0),
             VisualAlign::HorizontalCenter => (selected_bounds.center().x - bounds.center().x, 0.0),
@@ -324,11 +339,7 @@ pub fn align_selection(
         if dx == 0.0 && dy == 0.0 {
             continue;
         }
-        let mut object = scene
-            .objects
-            .iter()
-            .find(|object| object.id == *id)?
-            .clone();
+        let mut object = scene.objects.iter().find(|object| object.id == id)?.clone();
         object.transform.x += dx;
         object.transform.y += dy;
         if !valid_transform(object.transform) {
@@ -349,14 +360,14 @@ pub fn distribute_selection(
     painted_item_prefix: usize,
     distribution: VisualDistribution,
 ) -> Option<Vec<VisualOperation>> {
-    if selection.len() < 3 || selection.len() > MAX_VISUAL_TRANSACTION_OPERATIONS {
-        return None;
-    }
     let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
     let mut objects = selection
         .iter()
-        .map(|id| Some((*id, *bounds_by_object.get(id)?)))
-        .collect::<Option<Vec<_>>>()?;
+        .filter_map(|id| bounds_by_object.get(id).map(|bounds| (*id, *bounds)))
+        .collect::<Vec<_>>();
+    if objects.len() < 3 || objects.len() > MAX_VISUAL_TRANSACTION_OPERATIONS {
+        return None;
+    }
     let horizontal = distribution == VisualDistribution::Horizontal;
     let leading_edge = |bounds: &SceneRect| {
         if horizontal {
@@ -478,7 +489,28 @@ pub fn minimap_layout(
     };
     let mut remaining_points = MINIMAP_MAX_OUTLINE_POINTS;
     let mut outlines = Vec::new();
+    let mut open_paths = Vec::new();
     for item in projection.items.iter().take(MINIMAP_MAX_ITEMS) {
+        if item.kind == VisualProjectedKind::Connector {
+            for path in &item.open_paths {
+                if path.len() < 2 || path.len() > remaining_points {
+                    break;
+                }
+                let mapped = path.iter().copied().map(map_point).collect::<Vec<_>>();
+                if mapped
+                    .iter()
+                    .any(|point| !point.x.is_finite() || !point.y.is_finite())
+                {
+                    return None;
+                }
+                remaining_points -= mapped.len();
+                open_paths.push(mapped);
+            }
+            if remaining_points == 0 {
+                break;
+            }
+            continue;
+        }
         if item.outline.len() < 3 || item.outline.len() > remaining_points {
             break;
         }
@@ -507,6 +539,7 @@ pub fn minimap_layout(
     valid_rect(viewport).then_some(CanvasMinimap {
         frame,
         outlines,
+        open_paths,
         viewport,
         world_center,
         screen_center,
@@ -520,8 +553,7 @@ fn selected_outline_bounds(
 ) -> Option<SceneRect> {
     selection
         .iter()
-        .map(|id| bounds_by_object.get(id).copied())
-        .collect::<Option<Vec<_>>>()?
+        .filter_map(|id| bounds_by_object.get(id).copied())
         .into_iter()
         .reduce(union_rect)
 }
@@ -576,8 +608,18 @@ pub fn selection_handles(
     painted_item_prefix: usize,
     mapping: CanvasMapping,
 ) -> Vec<CanvasHandle> {
-    if selection.is_empty()
-        || selection.iter().any(|id| {
+    let shape_selection = selection
+        .iter()
+        .filter(|id| {
+            projection
+                .items
+                .iter()
+                .any(|item| item.object_id == **id && item.kind != VisualProjectedKind::Connector)
+        })
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if shape_selection.is_empty()
+        || shape_selection.iter().any(|id| {
             let mut projected_items = projection
                 .items
                 .iter()
@@ -591,8 +633,8 @@ pub fn selection_handles(
         return Vec::new();
     }
     let gap = HANDLE_WORLD_GAP_SCREEN_POINTS / mapping.zoom.max(f64::MIN_POSITIVE);
-    if selection.len() == 1 {
-        let object_id = *selection.first().expect("selection has one item");
+    if shape_selection.len() == 1 {
+        let object_id = *shape_selection.first().expect("selection has one item");
         let Some(object) = scene.objects.iter().find(|object| object.id == object_id) else {
             return Vec::new();
         };
@@ -626,7 +668,7 @@ pub fn selection_handles(
         return handles;
     }
 
-    let Some(bounds) = selection_bounds(projection, selection, painted_item_prefix) else {
+    let Some(bounds) = selection_bounds(projection, &shape_selection, painted_item_prefix) else {
         return Vec::new();
     };
     group_handles(bounds, gap)
@@ -673,7 +715,44 @@ pub fn hit_test(
         .take(painted_item_prefix)
         .rev()
         .find(|item| {
-            item.bounds.contains_point(world_point) && point_in_polygon(world_point, &item.outline)
+            if item.kind == VisualProjectedKind::Connector {
+                let stroke_radius = handle_radius_screen_points
+                    + (item.style.border_width * mapping.zoom / 2.0).max(0.0);
+                let world_radius = stroke_radius / mapping.zoom.max(f64::EPSILON);
+                let broad_phase = SceneRect {
+                    min: ScenePoint {
+                        x: world_point.x - world_radius,
+                        y: world_point.y - world_radius,
+                    },
+                    max: ScenePoint {
+                        x: world_point.x + world_radius,
+                        y: world_point.y + world_radius,
+                    },
+                };
+                if !rects_intersect(item.bounds, broad_phase) {
+                    return false;
+                }
+                if item
+                    .text_bounds
+                    .is_some_and(|bounds| bounds.contains_point(world_point))
+                {
+                    return true;
+                }
+                let threshold = stroke_radius * stroke_radius;
+                return item.open_paths.iter().any(|path| {
+                    path.windows(2).any(|segment| {
+                        squared_distance_to_segment(
+                            mapping.world_to_screen(segment[0]),
+                            mapping.world_to_screen(segment[1]),
+                            screen_point,
+                        ) <= threshold
+                    })
+                });
+            }
+            if !item.bounds.contains_point(world_point) {
+                return false;
+            }
+            point_in_polygon(world_point, &item.outline)
         })
         .map_or(CanvasHit::Empty, |item| CanvasHit::Object(item.object_id))
 }
@@ -686,7 +765,17 @@ pub fn marquee_selection(
     let marquee = normalized_rect(marquee);
     let mut selected = Vec::new();
     for item in projection.items.iter().take(painted_item_prefix) {
-        if rects_intersect(item.bounds, marquee) && !selected.contains(&item.object_id) {
+        let intersects = if item.kind == VisualProjectedKind::Connector {
+            item.text_bounds
+                .is_some_and(|bounds| rects_intersect(bounds, marquee))
+                || item.open_paths.iter().any(|path| {
+                    path.windows(2)
+                        .any(|segment| segment_intersects_rect(segment[0], segment[1], marquee))
+                })
+        } else {
+            rects_intersect(item.bounds, marquee)
+        };
+        if intersects && !selected.contains(&item.object_id) {
             selected.push(item.object_id);
         }
     }
@@ -702,7 +791,9 @@ pub fn selection_bounds(
         .items
         .iter()
         .take(painted_item_prefix)
-        .filter(|item| selection.contains(&item.object_id))
+        .filter(|item| {
+            selection.contains(&item.object_id) && item.kind != VisualProjectedKind::Connector
+        })
         .map(|item| item.bounds)
         .reduce(union_rect)
 }
@@ -953,6 +1044,54 @@ fn squared_distance(a: ScenePoint, b: ScenePoint) -> f64 {
     dx * dx + dy * dy
 }
 
+fn squared_distance_to_segment(start: ScenePoint, end: ScenePoint, point: ScenePoint) -> f64 {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let length_squared = dx * dx + dy * dy;
+    if length_squared <= f64::EPSILON {
+        return squared_distance(start, point);
+    }
+    let amount =
+        (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0);
+    squared_distance(
+        point,
+        ScenePoint {
+            x: start.x + amount * dx,
+            y: start.y + amount * dy,
+        },
+    )
+}
+
+fn segment_intersects_rect(start: ScenePoint, end: ScenePoint, rect: SceneRect) -> bool {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let mut minimum = 0.0_f64;
+    let mut maximum = 1.0_f64;
+    for (p, q) in [
+        (-dx, start.x - rect.min.x),
+        (dx, rect.max.x - start.x),
+        (-dy, start.y - rect.min.y),
+        (dy, rect.max.y - start.y),
+    ] {
+        if p.abs() <= f64::EPSILON {
+            if q < 0.0 {
+                return false;
+            }
+            continue;
+        }
+        let amount = q / p;
+        if p < 0.0 {
+            minimum = minimum.max(amount);
+        } else {
+            maximum = maximum.min(amount);
+        }
+        if minimum > maximum {
+            return false;
+        }
+    }
+    true
+}
+
 fn distance(a: ScenePoint, b: ScenePoint) -> f64 {
     squared_distance(a, b).sqrt()
 }
@@ -966,8 +1105,10 @@ mod tests {
         selection_bounds, selection_handles, snap_translation_delta, visible_outline_bounds,
     };
     use crate::diagram::{
-        DEFAULT_LAYER_ID, MAX_VISUAL_COORDINATE_ABS, ScenePoint, SceneRect, VisualDiagramDocument,
-        VisualObject, VisualObjectDraft, VisualObjectKind, VisualOperation, VisualPresetDraft,
+        DEFAULT_LAYER_ID, MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_TRANSACTION_OPERATIONS, ScenePoint,
+        SceneRect, VisualAnchor, VisualConnector, VisualConnectorDirection,
+        VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument, VisualObject,
+        VisualObjectDraft, VisualObjectKind, VisualOperation, VisualPresetDraft,
         VisualPrimitiveComponent, VisualPrimitiveShape, VisualSceneProjection, VisualShadow,
         VisualStyle, VisualTransform, project_visual_scene,
     };
@@ -1181,6 +1322,175 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn visual_connector_hit_test_includes_screen_tolerance_outside_exact_bounds() {
+        let mut document = VisualDiagramDocument::new();
+        let endpoints = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: -50.0,
+                        width: 20.0,
+                        height: 20.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Rectangle,
+                )),
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: 50.0,
+                        width: 20.0,
+                        height: 20.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Rectangle,
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        let connector_id = document
+            .apply_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: endpoints[0],
+                            anchor: VisualAnchor::East,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: endpoints[1],
+                            anchor: VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Straight,
+                        direction: VisualConnectorDirection::None,
+                        label: String::new(),
+                    },
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        let mut title = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+            .unwrap()
+            .clone();
+        title.transform.x = 500.0;
+        title.transform.y = 500.0;
+        document
+            .apply_transaction(&[VisualOperation::ReplaceObject(title)])
+            .unwrap();
+        let projection = project_visual_scene(document.scene()).unwrap();
+        let connector = projection
+            .items
+            .iter()
+            .find(|item| item.object_id == connector_id)
+            .unwrap();
+        let screen_near_line = map().world_to_screen(ScenePoint { x: 0.0, y: 2.0 });
+        assert!(
+            !connector
+                .bounds
+                .contains_point(ScenePoint { x: 0.0, y: 2.0 })
+        );
+        assert_eq!(
+            hit_test(
+                &projection,
+                projection.items.len(),
+                &[],
+                map(),
+                screen_near_line,
+                8.0,
+            ),
+            CanvasHit::Object(connector_id)
+        );
+    }
+
+    #[test]
+    fn visual_connector_selection_does_not_count_against_transform_operation_limit() {
+        let mut document = VisualDiagramDocument::new();
+        let endpoint_ids = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: -100.0,
+                        width: 80.0,
+                        height: 80.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Rectangle,
+                )),
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: 100.0,
+                        y: 100.0,
+                        width: 80.0,
+                        height: 80.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Ellipse,
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        let mut connectors = Vec::new();
+        for _ in 0..=MAX_VISUAL_TRANSACTION_OPERATIONS {
+            connectors.push(VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: endpoint_ids[0],
+                            anchor: VisualAnchor::East,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: endpoint_ids[1],
+                            anchor: VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Straight,
+                        direction: VisualConnectorDirection::None,
+                        label: String::new(),
+                    },
+                },
+            }));
+        }
+        let mut connector_ids = Vec::new();
+        for batch in connectors.chunks(MAX_VISUAL_TRANSACTION_OPERATIONS) {
+            connector_ids.extend(document.apply_transaction(batch).unwrap().created_objects);
+        }
+        let mut title = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+            .unwrap()
+            .clone();
+        title.transform.x = 900.0;
+        title.transform.y = 900.0;
+        document
+            .apply_transaction(&[VisualOperation::ReplaceObject(title)])
+            .unwrap();
+
+        let projection = project_visual_scene(document.scene()).unwrap();
+        let selection = endpoint_ids
+            .into_iter()
+            .chain(connector_ids)
+            .collect::<BTreeSet<_>>();
+        let operations = align_selection(
+            document.scene(),
+            &projection,
+            &selection,
+            projection.items.len(),
+            VisualAlign::Top,
+        )
+        .expect("only the transformable shapes count against the operation bound");
+        assert_eq!(operations.len(), 1);
     }
 
     #[test]
@@ -1770,6 +2080,7 @@ mod tests {
             simplified_dash_paths: 0,
             truncated_text_items: 0,
             text_lines: 0,
+            connector_route_fallbacks: 0,
         };
         let visible = SceneRect {
             min: ScenePoint { x: -50.0, y: -30.0 },

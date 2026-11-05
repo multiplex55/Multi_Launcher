@@ -11,6 +11,7 @@ pub const MAX_VISUAL_PRESETS: usize = 128;
 pub const MAX_VISUAL_PRESET_COMPONENTS: usize = 64;
 pub const MAX_VISUAL_NAME_BYTES: usize = 128;
 pub const MAX_VISUAL_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_VISUAL_CONNECTOR_LABEL_BYTES: usize = 4 * 1024;
 pub const MAX_VISUAL_DOCUMENT_TITLE_BYTES: usize = 4 * 1024;
 pub const MAX_VISUAL_HISTORY_ENTRIES: usize = 64;
 pub const MAX_VISUAL_HISTORY_BYTES: usize = 4 * 1024 * 1024;
@@ -197,6 +198,58 @@ pub enum VisualObjectKind {
     ImageReference {
         asset_id: VisualAssetId,
     },
+    Connector {
+        connector: VisualConnector,
+    },
+}
+
+/// Compass-side anchor in the referenced object's local orientation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualAnchor {
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+    NorthWest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualConnectorEndpoint {
+    pub object_id: VisualObjectId,
+    pub anchor: VisualAnchor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualConnectorRoute {
+    Straight,
+    Elbow,
+    Curved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualConnectorDirection {
+    None,
+    Forward,
+    Reverse,
+    Both,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualConnector {
+    pub from: VisualConnectorEndpoint,
+    pub to: VisualConnectorEndpoint,
+    pub route: VisualConnectorRoute,
+    pub direction: VisualConnectorDirection,
+    #[serde(deserialize_with = "deserialize_connector_label")]
+    pub label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -417,6 +470,9 @@ pub enum VisualDocumentError {
     TextTooLarge { max_bytes: usize },
     NameInvalid,
     AssetIdInvalid,
+    UnknownConnectorEndpoint(VisualObjectId),
+    ConnectorEndpointIsConnector(VisualObjectId),
+    InvalidConnectorGeometry,
     InvalidId,
     InvalidGeometry,
     InvalidStyle,
@@ -473,6 +529,19 @@ impl fmt::Display for VisualDocumentError {
             Self::AssetIdInvalid => {
                 formatter.write_str("image reference is not a bounded local asset key")
             }
+            Self::UnknownConnectorEndpoint(id) => write!(
+                formatter,
+                "connector endpoint object {} was not found",
+                id.get()
+            ),
+            Self::ConnectorEndpointIsConnector(id) => write!(
+                formatter,
+                "connector endpoint object {} is another connector",
+                id.get()
+            ),
+            Self::InvalidConnectorGeometry => formatter.write_str(
+                "connector transform is not editable; use its attached endpoint objects",
+            ),
             Self::InvalidId => formatter.write_str("visual document contains an invalid stable ID"),
             Self::InvalidGeometry => formatter.write_str(
                 "visual object geometry is nonfinite, degenerate, or outside its bounds",
@@ -877,6 +946,13 @@ fn apply_visual_operation(
                 .position(|object| object.id == *id)
                 .ok_or(VisualDocumentError::UnknownObject(*id))?;
             scene.objects.remove(index);
+            scene.objects.retain(|object| {
+                !matches!(
+                    &object.kind,
+                    VisualObjectKind::Connector { connector }
+                        if connector.from.object_id == *id || connector.to.object_id == *id
+                )
+            });
         }
         VisualOperation::ReplaceObject(replacement) => {
             let index = scene
@@ -1239,6 +1315,7 @@ fn validate_scene(
     }
 
     let mut object_ids = std::collections::HashSet::with_capacity(scene.objects.len());
+    let mut connector_ids = std::collections::HashSet::new();
     for object in &scene.objects {
         if object.id.get() == 0 {
             return Err(VisualDocumentError::InvalidId);
@@ -1254,6 +1331,27 @@ fn validate_scene(
             && !preset_ids.contains(preset_id)
         {
             return Err(VisualDocumentError::UnknownPreset(*preset_id));
+        }
+        if matches!(&object.kind, VisualObjectKind::Connector { .. }) {
+            connector_ids.insert(object.id);
+        }
+    }
+
+    for object in &scene.objects {
+        let VisualObjectKind::Connector { connector } = &object.kind else {
+            continue;
+        };
+        for endpoint in [connector.from, connector.to] {
+            if !object_ids.contains(&endpoint.object_id) {
+                return Err(VisualDocumentError::UnknownConnectorEndpoint(
+                    endpoint.object_id,
+                ));
+            }
+            if connector_ids.contains(&endpoint.object_id) {
+                return Err(VisualDocumentError::ConnectorEndpointIsConnector(
+                    endpoint.object_id,
+                ));
+            }
         }
     }
 
@@ -1338,6 +1436,16 @@ fn validate_object(object: &VisualObject) -> Result<(), VisualDocumentError> {
         }
         VisualObjectKind::PresetInstance { .. } => {}
         VisualObjectKind::ImageReference { asset_id } => validate_asset_id(asset_id.as_str())?,
+        VisualObjectKind::Connector { connector } => {
+            if object.transform != VisualTransform::default() {
+                return Err(VisualDocumentError::InvalidConnectorGeometry);
+            }
+            if connector.label.len() > MAX_VISUAL_CONNECTOR_LABEL_BYTES {
+                return Err(VisualDocumentError::TextTooLarge {
+                    max_bytes: MAX_VISUAL_CONNECTOR_LABEL_BYTES,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -1470,6 +1578,13 @@ where
     deserialize_bounded_string::<D, MAX_VISUAL_TEXT_BYTES>(deserializer)
 }
 
+fn deserialize_connector_label<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_string::<D, MAX_VISUAL_CONNECTOR_LABEL_BYTES>(deserializer)
+}
+
 fn deserialize_bounded_vec<'de, D, T, const MAX_ITEMS: usize>(
     deserializer: D,
 ) -> Result<Vec<T>, D::Error>
@@ -1542,11 +1657,12 @@ where
 mod tests {
     use super::{
         DEFAULT_LAYER_ID, MAX_VISUAL_DOCUMENT_TITLE_BYTES, MAX_VISUAL_HISTORY_BYTES,
-        MAX_VISUAL_SCENE_BYTES, TITLE_OBJECT_ID, VisualAssetId, VisualColor, VisualDiagramDocument,
-        VisualDocumentError, VisualHistoryEntry, VisualLayer, VisualLayerId, VisualLineStyle,
-        VisualObject, VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation,
-        VisualPresetDraft, VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene,
-        VisualShadow, VisualStyle, VisualTransform,
+        MAX_VISUAL_SCENE_BYTES, TITLE_OBJECT_ID, VisualAnchor, VisualAssetId, VisualColor,
+        VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute,
+        VisualDiagramDocument, VisualDocumentError, VisualHistoryEntry, VisualLayer, VisualLayerId,
+        VisualLineStyle, VisualObject, VisualObjectDraft, VisualObjectId, VisualObjectKind,
+        VisualOperation, VisualPresetDraft, VisualPrimitiveComponent, VisualPrimitiveShape,
+        VisualScene, VisualShadow, VisualStyle, VisualTransform,
     };
     use crate::diagram::codec::{
         DiagramFileDocument, DiagramFileDocumentRef, decode_document, encode_document,
@@ -1563,6 +1679,24 @@ mod tests {
 
     fn text_draft(text: impl Into<String>) -> VisualObjectDraft {
         draft(VisualObjectKind::Text { text: text.into() })
+    }
+
+    fn connector_draft(from: VisualObjectId, to: VisualObjectId) -> VisualObjectDraft {
+        draft(VisualObjectKind::Connector {
+            connector: VisualConnector {
+                from: VisualConnectorEndpoint {
+                    object_id: from,
+                    anchor: VisualAnchor::East,
+                },
+                to: VisualConnectorEndpoint {
+                    object_id: to,
+                    anchor: VisualAnchor::West,
+                },
+                route: VisualConnectorRoute::Elbow,
+                direction: VisualConnectorDirection::Forward,
+                label: "depends on".into(),
+            },
+        })
     }
 
     fn scene_with_object(id: u64) -> VisualScene {
@@ -1753,6 +1887,145 @@ mod tests {
         assert_eq!(reopened.scene().objects[1].id.get(), first.get() + 1);
         assert!(!reopened.can_redo());
         assert_eq!(TITLE_OBJECT_ID.get(), 1);
+    }
+
+    #[test]
+    fn visual_connector_validates_endpoints_allows_self_loops_and_cascades_delete_in_one_undo() {
+        let mut document = VisualDiagramDocument::new();
+        let shapes = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                })),
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Circle,
+                })),
+            ])
+            .unwrap()
+            .created_objects;
+        let first = shapes[0];
+        let second = shapes[1];
+        let connector = document
+            .apply_transaction(&[VisualOperation::AddObject(connector_draft(first, second))])
+            .unwrap()
+            .created_objects[0];
+        let before_delete = document.scene().clone();
+        let revision = document.revision();
+
+        let unknown_before = document.allocator();
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::AddObject(connector_draft(
+                first,
+                VisualObjectId(u64::MAX),
+            ))]),
+            Err(VisualDocumentError::UnknownConnectorEndpoint(id)) if id.get() == u64::MAX
+        ));
+        assert_eq!(document.revision(), revision);
+        assert_eq!(document.allocator(), unknown_before);
+
+        let self_loop = VisualConnector {
+            from: VisualConnectorEndpoint {
+                object_id: first,
+                anchor: VisualAnchor::North,
+            },
+            to: VisualConnectorEndpoint {
+                object_id: first,
+                anchor: VisualAnchor::North,
+            },
+            route: VisualConnectorRoute::Curved,
+            direction: VisualConnectorDirection::Both,
+            label: String::new(),
+        };
+        let self_loop_id = document
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Connector {
+                    connector: self_loop,
+                },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let after_self_loop = document.scene().clone();
+        assert!(
+            document
+                .apply_transaction(&[VisualOperation::AddObject(connector_draft(
+                    self_loop_id,
+                    second,
+                ))])
+                .is_err()
+        );
+        assert_eq!(document.scene(), &after_self_loop);
+
+        document
+            .apply_transaction(&[VisualOperation::RemoveObject(first)])
+            .unwrap();
+        assert!(document.scene().objects.iter().all(|object| {
+            object.id != first
+                && !matches!(
+                    &object.kind,
+                    VisualObjectKind::Connector { connector }
+                        if connector.from.object_id == first || connector.to.object_id == first
+                )
+        }));
+        assert!(document.undo().unwrap());
+        assert_eq!(document.scene(), &after_self_loop);
+        assert!(document.undo().unwrap());
+        assert_eq!(document.scene(), &before_delete);
+        assert!(
+            document
+                .scene()
+                .objects
+                .iter()
+                .any(|object| object.id == connector)
+        );
+    }
+
+    #[test]
+    fn visual_connector_transform_and_label_are_bounded() {
+        let mut document = VisualDiagramDocument::new();
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                })),
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                })),
+            ])
+            .unwrap()
+            .created_objects;
+        let id = document
+            .apply_transaction(&[VisualOperation::AddObject(connector_draft(ids[0], ids[1]))])
+            .unwrap()
+            .created_objects[0];
+        let mut invalid_transform = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .clone();
+        invalid_transform.transform.x = 10.0;
+        assert_eq!(
+            document.apply_transaction(&[VisualOperation::ReplaceObject(invalid_transform)]),
+            Err(VisualDocumentError::InvalidConnectorGeometry),
+        );
+
+        let mut invalid_label = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .clone();
+        let VisualObjectKind::Connector { connector } = &mut invalid_label.kind else {
+            unreachable!();
+        };
+        connector.label = "x".repeat(super::MAX_VISUAL_CONNECTOR_LABEL_BYTES + 1);
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::ReplaceObject(invalid_label)]),
+            Err(VisualDocumentError::TextTooLarge { max_bytes })
+                if max_bytes == super::MAX_VISUAL_CONNECTOR_LABEL_BYTES
+        ));
     }
 
     #[test]

@@ -678,6 +678,100 @@ mod tests {
     }
 
     #[test]
+    fn diagram_codec_visual_connector_roundtrips_and_preserves_cascade_history() {
+        use super::super::visual::{
+            DEFAULT_LAYER_ID, VisualAnchor, VisualConnector, VisualConnectorDirection,
+            VisualConnectorEndpoint, VisualConnectorRoute, VisualObjectDraft, VisualObjectKind,
+            VisualOperation, VisualPrimitiveShape, VisualStyle, VisualTransform,
+        };
+
+        let mut visual = VisualDiagramDocument::new();
+        let endpoints = visual
+            .apply_transaction(&[
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: -80.0,
+                        ..VisualTransform::default()
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Diamond,
+                    },
+                }),
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 80.0,
+                        ..VisualTransform::default()
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Cylinder,
+                    },
+                }),
+            ])
+            .unwrap()
+            .created_objects;
+        let connector_id = visual
+            .apply_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: endpoints[0],
+                            anchor: VisualAnchor::NorthEast,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: endpoints[1],
+                            anchor: VisualAnchor::SouthWest,
+                        },
+                        route: VisualConnectorRoute::Curved,
+                        direction: VisualConnectorDirection::Both,
+                        label: "reviewed\nwith care".into(),
+                    },
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        visual
+            .apply_transaction(&[VisualOperation::RemoveObject(endpoints[0])])
+            .unwrap();
+        assert!(
+            visual
+                .scene()
+                .objects
+                .iter()
+                .all(|object| object.id != connector_id)
+        );
+        visual.undo().unwrap();
+
+        let bytes = encode_document(DiagramFileDocumentRef::Visual(&visual)).unwrap();
+        let decoded = match decode_document(&bytes).unwrap() {
+            DiagramFileDocument::Visual(decoded) => decoded,
+            DiagramFileDocument::Mermaid(_) => panic!("visual payload decoded as Mermaid"),
+        };
+        assert_eq!(decoded.scene(), visual.scene());
+        assert!(matches!(
+            &decoded
+                .scene()
+                .objects
+                .iter()
+                .find(|object| object.id == connector_id)
+                .unwrap()
+                .kind,
+            VisualObjectKind::Connector { connector }
+                if connector.route == VisualConnectorRoute::Curved
+                    && connector.direction == VisualConnectorDirection::Both
+                    && connector.label == "reviewed\nwith care"
+        ));
+        assert!(decoded.can_redo());
+        decoded.validate().unwrap();
+    }
+
+    #[test]
     fn diagram_codec_rejects_noop_and_reused_id_visual_history() {
         let mut base = VisualDiagramDocument::new();
         let base_value: serde_json::Value = serde_json::from_slice(
