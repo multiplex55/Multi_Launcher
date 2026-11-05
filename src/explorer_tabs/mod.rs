@@ -4,11 +4,17 @@
 //! observes Shell state; opening or navigating tabs is intentionally owned by
 //! a later integration layer.
 
+mod folder_lists;
 mod identity;
 mod operation;
 #[cfg(windows)]
 mod windows;
 
+pub use folder_lists::{
+    CURRENT_FOLDER_LISTS_VERSION, FOLDER_LIST_FILE_NAME, FolderListError, FolderListId,
+    FolderListRunSnapshot, FolderListStore, MAX_FOLDER_LIST_NAME_BYTES, MAX_FOLDER_LISTS_BYTES,
+    MAX_SAVED_FOLDER_LISTS, SavedFolderList,
+};
 pub use identity::{
     CandidateCorrelation, PidlPathMatch, ShellBindingIdentity, ShellPathComparison,
     ShellTargetCandidate, ShellViewCandidate, ShellViewIdentity, ShellViewSnapshot,
