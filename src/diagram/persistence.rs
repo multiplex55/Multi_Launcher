@@ -4,6 +4,7 @@ use super::codec::{
     DiagramCodecError, DiagramFileDocument, DiagramFileDocumentRef, MAX_DIAGRAM_SESSION_BYTES,
     decode_document, encode_document,
 };
+use super::drawio::MAX_DRAWIO_XML_BYTES;
 use super::export::DiagramExportFormat;
 use super::mermaid::MAX_MERMAID_SOURCE_BYTES;
 use super::session::DiagramSession;
@@ -245,21 +246,21 @@ impl std::fmt::Display for DiagramPersistenceError {
                 "failed to {operation} {}: {source}",
                 path.display()
             ),
-            Self::UnsafePath(path) => write!(
-                formatter,
-                "native diagram path is not a regular file: {}",
-                path.display()
-            ),
-            Self::NotFound(path) => {
+            Self::UnsafePath(path) => {
                 write!(
                     formatter,
-                    "native diagram was not found: {}",
+                    "native diagram path is not a regular file: {}",
                     path.display()
                 )
             }
+            Self::NotFound(path) => write!(
+                formatter,
+                "native diagram was not found: {}",
+                path.display()
+            ),
             Self::OccupiedPath(path) => write!(
                 formatter,
-                "refusing to overwrite occupied native diagram path {}",
+                "refusing to overwrite occupied output path {}",
                 path.display()
             ),
             Self::DiskConflict { path, kind } => match kind {
@@ -488,6 +489,98 @@ pub(crate) fn publish_visual_document_copy(
     publish_unoccupied_bytes(path, &bytes)
 }
 
+#[derive(Debug)]
+pub(crate) enum DrawioFileError {
+    WrongExtension(PathBuf),
+    Persistence(DiagramPersistenceError),
+}
+
+impl std::fmt::Display for DrawioFileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongExtension(path) => write!(
+                formatter,
+                "draw.io file must use the .drawio extension: {}",
+                path.display()
+            ),
+            Self::Persistence(error) => match error {
+                DiagramPersistenceError::NotFound(path) => {
+                    write!(formatter, "draw.io file was not found: {}", path.display())
+                }
+                DiagramPersistenceError::UnsafePath(path) => {
+                    write!(
+                        formatter,
+                        "draw.io path is not a regular file: {}",
+                        path.display()
+                    )
+                }
+                DiagramPersistenceError::Oversized { path, max_bytes } => write!(
+                    formatter,
+                    "draw.io file at {} exceeds the {max_bytes}-byte limit",
+                    path.display()
+                ),
+                DiagramPersistenceError::OccupiedPath(path) => write!(
+                    formatter,
+                    "refusing to overwrite occupied draw.io path {}",
+                    path.display()
+                ),
+                DiagramPersistenceError::Io {
+                    operation,
+                    path,
+                    source,
+                } => write!(
+                    formatter,
+                    "failed to {operation} draw.io file {}: {source}",
+                    path.display()
+                ),
+                other => write!(formatter, "draw.io file operation failed: {other}"),
+            },
+        }
+    }
+}
+
+impl std::error::Error for DrawioFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Persistence(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Read a bounded, regular `.drawio` source file without interpreting it on
+/// the UI thread. The XML decoder applies its own structural limits to these
+/// bytes after the worker receives them.
+pub(crate) fn read_drawio_xml_source(path: &Path) -> Result<Vec<u8>, DrawioFileError> {
+    if !has_extension(path, "drawio") {
+        return Err(DrawioFileError::WrongExtension(path.to_path_buf()));
+    }
+    read_limited_with_limit(path, MAX_DRAWIO_XML_BYTES)
+        .map_err(DrawioFileError::Persistence)?
+        .ok_or_else(|| {
+            DrawioFileError::Persistence(DiagramPersistenceError::NotFound(path.to_path_buf()))
+        })
+}
+
+/// Publish already-reviewed draw.io bytes without replacing an existing file.
+pub(crate) fn publish_drawio_export(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<[u8; 32], DrawioFileError> {
+    if !has_extension(path, "drawio") {
+        return Err(DrawioFileError::WrongExtension(path.to_path_buf()));
+    }
+    if bytes.len() > MAX_DRAWIO_XML_BYTES {
+        return Err(DrawioFileError::Persistence(
+            DiagramPersistenceError::Oversized {
+                path: path.to_path_buf(),
+                max_bytes: MAX_DRAWIO_XML_BYTES,
+            },
+        ));
+    }
+    publish_unoccupied_bytes(path, bytes).map_err(DrawioFileError::Persistence)
+}
+
 /// Copy an explicitly chosen saved Diagram file byte-for-byte. Decode first
 /// so malformed/future documents cannot be propagated as a duplicate.
 pub(crate) fn duplicate_saved_document(
@@ -519,6 +612,18 @@ fn ensure_mld_extension(path: &Path) -> Result<(), DiagramPersistenceError> {
                 "a native Diagram copy must use the .mld extension".into(),
             ),
         })
+    }
+}
+
+fn has_extension(path: &Path, expected: &'static str) -> bool {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+    {
+        true
+    } else {
+        false
     }
 }
 
@@ -584,6 +689,13 @@ fn read_required(path: &Path) -> Result<Vec<u8>, DiagramPersistenceError> {
 }
 
 fn read_limited(path: &Path) -> Result<Option<Vec<u8>>, DiagramPersistenceError> {
+    read_limited_with_limit(path, MAX_DIAGRAM_DOCUMENT_BYTES)
+}
+
+fn read_limited_with_limit(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, DiagramPersistenceError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -598,10 +710,10 @@ fn read_limited(path: &Path) -> Result<Option<Vec<u8>>, DiagramPersistenceError>
     if !metadata.file_type().is_file() {
         return Err(DiagramPersistenceError::UnsafePath(path.to_path_buf()));
     }
-    if metadata.len() > MAX_DIAGRAM_DOCUMENT_BYTES as u64 {
+    if metadata.len() > max_bytes as u64 {
         return Err(DiagramPersistenceError::Oversized {
             path: path.to_path_buf(),
-            max_bytes: MAX_DIAGRAM_DOCUMENT_BYTES,
+            max_bytes,
         });
     }
 
@@ -621,19 +733,18 @@ fn read_limited(path: &Path) -> Result<Option<Vec<u8>>, DiagramPersistenceError>
         return Err(DiagramPersistenceError::UnsafePath(path.to_path_buf()));
     }
 
-    let mut bytes =
-        Vec::with_capacity(metadata.len().min(MAX_DIAGRAM_DOCUMENT_BYTES as u64) as usize);
-    file.take((MAX_DIAGRAM_DOCUMENT_BYTES + 1) as u64)
+    let mut bytes = Vec::with_capacity(metadata.len().min(max_bytes as u64) as usize);
+    file.take((max_bytes + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|source| DiagramPersistenceError::Io {
             operation: "read",
             path: path.to_path_buf(),
             source,
         })?;
-    if bytes.len() > MAX_DIAGRAM_DOCUMENT_BYTES {
+    if bytes.len() > max_bytes {
         return Err(DiagramPersistenceError::Oversized {
             path: path.to_path_buf(),
-            max_bytes: MAX_DIAGRAM_DOCUMENT_BYTES,
+            max_bytes,
         });
     }
     Ok(Some(bytes))
@@ -646,12 +757,15 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagramDocumentStore, DiagramPersistenceError, DiskConflictKind,
+        DiagramDocumentStore, DiagramPersistenceError, DiskConflictKind, DrawioFileError,
         MAX_DIAGRAM_DOCUMENT_BYTES, MAX_MERMAID_SOURCE_BYTES, MermaidFile, MermaidImportError,
-        duplicate_saved_document, publish_visual_document_copy,
+        duplicate_saved_document, publish_drawio_export, publish_visual_document_copy,
+        read_drawio_xml_source,
     };
     use crate::common::atomic_file::save_atomic;
-    use crate::diagram::{DiagramDocumentController, DiagramSession, VisualDiagramDocument};
+    use crate::diagram::{
+        DiagramDocumentController, DiagramSession, MAX_DRAWIO_XML_BYTES, VisualDiagramDocument,
+    };
     use std::fs;
 
     #[test]
@@ -746,6 +860,62 @@ mod tests {
             publish_visual_document_copy(&visual_copy, &VisualDiagramDocument::new()),
             Err(DiagramPersistenceError::OccupiedPath(path)) if path == visual_copy
         ));
+    }
+
+    #[test]
+    fn diagram_drawio_workflow_persistence_is_bounded_and_no_clobber() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("candidate.drawio");
+        let output = directory.path().join("export.drawio");
+        let bytes = b"<mxfile><diagram/></mxfile>";
+        fs::write(&source, bytes).unwrap();
+        assert_eq!(read_drawio_xml_source(&source).unwrap(), bytes);
+        assert!(matches!(
+            read_drawio_xml_source(&directory.path().join("missing.drawio")),
+            Err(DrawioFileError::Persistence(
+                DiagramPersistenceError::NotFound(_)
+            ))
+        ));
+        assert!(matches!(
+            read_drawio_xml_source(&directory.path().join("wrong.xml")),
+            Err(DrawioFileError::WrongExtension(_))
+        ));
+        let directory_with_suffix = directory.path().join("folder.drawio");
+        fs::create_dir(&directory_with_suffix).unwrap();
+        assert!(matches!(
+            read_drawio_xml_source(&directory_with_suffix),
+            Err(DrawioFileError::Persistence(
+                DiagramPersistenceError::UnsafePath(_)
+            ))
+        ));
+
+        let too_large = directory.path().join("large.drawio");
+        fs::write(&too_large, vec![b' '; MAX_DRAWIO_XML_BYTES + 1]).unwrap();
+        assert!(matches!(
+            read_drawio_xml_source(&too_large),
+            Err(DrawioFileError::Persistence(DiagramPersistenceError::Oversized { max_bytes, .. }))
+                if max_bytes == MAX_DRAWIO_XML_BYTES
+        ));
+
+        publish_drawio_export(&output, bytes).unwrap();
+        let published = fs::read(&output).unwrap();
+        assert_eq!(published, bytes);
+        assert!(matches!(
+            publish_drawio_export(&output, b"replacement"),
+            Err(DrawioFileError::Persistence(DiagramPersistenceError::OccupiedPath(path))) if path == output
+        ));
+        assert_eq!(fs::read(&output).unwrap(), published);
+        assert!(matches!(
+            publish_drawio_export(&directory.path().join("wrong.svg"), bytes),
+            Err(DrawioFileError::WrongExtension(_))
+        ));
+        let too_large_output = directory.path().join("oversized-output.drawio");
+        assert!(matches!(
+            publish_drawio_export(&too_large_output, &vec![b' '; MAX_DRAWIO_XML_BYTES + 1]),
+            Err(DrawioFileError::Persistence(DiagramPersistenceError::Oversized { max_bytes, .. }))
+                if max_bytes == MAX_DRAWIO_XML_BYTES
+        ));
+        assert!(!too_large_output.exists());
     }
 
     #[test]

@@ -6,9 +6,10 @@ use crate::diagram::{
     CanvasMinimap, DEFAULT_LAYER_ID, DecodedVisualAsset, DiagramDocument,
     DiagramDocumentController, DiagramDocumentError, DiagramExportFormat, DiagramImageSnapshot,
     DiagramRenderOutput, DiagramRenderedImageSnapshot, DiagramScene, DiagramSession,
-    DiagramSourceCopy, DiagramSourceCopyOrigin, DiagramSourceSnapshot, DiagramTemplate, EdgeId,
-    FlowDirection, GenericPreviewStatus, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS,
-    MAX_DIAGRAM_NODES, MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_PRESET_COMPONENTS,
+    DiagramSourceCopy, DiagramSourceCopyOrigin, DiagramSourceSnapshot, DiagramTemplate,
+    DrawioExportResult, DrawioImportResult, DrawioReport, DrawioWireError, EdgeId, FlowDirection,
+    GenericPreviewStatus, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES,
+    MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_PRESET_COMPONENTS,
     MAX_VISUAL_TRANSACTION_OPERATIONS, MermaidFile, NodeId, NodePosition, NodeShape,
     PendingDiagramTransition, Position, PreparedText, PreparedVisualAsset, PreviewState,
     ProjectedStrokePrimitive, RasterSize, RecentDiagramIndex, RenderDocumentIdentity, RenderKey,
@@ -20,11 +21,12 @@ use crate::diagram::{
     VisualPresetDraft, VisualPrimitiveShape, VisualProjectedKind, VisualProjectionError,
     VisualScene, VisualSceneProjection, VisualShadow, VisualStyle, VisualTransform,
     VisualTransformMode, build_scene, color_with_opacity, duplicate_saved_document,
-    generic_preview_family, is_generic_preview_candidate, mermaid_visual_copy,
-    preview_visual_transforms, project_visual_scene, publish_visual_document_copy,
-    visual_canvas_align_selection, visual_canvas_distribute_selection, visual_canvas_hit_test,
-    visual_canvas_marquee_selection, visual_canvas_minimap_layout, visual_canvas_selection_bounds,
-    visual_canvas_selection_handles, visual_canvas_snap_translation_delta,
+    export_drawio_scene, generic_preview_family, import_drawio_xml, is_generic_preview_candidate,
+    mermaid_visual_copy, preview_visual_transforms, project_visual_scene, publish_drawio_export,
+    publish_visual_document_copy, read_drawio_xml_source, visual_canvas_align_selection,
+    visual_canvas_distribute_selection, visual_canvas_hit_test, visual_canvas_marquee_selection,
+    visual_canvas_minimap_layout, visual_canvas_selection_bounds, visual_canvas_selection_handles,
+    visual_canvas_snap_translation_delta,
 };
 use eframe::egui;
 use std::collections::{BTreeSet, HashMap};
@@ -91,6 +93,17 @@ fn ensure_native_extension(mut path: PathBuf) -> PathBuf {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(NATIVE_DIAGRAM_EXTENSION));
     if !has_native_extension {
         path.set_extension(NATIVE_DIAGRAM_EXTENSION);
+    }
+    path
+}
+
+fn ensure_drawio_extension(mut path: PathBuf) -> PathBuf {
+    let has_drawio_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("drawio"));
+    if !has_drawio_extension {
+        path.set_extension("drawio");
     }
     path
 }
@@ -515,6 +528,76 @@ struct CompletedVisualAssetImport {
     prepared: PreparedVisualAsset,
 }
 
+#[derive(Clone)]
+struct DrawioWorkflowScope {
+    document: RenderDocumentIdentity,
+    revision: u64,
+    owner_generation: u64,
+    owner_viewport_id: egui::ViewportId,
+}
+
+impl DrawioWorkflowScope {
+    fn matches(&self, dialog: &DiagramStudioDialog, owner_viewport_id: egui::ViewportId) -> bool {
+        let revision = dialog
+            .documents
+            .session()
+            .map(DiagramSession::revision)
+            .or_else(|| dialog.documents.visual_revision())
+            .unwrap_or_default();
+        self.document == dialog.render_document
+            && self.revision == revision
+            && self.owner_generation == dialog.owner_generation
+            && self.owner_viewport_id == owner_viewport_id
+            && dialog.documents.pending_transition().is_none()
+    }
+}
+
+enum DrawioWorkKind {
+    Import { source_path: PathBuf },
+    Export,
+}
+
+enum DrawioWorkResult {
+    Import(Result<DrawioImportResult, String>),
+    Export(Result<DrawioExportResult, DrawioWireError>),
+}
+
+struct PendingDrawioWork {
+    scope: DrawioWorkflowScope,
+    kind: DrawioWorkKind,
+    cancelled: Arc<AtomicBool>,
+    receiver: Receiver<DrawioWorkResult>,
+    retired: bool,
+}
+
+enum DrawioWorkflowReview {
+    Import {
+        scope: DrawioWorkflowScope,
+        source_path: PathBuf,
+        candidate: DrawioImportResult,
+        copy_path: Option<PathBuf>,
+    },
+    ExportReady {
+        scope: DrawioWorkflowScope,
+        result: DrawioExportResult,
+    },
+    ExportUnsupported {
+        scope: DrawioWorkflowScope,
+        report: DrawioReport,
+        reason: String,
+    },
+}
+
+impl DrawioWorkflowReview {
+    fn scope(&self) -> &DrawioWorkflowScope {
+        match self {
+            Self::Import { scope, .. }
+            | Self::ExportReady { scope, .. }
+            | Self::ExportUnsupported { scope, .. } => scope,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct VisualPropertyDraft {
     document: RenderDocumentIdentity,
@@ -625,16 +708,42 @@ enum DocumentIntent {
     OpenRecent(PathBuf),
     DuplicateRecent(PathBuf),
     Export(DiagramExportFormat, ExportScale),
+    DrawioImport,
+    DrawioExport,
+    DrawioPublishImport,
+    DrawioOpenImportCopy,
+    DrawioPublishExport,
+    DrawioCancel,
     UseSourceInMarkdown(DiagramSourceCopyOrigin),
     Close,
     ResolvePending(TransitionDecision),
 }
 
 impl DocumentIntent {
+    const fn is_drawio(&self) -> bool {
+        matches!(
+            self,
+            Self::DrawioImport
+                | Self::DrawioExport
+                | Self::DrawioPublishImport
+                | Self::DrawioOpenImportCopy
+                | Self::DrawioPublishExport
+                | Self::DrawioCancel
+        )
+    }
+
     fn requires_action_fence(&self) -> bool {
         matches!(
             self,
-            Self::ConvertMermaidCopy | Self::OpenRecent(_) | Self::DuplicateRecent(_)
+            Self::ConvertMermaidCopy
+                | Self::OpenRecent(_)
+                | Self::DuplicateRecent(_)
+                | Self::DrawioImport
+                | Self::DrawioExport
+                | Self::DrawioPublishImport
+                | Self::DrawioOpenImportCopy
+                | Self::DrawioPublishExport
+                | Self::DrawioCancel
         )
     }
 }
@@ -776,6 +885,8 @@ pub(crate) struct DiagramStudioDialog {
     visual_asset_owner_generation: u64,
     visual_asset_work: Option<PendingVisualAssetWork>,
     completed_visual_asset_import: Option<CompletedVisualAssetImport>,
+    drawio_work: Option<PendingDrawioWork>,
+    drawio_review: Option<DrawioWorkflowReview>,
     renderer: Option<RendererService>,
     camera: Camera,
     viewer_camera: Camera,
@@ -883,6 +994,8 @@ pub(crate) struct DiagramStudioDialog {
     test_native_inspector_visible: bool,
     #[cfg(test)]
     test_picker_source_change: Option<String>,
+    #[cfg(test)]
+    test_picker_visual_label_change: Option<String>,
 }
 
 pub(crate) struct DiagramMarkdownSource {
@@ -956,6 +1069,8 @@ impl DiagramStudioDialog {
             visual_asset_owner_generation: 0,
             visual_asset_work: None,
             completed_visual_asset_import: None,
+            drawio_work: None,
+            drawio_review: None,
             renderer: None,
             camera: Camera::default(),
             viewer_camera: Camera::default(),
@@ -1063,6 +1178,8 @@ impl DiagramStudioDialog {
             test_native_inspector_visible: false,
             #[cfg(test)]
             test_picker_source_change: None,
+            #[cfg(test)]
+            test_picker_visual_label_change: None,
         }
     }
 
@@ -1111,6 +1228,8 @@ impl DiagramStudioDialog {
             || self.close_pending
             || self.viewer_bootstrap_pending
             || self.pending_viewer_effects.is_some()
+            || self.drawio_work.is_some()
+            || self.drawio_review.is_some()
     }
 
     pub(super) fn embedded_viewer_layer_if_root(&self) -> Option<egui::LayerId> {
@@ -1301,6 +1420,7 @@ impl DiagramStudioDialog {
     ) {
         self.refresh_cache();
         self.poll_visual_asset_work();
+        self.release_retired_drawio_slot();
         if !self.open {
             self.pending_root_effects = None;
             return;
@@ -2314,9 +2434,19 @@ impl DiagramStudioDialog {
             {
                 ctx.send_viewport_cmd_to(viewer_viewport_id(), egui::ViewportCommand::CancelClose);
             }
+            if let Some(work) = self.drawio_work.as_ref() {
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                if work.scope.owner_viewport_id != egui::ViewportId::ROOT {
+                    ctx.request_repaint_of(work.scope.owner_viewport_id);
+                }
+                if effects.owner_viewport_id != egui::ViewportId::ROOT {
+                    ctx.request_repaint_of(effects.owner_viewport_id);
+                }
+            }
             return false;
         }
         let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
+        let accepted_owner_viewport_id = effects.owner_viewport_id;
         if owner_pass_current && let Some(recent_panel) = effects.recent_panel.as_ref() {
             if let Some(open) = recent_panel.open {
                 self.recent_panel_open = open;
@@ -2462,6 +2592,7 @@ impl DiagramStudioDialog {
                 self.apply_pending(mutation)
             }
         });
+        self.retire_stale_drawio_work(owner_pass_current.then_some(accepted_owner_viewport_id));
         if mutation_succeeded
             && effects.document_intent.is_none()
             && let Some((editor_id, cursor_character)) = source_cursor_request
@@ -2474,8 +2605,13 @@ impl DiagramStudioDialog {
         let debounce_accepted_source = source_mutation_requested && mutation_succeeded;
         let viewer_was_open = self.viewer_open;
         let mut document_action_fence = effects.document_action_fence.clone();
+        let is_drawio_intent = effects
+            .document_intent
+            .as_ref()
+            .is_some_and(DocumentIntent::is_drawio);
         if source_mutation_requested
             && mutation_succeeded
+            && !is_drawio_intent
             && let Some(fence) = document_action_fence.as_mut()
             && fence.document == self.render_document
             && fence.owner_generation == self.owner_generation
@@ -2496,6 +2632,7 @@ impl DiagramStudioDialog {
                     owner_pass_current,
                 )
             });
+        self.poll_drawio_work(ctx, accepted_owner_viewport_id, owner_pass_current);
         let owner_closed_viewer = accepted_close && viewer_was_open;
         if self.open {
             let repaint_target = child_viewport_id.unwrap_or(egui::ViewportId::ROOT);
@@ -2651,6 +2788,17 @@ impl DiagramStudioDialog {
             ));
             return false;
         }
+        if self.documents.authoring_kind() != Some(crate::diagram::DiagramAuthoringKind::Visual)
+            && matches!(
+                &intent,
+                DocumentIntent::DrawioExport | DocumentIntent::DrawioPublishExport
+            )
+        {
+            self.message = Some(StudioNotice::error(
+                "Draw.io export is available only for an active Visual document.",
+            ));
+            return false;
+        }
         if self.documents.pending_transition().is_some()
             && matches!(
                 &intent,
@@ -2659,6 +2807,10 @@ impl DiagramStudioDialog {
                     | DocumentIntent::AutoLayout
                     | DocumentIntent::Export(_, _)
                     | DocumentIntent::UseSourceInMarkdown(_)
+                    | DocumentIntent::DrawioImport
+                    | DocumentIntent::DrawioExport
+                    | DocumentIntent::DrawioPublishImport
+                    | DocumentIntent::DrawioPublishExport
             )
         {
             self.message = Some(StudioNotice::error(
@@ -2857,6 +3009,37 @@ impl DiagramStudioDialog {
             }
             DocumentIntent::Export(format, scale) => {
                 self.export_document(format, scale);
+            }
+            DocumentIntent::DrawioImport => {
+                if let Some(fence) = fence {
+                    self.begin_drawio_import(fence, ctx, owner_pass_current);
+                }
+            }
+            DocumentIntent::DrawioExport => {
+                if let Some(fence) = fence {
+                    self.begin_drawio_export(fence, ctx, owner_pass_current);
+                }
+            }
+            DocumentIntent::DrawioPublishImport => {
+                if let Some(fence) = fence {
+                    self.publish_drawio_import_copy(fence, ctx, owner_pass_current);
+                }
+            }
+            DocumentIntent::DrawioOpenImportCopy => {
+                if let Some(fence) = fence {
+                    self.open_drawio_import_copy(fence, ctx, owner_pass_current);
+                }
+            }
+            DocumentIntent::DrawioPublishExport => {
+                if let Some(fence) = fence {
+                    self.publish_drawio_export_review(fence, ctx, owner_pass_current);
+                }
+            }
+            DocumentIntent::DrawioCancel => {
+                self.retire_drawio_work();
+                self.message = Some(StudioNotice::info(
+                    "Draw.io review cancelled; the active document and files were left unchanged.",
+                ));
             }
             DocumentIntent::UseSourceInMarkdown(origin) => {
                 if self.documents.source_copy_origin() != Some(&origin) {
@@ -3101,6 +3284,611 @@ impl DiagramStudioDialog {
             }
             picker.pick_file()
         }
+    }
+
+    fn pick_drawio_source(&mut self) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
+            if let Some(source) = self.test_picker_source_change.take() {
+                let _ = self.documents.replace_source(&source);
+                self.refresh_cache();
+            }
+            return self.test_next_file_picker_result.take().unwrap_or(None);
+        }
+        #[cfg(not(test))]
+        {
+            let directory = self.picker_directory();
+            let mut picker =
+                rfd::FileDialog::new().add_filter("draw.io diagram (*.drawio)", &["drawio"]);
+            if directory.is_dir() {
+                picker = picker.set_directory(directory);
+            }
+            picker.pick_file()
+        }
+    }
+
+    fn pick_drawio_destination(&mut self, _suggested_name: &str) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
+            if let Some(label) = self.test_picker_visual_label_change.take() {
+                let _ = self.documents.replace_visual_label(label);
+                self.refresh_cache();
+            }
+            if let Some(source) = self.test_picker_source_change.take() {
+                let _ = self.documents.replace_source(&source);
+                self.refresh_cache();
+            }
+            return self
+                .test_next_file_picker_result
+                .take()
+                .unwrap_or(None)
+                .map(ensure_drawio_extension);
+        }
+        #[cfg(not(test))]
+        {
+            let directory = self.picker_directory();
+            let mut picker = rfd::FileDialog::new()
+                .add_filter("draw.io diagram (*.drawio)", &["drawio"])
+                .set_file_name(_suggested_name);
+            if directory.is_dir() {
+                picker = picker.set_directory(directory);
+            }
+            picker.save_file().map(ensure_drawio_extension)
+        }
+    }
+
+    fn start_drawio_import(
+        &mut self,
+        ctx: &egui::Context,
+        source_path: PathBuf,
+        scope: DrawioWorkflowScope,
+    ) {
+        if self.drawio_work.is_some() || self.visual_asset_work.is_some() {
+            self.message = Some(StudioNotice::error(
+                "Another bounded Diagram import or export is still running.",
+            ));
+            return;
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let wake_context = ctx.clone();
+        let owner_viewport_id = scope.owner_viewport_id;
+        let (sender, receiver) = sync_channel(1);
+        let worker_source = source_path.clone();
+        let worker = std::thread::Builder::new()
+            .name("diagram-drawio-import".into())
+            .spawn(move || {
+                let result = if worker_cancelled.load(Ordering::Acquire) {
+                    None
+                } else {
+                    Some(
+                        read_drawio_xml_source(&worker_source)
+                            .map_err(|error| error.to_string())
+                            .and_then(|bytes| {
+                                if worker_cancelled.load(Ordering::Acquire) {
+                                    return Err("draw.io import was cancelled".into());
+                                }
+                                import_drawio_xml(&bytes).map_err(|error| error.to_string())
+                            }),
+                    )
+                };
+                if let Some(result) = result
+                    && !worker_cancelled.load(Ordering::Acquire)
+                {
+                    let _ = sender.send(DrawioWorkResult::Import(result));
+                }
+                drop(sender);
+                wake_context.request_repaint_of(egui::ViewportId::ROOT);
+                if owner_viewport_id != egui::ViewportId::ROOT {
+                    wake_context.request_repaint_of(owner_viewport_id);
+                }
+            });
+        if let Err(error) = worker {
+            self.message = Some(StudioNotice::error(format!(
+                "Could not start draw.io import: {error}"
+            )));
+            return;
+        }
+        self.drawio_work = Some(PendingDrawioWork {
+            scope,
+            kind: DrawioWorkKind::Import { source_path },
+            cancelled,
+            receiver,
+            retired: false,
+        });
+        self.message = Some(StudioNotice::info(
+            "Reviewing the bounded draw.io file; the active document has not changed.",
+        ));
+    }
+
+    fn start_drawio_export(
+        &mut self,
+        ctx: &egui::Context,
+        scene: VisualScene,
+        scope: DrawioWorkflowScope,
+    ) {
+        if self.drawio_work.is_some() || self.visual_asset_work.is_some() {
+            self.message = Some(StudioNotice::error(
+                "Another bounded Diagram import or export is still running.",
+            ));
+            return;
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let wake_context = ctx.clone();
+        let owner_viewport_id = scope.owner_viewport_id;
+        let (sender, receiver) = sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name("diagram-drawio-export".into())
+            .spawn(move || {
+                if !worker_cancelled.load(Ordering::Acquire) {
+                    let result = export_drawio_scene(&scene);
+                    if !worker_cancelled.load(Ordering::Acquire) {
+                        let _ = sender.send(DrawioWorkResult::Export(result));
+                    }
+                }
+                drop(sender);
+                wake_context.request_repaint_of(egui::ViewportId::ROOT);
+                if owner_viewport_id != egui::ViewportId::ROOT {
+                    wake_context.request_repaint_of(owner_viewport_id);
+                }
+            });
+        if let Err(error) = worker {
+            self.message = Some(StudioNotice::error(format!(
+                "Could not start draw.io export: {error}"
+            )));
+            return;
+        }
+        self.drawio_work = Some(PendingDrawioWork {
+            scope,
+            kind: DrawioWorkKind::Export,
+            cancelled,
+            receiver,
+            retired: false,
+        });
+        self.message = Some(StudioNotice::info(
+            "Preparing an export of the committed visual revision.",
+        ));
+    }
+
+    fn retire_drawio_work(&mut self) {
+        if let Some(work) = self.drawio_work.as_mut() {
+            work.retired = true;
+            work.cancelled.store(true, Ordering::Release);
+        }
+        self.drawio_review = None;
+    }
+
+    fn release_retired_drawio_slot(&mut self) {
+        let Some(work) = self.drawio_work.as_ref() else {
+            return;
+        };
+        if !work.retired {
+            return;
+        }
+        match work.receiver.try_recv() {
+            Ok(_) | Err(TryRecvError::Disconnected) => self.drawio_work = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    fn retire_stale_drawio_work(&mut self, current_owner: Option<egui::ViewportId>) {
+        let revision = self
+            .documents
+            .session()
+            .map(DiagramSession::revision)
+            .or_else(|| self.documents.visual_revision())
+            .unwrap_or_default();
+        let work_stale = self.drawio_work.as_ref().is_some_and(|work| {
+            work.scope.document != self.render_document
+                || work.scope.revision != revision
+                || work.scope.owner_generation != self.owner_generation
+                || self.documents.pending_transition().is_some()
+                || current_owner.is_some_and(|owner| work.scope.owner_viewport_id != owner)
+        });
+        if work_stale && let Some(work) = self.drawio_work.as_mut() {
+            work.retired = true;
+            work.cancelled.store(true, Ordering::Release);
+        }
+        if self.drawio_review.as_ref().is_some_and(|review| {
+            review.scope().document != self.render_document
+                || review.scope().revision != revision
+                || review.scope().owner_generation != self.owner_generation
+                || current_owner.is_some_and(|owner| review.scope().owner_viewport_id != owner)
+        }) {
+            self.drawio_review = None;
+        }
+    }
+
+    fn poll_drawio_work(
+        &mut self,
+        ctx: &egui::Context,
+        owner_viewport_id: egui::ViewportId,
+        owner_pass_current: bool,
+    ) -> bool {
+        self.retire_stale_drawio_work(owner_pass_current.then_some(owner_viewport_id));
+        let Some(work) = self.drawio_work.as_ref() else {
+            return false;
+        };
+        if !work.retired && !owner_pass_current {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            if work.scope.owner_viewport_id != egui::ViewportId::ROOT {
+                ctx.request_repaint_of(work.scope.owner_viewport_id);
+            }
+            return false;
+        }
+        let was_retired = work.retired;
+        let result = match work.receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => return false,
+        };
+        let Some(work) = self.drawio_work.take() else {
+            return false;
+        };
+        if was_retired {
+            return true;
+        }
+        let Some(result) = result else {
+            self.message = Some(StudioNotice::error(
+                "The draw.io worker stopped before returning a result.",
+            ));
+            return true;
+        };
+        if !work.scope.matches(self, owner_viewport_id) {
+            return true;
+        }
+        match (work.kind, result) {
+            (DrawioWorkKind::Import { source_path }, DrawioWorkResult::Import(Ok(candidate))) => {
+                self.drawio_review = Some(DrawioWorkflowReview::Import {
+                    scope: work.scope,
+                    source_path,
+                    candidate,
+                    copy_path: None,
+                });
+                self.message = Some(StudioNotice::info(
+                    "Draw.io candidate is ready for review; the source and active document are unchanged.",
+                ));
+            }
+            (DrawioWorkKind::Import { source_path }, DrawioWorkResult::Import(Err(error))) => {
+                self.message = Some(StudioNotice::error(format!(
+                    "Could not import {}: {error}",
+                    source_path.display()
+                )));
+            }
+            (DrawioWorkKind::Export, DrawioWorkResult::Export(Ok(result))) => {
+                self.drawio_review = Some(DrawioWorkflowReview::ExportReady {
+                    scope: work.scope,
+                    result,
+                });
+                self.message = Some(StudioNotice::info(
+                    "Draw.io export is ready for review; no file has been written.",
+                ));
+            }
+            (
+                DrawioWorkKind::Export,
+                DrawioWorkResult::Export(Err(DrawioWireError::UnsupportedContent(report))),
+            ) => {
+                self.drawio_review = Some(DrawioWorkflowReview::ExportUnsupported {
+                    scope: work.scope,
+                    report,
+                    reason: "the scene contains content the draw.io subset cannot represent".into(),
+                });
+                self.message = Some(StudioNotice::error(
+                    "Draw.io export stopped because the committed scene has unsupported content; no bytes were published.",
+                ));
+            }
+            (DrawioWorkKind::Export, DrawioWorkResult::Export(Err(error))) => {
+                self.message = Some(StudioNotice::error(format!(
+                    "Could not prepare draw.io export: {error}"
+                )));
+            }
+            _ => {
+                self.message = Some(StudioNotice::error(
+                    "The draw.io worker returned an unexpected result.",
+                ));
+            }
+        }
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+        if owner_viewport_id != egui::ViewportId::ROOT {
+            ctx.request_repaint_of(owner_viewport_id);
+        }
+        true
+    }
+
+    fn drawio_fence_is_current(
+        &self,
+        fence: &DocumentActionFence,
+        ctx: &egui::Context,
+        owner_pass_current: bool,
+    ) -> bool {
+        (fence.owner_viewport_id == egui::ViewportId::ROOT
+            || fence.owner_viewport_id == viewport_id())
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && self.document_action_fence_is_current(fence, ctx, owner_pass_current)
+    }
+
+    fn drawio_scope_from_fence(fence: &DocumentActionFence) -> DrawioWorkflowScope {
+        DrawioWorkflowScope {
+            document: fence.document.clone(),
+            revision: fence.revision,
+            owner_generation: fence.owner_generation,
+            owner_viewport_id: fence.owner_viewport_id,
+        }
+    }
+
+    fn begin_drawio_import(
+        &mut self,
+        fence: &DocumentActionFence,
+        ctx: &egui::Context,
+        owner_pass_current: bool,
+    ) {
+        if !self.drawio_fence_is_current(fence, ctx, owner_pass_current) {
+            self.message = Some(StudioNotice::error(
+                "The active document changed before draw.io import; try again.",
+            ));
+            return;
+        }
+        if self.drawio_work.is_some()
+            || self.drawio_review.is_some()
+            || self.visual_asset_work.is_some()
+        {
+            self.message = Some(StudioNotice::error(
+                "Finish or cancel the current Diagram import/export before starting another.",
+            ));
+            return;
+        }
+        let Some(source_path) = self.pick_drawio_source() else {
+            return;
+        };
+        if !self.drawio_fence_is_current(fence, ctx, owner_pass_current) {
+            self.message = Some(StudioNotice::error(
+                "The active document changed while choosing a draw.io source; nothing was imported.",
+            ));
+            return;
+        }
+        let scope = Self::drawio_scope_from_fence(fence);
+        self.start_drawio_import(ctx, source_path, scope);
+    }
+
+    fn begin_drawio_export(
+        &mut self,
+        fence: &DocumentActionFence,
+        ctx: &egui::Context,
+        owner_pass_current: bool,
+    ) {
+        if !self.drawio_fence_is_current(fence, ctx, owner_pass_current)
+            || self.documents.authoring_kind() != Some(crate::diagram::DiagramAuthoringKind::Visual)
+            || self.documents.pending_transition().is_some()
+        {
+            self.message = Some(StudioNotice::error(
+                "The visual document changed before draw.io export; try again.",
+            ));
+            return;
+        }
+        if self.visual_property_draft.is_some() {
+            self.message = Some(StudioNotice::error(
+                "Apply or cancel the visual property draft before exporting.",
+            ));
+            return;
+        }
+        if self.drawio_work.is_some()
+            || self.drawio_review.is_some()
+            || self.visual_asset_work.is_some()
+        {
+            self.message = Some(StudioNotice::error(
+                "Finish or cancel the current Diagram import/export before starting another.",
+            ));
+            return;
+        }
+        let Some(scene) = self.documents.visual_scene().cloned() else {
+            self.message = Some(StudioNotice::error(
+                "There is no active visual scene to export.",
+            ));
+            return;
+        };
+        self.start_drawio_export(ctx, scene, Self::drawio_scope_from_fence(fence));
+    }
+
+    fn publish_drawio_import_copy(
+        &mut self,
+        fence: &DocumentActionFence,
+        ctx: &egui::Context,
+        owner_pass_current: bool,
+    ) {
+        let (scope, source_path, candidate, has_copy) = match self.drawio_review.as_ref() {
+            Some(DrawioWorkflowReview::Import {
+                scope,
+                source_path,
+                candidate,
+                copy_path,
+            }) => (
+                scope.clone(),
+                source_path.clone(),
+                candidate.clone(),
+                copy_path.is_some(),
+            ),
+            _ => {
+                self.message = Some(StudioNotice::error(
+                    "There is no reviewed draw.io import to publish.",
+                ));
+                return;
+            }
+        };
+        if has_copy
+            || !scope.matches(self, fence.owner_viewport_id)
+            || !self.drawio_fence_is_current(fence, ctx, owner_pass_current)
+        {
+            self.message = Some(StudioNotice::error(
+                "The reviewed draw.io candidate is stale or already copied; review it again before publishing.",
+            ));
+            return;
+        }
+        let suggestion = source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| format!("{stem}-imported.mld"))
+            .unwrap_or_else(|| "drawio-import.mld".into());
+        let Some(destination) = self.pick_copy_destination(&suggestion) else {
+            return;
+        };
+        if !self.drawio_fence_is_current(fence, ctx, owner_pass_current)
+            || !scope.matches(self, fence.owner_viewport_id)
+        {
+            self.message = Some(StudioNotice::error(
+                "The active document changed while choosing a destination; no copy was written.",
+            ));
+            return;
+        }
+        if self.drawio_destination_aliases(&destination, Some(&source_path)) {
+            return;
+        }
+        match publish_visual_document_copy(&destination, &candidate.document) {
+            Ok(_) => {
+                if let Some(DrawioWorkflowReview::Import { copy_path, .. }) =
+                    self.drawio_review.as_mut()
+                {
+                    *copy_path = Some(destination.clone());
+                }
+                self.message = Some(StudioNotice::info(format!(
+                    "Created a reviewed Visual copy at {}. The draw.io source and active document remain unchanged.",
+                    destination.display()
+                )));
+            }
+            Err(error) => {
+                self.message = Some(StudioNotice::error(format!(
+                    "Could not publish the Visual copy at {}: {error}",
+                    destination.display()
+                )));
+            }
+        }
+    }
+
+    fn open_drawio_import_copy(
+        &mut self,
+        fence: &DocumentActionFence,
+        ctx: &egui::Context,
+        owner_pass_current: bool,
+    ) {
+        let (scope, path) = match self.drawio_review.as_ref() {
+            Some(DrawioWorkflowReview::Import {
+                scope,
+                copy_path: Some(path),
+                ..
+            }) => (scope.clone(), path.clone()),
+            _ => {
+                self.message = Some(StudioNotice::error(
+                    "Create the reviewed .mld copy before opening it.",
+                ));
+                return;
+            }
+        };
+        if !scope.matches(self, fence.owner_viewport_id)
+            || !self.drawio_fence_is_current(fence, ctx, owner_pass_current)
+        {
+            self.message = Some(StudioNotice::error(
+                "The reviewed Visual copy is stale; review the current document before opening it.",
+            ));
+            return;
+        }
+        match self.documents.request_open(&path) {
+            Ok(outcome) => {
+                self.finish_transition(outcome, false);
+                if outcome == TransitionOutcome::Applied {
+                    self.record_recent_path(&path, "opened");
+                }
+            }
+            Err(error) => {
+                self.show_document_error("open the reviewed Visual copy", Some(&path), error)
+            }
+        }
+    }
+
+    fn publish_drawio_export_review(
+        &mut self,
+        fence: &DocumentActionFence,
+        ctx: &egui::Context,
+        owner_pass_current: bool,
+    ) {
+        let (scope, result) = match self.drawio_review.as_ref() {
+            Some(DrawioWorkflowReview::ExportReady { scope, result }) => {
+                (scope.clone(), result.clone())
+            }
+            _ => {
+                self.message = Some(StudioNotice::error(
+                    "There is no complete draw.io export ready to publish.",
+                ));
+                return;
+            }
+        };
+        if !result.report.issues.is_empty()
+            || result.report.total_issues != 0
+            || !scope.matches(self, fence.owner_viewport_id)
+            || !self.drawio_fence_is_current(fence, ctx, owner_pass_current)
+        {
+            self.message = Some(StudioNotice::error(
+                "The reviewed export is stale or reports unsupported content; no file was written.",
+            ));
+            return;
+        }
+        let suggested_name = self
+            .documents
+            .path()
+            .and_then(Path::file_stem)
+            .and_then(|stem| stem.to_str())
+            .map(|stem| format!("{stem}.drawio"))
+            .unwrap_or_else(|| "diagram.drawio".into());
+        let Some(destination) = self.pick_drawio_destination(&suggested_name) else {
+            return;
+        };
+        if !self.drawio_fence_is_current(fence, ctx, owner_pass_current)
+            || !scope.matches(self, fence.owner_viewport_id)
+        {
+            self.message = Some(StudioNotice::error(
+                "The visual document changed while choosing an export destination; no file was written.",
+            ));
+            return;
+        }
+        if self.drawio_destination_aliases(&destination, None) {
+            return;
+        }
+        match publish_drawio_export(&destination, &result.bytes) {
+            Ok(_) => {
+                self.drawio_review = None;
+                self.message = Some(StudioNotice::info(format!(
+                    "Published draw.io file to {}.",
+                    destination.display()
+                )));
+            }
+            Err(error) => self.message = Some(StudioNotice::error(error.to_string())),
+        }
+    }
+
+    fn drawio_destination_aliases(
+        &mut self,
+        destination: &Path,
+        reviewed_source: Option<&Path>,
+    ) -> bool {
+        for protected in reviewed_source.into_iter().chain(self.documents.path()) {
+            match same_export_destination(protected, destination) {
+                Ok(true) => {
+                    self.message = Some(StudioNotice::error(
+                        "A draw.io destination cannot replace the active native document or reviewed source.",
+                    ));
+                    return true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.message = Some(StudioNotice::error(format!(
+                        "Could not verify that draw.io output is a distinct file: {error}"
+                    )));
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn pick_export_destination(&mut self, format: DiagramExportFormat) -> Option<PathBuf> {
@@ -3435,7 +4223,10 @@ impl DiagramStudioDialog {
         path: PathBuf,
         mut fence: VisualAssetImportFence,
     ) {
-        if self.visual_asset_work.is_some() || self.completed_visual_asset_import.is_some() {
+        if self.visual_asset_work.is_some()
+            || self.completed_visual_asset_import.is_some()
+            || self.drawio_work.is_some()
+        {
             self.message = Some(StudioNotice::error(
                 "Wait for the current image operation to finish before importing another image.",
             ));
@@ -3548,7 +4339,10 @@ impl DiagramStudioDialog {
         scene: &VisualScene,
         revision: u64,
     ) {
-        if self.visual_asset_work.is_some() || self.completed_visual_asset_import.is_some() {
+        if self.visual_asset_work.is_some()
+            || self.completed_visual_asset_import.is_some()
+            || self.drawio_work.is_some()
+        {
             return;
         }
         let assets = scene
@@ -4453,6 +5247,7 @@ impl DiagramStudioDialog {
 
     fn reset_document_presentation(&mut self) {
         self.clear_visual_asset_state();
+        self.retire_drawio_work();
         if let Some(renderer) = &self.renderer {
             renderer.retire(&self.render_document);
         }
@@ -4618,6 +5413,11 @@ impl DiagramStudioDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_set_picker_visual_label_change(&mut self, label: impl Into<String>) {
+        self.test_picker_visual_label_change = Some(label.into());
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_action_rect(&self, name: &str) -> Option<(egui::Rect, egui::Rect)> {
         self.test_action_rects
             .iter()
@@ -4746,6 +5546,14 @@ impl DiagramStudioDialog {
         {
             self.test_body_rendered = true;
         }
+        let drawio_controls_available = self.drawio_work.is_none()
+            && self.visual_asset_work.is_none()
+            && self.completed_visual_asset_import.is_none()
+            && self.drawio_review.is_none();
+        let drawio_review_current = self
+            .drawio_review
+            .as_ref()
+            .is_some_and(|review| review.scope().matches(self, ui.ctx().viewport_id()));
         let Self {
             documents,
             view_mode,
@@ -4771,6 +5579,8 @@ impl DiagramStudioDialog {
             recent_index_status,
             recent_search,
             recent_panel_open,
+            drawio_work,
+            drawio_review,
             #[cfg(test)]
             test_source_editor_id,
             #[cfg(test)]
@@ -4844,7 +5654,6 @@ impl DiagramStudioDialog {
             });
         let base_editing_allowed =
             actions_allowed && !closing_requested && pending_transition.is_none();
-
         if base_editing_allowed
             && !popup_open_at_start
             && pending.is_none()
@@ -4979,6 +5788,23 @@ impl DiagramStudioDialog {
                         test_action_focus_ids.push(("import_mermaid".into(), response.id));
                         if response.clicked() && document_intent.is_none() {
                             *document_intent = Some(DocumentIntent::ImportMermaid);
+                            menu_ui.close();
+                        }
+                        let drawio = menu_ui.add_enabled(
+                            menu_actions_allowed && drawio_controls_available,
+                            egui::Button::new("Draw.io diagram…"),
+                        );
+                        #[cfg(test)]
+                        test_action_rects.push((
+                            "drawio_import".into(),
+                            drawio.rect,
+                            menu_ui.clip_rect(),
+                        ));
+                        if drawio.enabled() {
+                            import_item_ids.push(drawio.id);
+                        }
+                        if drawio.clicked() && document_intent.is_none() {
+                            *document_intent = Some(DocumentIntent::DrawioImport);
                             menu_ui.close();
                         }
                     });
@@ -5245,6 +6071,17 @@ impl DiagramStudioDialog {
                         camera.fit_next = false;
                     }
                 });
+
+                draw_drawio_workflow_panel(
+                    ui,
+                    drawio_work.as_ref(),
+                    drawio_review.as_ref(),
+                    drawio_review_current,
+                    document_actions_allowed,
+                    document_intent,
+                    #[cfg(test)]
+                    test_action_rects,
+                );
 
                 draw_effects.recent_panel = draw_recent_documents(
                     ui,
@@ -5844,6 +6681,10 @@ impl DiagramStudioDialog {
         let projection = visual_presentation.map(|(_, projection)| projection);
         let visual_revision = self.documents.visual_revision().unwrap_or(0);
         let visual_identity = self.render_document.clone();
+        let drawio_review_current = self
+            .drawio_review
+            .as_ref()
+            .is_some_and(|review| review.scope().matches(self, ui.ctx().viewport_id()));
         let mut visual_asset_picker_requested = None;
         if let Some(scene) = scene_snapshot.as_deref() {
             self.sync_visual_asset_scope(
@@ -5941,6 +6782,51 @@ impl DiagramStudioDialog {
                     if viewer.clicked() {
                         effects.open_viewer_requested = true;
                     }
+                    let _drawio_menu = ui.menu_button("Draw.io", |menu_ui| {
+                        let menu_allowed = actions_allowed
+                            && !closing_requested
+                            && pending_transition.is_none()
+                            && pending.is_none()
+                            && !visual_draft_active;
+                        let available = self.drawio_work.is_none()
+                            && self.drawio_review.is_none()
+                            && self.visual_asset_work.is_none()
+                            && self.completed_visual_asset_import.is_none();
+                        let import = menu_ui.add_enabled(
+                            menu_allowed && available,
+                            egui::Button::new("Import diagram…"),
+                        );
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "drawio_import".into(),
+                            import.rect,
+                            menu_ui.clip_rect(),
+                        ));
+                        if import.clicked() && document_intent.is_none() {
+                            *document_intent = Some(DocumentIntent::DrawioImport);
+                            menu_ui.close();
+                        }
+                        let export = menu_ui.add_enabled(
+                            menu_allowed && available,
+                            egui::Button::new("Export diagram…"),
+                        );
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "drawio_export".into(),
+                            export.rect,
+                            menu_ui.clip_rect(),
+                        ));
+                        if export.clicked() && document_intent.is_none() {
+                            *document_intent = Some(DocumentIntent::DrawioExport);
+                            menu_ui.close();
+                        }
+                    });
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "menu_drawio".into(),
+                        _drawio_menu.response.rect,
+                        ui.clip_rect(),
+                    ));
                     for (name, label, intent) in [
                         ("document_new", "New Mermaid", DocumentIntent::New),
                         ("document_new_visual", "New Visual", DocumentIntent::NewVisual),
@@ -5973,7 +6859,9 @@ impl DiagramStudioDialog {
                     }
                     let import_enabled = structural_edits_allowed
                         && self.visual_asset_work.is_none()
-                        && self.completed_visual_asset_import.is_none();
+                        && self.completed_visual_asset_import.is_none()
+                        && self.drawio_work.is_none()
+                        && self.drawio_review.is_none();
                     let add_image = ui.add_enabled(
                         import_enabled,
                         egui::Button::new("Add image…"),
@@ -6000,6 +6888,17 @@ impl DiagramStudioDialog {
                         });
                     }
                 });
+
+                draw_drawio_workflow_panel(
+                    ui,
+                    self.drawio_work.as_ref(),
+                    self.drawio_review.as_ref(),
+                    drawio_review_current,
+                    structural_edits_allowed && !visual_draft_active,
+                    document_intent,
+                    #[cfg(test)]
+                    &mut self.test_action_rects,
+                );
 
                 effects.recent_panel = draw_recent_documents(
                     ui,
@@ -10353,6 +11252,185 @@ fn canvas_shortcuts(
     }
 }
 
+fn draw_drawio_workflow_panel(
+    ui: &mut egui::Ui,
+    work: Option<&PendingDrawioWork>,
+    review: Option<&DrawioWorkflowReview>,
+    review_scope_current: bool,
+    actions_allowed: bool,
+    document_intent: &mut Option<DocumentIntent>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+) {
+    #[cfg(test)]
+    let mut record = |name: &str, response: &egui::Response, clip: egui::Rect| {
+        test_action_rects.push((name.to_owned(), response.rect, clip));
+    };
+    #[cfg(not(test))]
+    let record = |_name: &str, _response: &egui::Response, _clip: egui::Rect| {};
+
+    if let Some(work) = work {
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                let activity = match &work.kind {
+                    DrawioWorkKind::Import { source_path } => format!(
+                        "Reading and reviewing {}…",
+                        source_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("draw.io file")
+                    ),
+                    DrawioWorkKind::Export => "Preparing the committed visual scene…".into(),
+                };
+                ui.label(if work.retired {
+                    "Waiting for a retired draw.io operation to stop; its result will be discarded."
+                } else {
+                    &activity
+                });
+                let cancel = ui.add_enabled(
+                    actions_allowed && !work.retired,
+                    egui::Button::new("Cancel Draw.io"),
+                );
+                record("drawio_cancel", &cancel, ui.clip_rect());
+                if cancel.clicked() && document_intent.is_none() {
+                    *document_intent = Some(DocumentIntent::DrawioCancel);
+                }
+            });
+        });
+        return;
+    }
+
+    let Some(review) = review else {
+        return;
+    };
+    let scope_live = review_scope_current;
+    ui.group(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            match review {
+                DrawioWorkflowReview::Import {
+                    source_path,
+                    candidate,
+                    copy_path,
+                    ..
+                } => {
+                    let scene = candidate.document.scene();
+                    let imported_object_count = scene
+                        .objects
+                        .iter()
+                        .filter(|object| object.id != crate::diagram::TITLE_OBJECT_ID)
+                        .count();
+                    ui.strong("Review draw.io import");
+                    ui.label(format!(
+                        "{} objects in {} layers from {}; source remains unchanged.",
+                        imported_object_count,
+                        scene.layers.len(),
+                        source_path.file_name().and_then(|name| name.to_str()).unwrap_or("draw.io file")
+                    ));
+                    if !scope_live {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(185, 65, 65),
+                            "The active document or owner changed; this candidate cannot be published.",
+                        );
+                    }
+                    if let Some(path) = copy_path {
+                        ui.label(format!("Copy created at {}.", path.display()));
+                        let open = ui.add_enabled(
+                            actions_allowed && scope_live && document_intent.is_none(),
+                            egui::Button::new("Open copy…"),
+                        );
+                        record("drawio_open_copy", &open, ui.clip_rect());
+                        if open.clicked() {
+                            *document_intent = Some(DocumentIntent::DrawioOpenImportCopy);
+                        }
+                    } else {
+                        let publish = ui.add_enabled(
+                            actions_allowed && scope_live && document_intent.is_none(),
+                            egui::Button::new("Create .mld copy…"),
+                        );
+                        record("drawio_publish_import", &publish, ui.clip_rect());
+                        if publish.clicked() {
+                            *document_intent = Some(DocumentIntent::DrawioPublishImport);
+                        }
+                    }
+                }
+                DrawioWorkflowReview::ExportReady { result, .. } => {
+                    ui.strong("Review draw.io export");
+                    ui.label(format!(
+                        "Complete export of the committed visual scene ({} bytes).",
+                        result.bytes.len(),
+                    ));
+                    if !scope_live {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(185, 65, 65),
+                            "The visual document or owner changed; this export cannot be published.",
+                        );
+                    }
+                    let publish = ui.add_enabled(
+                        actions_allowed && scope_live && document_intent.is_none(),
+                        egui::Button::new("Save .drawio…"),
+                    );
+                    record("drawio_publish_export", &publish, ui.clip_rect());
+                    if publish.clicked() {
+                        *document_intent = Some(DocumentIntent::DrawioPublishExport);
+                    }
+                }
+                DrawioWorkflowReview::ExportUnsupported {
+                    reason,
+                    ..
+                } => {
+                    ui.strong("Draw.io export is not available for this visual scene");
+                    ui.label(reason);
+                }
+            }
+            let cancel = ui.add_enabled(
+                actions_allowed && document_intent.is_none(),
+                egui::Button::new("Discard review"),
+            );
+            record("drawio_cancel", &cancel, ui.clip_rect());
+            if cancel.clicked() {
+                *document_intent = Some(DocumentIntent::DrawioCancel);
+            }
+        });
+        match review {
+            DrawioWorkflowReview::Import { candidate, .. } => {
+                draw_drawio_report(ui, &candidate.report)
+            }
+            DrawioWorkflowReview::ExportReady { result, .. } => {
+                draw_drawio_report(ui, &result.report)
+            }
+            DrawioWorkflowReview::ExportUnsupported { report, .. } => {
+                draw_drawio_report(ui, report)
+            }
+        }
+    });
+}
+
+fn draw_drawio_report(ui: &mut egui::Ui, report: &DrawioReport) {
+    if report.total_issues == 0 {
+        ui.label("No unsupported or inferred content was reported.");
+        return;
+    }
+    ui.colored_label(
+        egui::Color32::from_rgb(185, 110, 35),
+        format!(
+            "{} item or property issue(s) require review:",
+            report.total_issues
+        ),
+    );
+    let shown = report.issues.len().min(6);
+    for issue in report.issues.iter().take(shown) {
+        match issue.source_id.as_deref() {
+            Some(source_id) => ui.label(format!("{source_id}: {}", issue.property)),
+            None => ui.label(issue.property),
+        };
+    }
+    let omitted = report.total_issues.saturating_sub(shown);
+    if omitted > 0 {
+        ui.weak(format!(
+            "{omitted} additional issue(s) are omitted from this summary."
+        ));
+    }
+}
+
 fn draw_recent_documents(
     ui: &mut egui::Ui,
     index: Option<&RecentDiagramIndex>,
@@ -10464,6 +11542,37 @@ mod tests {
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         std::fs::write(path, bytes.into_inner()).unwrap();
+    }
+
+    const DRAWIO_WORKFLOW_FIXTURE: &str = "<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"layer\" parent=\"0\" value=\"Layer\"/><mxCell id=\"box\" value=\"Imported box\" style=\"shape=rectangle;\" vertex=\"1\" parent=\"layer\"><mxGeometry x=\"10\" y=\"20\" width=\"100\" height=\"50\" as=\"geometry\"/></mxCell></root></mxGraphModel>";
+
+    fn wait_for_drawio_review(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
+        for _ in 0..200 {
+            frame(dialog, ctx);
+            if dialog.drawio_work.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            dialog.drawio_work.is_none(),
+            "draw.io worker settles within the bounded test wait"
+        );
+        assert!(
+            dialog.drawio_review.is_some(),
+            "worker should produce a review: {:?}",
+            dialog.message.as_ref().map(StudioNotice::text)
+        );
+    }
+
+    fn click_mermaid_drawio_import(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
+        click_action(dialog, ctx, "menu_import");
+        click_action(dialog, ctx, "drawio_import");
+    }
+
+    fn click_visual_drawio_export(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
+        click_action(dialog, ctx, "menu_drawio");
+        click_action(dialog, ctx, "drawio_export");
     }
 
     fn frame(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
@@ -15943,6 +17052,288 @@ mod tests {
             dialog.test_visual_items_painted + dialog.test_visual_items_omitted,
             projected_items
         );
+    }
+
+    #[test]
+    fn diagram_drawio_workflow_import_copy_then_open_uses_dirty_transition() {
+        let directory = tempfile::tempdir().expect("temporary draw.io workflow directory");
+        let active_path = directory.path().join("working.mld");
+        let source_path = directory.path().join("incoming.drawio");
+        let occupied_copy = directory.path().join("occupied.mld");
+        let copy_path = directory.path().join("incoming-imported.mld");
+        std::fs::write(&source_path, DRAWIO_WORKFLOW_FIXTURE.as_bytes())
+            .expect("write bounded draw.io source");
+        let source_bytes = std::fs::read(&source_path).expect("snapshot draw.io source bytes");
+        let occupied_bytes = b"preserve the late collision";
+
+        let mut dialog = initialized_dialog();
+        dialog
+            .documents
+            .save_as(&active_path)
+            .expect("establish active native baseline");
+        let saved_active_bytes = std::fs::read(&active_path).expect("read active baseline");
+        dialog.test_replace_source("flowchart LR\n    A[\"Unsaved working draft\"] --> B\n");
+        let active_source = dialog.test_session().draft().to_owned();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        dialog.test_set_next_file_picker_result(Some(source_path.clone()));
+        click_mermaid_drawio_import(&mut dialog, &ctx);
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        wait_for_drawio_review(&mut dialog, &ctx);
+        assert!(matches!(
+            dialog.drawio_review.as_ref(),
+            Some(DrawioWorkflowReview::Import { source_path: reviewed, copy_path: None, .. })
+                if reviewed == &source_path
+        ));
+        assert_eq!(dialog.documents.path(), Some(active_path.as_path()));
+        assert_eq!(dialog.test_session().draft(), active_source);
+        assert!(dialog.documents.is_dirty());
+
+        std::fs::write(&occupied_copy, occupied_bytes).expect("create target after review");
+        dialog.test_set_next_file_picker_result(Some(occupied_copy.clone()));
+        click_action(&mut dialog, &ctx, "drawio_publish_import");
+        assert_eq!(std::fs::read(&occupied_copy).unwrap(), occupied_bytes);
+        assert!(matches!(
+            dialog.drawio_review.as_ref(),
+            Some(DrawioWorkflowReview::Import {
+                copy_path: None,
+                ..
+            })
+        ));
+
+        dialog.test_set_next_file_picker_result(Some(copy_path.clone()));
+        click_action(&mut dialog, &ctx, "drawio_publish_import");
+        assert!(copy_path.is_file());
+        assert_eq!(std::fs::read(&active_path).unwrap(), saved_active_bytes);
+        assert_eq!(dialog.documents.path(), Some(active_path.as_path()));
+        assert_eq!(dialog.test_session().draft(), active_source);
+        assert!(dialog.documents.is_dirty());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+        assert!(matches!(
+            dialog.drawio_review.as_ref(),
+            Some(DrawioWorkflowReview::Import { copy_path: Some(path), .. }) if path == &copy_path
+        ));
+
+        click_action(&mut dialog, &ctx, "drawio_open_copy");
+        assert!(dialog.documents.pending_transition().is_some());
+        click_action(&mut dialog, &ctx, "decision_cancel");
+        assert!(dialog.documents.pending_transition().is_none());
+        assert_eq!(dialog.documents.path(), Some(active_path.as_path()));
+        assert_eq!(dialog.test_session().draft(), active_source);
+        assert!(dialog.documents.is_dirty());
+
+        click_action(&mut dialog, &ctx, "drawio_open_copy");
+        assert!(dialog.documents.pending_transition().is_some());
+        click_action(&mut dialog, &ctx, "decision_discard");
+        assert_eq!(dialog.documents.path(), Some(copy_path.as_path()));
+        assert_eq!(
+            dialog.documents.authoring_kind(),
+            Some(crate::diagram::DiagramAuthoringKind::Visual)
+        );
+        assert!(dialog.documents.session().is_none());
+        assert_eq!(std::fs::read(&active_path).unwrap(), saved_active_bytes);
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn diagram_drawio_workflow_discard_stale_and_cancel_do_not_publish() {
+        let directory = tempfile::tempdir().expect("temporary draw.io workflow directory");
+        let source_path = directory.path().join("incoming.drawio");
+        let never_published = directory.path().join("never-created.mld");
+        std::fs::write(&source_path, DRAWIO_WORKFLOW_FIXTURE.as_bytes())
+            .expect("write bounded draw.io source");
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let original_source = dialog.test_session().draft().to_owned();
+
+        dialog.test_set_next_file_picker_result(Some(source_path.clone()));
+        click_action(&mut dialog, &ctx, "menu_import");
+        click_action_with_child_discard(&mut dialog, &ctx, "drawio_import");
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert!(dialog.drawio_work.is_none());
+        assert_eq!(dialog.test_session().draft(), original_source);
+        assert!(!never_published.exists());
+
+        dialog.test_set_next_file_picker_result(Some(source_path.clone()));
+        dialog.test_set_picker_source_change(
+            "flowchart LR\n    A[\"Changed during picker\"] --> B\n",
+        );
+        click_mermaid_drawio_import(&mut dialog, &ctx);
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert!(dialog.drawio_work.is_none());
+        assert!(dialog.drawio_review.is_none());
+        assert_ne!(dialog.test_session().draft(), original_source);
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Error(message)) if message.contains("while choosing")
+        ));
+        assert!(!never_published.exists());
+
+        dialog.test_set_next_file_picker_result(Some(source_path));
+        click_mermaid_drawio_import(&mut dialog, &ctx);
+        wait_for_drawio_review(&mut dialog, &ctx);
+        let source_after_import = dialog.test_session().draft().to_owned();
+        click_action(&mut dialog, &ctx, "drawio_cancel");
+        assert!(dialog.drawio_review.is_none());
+        assert!(dialog.drawio_work.is_none());
+        assert_eq!(dialog.test_session().draft(), source_after_import);
+        assert!(!never_published.exists());
+
+        let candidate = import_drawio_xml(DRAWIO_WORKFLOW_FIXTURE.as_bytes()).unwrap();
+        let scope = DrawioWorkflowScope {
+            document: dialog.render_document.clone(),
+            revision: dialog.test_session().revision(),
+            owner_generation: dialog.owner_generation,
+            owner_viewport_id: viewport_id(),
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = sync_channel(1);
+        dialog.drawio_work = Some(PendingDrawioWork {
+            scope,
+            kind: DrawioWorkKind::Import {
+                source_path: directory.path().join("late.drawio"),
+            },
+            cancelled: cancelled.clone(),
+            receiver,
+            retired: false,
+        });
+        click_action(&mut dialog, &ctx, "drawio_cancel");
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(dialog.drawio_work.as_ref().is_some_and(|work| work.retired));
+        sender
+            .send(DrawioWorkResult::Import(Ok(candidate)))
+            .expect("late result is drained from the retired slot");
+        drop(sender);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        assert!(dialog.drawio_work.is_none());
+        assert!(dialog.drawio_review.is_none());
+        assert!(!never_published.exists());
+    }
+
+    #[test]
+    fn diagram_drawio_workflow_export_review_is_atomic_and_preserves_native_document() {
+        let directory = tempfile::tempdir().expect("temporary draw.io export directory");
+        let native_path = directory.path().join("visual.mld");
+        let occupied_path = directory.path().join("occupied.drawio");
+        let output_path = directory.path().join("published.drawio");
+        let occupied_bytes = b"keep existing draw.io bytes";
+        std::fs::write(&occupied_path, occupied_bytes).expect("prepare occupied export target");
+        let mut dialog = initialized_visual_dialog();
+        dialog
+            .documents
+            .replace_visual_label("Committed workflow scene")
+            .expect("set export scene title");
+        dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform {
+                    x: 40.0,
+                    y: 20.0,
+                    width: 120.0,
+                    height: 64.0,
+                    rotation_degrees: 12.0,
+                },
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            })])
+            .expect("add a supported visual object");
+        dialog
+            .documents
+            .save_as(&native_path)
+            .expect("save the active native visual document");
+        let native_bytes = std::fs::read(&native_path).expect("snapshot native bytes");
+        let committed_scene = dialog.documents.visual_scene().unwrap().clone();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        click_visual_drawio_export(&mut dialog, &ctx);
+        wait_for_drawio_review(&mut dialog, &ctx);
+        assert!(matches!(
+            dialog.drawio_review.as_ref(),
+            Some(DrawioWorkflowReview::ExportReady { .. })
+        ));
+        std::fs::write(&occupied_path, occupied_bytes).expect("create collision after review");
+        dialog.test_set_next_file_picker_result(Some(occupied_path.clone()));
+        click_action(&mut dialog, &ctx, "drawio_publish_export");
+        assert_eq!(std::fs::read(&occupied_path).unwrap(), occupied_bytes);
+        assert!(matches!(
+            dialog.drawio_review.as_ref(),
+            Some(DrawioWorkflowReview::ExportReady { .. })
+        ));
+
+        dialog.test_set_next_file_picker_result(Some(output_path.clone()));
+        click_action(&mut dialog, &ctx, "drawio_publish_export");
+        let bytes = std::fs::read(&output_path).expect("accepted export is published");
+        let imported = import_drawio_xml(&bytes).expect("published XML parses in the wire adapter");
+        assert!(imported.document.scene().objects.iter().any(|object| {
+            matches!(
+                &object.kind,
+                VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle
+                }
+            )
+        }));
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &committed_scene);
+        assert_eq!(dialog.documents.path(), Some(native_path.as_path()));
+        assert_eq!(std::fs::read(&native_path).unwrap(), native_bytes);
+        assert!(dialog.drawio_review.is_none());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message)) if message.contains("Published draw.io file")
+        ));
+    }
+
+    #[test]
+    fn diagram_drawio_workflow_visual_change_during_export_picker_prevents_publication() {
+        let directory = tempfile::tempdir().expect("temporary stale draw.io export directory");
+        let destination = directory.path().join("stale.drawio");
+        let mut dialog = initialized_visual_dialog();
+        dialog
+            .documents
+            .replace_visual_label("Review snapshot")
+            .expect("set initial title");
+        let initial_revision = dialog.documents.visual_revision().unwrap();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        click_visual_drawio_export(&mut dialog, &ctx);
+        wait_for_drawio_review(&mut dialog, &ctx);
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_set_picker_visual_label_change("Changed while choosing destination");
+        click_action(&mut dialog, &ctx, "drawio_publish_export");
+
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert_eq!(
+            dialog.documents.visual_revision(),
+            Some(initial_revision + 1)
+        );
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .and_then(|scene| scene.label()),
+            Some("Changed while choosing destination")
+        );
+        assert!(!destination.exists());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Error(message)) if message.contains("while choosing")
+        ));
     }
 
     #[test]

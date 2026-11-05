@@ -1467,16 +1467,22 @@ fn infer_compass_anchor(from: VisualTransform, to: VisualTransform) -> VisualAnc
 pub fn export_drawio_xml(
     document: &VisualDiagramDocument,
 ) -> Result<DrawioExportResult, DrawioWireError> {
-    document
-        .scene()
+    export_drawio_scene(document.scene())
+}
+
+/// Export one committed visual scene without copying its controller history
+/// or saved baseline into a temporary document.
+pub(crate) fn export_drawio_scene(
+    scene: &VisualScene,
+) -> Result<DrawioExportResult, DrawioWireError> {
+    scene
         .validate()
         .map_err(DrawioWireError::InvalidVisualDocument)?;
     let mut result = DrawioExportResult {
         bytes: Vec::new(),
         report: DrawioReport::default(),
     };
-    let exportable_vertices = document
-        .scene()
+    let exportable_vertices = scene
         .objects
         .iter()
         .filter_map(|object| is_exportable_vertex(object).then_some(object.id))
@@ -1485,7 +1491,7 @@ pub fn export_drawio_xml(
     writer.push("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")?;
     writer.push("<mxfile><diagram id=\"page-1\" name=\"Page-1\"><mxGraphModel><root>")?;
     writer.push("<mxCell id=\"0\"/>")?;
-    for layer in &document.scene().layers {
+    for layer in &scene.layers {
         writer.push("<mxCell id=\"")?;
         writer.push(&layer_wire_id(layer.id))?;
         writer.push("\" parent=\"0\" value=\"")?;
@@ -1495,7 +1501,7 @@ pub fn export_drawio_xml(
 
     // mxCell document order is the scene-wide stable stacking order. The parent
     // layer is an independent attribute, so do not regroup objects by layer.
-    for object in &document.scene().objects {
+    for object in &scene.objects {
         if object.id == TITLE_OBJECT_ID && is_inert_title(object) {
             continue;
         }
@@ -1545,7 +1551,7 @@ pub fn export_drawio_xml(
             }
         }
     }
-    if !document.scene().presets.is_empty() {
+    if !scene.presets.is_empty() {
         result.report.add(None, "preset-definitions-not-exported");
     }
     writer.push("</root></mxGraphModel></diagram></mxfile>")?;

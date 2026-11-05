@@ -35,6 +35,7 @@ pub use document::{
     DiagramAuthoringKind, DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
     DiagramSourceCopyOrigin, PendingDiagramTransition, TransitionDecision, TransitionOutcome,
 };
+pub(crate) use drawio::export_drawio_scene;
 pub use drawio::{
     DrawioExportResult, DrawioImportResult, DrawioIssue, DrawioReport, DrawioWireError,
     MAX_DRAWIO_ATTRIBUTE_NAME_BYTES, MAX_DRAWIO_ATTRIBUTE_VALUE_BYTES,
@@ -103,7 +104,10 @@ pub use persistence::{
     DiagramExportPublicationError, DiagramPersistenceError, DiskConflictKind,
     MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile, MermaidImportError,
 };
-pub(crate) use persistence::{duplicate_saved_document, publish_visual_document_copy};
+pub(crate) use persistence::{
+    DrawioFileError, duplicate_saved_document, publish_drawio_export, publish_visual_document_copy,
+    read_drawio_xml_source,
+};
 pub(crate) use recents::RecentDiagramIndex;
 pub use rendering::{
     DiagramFamily, DiagramRenderError, DiagramRenderOutput, RasterImage, RasterSize,
