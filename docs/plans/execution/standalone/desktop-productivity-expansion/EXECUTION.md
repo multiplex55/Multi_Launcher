@@ -24,7 +24,7 @@ Authority: ../../../CODEX_GOAL_DESKTOP_PRODUCTIVITY_EXPANSION.md and companion K
 | C02 | M0-A, M5–M7 | Frozen PARTIAL/BLOCKED; M5 and M7-A accepted, M7-B subset; M6 absent | M5-A18/18, B46/46; M7-A69 distinct and B3/3 | N5 unverified | scoped independent review | final18632f79 pushed |
 | C03 | M0-A, M8–M11 | PARTIAL/BLOCKED; dual authoring, direct canvas and ungrouped draw.io delivered; three frozen increments inactive | scoped evidence below; final M11-B 6/6 | N6/N7 and independent reader unverified | scoped independent review | actual final tip/push in C03 handoff receipt |
 | C04 | M0-A, M12 | PARTIAL/BLOCKED; ordered operation, read-only Shell evidence and saved-list storage accepted; live launch absent | A.1 all21 distinct, B storage9/9 | N8 unverified; Win10 lacks tabs | scoped independent review | actual final tip/push in C04 handoff receipt |
-| C05 | M0-A, M13 | not started | not run | not run | pending | not started |
+| C05 | M0-A, M13 | exact-parent baseline prepared; source not started | not run | N9 unverified | read-only advance planning | initial baseline/push receipt below |
 | C06 | M0-A, M14 | not started | not run | not run | pending | not started |
 | C07 | M0-A, M15–M17 | not started | not run | not run | pending | not started |
 
@@ -827,3 +827,10 @@ Final storage source gate: borrowed compact JSON with capped writer, fixed test 
 M12-B independent storage accepted, `m12-b-list.log` exit0 with 9 exact matches (223.45s command) and `m12-b-run.log` exit0 9/9 (0.925s tests, 27.18s command), no correction. Verified stable create/update/remove/order and ID high-water, exact path spellings/duplicates, immutable launch snapshot, list/name/path/file bounds, malformed/future/unsafe preservation, stale writer and real initial publication race preserving disk and in-memory state. Scoped independent store review and parent capped-write/race inspection complete. No real app-data path, GUI, command/hotkey or native action touched.
 
 C04/ID61 handoff **Partial / Blocked**: M0-A, A.1 and B storage subset accepted; A.2 stops before native mutation, see `stalls/20261105T221741Z.md`. Saved-list editor, live target-bound launch and progress/cancel, command/action/hotkey discoverability and common host remain absent. N8 unverified; inherited capture observer unchanged and not reprobed. This storage/report commit is the actual C04 final handoff; its exact SHA, ancestry/checkpoint and push results go into ignored `C04-handoff.json` after commit, then C05 must create its direct child and own M0-A/push before source. No extra checkout, merge, unrelated changes or unsafe active native code.
+
+## C05/M0-A — Folder size analyzer baseline
+
+- Verified parent branch `feat/explorer-folder-tabs`, actual final tip `064955b4262036b398b3ff27fe737f6d6b82b1f1` (M12-B storage and final record), pushed to matching upstream, clean index/worktree. C04 status **Partial / Blocked** with native launch and launcher integration absent. Exact parent/baseline/checkpoint/report/final SHAs and push in ignored `C04-handoff.json`.
+- Verified intended `origin`, default `origin/master`, no Git operation and no local/tracking/remote C05 branch. Created `feat/folder-size-analyzer` directly at the exact C04 tip in the existing checkout; confirmed initial HEAD equals parent.
+- Docs-only baseline precedes C05 source/build/test. Record actual SHA, direct parent check and one normal initial upstream push after commit. No extra checkout/clone, intermediate merge, or unrelated changes.
+- ID88 scope is read-only progressive folder-size analysis, logical per-entry size, bounded traversal/cancel/partial notices, and launcher/dialog integration. Native N9 remains unverified. A disposable temp tree can establish native metadata accounting separately from the unchanged screenshot observer; no observer reprobe.
