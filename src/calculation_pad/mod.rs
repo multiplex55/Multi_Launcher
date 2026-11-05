@@ -5,6 +5,7 @@
 
 mod document;
 mod examples;
+mod integer;
 mod operators;
 mod persistence;
 mod session;
@@ -16,6 +17,7 @@ pub use document::{
     MAX_NAME_BYTES, MAX_SOURCE_LINES,
 };
 pub(crate) use examples::{CalculationExampleGroup, EXAMPLE_GROUPS};
+pub use integer::{IntegerError, IntegerMode, IntegerSignedness, IntegerWidth, TypedInteger};
 
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,

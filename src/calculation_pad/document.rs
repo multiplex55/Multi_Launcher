@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
 
+use super::integer::TypedInteger;
 use super::operators::{CheckedOperators, ModuloOperators};
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
@@ -200,6 +201,8 @@ pub enum LineOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalculationValue {
     Scalar(f64),
+    /// An exact fixed-width integer result with explicit width and signedness.
+    Integer(TypedInteger),
     PhysicalQuantity {
         value: f64,
         unit: Unit,
@@ -217,6 +220,7 @@ impl CalculationValue {
     pub fn formatted_result(&self) -> Option<String> {
         match self {
             Self::Scalar(value) => format_number(*value),
+            Self::Integer(value) => Some(value.formatted_decimal()),
             Self::PhysicalQuantity { value, unit, .. } => {
                 Some(format!("{} {}", format_number(*value)?, unit.symbol()))
             }
