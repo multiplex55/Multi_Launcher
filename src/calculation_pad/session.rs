@@ -957,6 +957,16 @@ mod tests {
         }
     }
 
+    fn integer(
+        session: &mut CalculationPadSession,
+        line_index: usize,
+    ) -> crate::calculation_pad::TypedInteger {
+        match &session.evaluation().unwrap().lines[line_index].outcome {
+            LineOutcome::Value(CalculationValue::Integer(value)) => *value,
+            other => panic!("expected an integer result on line {line_index}, got {other:?}"),
+        }
+    }
+
     fn saved_path(session: &CalculationPadSession, id: DocumentId) -> PathBuf {
         session
             .store
@@ -1077,6 +1087,37 @@ mod tests {
         assert_eq!(session.revision(), Some(revision + 1));
         assert_eq!(scalar(&mut session, 1), 5.0);
         assert_eq!(session.evaluation_count(), 2);
+    }
+
+    #[test]
+    fn exact_integer_modes_survive_session_cache_edit_undo_and_redo() {
+        let (_directory, _root, mut session) = fixture();
+        session.replace_source("mask = u8(40)\nmask + 1").unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+
+        let initial = integer(&mut session, 1);
+        assert_eq!(initial.formatted_decimal(), "41");
+        assert_eq!(initial.mode().type_name(), "u8");
+        assert_eq!(session.evaluation_count(), 1);
+        assert_eq!(integer(&mut session, 1), initial);
+        assert_eq!(session.evaluation_count(), 1);
+
+        session.replace_line(ids[0], "mask = u8(41)").unwrap();
+        let edited = integer(&mut session, 1);
+        assert_eq!(edited.formatted_decimal(), "42");
+        assert_eq!(edited.mode().type_name(), "u8");
+        assert_eq!(session.line_ids().unwrap().to_vec(), ids);
+        assert_eq!(session.evaluation_count(), 2);
+
+        assert!(session.undo());
+        assert_eq!(integer(&mut session, 1), initial);
+        assert_eq!(session.line_ids().unwrap().to_vec(), ids);
+        assert_eq!(session.evaluation_count(), 3);
+
+        assert!(session.redo());
+        assert_eq!(integer(&mut session, 1), edited);
+        assert_eq!(session.line_ids().unwrap().to_vec(), ids);
+        assert_eq!(session.evaluation_count(), 4);
     }
 
     #[test]

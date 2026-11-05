@@ -13,6 +13,7 @@ use std::ops::Range;
 
 use super::integer::TypedInteger;
 use super::operators::{CheckedOperators, ModuloOperators};
+use super::programmer::{self, ProgrammerError, ProgrammerExpression};
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_LINES: usize = 256;
@@ -315,6 +316,7 @@ pub enum DiagnosticKind {
     NestingTooDeep {
         max_depth: usize,
     },
+    Programmer(ProgrammerError),
     TooManyIdentifiers {
         max_identifiers: usize,
     },
@@ -391,6 +393,7 @@ impl fmt::Display for Diagnostic {
             Kind::NestingTooDeep { max_depth } => {
                 write!(formatter, "expression nesting exceeds {max_depth} levels")
             }
+            Kind::Programmer(error) => error.fmt(formatter),
             Kind::TooManyIdentifiers { max_identifiers } => write!(
                 formatter,
                 "identifier count exceeds the {max_identifiers}-item limit"
@@ -415,7 +418,7 @@ struct PreparedLine {
 enum PreparedStatement {
     Blank,
     Comment,
-    Scalar(PreparedScalar),
+    Expression(PreparedExpression),
     PhysicalConversion(String),
     PhysicalReference {
         destination: Unit,
@@ -429,6 +432,15 @@ enum PreparedStatement {
         destination: NumericBase,
     },
     Invalid,
+}
+
+#[derive(Debug)]
+struct PreparedExpression {
+    scalar: Option<PreparedScalar>,
+    scalar_error: Option<DiagnosticKind>,
+    programmer: Option<ProgrammerExpression>,
+    programmer_error: Option<ProgrammerError>,
+    uses_programmer_syntax: bool,
 }
 
 #[derive(Debug)]
@@ -577,11 +589,49 @@ fn prepare_line(
         };
     }
 
-    let scan = match scan_expression(expression) {
-        Ok(scan) => scan,
-        Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
-    };
-    if total_identifiers.saturating_add(scan.identifiers) > MAX_DEPENDENCIES {
+    let programmer_parse = programmer::parse(expression);
+    if let Some(ProgrammerError::NameTooLong { max_bytes }) = &programmer_parse.error {
+        return PreparedLine::invalid(
+            source_range,
+            assignment_name,
+            DiagnosticKind::NameTooLong {
+                max_bytes: *max_bytes,
+            },
+        );
+    }
+    let scan = scan_expression(expression);
+    if let Err(kind) = &scan {
+        let typed_route_can_win = matches!(kind, DiagnosticKind::PrefixedIntegerTooLarge { .. })
+            && programmer_parse
+                .expression
+                .as_ref()
+                .is_some_and(|programmer| {
+                    programmer_parse.uses_programmer_syntax
+                        || programmer
+                            .references()
+                            .iter()
+                            .any(|(name, braced)| *braced || !is_reserved_name(name))
+                });
+        if !typed_route_can_win {
+            return PreparedLine::invalid(source_range, assignment_name, kind.clone());
+        }
+    }
+    let identifier_count =
+        if programmer_parse.expression.is_some() || programmer_parse.uses_programmer_syntax {
+            programmer_parse.identifier_count
+        } else {
+            scan.as_ref().map_or(0, |scan| scan.identifiers)
+        };
+    if identifier_count > MAX_DEPENDENCIES_PER_LINE {
+        return PreparedLine::invalid(
+            source_range,
+            assignment_name,
+            DiagnosticKind::TooManyIdentifiers {
+                max_identifiers: MAX_DEPENDENCIES_PER_LINE,
+            },
+        );
+    }
+    if total_identifiers.saturating_add(identifier_count) > MAX_DEPENDENCIES {
         return PreparedLine::invalid(
             source_range,
             assignment_name,
@@ -590,7 +640,7 @@ fn prepare_line(
             },
         );
     }
-    *total_identifiers += scan.identifiers;
+    *total_identifiers += identifier_count;
 
     if let Some((source, destination)) = split_to_keyword(expression) {
         if let Some(reference) = parse_simple_reference(source) {
@@ -635,55 +685,84 @@ fn prepare_line(
         };
     }
 
-    let lowered_numbers = match lower_numeric_literals(expression, &scan.numeric_literals) {
-        Ok(lowered) => lowered,
-        Err(kind) => return PreparedLine::invalid(source_range, assignment_name, kind),
-    };
-    let lowered_expression = if scan.uses_mod_function {
-        Cow::Owned(lower_mod_function_calls(lowered_numbers.as_ref()))
-    } else {
-        lowered_numbers
-    };
-    if lowered_expression.len() > MAX_PREPARED_EXPRESSION_BYTES {
-        return PreparedLine::invalid(
-            source_range,
-            assignment_name,
-            DiagnosticKind::PreparedExpressionTooLong {
-                max_bytes: MAX_PREPARED_EXPRESSION_BYTES,
-            },
+    let mut scalar = None;
+    let mut scalar_error = None;
+    match scan {
+        Err(kind) => scalar_error = Some(kind),
+        Ok(scan) => match lower_numeric_literals(expression, &scan.numeric_literals) {
+            Err(kind) => scalar_error = Some(kind),
+            Ok(lowered_numbers) => {
+                let lowered_expression = if scan.uses_mod_function {
+                    Cow::Owned(lower_mod_function_calls(lowered_numbers.as_ref()))
+                } else {
+                    lowered_numbers
+                };
+                if lowered_expression.len() > MAX_PREPARED_EXPRESSION_BYTES {
+                    scalar_error = Some(DiagnosticKind::PreparedExpressionTooLong {
+                        max_bytes: MAX_PREPARED_EXPRESSION_BYTES,
+                    });
+                } else {
+                    let parsed = if scan.uses_remainder || scan.uses_mod_function {
+                        ModuloExpression::parse_wo_compile(lowered_expression.as_ref())
+                            .map(Box::new)
+                            .map(PreparedScalar::Modulo)
+                    } else {
+                        CheckedExpression::parse_wo_compile(lowered_expression.as_ref())
+                            .map(Box::new)
+                            .map(PreparedScalar::Checked)
+                    };
+                    match parsed {
+                        Ok(parsed) => scalar = Some(parsed),
+                        Err(_) => scalar_error = Some(DiagnosticKind::InvalidExpression),
+                    }
+                }
+            }
+        },
+    }
+
+    let programmer = programmer_parse.expression;
+    let uses_programmer_syntax = programmer_parse.uses_programmer_syntax;
+    let programmer_error = programmer_parse.error;
+    if scalar.is_none() && programmer.is_none() {
+        let diagnostic = if uses_programmer_syntax {
+            DiagnosticKind::Programmer(programmer_error.unwrap_or(ProgrammerError::InvalidSyntax))
+        } else {
+            scalar_error.unwrap_or(DiagnosticKind::InvalidExpression)
+        };
+        return PreparedLine::invalid(source_range, assignment_name, diagnostic);
+    }
+
+    let mut references = Vec::new();
+    if let Some(programmer) = &programmer {
+        references.extend(
+            programmer
+                .references()
+                .into_iter()
+                .filter(|(name, braced)| *braced || !is_reserved_name(name))
+                .map(|(name, _)| prepared_reference(&name)),
         );
     }
-    let parsed = if scan.uses_remainder || scan.uses_mod_function {
-        ModuloExpression::parse_wo_compile(lowered_expression.as_ref())
-            .map(Box::new)
-            .map(PreparedScalar::Modulo)
-    } else {
-        CheckedExpression::parse_wo_compile(lowered_expression.as_ref())
-            .map(Box::new)
-            .map(PreparedScalar::Checked)
-    };
-
-    match parsed {
-        Ok(parsed) => {
-            let references = parsed
+    if let Some(scalar) = &scalar {
+        references.extend(
+            scalar
                 .var_names()
                 .iter()
-                .map(|name| prepared_reference(name))
-                .collect();
-            PreparedLine {
-                source_range,
-                assignment_name,
-                statement: PreparedStatement::Scalar(parsed),
-                references,
-                dependencies: Vec::new(),
-                diagnostic: None,
-            }
-        }
-        Err(_) => PreparedLine::invalid(
-            source_range,
-            assignment_name,
-            DiagnosticKind::InvalidExpression,
-        ),
+                .map(|name| prepared_reference(name)),
+        );
+    }
+    PreparedLine {
+        source_range,
+        assignment_name,
+        statement: PreparedStatement::Expression(PreparedExpression {
+            scalar,
+            scalar_error,
+            programmer,
+            programmer_error,
+            uses_programmer_syntax,
+        }),
+        references,
+        dependencies: Vec::new(),
+        diagnostic: None,
     }
 }
 
@@ -1369,6 +1448,7 @@ fn mark_duplicate_assignments(
 
 fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, Vec<usize>>) {
     for line_index in 0..lines.len() {
+        let defer_scalar_diagnostic = defers_scalar_diagnostic(&lines[line_index]);
         for reference_index in 0..lines[line_index].references.len() {
             let reference_name = lines[line_index].references[reference_index].name.clone();
             let target = match lines[line_index].references[reference_index].kind {
@@ -1376,26 +1456,32 @@ fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, 
                     .target_line
                     .filter(|target| *target < lines.len()),
                 ReferenceKind::InvalidRow => {
-                    set_diagnostic_if_missing(
-                        &mut lines[line_index],
-                        DiagnosticKind::UnknownRowReference(reference_name),
-                    );
+                    if !defer_scalar_diagnostic {
+                        set_diagnostic_if_missing(
+                            &mut lines[line_index],
+                            DiagnosticKind::UnknownRowReference(reference_name),
+                        );
+                    }
                     None
                 }
                 ReferenceKind::Named => match definitions.get(&reference_name) {
                     Some(locations) if locations.len() == 1 => Some(locations[0]),
                     Some(_) => {
-                        set_diagnostic_if_missing(
-                            &mut lines[line_index],
-                            DiagnosticKind::DuplicateName(reference_name),
-                        );
+                        if !defer_scalar_diagnostic {
+                            set_diagnostic_if_missing(
+                                &mut lines[line_index],
+                                DiagnosticKind::DuplicateName(reference_name),
+                            );
+                        }
                         None
                     }
                     None => {
-                        set_diagnostic_if_missing(
-                            &mut lines[line_index],
-                            DiagnosticKind::UnknownName(reference_name),
-                        );
+                        if !defer_scalar_diagnostic {
+                            set_diagnostic_if_missing(
+                                &mut lines[line_index],
+                                DiagnosticKind::UnknownName(reference_name),
+                            );
+                        }
                         None
                     }
                 },
@@ -1405,10 +1491,12 @@ fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, 
                 && target.is_none()
             {
                 let name = lines[line_index].references[reference_index].name.clone();
-                set_diagnostic_if_missing(
-                    &mut lines[line_index],
-                    DiagnosticKind::UnknownRowReference(name),
-                );
+                if !defer_scalar_diagnostic {
+                    set_diagnostic_if_missing(
+                        &mut lines[line_index],
+                        DiagnosticKind::UnknownRowReference(name),
+                    );
+                }
             }
             lines[line_index].references[reference_index].target_line = target;
             if let Some(target) = target {
@@ -1418,6 +1506,18 @@ fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, 
         lines[line_index].dependencies.sort_unstable();
         lines[line_index].dependencies.dedup();
     }
+}
+
+fn defers_scalar_diagnostic(line: &PreparedLine) -> bool {
+    matches!(
+        &line.statement,
+        PreparedStatement::Expression(PreparedExpression {
+            programmer: Some(_),
+            scalar_error: Some(_),
+            uses_programmer_syntax: false,
+            ..
+        })
+    )
 }
 
 fn set_diagnostic_if_missing(line: &mut PreparedLine, kind: DiagnosticKind) {
@@ -1474,6 +1574,29 @@ fn evaluate_line(
 ) -> LineOutcome {
     if let Some(diagnostic) = &line.diagnostic {
         return LineOutcome::Error(diagnostic.clone());
+    }
+
+    if let PreparedStatement::Expression(expression) = &line.statement {
+        if defers_scalar_diagnostic(line) {
+            let typed_route_can_win = !line.references.is_empty()
+                && line.references.iter().all(|reference| {
+                    reference
+                        .target_line
+                        .and_then(|dependency| values.get(dependency))
+                        .and_then(Option::as_ref)
+                        .is_some_and(|value| {
+                            matches!(
+                                value,
+                                CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }
+                            )
+                        })
+                });
+            if !typed_route_can_win {
+                if let Some(error) = &expression.scalar_error {
+                    return LineOutcome::Error(Diagnostic::new(error.clone()));
+                }
+            }
+        }
     }
 
     match &line.statement {
@@ -1534,42 +1657,8 @@ fn evaluate_line(
         PreparedStatement::Blank | PreparedStatement::Comment | PreparedStatement::Invalid => {
             unreachable!("non-result line states returned above")
         }
-        PreparedStatement::Scalar(expression) => {
-            let mut variables = Vec::with_capacity(expression.var_names().len());
-            for name in expression.var_names() {
-                let Some(reference) = line
-                    .references
-                    .iter()
-                    .find(|reference| reference.name == *name)
-                else {
-                    return LineOutcome::Error(Diagnostic::new(DiagnosticKind::UnknownName(
-                        name.clone(),
-                    )));
-                };
-                let Some(dependency_line) = reference.target_line else {
-                    return LineOutcome::Error(Diagnostic::new(DiagnosticKind::UnknownName(
-                        name.clone(),
-                    )));
-                };
-                match values.get(dependency_line).and_then(Option::as_ref) {
-                    Some(CalculationValue::Scalar(value)) => variables.push(*value),
-                    Some(_) => {
-                        return LineOutcome::Error(Diagnostic::new(
-                            DiagnosticKind::ExpectedScalar(name.clone()),
-                        ));
-                    }
-                    None => {
-                        return LineOutcome::Error(Diagnostic::new(
-                            DiagnosticKind::DependencyFailed { dependency_line },
-                        ));
-                    }
-                }
-            }
-            match expression.eval(&variables) {
-                Ok(value) if value.is_finite() => Ok(CalculationValue::Scalar(value)),
-                Ok(_) => Err(DiagnosticKind::InvalidArithmetic),
-                Err(_) => Err(DiagnosticKind::InvalidExpression),
-            }
+        PreparedStatement::Expression(expression) => {
+            evaluate_prepared_expression(expression, line, values)
         }
         PreparedStatement::PhysicalConversion(expression) => {
             match unit_conversion::evaluate_conversion(expression) {
@@ -1653,6 +1742,79 @@ fn evaluate_line(
     }
 }
 
+fn evaluate_prepared_expression(
+    expression: &PreparedExpression,
+    line: &PreparedLine,
+    values: &[Option<CalculationValue>],
+) -> Result<CalculationValue, DiagnosticKind> {
+    let has_typed_reference = line.references.iter().any(|reference| {
+        reference
+            .target_line
+            .and_then(|line_index| values.get(line_index))
+            .and_then(Option::as_ref)
+            .is_some_and(|value| {
+                matches!(
+                    value,
+                    CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }
+                )
+            })
+    });
+
+    if expression.uses_programmer_syntax || has_typed_reference {
+        let programmer = expression.programmer.as_ref().ok_or_else(|| {
+            DiagnosticKind::Programmer(
+                expression
+                    .programmer_error
+                    .clone()
+                    .unwrap_or(ProgrammerError::InvalidSyntax),
+            )
+        })?;
+        let mut bindings = HashMap::with_capacity(line.references.len());
+        for reference in &line.references {
+            if let Some(line_index) = reference.target_line {
+                if let Some(Some(value)) = values.get(line_index) {
+                    bindings.insert(reference.name.clone(), value.clone());
+                }
+            }
+        }
+        return programmer
+            .evaluate(&bindings)
+            .map(CalculationValue::Integer)
+            .map_err(DiagnosticKind::Programmer);
+    }
+
+    if let Some(error) = &expression.scalar_error {
+        return Err(error.clone());
+    }
+    let Some(expression) = expression.scalar.as_ref() else {
+        return Err(DiagnosticKind::InvalidExpression);
+    };
+
+    let mut variables = Vec::with_capacity(expression.var_names().len());
+    for name in expression.var_names() {
+        let Some(reference) = line
+            .references
+            .iter()
+            .find(|reference| reference.name == *name)
+        else {
+            return Err(DiagnosticKind::UnknownName(name.clone()));
+        };
+        let Some(dependency_line) = reference.target_line else {
+            return Err(DiagnosticKind::UnknownName(name.clone()));
+        };
+        match values.get(dependency_line).and_then(Option::as_ref) {
+            Some(CalculationValue::Scalar(value)) => variables.push(*value),
+            Some(_) => return Err(DiagnosticKind::ExpectedScalar(name.clone())),
+            None => return Err(DiagnosticKind::DependencyFailed { dependency_line }),
+        }
+    }
+    match expression.eval(&variables) {
+        Ok(value) if value.is_finite() => Ok(CalculationValue::Scalar(value)),
+        Ok(_) => Err(DiagnosticKind::InvalidArithmetic),
+        Err(_) => Err(DiagnosticKind::InvalidExpression),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1660,6 +1822,7 @@ mod tests {
         MAX_DEPENDENCIES, MAX_DEPENDENCIES_PER_LINE, MAX_DOCUMENT_BYTES, MAX_EXPRESSION_BYTES,
         MAX_EXPRESSION_NESTING, MAX_NAME_BYTES, MAX_SOURCE_LINES,
     };
+    use crate::calculation_pad::{ProgrammerError, TypedInteger};
     use crate::common::numeric_base::NumericBase;
     use crate::unit_conversion::{Approximation, ConversionError, Unit};
 
@@ -1694,6 +1857,13 @@ mod tests {
         match value(evaluation, line_index) {
             CalculationValue::Scalar(value) => *value,
             other => panic!("expected a scalar on line {line_index}, got {other:?}"),
+        }
+    }
+
+    fn integer(evaluation: &CalculationEvaluation<'_>, line_index: usize) -> TypedInteger {
+        match value(evaluation, line_index) {
+            CalculationValue::Integer(value) => *value,
+            other => panic!("expected an integer on line {line_index}, got {other:?}"),
         }
     }
 
@@ -2035,6 +2205,250 @@ mod tests {
         assert!(matches!(
             error(&evaluation, 3),
             DiagnosticKind::PrefixedIntegerTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn programmer_integer_operators_are_exact_and_select_explicit_modes() {
+        let source = concat!(
+            "0xFF << 8\r\n",
+            "u8(255) << 1\r\n",
+            "not u8(0)\r\n",
+            "~u8(0)\r\n",
+            "i8(-1) >> 1\r\n",
+            "9007199254740993 & 18446744073709551615\r\n",
+            "u8(0b1100) and 0b1010\r\n",
+            "u8(1) or 2\r\n",
+            "u8(7) xor 3\r\n",
+            "u8(2) ^ 3\r\n",
+            "u8(1) or 2 and 4\r\n",
+            "u8(15) idiv 2\r\n",
+            "u8(15) rem 4\r\n",
+            "u8(15) % 4\r\n",
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+
+        assert_eq!(evaluation.source, source);
+        assert_eq!(integer(&evaluation, 0).formatted_decimal(), "65280");
+        assert_eq!(integer(&evaluation, 0).mode().type_name(), "u64");
+        assert_eq!(integer(&evaluation, 1).formatted_decimal(), "254");
+        assert_eq!(integer(&evaluation, 1).mode().type_name(), "u8");
+        assert_eq!(integer(&evaluation, 2).formatted_decimal(), "255");
+        assert_eq!(integer(&evaluation, 3).formatted_decimal(), "255");
+        assert_eq!(integer(&evaluation, 4).formatted_decimal(), "-1");
+        assert_eq!(integer(&evaluation, 4).mode().type_name(), "i8");
+        assert_eq!(
+            integer(&evaluation, 5).formatted_decimal(),
+            "9007199254740993"
+        );
+        assert_eq!(integer(&evaluation, 6).formatted_decimal(), "8");
+        assert_eq!(integer(&evaluation, 7).formatted_decimal(), "3");
+        assert_eq!(integer(&evaluation, 8).formatted_decimal(), "4");
+        assert_eq!(integer(&evaluation, 9).formatted_decimal(), "8");
+        assert_eq!(integer(&evaluation, 10).formatted_decimal(), "1");
+        assert_eq!(integer(&evaluation, 11).formatted_decimal(), "7");
+        assert_eq!(integer(&evaluation, 12).formatted_decimal(), "3");
+        assert_eq!(integer(&evaluation, 13).formatted_decimal(), "3");
+    }
+
+    #[test]
+    fn programmer_helpers_and_typed_references_keep_integer_modes() {
+        let document = CalculationDocument::new(concat!(
+            "α = u8(41)\n",
+            "α + 1\n",
+            "r1 + 2\n",
+            "rotl(u8(129), 1)\n",
+            "rotr(u8(129), 1)\n",
+            "rotl(u8(129), 255)\n",
+            "rotl(u8(129), 256)\n",
+            "rotr(i8(-1), 128)\n",
+            "popcount(u8(0xb5))\n",
+            "mask(u8(0), 2, 3)\n",
+            "extract(i8(-1), 0, 8)\n",
+        ));
+        let evaluation = document.evaluate();
+
+        assert_eq!(integer(&evaluation, 0).mode().type_name(), "u8");
+        assert_eq!(integer(&evaluation, 1).formatted_decimal(), "42");
+        assert_eq!(integer(&evaluation, 1).mode().type_name(), "u8");
+        assert_eq!(integer(&evaluation, 2).formatted_decimal(), "43");
+        assert_eq!(integer(&evaluation, 2).mode().type_name(), "u8");
+        assert_eq!(integer(&evaluation, 3).bit_pattern(), 3);
+        assert_eq!(integer(&evaluation, 4).bit_pattern(), 192);
+        assert_eq!(integer(&evaluation, 5).bit_pattern(), 192);
+        assert_eq!(integer(&evaluation, 6).bit_pattern(), 129);
+        assert_eq!(integer(&evaluation, 7).formatted_decimal(), "-1");
+        assert_eq!(integer(&evaluation, 8).formatted_decimal(), "5");
+        assert_eq!(integer(&evaluation, 9).bit_pattern(), 0x1c);
+        assert_eq!(integer(&evaluation, 10).formatted_decimal(), "255");
+        assert_eq!(integer(&evaluation, 10).mode().type_name(), "u8");
+    }
+
+    #[test]
+    fn programmer_errors_are_isolated_and_scalar_conversion_is_explicit() {
+        let document = CalculationDocument::new(concat!(
+            "scalar = 2.0\n",
+            "scalar & 1\n",
+            "int(scalar) & 1\n",
+            "u8(2.5)\n",
+            "u8(255) + 1\n",
+            "u8(1) idiv 0\n",
+            "i8(-128) idiv -1\n",
+            "i8(-128) rem -1\n",
+            "u8(1) << 8\n",
+            "u8(1) << -1\n",
+            "u8(1) << u64(8)\n",
+            "u8(1) + i8(1)\n",
+            "u8(1) / 2\n",
+            "distance = 1 m to cm\n",
+            "distance & 1\n",
+            "u8(2) + 3\n",
+        ));
+        let evaluation = document.evaluate();
+
+        assert!(matches!(
+            error(&evaluation, 1),
+            DiagnosticKind::Programmer(ProgrammerError::ExpectedInteger)
+        ));
+        assert_eq!(integer(&evaluation, 2).formatted_decimal(), "0");
+        assert_eq!(integer(&evaluation, 2).mode().type_name(), "i64");
+        assert!(matches!(
+            error(&evaluation, 3),
+            DiagnosticKind::Programmer(ProgrammerError::UnsafeScalarConversion)
+        ));
+        for line in [4, 5, 6, 7, 8, 9, 10, 11] {
+            assert!(matches!(
+                error(&evaluation, line),
+                DiagnosticKind::Programmer(ProgrammerError::Integer(_))
+            ));
+        }
+        assert!(matches!(
+            error(&evaluation, 12),
+            DiagnosticKind::Programmer(ProgrammerError::UnsupportedOperation)
+        ));
+        assert!(matches!(
+            error(&evaluation, 14),
+            DiagnosticKind::Programmer(ProgrammerError::ExpectedInteger)
+        ));
+        assert_eq!(integer(&evaluation, 15).formatted_decimal(), "5");
+    }
+
+    #[test]
+    fn contextual_operator_constructor_and_unicode_names_remain_assignable() {
+        let document = CalculationDocument::new(concat!(
+            "and = 7\n",
+            "and + 1\n",
+            "not = 7\n",
+            "not + 2\n",
+            "not - 2\n",
+            "u8 = 3\n",
+            "u8 + 1\n",
+            "{xor} = 9\n",
+            "{xor} + 1\n",
+            "u8({xor}) & 1\n",
+            "not(u8(0))\n",
+        ));
+        let evaluation = document.evaluate();
+
+        assert_eq!(scalar(&evaluation, 1), 8.0);
+        assert_eq!(scalar(&evaluation, 3), 9.0);
+        assert_eq!(scalar(&evaluation, 4), 5.0);
+        assert_eq!(scalar(&evaluation, 6), 4.0);
+        assert_eq!(scalar(&evaluation, 8), 10.0);
+        assert_eq!(integer(&evaluation, 9).formatted_decimal(), "1");
+        assert_eq!(integer(&evaluation, 10).formatted_decimal(), "255");
+    }
+
+    #[test]
+    fn malformed_and_resource_limited_programmer_expressions_do_not_hide_later_lines() {
+        let malformed = "u8(1) <<\nu8(2) + 3\n";
+        let malformed_document = CalculationDocument::new(malformed);
+        let evaluation = malformed_document.evaluate();
+        assert!(matches!(
+            error(&evaluation, 0),
+            DiagnosticKind::Programmer(ProgrammerError::InvalidSyntax)
+        ));
+        assert_eq!(integer(&evaluation, 1).formatted_decimal(), "5");
+
+        let nested = format!(
+            "{}1 & 1{}",
+            "(".repeat(MAX_EXPRESSION_NESTING + 1),
+            ")".repeat(MAX_EXPRESSION_NESTING + 1)
+        );
+        let nested_document = CalculationDocument::new(nested);
+        let nested_evaluation = nested_document.evaluate();
+        assert!(matches!(
+            error(&nested_evaluation, 0),
+            DiagnosticKind::NestingTooDeep { .. }
+        ));
+
+        let too_many_tokens = format!("1 & 1{}", "+ 1".repeat(130));
+        let token_document = CalculationDocument::new(too_many_tokens);
+        let token_evaluation = token_document.evaluate();
+        assert!(matches!(
+            error(&token_evaluation, 0),
+            DiagnosticKind::Programmer(ProgrammerError::TooManyTokens { .. })
+        ));
+
+        let oversized_name = format!(
+            "u128(0x20000000000001) | {{{}}}",
+            "x".repeat(MAX_NAME_BYTES + 1)
+        );
+        let oversized_document = CalculationDocument::new(oversized_name);
+        let oversized_evaluation = oversized_document.evaluate();
+        assert!(matches!(
+            error(&oversized_evaluation, 0),
+            DiagnosticKind::NameTooLong { .. }
+        ));
+
+        let malformed_literal_document = CalculationDocument::new("missing + 0xG");
+        let malformed_literal = malformed_literal_document.evaluate();
+        assert!(matches!(
+            error(&malformed_literal, 0),
+            DiagnosticKind::InvalidPrefixedInteger { radix: 16 }
+        ));
+    }
+
+    #[test]
+    fn typed_references_can_adopt_large_exact_literals_without_changing_scalar_errors() {
+        let document = CalculationDocument::new(concat!(
+            "wide = u128(9007199254740993)\n",
+            "wide + 0x20000000000001\n",
+            "missing + 0x20000000000001\n",
+        ));
+        let evaluation = document.evaluate();
+
+        assert_eq!(
+            integer(&evaluation, 1).formatted_decimal(),
+            "18014398509481986"
+        );
+        assert_eq!(integer(&evaluation, 1).mode().type_name(), "u128");
+        assert!(matches!(
+            error(&evaluation, 2),
+            DiagnosticKind::PrefixedIntegerTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn integer_constructors_reject_rounded_float_spellings_but_convert_safe_scalar_values() {
+        let document = CalculationDocument::new(concat!(
+            "scalar = 42.0\n",
+            "u8(scalar)\n",
+            "u64(9007199254740993.0)\n",
+            "u8(1.00000000000000001)\n",
+        ));
+        let evaluation = document.evaluate();
+
+        assert_eq!(integer(&evaluation, 1).formatted_decimal(), "42");
+        assert_eq!(integer(&evaluation, 1).mode().type_name(), "u8");
+        assert!(matches!(
+            error(&evaluation, 2),
+            DiagnosticKind::Programmer(ProgrammerError::UnsafeScalarConversion)
+        ));
+        assert!(matches!(
+            error(&evaluation, 3),
+            DiagnosticKind::Programmer(ProgrammerError::UnsafeScalarConversion)
         ));
     }
 

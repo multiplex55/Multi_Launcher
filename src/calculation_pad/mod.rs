@@ -8,6 +8,7 @@ mod examples;
 mod integer;
 mod operators;
 mod persistence;
+mod programmer;
 mod session;
 
 pub use document::{
@@ -18,6 +19,7 @@ pub use document::{
 };
 pub(crate) use examples::{CalculationExampleGroup, EXAMPLE_GROUPS};
 pub use integer::{IntegerError, IntegerMode, IntegerSignedness, IntegerWidth, TypedInteger};
+pub use programmer::ProgrammerError;
 
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,

@@ -58,6 +58,61 @@ operation could otherwise hide them, as in `min(sqrt(-1), 1)`.
 used, `*`, `/`, and `%` group left to right; expressions without these forms
 keep the original operator precedence.
 
+## Exact integer expressions
+
+Programmer expressions use exact fixed-width integers instead of `f64`. They
+are selected by a programmer operator, an integer constructor/helper, or a
+reference to an earlier exact integer result. Untyped programmer expressions
+use `u64`; bare numeric literals adopt the mode selected by a typed operand.
+Available modes are signed and unsigned 8-, 16-, 32-, 64-, and 128-bit
+integers. `int(value)` is a checked signed 64-bit constructor. Width-specific
+constructors such as `u8(value)` and `i128(value)` select their named mode.
+Mixed widths or signedness require an explicit constructor and checked cast.
+
+Decimal and `0x`, `0o`, and `0b` integer literals are parsed exactly from the
+source token. Integer `+`, `-`, `*`, `^`, `idiv`, `rem`, and `%` use checked
+arithmetic; `^` remains exponentiation. `/` remains the scalar division
+operator. Integer bit operations are `&`, `|`, `~`, `and`, `or`, `xor`, and
+`not`; shifts use `<<` and `>>`. Left shifts discard bits above the selected
+width, signed right shifts extend the sign bit, and shift counts must be
+between zero and width minus one. `rotl(value, count)` and
+`rotr(value, count)` rotate modulo the operand width. `popcount(value)` returns
+the number of set bits in the operand's mode. `mask(value, start, count)` makes
+a same-mode field mask, while `extract(value, start, count)` returns the
+selected bits as an unsigned value of the same width. Bit positions count from
+the least-significant bit; empty fields are allowed when their start is at or
+before the width. Prefix `not value` is supported; use `not(value)` or `~value`
+when a signed operand follows.
+
+Programmer precedence from tightest to loosest is: calls and grouping; `^`
+(right-associative and included in prefix operands); unary `+`, `-`, `~`, and
+prefix `not`; multiplicative `*`, `idiv`, `rem`, and `%`; additive `+` and `-`;
+shifts; `&` and `and`; `xor`; then `|` and `or`. All binary operators except
+`^` associate left. `/` is unavailable in typed programmer expressions;
+ordinary scalar `/` keeps its existing behavior.
+
+For example:
+
+```text
+0xFF << 8
+byte = u8(255)
+byte << 1
+not u8(0)
+i8(-1) >> 1
+extract(u8(0xb5), 2, 4)
+```
+
+Exact integer names and `rN` references stay typed in later programmer
+expressions. Scalar results are not implicitly converted. An explicit
+constructor can convert a scalar reference only when its value is finite,
+integral, within the exactly representable scalar integer range, and fits the
+requested mode. Floating-point and scientific-notation literal tokens are
+rejected in integer constructors to prevent decimal rounding. Physical
+quantities cannot be converted to integers. Integer overflow, division by zero,
+invalid shifts, and mode mismatches are line-local diagnostics. This syntax
+does not change scalar expressions: for example, `2 ^ 3` remains scalar unless
+a programmer operator or typed reference selects integer evaluation.
+
 ## Physical quantities
 
 Direct unit conversions use the shared catalog and conversion parser:
@@ -115,6 +170,7 @@ The evaluator checks these bounds before invoking expression or unit parsers:
 | Expression or conversion line | 2,048 UTF-8 bytes |
 | Normalized scalar expression | 8 KiB |
 | Parenthesis nesting | 32 levels |
+| Programmer expression tokens | 256 tokens |
 | Identifier occurrences per line | 64 |
 | Identifier occurrences per document | 512 |
 | Name | 128 UTF-8 bytes |

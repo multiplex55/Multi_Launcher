@@ -249,6 +249,31 @@ impl TypedInteger {
         }
     }
 
+    /// Interprets this value numerically as `i128`, when the value fits.
+    pub const fn as_i128(self) -> Option<i128> {
+        if self.mode.is_signed() {
+            Some(self.signed_value())
+        } else if self.bits <= i128::MAX as u128 {
+            Some(self.bits as i128)
+        } else {
+            None
+        }
+    }
+
+    /// Interprets this value numerically as `u128`, when it is nonnegative.
+    pub const fn as_u128(self) -> Option<u128> {
+        if self.mode.is_signed() {
+            let value = self.signed_value();
+            if value >= 0 {
+                Some(value as u128)
+            } else {
+                None
+            }
+        } else {
+            Some(self.bits)
+        }
+    }
+
     /// Explicit numeric cast. The numeric value must fit in the target mode.
     pub fn checked_cast(self, target: IntegerMode) -> Result<Self, IntegerError> {
         if self.mode.is_signed() {
@@ -486,12 +511,12 @@ impl TypedInteger {
         }
     }
 
-    fn signed_value(self) -> i128 {
+    const fn signed_value(self) -> i128 {
         let width = self.mode.width;
         let sign_bit = 1_u128 << (width.bits() - 1);
         if self.bits & sign_bit == 0 {
             self.bits as i128
-        } else if width == IntegerWidth::Bits128 {
+        } else if matches!(width, IntegerWidth::Bits128) {
             self.bits as i128
         } else {
             (self.bits | !width.bit_mask()) as i128
