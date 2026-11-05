@@ -7,9 +7,10 @@ use super::codec::{
 use super::export::DiagramExportFormat;
 use super::mermaid::MAX_MERMAID_SOURCE_BYTES;
 use super::session::DiagramSession;
+use super::visual::VisualDiagramDocument;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const MAX_DIAGRAM_DOCUMENT_BYTES: usize = MAX_DIAGRAM_SESSION_BYTES;
@@ -470,6 +471,91 @@ impl DiagramDocumentStore {
     }
 }
 
+/// Publish a newly converted visual document without replacing any existing
+/// destination. The returned digest is for the exact bytes atomically copied.
+pub(crate) fn publish_visual_document_copy(
+    path: &Path,
+    document: &VisualDiagramDocument,
+) -> Result<[u8; 32], DiagramPersistenceError> {
+    ensure_mld_extension(path)?;
+    let bytes = encode_document(DiagramFileDocumentRef::Visual(document)).map_err(|source| {
+        DiagramPersistenceError::Codec {
+            operation: "encode",
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    publish_unoccupied_bytes(path, &bytes)
+}
+
+/// Copy an explicitly chosen saved Diagram file byte-for-byte. Decode first
+/// so malformed/future documents cannot be propagated as a duplicate.
+pub(crate) fn duplicate_saved_document(
+    source: &Path,
+    destination: &Path,
+) -> Result<[u8; 32], DiagramPersistenceError> {
+    ensure_mld_extension(destination)?;
+    let bytes = read_required(source)?;
+    decode_document(&bytes).map_err(|source_error| DiagramPersistenceError::Codec {
+        operation: "validate for copy",
+        path: source.to_path_buf(),
+        source: source_error,
+    })?;
+    publish_unoccupied_bytes(destination, &bytes)
+}
+
+fn ensure_mld_extension(path: &Path) -> Result<(), DiagramPersistenceError> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mld"))
+    {
+        Ok(())
+    } else {
+        Err(DiagramPersistenceError::Codec {
+            operation: "publish copy to a path without .mld extension",
+            path: path.to_path_buf(),
+            source: DiagramCodecError::InvalidState(
+                "a native Diagram copy must use the .mld extension".into(),
+            ),
+        })
+    }
+}
+
+fn publish_unoccupied_bytes(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<[u8; 32], DiagramPersistenceError> {
+    ensure_unoccupied(path)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".diagram-copy-")
+        .tempfile_in(parent)
+        .map_err(|source| DiagramPersistenceError::Io {
+            operation: "create copy temporary file",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    temporary
+        .write_all(bytes)
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|source| DiagramPersistenceError::Io {
+            operation: "write copy temporary file",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| DiagramPersistenceError::AtomicWrite {
+            path: path.to_path_buf(),
+            source: anyhow::anyhow!(error.error),
+        })?;
+    Ok(digest(bytes))
+}
+
 fn encode_document_for_path(
     path: &Path,
     document: DiagramFileDocumentRef<'_>,
@@ -562,9 +648,10 @@ mod tests {
     use super::{
         DiagramDocumentStore, DiagramPersistenceError, DiskConflictKind,
         MAX_DIAGRAM_DOCUMENT_BYTES, MAX_MERMAID_SOURCE_BYTES, MermaidFile, MermaidImportError,
+        duplicate_saved_document, publish_visual_document_copy,
     };
     use crate::common::atomic_file::save_atomic;
-    use crate::diagram::DiagramSession;
+    use crate::diagram::{DiagramDocumentController, DiagramSession, VisualDiagramDocument};
     use std::fs;
 
     #[test]
@@ -624,6 +711,40 @@ mod tests {
                 kind: DiskConflictKind::Deleted,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn mermaid_visual_copy_persistence_is_atomic_no_clobber_and_preserves_saved_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.mld");
+        let duplicate = directory.path().join("duplicate.mld");
+        let visual_copy = directory.path().join("visual.mld");
+
+        let mut source_document = DiagramDocumentController::new();
+        source_document
+            .replace_source("flowchart TD\nA[\"Saved\"]\n")
+            .unwrap();
+        source_document.save_as(&source).unwrap();
+        let original_bytes = fs::read(&source).unwrap();
+
+        duplicate_saved_document(&source, &duplicate).expect("publish exact validated copy");
+        assert_eq!(fs::read(&duplicate).unwrap(), original_bytes);
+        assert!(matches!(
+            duplicate_saved_document(&source, &duplicate),
+            Err(DiagramPersistenceError::OccupiedPath(path)) if path == duplicate
+        ));
+
+        publish_visual_document_copy(&visual_copy, &VisualDiagramDocument::new())
+            .expect("publish a new visual document");
+        let loaded = DiagramDocumentStore.open(&visual_copy).unwrap();
+        assert!(matches!(
+            loaded.document,
+            super::super::codec::DiagramFileDocument::Visual(_)
+        ));
+        assert!(matches!(
+            publish_visual_document_copy(&visual_copy, &VisualDiagramDocument::new()),
+            Err(DiagramPersistenceError::OccupiedPath(path)) if path == visual_copy
         ));
     }
 

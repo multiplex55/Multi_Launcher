@@ -11,19 +11,20 @@ use crate::diagram::{
     MAX_DIAGRAM_NODES, MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_PRESET_COMPONENTS,
     MAX_VISUAL_TRANSACTION_OPERATIONS, MermaidFile, NodeId, NodePosition, NodeShape,
     PendingDiagramTransition, Position, PreparedText, PreparedVisualAsset, PreviewState,
-    ProjectedStrokePrimitive, RasterSize, RenderDocumentIdentity, RenderKey, RenderOptions,
-    RendererService, SceneMetrics, ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment,
-    TransitionDecision, TransitionOutcome, VisualAlign, VisualAnchor, VisualAsset, VisualAssetId,
-    VisualColor, VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint,
-    VisualConnectorRoute, VisualDistribution, VisualLineStyle, VisualObject, VisualObjectDraft,
-    VisualObjectId, VisualObjectKind, VisualOperation, VisualPresetDraft, VisualPrimitiveShape,
-    VisualProjectedKind, VisualProjectionError, VisualScene, VisualSceneProjection, VisualShadow,
-    VisualStyle, VisualTransform, VisualTransformMode, build_scene, color_with_opacity,
-    generic_preview_family, is_generic_preview_candidate, preview_visual_transforms,
-    project_visual_scene, visual_canvas_align_selection, visual_canvas_distribute_selection,
-    visual_canvas_hit_test, visual_canvas_marquee_selection, visual_canvas_minimap_layout,
-    visual_canvas_selection_bounds, visual_canvas_selection_handles,
-    visual_canvas_snap_translation_delta,
+    ProjectedStrokePrimitive, RasterSize, RecentDiagramIndex, RenderDocumentIdentity, RenderKey,
+    RenderOptions, RendererService, SceneMetrics, ScenePoint, SceneRect, SessionStatus,
+    TextHorizontalAlignment, TransitionDecision, TransitionOutcome, VisualAlign, VisualAnchor,
+    VisualAsset, VisualAssetId, VisualColor, VisualConnector, VisualConnectorDirection,
+    VisualConnectorEndpoint, VisualConnectorRoute, VisualDistribution, VisualLineStyle,
+    VisualObject, VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation,
+    VisualPresetDraft, VisualPrimitiveShape, VisualProjectedKind, VisualProjectionError,
+    VisualScene, VisualSceneProjection, VisualShadow, VisualStyle, VisualTransform,
+    VisualTransformMode, build_scene, color_with_opacity, duplicate_saved_document,
+    generic_preview_family, is_generic_preview_candidate, mermaid_visual_copy,
+    preview_visual_transforms, project_visual_scene, publish_visual_document_copy,
+    visual_canvas_align_selection, visual_canvas_distribute_selection, visual_canvas_hit_test,
+    visual_canvas_marquee_selection, visual_canvas_minimap_layout, visual_canvas_selection_bounds,
+    visual_canvas_selection_handles, visual_canvas_snap_translation_delta,
 };
 use eframe::egui;
 use std::collections::{BTreeSet, HashMap};
@@ -620,10 +621,22 @@ enum DocumentIntent {
     AutoLayout,
     Save,
     SaveAs,
+    ConvertMermaidCopy,
+    OpenRecent(PathBuf),
+    DuplicateRecent(PathBuf),
     Export(DiagramExportFormat, ExportScale),
     UseSourceInMarkdown(DiagramSourceCopyOrigin),
     Close,
     ResolvePending(TransitionDecision),
+}
+
+impl DocumentIntent {
+    fn requires_action_fence(&self) -> bool {
+        matches!(
+            self,
+            Self::ConvertMermaidCopy | Self::OpenRecent(_) | Self::DuplicateRecent(_)
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -656,6 +669,13 @@ struct DrawBodyEffects {
     visual_canvas_editing_allowed: bool,
     visual_structural_editing_allowed: bool,
     visual_asset_picker_requested: Option<VisualAssetImportFence>,
+    recent_panel: Option<RecentPanelEffects>,
+}
+
+#[derive(Default)]
+struct RecentPanelEffects {
+    open: Option<bool>,
+    search: Option<String>,
 }
 
 struct PendingRootEffects {
@@ -683,6 +703,18 @@ struct PendingRootEffects {
     open_viewer_requested: bool,
     mutation: Option<PendingMutation>,
     document_intent: Option<DocumentIntent>,
+    document_action_fence: Option<DocumentActionFence>,
+    recent_panel: Option<RecentPanelEffects>,
+}
+
+#[derive(Clone)]
+struct DocumentActionFence {
+    document: RenderDocumentIdentity,
+    revision: u64,
+    owner_generation: u64,
+    owner_viewport_id: egui::ViewportId,
+    root_pass: ViewportPassProvenance,
+    owner_pass: Option<ViewportPassProvenance>,
 }
 
 struct PendingViewerEffects {
@@ -723,6 +755,13 @@ pub(crate) struct DiagramStudioDialog {
     pending_viewer_effects: Option<PendingViewerEffects>,
     pending_markdown_source: Option<DiagramMarkdownSource>,
     default_directory: PathBuf,
+    recent_index_path: Option<PathBuf>,
+    recent_index: Option<RecentDiagramIndex>,
+    recent_index_loaded: bool,
+    recent_index_error: Option<String>,
+    recent_index_status: Option<String>,
+    recent_search: String,
+    recent_panel_open: bool,
     view_mode: ViewMode,
     source_preview_split_ratio: f32,
     inspector_canvas_split_ratio: f32,
@@ -859,10 +898,20 @@ impl Default for DiagramStudioDialog {
 
 impl DiagramStudioDialog {
     pub(crate) fn new(root: &crate::platform::app_data::AppDataRoot) -> Self {
-        Self::new_with_directory(root.path().to_path_buf())
+        Self::new_with_recent_index(
+            root.path().to_path_buf(),
+            Some(root.path().join("diagram-recents.json")),
+        )
     }
 
     fn new_with_directory(default_directory: PathBuf) -> Self {
+        Self::new_with_recent_index(default_directory, None)
+    }
+
+    fn new_with_recent_index(
+        default_directory: PathBuf,
+        recent_index_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             open: false,
             owner_generation: 0,
@@ -886,6 +935,13 @@ impl DiagramStudioDialog {
             pending_viewer_effects: None,
             pending_markdown_source: None,
             default_directory,
+            recent_index_path,
+            recent_index: None,
+            recent_index_loaded: false,
+            recent_index_error: None,
+            recent_index_status: None,
+            recent_search: String::new(),
+            recent_panel_open: false,
             view_mode: ViewMode::Split,
             source_preview_split_ratio: DEFAULT_SOURCE_PREVIEW_RATIO,
             inspector_canvas_split_ratio: DEFAULT_INSPECTOR_CANVAS_RATIO,
@@ -1268,6 +1324,7 @@ impl DiagramStudioDialog {
         let mut visual_asset_picker_requested = None;
         let mut open_viewer_requested = false;
         let mut document_intent = None;
+        let mut recent_panel = None;
         let mut body_rendered = false;
         let mut child_modal_open = false;
         let mut child_focused = false;
@@ -1277,6 +1334,13 @@ impl DiagramStudioDialog {
         let mut owner_pass = None;
         let mut owner_pass_accepted = false;
         let owner_generation = self.owner_generation;
+        let action_document = self.render_document.clone();
+        let action_revision = self
+            .documents
+            .session()
+            .map(DiagramSession::revision)
+            .or_else(|| self.documents.visual_revision())
+            .unwrap_or_default();
         self.test_begin_frame();
         ctx.show_viewport_immediate(viewport_id(), viewport_builder(), |child, class| {
             callback_class = class;
@@ -1410,6 +1474,7 @@ impl DiagramStudioDialog {
                     visual_canvas_editing_allowed = effects.visual_canvas_editing_allowed;
                     visual_structural_editing_allowed = effects.visual_structural_editing_allowed;
                     visual_asset_picker_requested = effects.visual_asset_picker_requested;
+                    recent_panel = effects.recent_panel;
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
@@ -1431,6 +1496,7 @@ impl DiagramStudioDialog {
                 visual_canvas_editing_allowed = effects.visual_canvas_editing_allowed;
                 visual_structural_editing_allowed = effects.visual_structural_editing_allowed;
                 visual_asset_picker_requested = effects.visual_asset_picker_requested;
+                recent_panel = effects.recent_panel;
             }
             if body_rendered
                 && pass_authorized
@@ -1547,8 +1613,20 @@ impl DiagramStudioDialog {
         if first_ui_pass {
             let viewport_callback_observed = child_viewport_id.is_some();
             let owner_effects_accepted = child_pass_accepted && !ctx.will_discard();
+            let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+            let document_action_fence = document_intent
+                .as_ref()
+                .filter(|intent| intent.requires_action_fence())
+                .map(|_| DocumentActionFence {
+                    document: action_document,
+                    revision: action_revision,
+                    owner_generation,
+                    owner_viewport_id,
+                    root_pass,
+                    owner_pass,
+                });
             self.pending_root_effects = Some(PendingRootEffects {
-                root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                root_pass,
                 owner_generation,
                 owner_viewport_id,
                 owner_pass,
@@ -1599,6 +1677,10 @@ impl DiagramStudioDialog {
                     .flatten(),
                 document_intent: (child_pass_accepted && document_intent_authorized)
                     .then_some(document_intent)
+                    .flatten(),
+                document_action_fence,
+                recent_panel: (child_pass_accepted && body_rendered)
+                    .then_some(recent_panel)
                     .flatten(),
             });
         }
@@ -2235,6 +2317,17 @@ impl DiagramStudioDialog {
             return false;
         }
         let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
+        if owner_pass_current && let Some(recent_panel) = effects.recent_panel.as_ref() {
+            if let Some(open) = recent_panel.open {
+                self.recent_panel_open = open;
+                if open {
+                    self.ensure_recent_index_loaded();
+                }
+            }
+            if let Some(search) = recent_panel.search.as_ref() {
+                self.recent_search.clone_from(search);
+            }
+        }
         self.process_visual_asset_picker_request(ctx, &effects, owner_pass_current);
         let mut cancel_visual_gesture = false;
         if let Some(gesture) = self.visual_gesture.as_mut() {
@@ -2380,10 +2473,29 @@ impl DiagramStudioDialog {
         }
         let debounce_accepted_source = source_mutation_requested && mutation_succeeded;
         let viewer_was_open = self.viewer_open;
+        let mut document_action_fence = effects.document_action_fence.clone();
+        if source_mutation_requested
+            && mutation_succeeded
+            && let Some(fence) = document_action_fence.as_mut()
+            && fence.document == self.render_document
+            && fence.owner_generation == self.owner_generation
+        {
+            fence.revision = self
+                .documents
+                .session()
+                .map(DiagramSession::revision)
+                .or_else(|| self.documents.visual_revision())
+                .unwrap_or_default();
+        }
         let accepted_close = mutation_succeeded
-            && effects
-                .document_intent
-                .is_some_and(|intent| self.apply_document_intent(intent));
+            && effects.document_intent.is_some_and(|intent| {
+                self.apply_document_intent(
+                    intent,
+                    document_action_fence.as_ref(),
+                    ctx,
+                    owner_pass_current,
+                )
+            });
         let owner_closed_viewer = accepted_close && viewer_was_open;
         if self.open {
             let repaint_target = child_viewport_id.unwrap_or(egui::ViewportId::ROOT);
@@ -2507,7 +2619,23 @@ impl DiagramStudioDialog {
             .map(RendererService::test_counter_snapshot)
     }
 
-    fn apply_document_intent(&mut self, intent: DocumentIntent) -> bool {
+    fn apply_document_intent(
+        &mut self,
+        intent: DocumentIntent,
+        fence: Option<&DocumentActionFence>,
+        ctx: &egui::Context,
+        owner_pass_current: bool,
+    ) -> bool {
+        if intent.requires_action_fence()
+            && !fence.is_some_and(|fence| {
+                self.document_action_fence_is_current(fence, ctx, owner_pass_current)
+            })
+        {
+            self.message = Some(StudioNotice::error(
+                "The Diagram document changed before that action was accepted; try again.",
+            ));
+            return false;
+        }
         if self.documents.authoring_kind() == Some(crate::diagram::DiagramAuthoringKind::Visual)
             && matches!(
                 &intent,
@@ -2569,10 +2697,105 @@ impl DiagramStudioDialog {
                     match self.documents.request_open(&path) {
                         Ok(outcome) => {
                             self.finish_transition(outcome, false);
+                            if outcome == TransitionOutcome::Applied {
+                                self.record_recent_path(&path, "opened");
+                            }
                         }
                         Err(error) => {
                             self.show_document_error("open", Some(&path), error);
                         }
+                    }
+                }
+            }
+            DocumentIntent::ConvertMermaidCopy => {
+                let converted = self
+                    .documents
+                    .session()
+                    .ok_or_else(|| "there is no active Mermaid document".to_owned())
+                    .and_then(|session| {
+                        mermaid_visual_copy(session).map_err(|error| error.to_string())
+                    });
+                let converted = match converted {
+                    Ok(converted) => converted,
+                    Err(error) => {
+                        self.message = Some(StudioNotice::error(format!(
+                            "Could not prepare a visual copy: {error}"
+                        )));
+                        return false;
+                    }
+                };
+                let suggestion = self
+                    .documents
+                    .path()
+                    .and_then(Path::file_stem)
+                    .and_then(|stem| stem.to_str())
+                    .map(|stem| format!("{stem}-visual.mld"))
+                    .unwrap_or_else(|| "diagram-visual.mld".into());
+                let Some(path) = self.pick_copy_destination(&suggestion) else {
+                    return false;
+                };
+                let still_current = fence.is_some_and(|fence| {
+                    self.document_action_fence_is_current(fence, ctx, owner_pass_current)
+                });
+                if !still_current {
+                    self.message = Some(StudioNotice::error(
+                        "The Mermaid source changed while choosing a destination; no copy was written.",
+                    ));
+                    return false;
+                }
+                match publish_visual_document_copy(&path, &converted) {
+                    Ok(_) => {
+                        self.message = Some(StudioNotice::info(format!(
+                            "Created a visual copy at {}. The Mermaid document remains active.",
+                            path.display()
+                        )));
+                        self.record_recent_path(&path, "copied");
+                    }
+                    Err(error) => {
+                        self.message = Some(StudioNotice::error(format!(
+                            "Could not create a visual copy at {}: {error}",
+                            path.display()
+                        )))
+                    }
+                }
+            }
+            DocumentIntent::OpenRecent(path) => match self.documents.request_open(&path) {
+                Ok(outcome) => {
+                    self.finish_transition(outcome, false);
+                    if outcome == TransitionOutcome::Applied {
+                        self.record_recent_path(&path, "opened");
+                    }
+                }
+                Err(error) => self.show_document_error("open", Some(&path), error),
+            },
+            DocumentIntent::DuplicateRecent(source) => {
+                let suggestion = source
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(|stem| format!("{stem}-copy.mld"))
+                    .unwrap_or_else(|| "diagram-copy.mld".into());
+                let Some(destination) = self.pick_copy_destination(&suggestion) else {
+                    return false;
+                };
+                if !fence.is_some_and(|fence| {
+                    self.document_action_fence_is_current(fence, ctx, owner_pass_current)
+                }) {
+                    self.message = Some(StudioNotice::error(
+                        "The active document changed while choosing a destination; no duplicate was written.",
+                    ));
+                    return false;
+                }
+                match duplicate_saved_document(&source, &destination) {
+                    Ok(_) => {
+                        self.message = Some(StudioNotice::info(format!(
+                            "Duplicated {} to {}. The active document was not changed.",
+                            source.display(),
+                            destination.display()
+                        )));
+                        self.record_recent_path(&destination, "copied");
+                    }
+                    Err(error) => {
+                        self.show_document_error("duplicate", Some(&source), error.into())
                     }
                 }
             }
@@ -2614,7 +2837,12 @@ impl DiagramStudioDialog {
                 }
             },
             DocumentIntent::Save => match self.documents.save() {
-                Ok(()) => self.message = Some(StudioNotice::info("Diagram saved.")),
+                Ok(()) => {
+                    self.message = Some(StudioNotice::info("Diagram saved."));
+                    if let Some(path) = self.documents.path().map(Path::to_path_buf) {
+                        self.record_recent_path(&path, "saved");
+                    }
+                }
                 Err(DiagramDocumentError::SaveAsRequired) => {
                     if let Some(path) = self.pick_native_document(true) {
                         self.save_as_to(path);
@@ -2660,23 +2888,49 @@ impl DiagramStudioDialog {
             }
             DocumentIntent::ResolvePending(decision) => {
                 let pending = self.documents.pending_transition().cloned();
+                let path_before_save = self.documents.path().map(Path::to_path_buf);
+                let dirty_before_save = self.documents.is_dirty();
                 match self.documents.resolve_pending(decision) {
                     Ok(outcome) => {
+                        if decision == TransitionDecision::Save
+                            && dirty_before_save
+                            && let Some(path) = path_before_save.as_deref()
+                        {
+                            self.record_recent_path(path, "saved");
+                        }
                         let closes = pending == Some(PendingDiagramTransition::Close);
                         let closed = self.finish_transition(outcome, closes);
+                        if outcome == TransitionOutcome::Applied
+                            && let Some(PendingDiagramTransition::Open(path)) = pending.as_ref()
+                        {
+                            self.record_recent_path(path, "opened");
+                        }
                         accepted_close = closes && closed;
                     }
                     Err(DiagramDocumentError::SaveAsRequired)
                         if decision == TransitionDecision::Save =>
                     {
                         if let Some(path) = self.pick_native_document(true) {
+                            let saved_path = ensure_native_extension(path.clone());
                             accepted_close = match self.documents.resolve_pending_save_as(&path) {
                                 Ok(outcome) => {
+                                    self.record_recent_path(&saved_path, "saved");
                                     let closes = pending == Some(PendingDiagramTransition::Close);
                                     let closed = self.finish_transition(outcome, closes);
+                                    if outcome == TransitionOutcome::Applied
+                                        && let Some(PendingDiagramTransition::Open(open_path)) =
+                                            pending.as_ref()
+                                    {
+                                        self.record_recent_path(open_path, "opened");
+                                    }
                                     closes && closed
                                 }
                                 Err(error) => {
+                                    if self.documents.path() == Some(saved_path.as_path())
+                                        && !self.documents.is_dirty()
+                                    {
+                                        self.record_recent_path(&saved_path, "saved");
+                                    }
                                     self.show_document_error("save", Some(&path), error);
                                     false
                                 }
@@ -2684,6 +2938,14 @@ impl DiagramStudioDialog {
                         }
                     }
                     Err(error) => {
+                        if decision == TransitionDecision::Save
+                            && dirty_before_save
+                            && !self.documents.is_dirty()
+                            && self.documents.path() == path_before_save.as_deref()
+                            && let Some(path) = path_before_save.as_deref()
+                        {
+                            self.record_recent_path(path, "saved");
+                        }
                         self.show_current_document_error("apply the pending document action", error)
                     }
                 }
@@ -2695,7 +2957,10 @@ impl DiagramStudioDialog {
     fn save_as_to(&mut self, path: PathBuf) {
         let path = ensure_native_extension(path);
         match self.documents.save_as(&path) {
-            Ok(()) => self.message = Some(StudioNotice::info(format!("Saved {}.", path.display()))),
+            Ok(()) => {
+                self.message = Some(StudioNotice::info(format!("Saved {}.", path.display())));
+                self.record_recent_path(&path, "saved");
+            }
             Err(error) => {
                 self.show_document_error("save", Some(&path), error);
             }
@@ -2970,6 +3235,107 @@ impl DiagramStudioDialog {
             } else {
                 picker.pick_file()
             }
+        }
+    }
+
+    fn pick_copy_destination(&mut self, _suggested_name: &str) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
+            if let Some(source) = self.test_picker_source_change.take() {
+                let _ = self.documents.replace_source(&source);
+                self.refresh_cache();
+            }
+            return self
+                .test_next_file_picker_result
+                .take()
+                .unwrap_or(None)
+                .map(ensure_native_extension);
+        }
+        #[cfg(not(test))]
+        {
+            let mut picker = rfd::FileDialog::new()
+                .add_filter(
+                    "Diagram Studio document (*.mld)",
+                    &[NATIVE_DIAGRAM_EXTENSION],
+                )
+                .set_file_name(_suggested_name);
+            let directory = self.picker_directory();
+            if directory.is_dir() {
+                picker = picker.set_directory(directory);
+            }
+            picker.save_file().map(ensure_native_extension)
+        }
+    }
+
+    fn document_action_fence_is_current(
+        &self,
+        fence: &DocumentActionFence,
+        ctx: &egui::Context,
+        owner_pass_current: bool,
+    ) -> bool {
+        let current_revision = self
+            .documents
+            .session()
+            .map(DiagramSession::revision)
+            .or_else(|| self.documents.visual_revision())
+            .unwrap_or_default();
+        let owner_origin_matches = match fence.owner_pass {
+            Some(pass) => pass.viewport_id == fence.owner_viewport_id && pass.was_retained(ctx),
+            None => fence.owner_viewport_id == egui::ViewportId::ROOT,
+        };
+        fence.document == self.render_document
+            && fence.revision == current_revision
+            && fence.owner_generation == self.owner_generation
+            && owner_origin_matches
+            && fence.root_pass.was_retained(ctx)
+            && owner_pass_current
+    }
+
+    fn ensure_recent_index_loaded(&mut self) {
+        if self.recent_index_loaded {
+            return;
+        }
+        self.recent_index_loaded = true;
+        self.recent_index = match self.recent_index_path.as_deref() {
+            Some(path) => match RecentDiagramIndex::load(path) {
+                Ok(index) => Some(index),
+                Err(error) => {
+                    self.recent_index_error = Some(error.to_string());
+                    None
+                }
+            },
+            None => Some(RecentDiagramIndex::default()),
+        };
+    }
+
+    fn record_recent_path(&mut self, path: &Path, operation: &str) {
+        self.ensure_recent_index_loaded();
+        if let Some(error) = self.recent_index_error.as_deref() {
+            self.message = Some(StudioNotice::info(format!(
+                "Diagram {operation} succeeded, but the existing recent list was left unchanged: {error}"
+            )));
+            return;
+        }
+        let Some(index) = self.recent_index.as_mut() else {
+            return;
+        };
+        if let Err(error) = index.record(path) {
+            self.recent_index_status = Some(error.to_string());
+            self.message = Some(StudioNotice::info(format!(
+                "Diagram {operation} succeeded, but it could not be added to recents: {error}"
+            )));
+            return;
+        }
+        if let Some(index_path) = self.recent_index_path.as_deref()
+            && let Err(error) = index.save(index_path)
+        {
+            self.recent_index_status = Some(error.to_string());
+            self.message = Some(StudioNotice::info(format!(
+                "Diagram {operation} succeeded, but recents could not be saved: {error}"
+            )));
+        } else {
+            self.recent_index_status = None;
         }
     }
 
@@ -4399,6 +4765,12 @@ impl DiagramStudioDialog {
             drag,
             message,
             focus_source,
+            recent_index,
+            recent_index_loaded,
+            recent_index_error,
+            recent_index_status,
+            recent_search,
+            recent_panel_open,
             #[cfg(test)]
             test_source_editor_id,
             #[cfg(test)]
@@ -4435,6 +4807,9 @@ impl DiagramStudioDialog {
         let document_dirty = documents.is_dirty();
         let can_undo = documents.can_undo();
         let can_redo = documents.can_redo();
+        let can_convert_visual = session.current_graph().is_some_and(|graph| {
+            graph.groups.is_empty() && graph.nodes.iter().all(|node| node.group.is_none())
+        });
         let popup_open_at_start = egui::Popup::is_any_open(ui.ctx());
         let document_actions_allowed = actions_allowed
             && !closing_requested
@@ -4560,6 +4935,28 @@ impl DiagramStudioDialog {
                         if response.clicked() && document_intent.is_none() {
                             *document_intent = Some(DocumentIntent::UseSourceInMarkdown(origin));
                         }
+                    }
+                    let convert = ui.add_enabled(
+                        document_actions_allowed && can_convert_visual,
+                        egui::Button::new("Copy as Visual…"),
+                    );
+                    #[cfg(test)]
+                    {
+                        test_action_rects.push((
+                            "convert_visual_copy".into(),
+                            convert.rect,
+                            ui.clip_rect(),
+                        ));
+                        test_action_enabled.push((
+                            "convert_visual_copy".into(),
+                            document_actions_allowed && can_convert_visual,
+                        ));
+                    }
+                    if convert.clicked() && document_intent.is_none() {
+                        *document_intent = Some(DocumentIntent::ConvertMermaidCopy);
+                    }
+                    if !can_convert_visual {
+                        ui.weak("Visual copy requires a valid native flowchart without groups.");
                     }
                     let mut import_item_ids = Vec::new();
                     let mut import_sizing_pass = false;
@@ -4848,6 +5245,20 @@ impl DiagramStudioDialog {
                         camera.fit_next = false;
                     }
                 });
+
+                draw_effects.recent_panel = draw_recent_documents(
+                    ui,
+                    recent_index.as_ref(),
+                    *recent_index_loaded,
+                    recent_index_error.as_deref(),
+                    recent_index_status.as_deref(),
+                    recent_search,
+                    *recent_panel_open,
+                    document_actions_allowed,
+                    document_intent,
+                    #[cfg(test)]
+                    test_action_rects,
+                );
 
                 let menu_open = active_menu_scope.is_some();
                 let editing_allowed = base_editing_allowed && !menu_open;
@@ -5589,6 +6000,20 @@ impl DiagramStudioDialog {
                         });
                     }
                 });
+
+                effects.recent_panel = draw_recent_documents(
+                    ui,
+                    self.recent_index.as_ref(),
+                    self.recent_index_loaded,
+                    self.recent_index_error.as_deref(),
+                    self.recent_index_status.as_deref(),
+                    &mut self.recent_search,
+                    self.recent_panel_open,
+                    document_actions_allowed,
+                    document_intent,
+                    #[cfg(test)]
+                    &mut self.test_action_rects,
+                );
 
                 let mut label = self.documents.visual_label().unwrap_or_default().to_owned();
                 let label_editor_id = ui.make_persistent_id("diagram-studio-visual-label-editor");
@@ -9928,6 +10353,103 @@ fn canvas_shortcuts(
     }
 }
 
+fn draw_recent_documents(
+    ui: &mut egui::Ui,
+    index: Option<&RecentDiagramIndex>,
+    loaded: bool,
+    load_error: Option<&str>,
+    status: Option<&str>,
+    search: &mut String,
+    expanded: bool,
+    actions_allowed: bool,
+    intent: &mut Option<DocumentIntent>,
+    #[cfg(test)] action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
+) -> Option<RecentPanelEffects> {
+    let toggle = ui.add_enabled(
+        actions_allowed,
+        egui::Button::new(if expanded {
+            "Recent diagrams ▾"
+        } else {
+            "Recent diagrams ▸"
+        }),
+    );
+    #[cfg(test)]
+    action_rects.push(("recent_panel".into(), toggle.rect, ui.clip_rect()));
+    let mut effects = RecentPanelEffects {
+        open: toggle.clicked().then_some(!expanded),
+        search: None,
+    };
+    if !expanded {
+        return effects.open.is_some().then_some(effects);
+    }
+    if !loaded {
+        ui.weak("Loading recent diagrams…");
+        return effects.open.is_some().then_some(effects);
+    }
+    let mut query = search.clone();
+    ui.horizontal(|ui| {
+        ui.label("Find");
+        ui.add_enabled(actions_allowed, egui::TextEdit::singleline(&mut query));
+    });
+    if actions_allowed && query != *search {
+        effects.search = Some(query.clone());
+    }
+    if let Some(error) = load_error {
+        ui.colored_label(
+            egui::Color32::from_rgb(185, 65, 65),
+            format!("Recent list was preserved but could not be read: {error}"),
+        );
+        return (effects.open.is_some() || effects.search.is_some()).then_some(effects);
+    }
+    if let Some(error) = status {
+        ui.weak(format!(
+            "The latest document action succeeded, but recents were not saved: {error}"
+        ));
+    }
+    let rows = index
+        .as_ref()
+        .map(|index| index.matching(&query).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if rows.is_empty() {
+        ui.weak("No recent diagrams match this search.");
+        return (effects.open.is_some() || effects.search.is_some()).then_some(effects);
+    }
+    egui::ScrollArea::vertical()
+        .max_height(170.0)
+        .id_salt("diagram-studio-recents")
+        .show(ui, |ui| {
+            for (_row, path) in rows.iter().enumerate() {
+                ui.push_id(path, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(path.to_string_lossy());
+                        let open = ui.add_enabled(actions_allowed, egui::Button::new("Open"));
+                        #[cfg(test)]
+                        action_rects.push((
+                            format!("recent_open_{_row}"),
+                            open.rect,
+                            ui.clip_rect(),
+                        ));
+                        if open.clicked() && intent.is_none() {
+                            *intent = Some(DocumentIntent::OpenRecent(path.clone()));
+                        }
+                        let duplicate =
+                            ui.add_enabled(actions_allowed, egui::Button::new("Duplicate…"));
+                        #[cfg(test)]
+                        action_rects.push((
+                            format!("recent_duplicate_{_row}"),
+                            duplicate.rect,
+                            ui.clip_rect(),
+                        ));
+                        if duplicate.clicked() && intent.is_none() {
+                            *intent = Some(DocumentIntent::DuplicateRecent(path.clone()));
+                        }
+                    });
+                });
+            }
+        });
+    (effects.open.is_some() || effects.search.is_some()).then_some(effects)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10304,6 +10826,13 @@ mod tests {
         dialog.reset_document_presentation();
         dialog.open();
         dialog
+    }
+
+    fn save_test_diagram(path: &Path, source: &str) -> Vec<u8> {
+        let mut document = DiagramDocumentController::new();
+        document.replace_source(source).unwrap();
+        document.save_as(path).unwrap();
+        std::fs::read(path).unwrap()
     }
 
     fn add_visual_layout_objects(dialog: &mut DiagramStudioDialog) -> Vec<VisualObjectId> {
@@ -15671,5 +16200,201 @@ mod tests {
         assert!(dialog.completed_visual_asset_import.is_none());
         assert!(dialog.documents.visual_scene().unwrap().assets.is_empty());
         assert_eq!(dialog.documents.visual_revision(), Some(revision));
+    }
+
+    #[test]
+    fn mermaid_visual_copy_control_publishes_a_distinct_visual_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let recents_path = directory.path().join("diagram-recents.json");
+        let destination = directory.path().join("flowchart-visual.mld");
+        let source = "flowchart LR\nA[\"東京&#10;Caption\"] -->|stores| B{\"Choice\"}\nB --> C(\"Cached\")\n";
+        let mut dialog = DiagramStudioDialog::new_with_recent_index(
+            directory.path().to_path_buf(),
+            Some(recents_path.clone()),
+        );
+        dialog.test_replace_source(source);
+        dialog.open();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        assert_eq!(
+            dialog.test_action_enabled("convert_visual_copy"),
+            Some(true)
+        );
+        let original_identity = dialog.render_document.clone();
+        let original_revision = dialog.test_session().revision();
+        let original_draft = dialog.test_session().draft().to_owned();
+        click_action_with_child_discard(&mut dialog, &ctx, "convert_visual_copy");
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert!(!destination.exists());
+        assert_eq!(dialog.test_session().draft(), original_draft);
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+
+        click_action(&mut dialog, &ctx, "convert_visual_copy");
+
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert_eq!(dialog.render_document, original_identity);
+        assert_eq!(dialog.test_session().revision(), original_revision);
+        assert_eq!(dialog.test_session().draft(), original_draft);
+        assert!(dialog.documents.is_dirty());
+        assert_eq!(dialog.documents.path(), None);
+        let mut opened = DiagramDocumentController::new();
+        assert_eq!(
+            opened.request_open(&destination).unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(
+            opened.authoring_kind(),
+            Some(crate::diagram::DiagramAuthoringKind::Visual)
+        );
+        assert!(opened.visual_scene().unwrap().objects.len() >= 7);
+        assert_eq!(
+            RecentDiagramIndex::load(&recents_path).unwrap().paths(),
+            [destination]
+        );
+    }
+
+    #[test]
+    fn mermaid_visual_copy_rejects_grouped_sources_and_stale_picker_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut grouped = DiagramStudioDialog::default();
+        grouped.test_replace_source("flowchart TD\nsubgraph G[\"Group\"]\nA\nend\n");
+        grouped.open();
+        frame(&mut grouped, &ctx);
+        assert_eq!(
+            grouped.test_action_enabled("convert_visual_copy"),
+            Some(false)
+        );
+        assert_eq!(grouped.test_file_picker_calls(), 0);
+
+        let destination = directory.path().join("stale-visual.mld");
+        let mut dialog = DiagramStudioDialog::default();
+        dialog.test_replace_source("flowchart TD\nA[\"Before picker\"]\n");
+        dialog.open();
+        dialog.test_set_picker_source_change("flowchart TD\nB[\"After picker\"]\n");
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        click_action(&mut dialog, &ctx, "convert_visual_copy");
+
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert!(
+            !destination.exists(),
+            "stale source must not publish the copy"
+        );
+        assert!(dialog.test_session().draft().contains("After picker"));
+    }
+
+    #[test]
+    fn diagram_recent_panel_and_open_use_accepted_dirty_document_transitions() {
+        let directory = tempfile::tempdir().unwrap();
+        let recents_path = directory.path().join("diagram-recents.json");
+        let target = directory.path().join("target.mld");
+        let other = directory.path().join("other.mld");
+        save_test_diagram(&target, "flowchart TD\nTarget[\"Saved target\"]\n");
+        save_test_diagram(&other, "flowchart LR\nOther[\"Other\"]\n");
+        let mut index = RecentDiagramIndex::default();
+        index.record(&target).unwrap();
+        index.record(&other).unwrap();
+        index.save(&recents_path).unwrap();
+
+        let mut dialog = DiagramStudioDialog::new_with_recent_index(
+            directory.path().to_path_buf(),
+            Some(recents_path),
+        );
+        dialog.test_replace_source("flowchart TD\nUnsaved[\"Keep until decision\"]\n");
+        dialog.open();
+        let ctx = egui::Context::default();
+        click_action_with_child_discard(&mut dialog, &ctx, "recent_panel");
+        assert!(!dialog.recent_panel_open);
+        assert!(
+            !dialog.recent_index_loaded,
+            "a discarded panel pass does not load recents"
+        );
+        click_action(&mut dialog, &ctx, "recent_panel");
+        assert!(dialog.recent_panel_open);
+        assert!(dialog.recent_index_loaded);
+
+        let original = dialog.test_session().draft().to_owned();
+        click_action_with_child_discard(&mut dialog, &ctx, "recent_open_1");
+        assert!(dialog.documents.pending_transition().is_none());
+        assert_eq!(dialog.test_session().draft(), original);
+        click_action(&mut dialog, &ctx, "recent_open_1");
+        assert!(matches!(
+            dialog.documents.pending_transition(),
+            Some(PendingDiagramTransition::Open(path)) if path == &target
+        ));
+        assert_eq!(dialog.test_session().draft(), original);
+        click_action(&mut dialog, &ctx, "decision_discard");
+        assert_eq!(dialog.documents.path(), Some(target.as_path()));
+        assert!(dialog.test_session().draft().contains("Saved target"));
+        assert_eq!(
+            dialog.recent_index.as_ref().unwrap().paths().first(),
+            Some(&target),
+            "the applied open moves its path to the newest position"
+        );
+    }
+
+    #[test]
+    fn diagram_recent_duplicate_preserves_bytes_and_does_not_replace_active_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let recents_path = directory.path().join("diagram-recents.json");
+        let source = directory.path().join("saved-mermaid.mld");
+        let destination = directory.path().join("saved-mermaid-copy.mld");
+        let original_bytes = save_test_diagram(&source, "flowchart TD\nA[\"Saved bytes\"]\n");
+        let mut index = RecentDiagramIndex::default();
+        index.record(&source).unwrap();
+        index.save(&recents_path).unwrap();
+
+        let mut dialog = DiagramStudioDialog::new_with_recent_index(
+            directory.path().to_path_buf(),
+            Some(recents_path.clone()),
+        );
+        dialog.test_replace_source("flowchart LR\nActive[\"Keep active\"]\n");
+        dialog.open();
+        let ctx = egui::Context::default();
+        click_action(&mut dialog, &ctx, "recent_panel");
+        let original_identity = dialog.render_document.clone();
+        let original_revision = dialog.test_session().revision();
+        let original_draft = dialog.test_session().draft().to_owned();
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+
+        click_action(&mut dialog, &ctx, "recent_duplicate_0");
+
+        assert_eq!(std::fs::read(&destination).unwrap(), original_bytes);
+        assert_eq!(dialog.render_document, original_identity);
+        assert_eq!(dialog.test_session().revision(), original_revision);
+        assert_eq!(dialog.test_session().draft(), original_draft);
+        assert!(dialog.documents.pending_transition().is_none());
+        assert_eq!(
+            RecentDiagramIndex::load(&recents_path)
+                .unwrap()
+                .paths()
+                .first(),
+            Some(&destination)
+        );
+    }
+
+    #[test]
+    fn diagram_recent_corrupt_index_is_preserved_after_a_successful_save_as() {
+        let directory = tempfile::tempdir().unwrap();
+        let recents_path = directory.path().join("diagram-recents.json");
+        let document_path = directory.path().join("saved.mld");
+        let corrupt = br#"{"version":99,"paths":["keep this opaque"]}"#.to_vec();
+        std::fs::write(&recents_path, &corrupt).unwrap();
+        let mut dialog = DiagramStudioDialog::new_with_recent_index(
+            directory.path().to_path_buf(),
+            Some(recents_path.clone()),
+        );
+        dialog.test_replace_source("flowchart TD\nA\n");
+
+        dialog.save_as_to(document_path.clone());
+
+        assert!(document_path.is_file());
+        assert_eq!(std::fs::read(&recents_path).unwrap(), corrupt);
+        assert_eq!(dialog.documents.path(), Some(document_path.as_path()));
+        assert!(dialog.message.as_ref().is_some_and(|message| {
+            message
+                .text()
+                .contains("existing recent list was left unchanged")
+        }));
     }
 }

@@ -38,6 +38,10 @@ impl VisualObjectId {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    pub(super) const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -814,6 +818,22 @@ impl VisualDiagramDocument {
             allocator: VisualAllocator::initial(),
             history: VisualHistory::default(),
         }
+    }
+
+    /// Construct a fresh, clean visual document from one completely prepared
+    /// scene. Conversion uses this to avoid manufacturing edit history or
+    /// routing large valid documents through the ordinary GUI operation cap.
+    pub(super) fn from_fresh_scene(scene: VisualScene) -> Result<Self, VisualDocumentError> {
+        let allocator = VisualAllocator::for_scene(&scene);
+        let document = Self {
+            saved_baseline: scene.clone(),
+            current: scene,
+            revision: 0,
+            allocator,
+            history: VisualHistory::default(),
+        };
+        document.validate()?;
+        Ok(document)
     }
 
     pub(super) fn from_legacy_title(

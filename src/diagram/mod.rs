@@ -2,6 +2,7 @@
 
 mod assets;
 mod codec;
+mod conversion;
 mod document;
 mod export;
 mod layout;
@@ -9,6 +10,7 @@ mod mermaid;
 mod mermaid_assistance;
 mod model;
 mod persistence;
+mod recents;
 mod rendering;
 mod scene;
 mod session;
@@ -27,6 +29,7 @@ pub use codec::{
     DIAGRAM_VISUAL_LEGACY_FORMAT_VERSION, DiagramCodecError, MAX_DIAGRAM_SESSION_BYTES,
     MAX_VISUAL_DOCUMENT_TITLE_BYTES, decode_session, encode_session,
 };
+pub(crate) use conversion::mermaid_visual_copy;
 pub use document::{
     DiagramAuthoringKind, DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
     DiagramSourceCopyOrigin, PendingDiagramTransition, TransitionDecision, TransitionOutcome,
@@ -91,6 +94,8 @@ pub use persistence::{
     DiagramExportPublicationError, DiagramPersistenceError, DiskConflictKind,
     MAX_DIAGRAM_DOCUMENT_BYTES, MermaidFile, MermaidImportError,
 };
+pub(crate) use persistence::{duplicate_saved_document, publish_visual_document_copy};
+pub(crate) use recents::RecentDiagramIndex;
 pub use rendering::{
     DiagramFamily, DiagramRenderError, DiagramRenderOutput, RasterImage, RasterSize,
     RenderDocumentIdentity, RenderKey, RenderOptions, RenderTheme, render_mermaid_preview,
