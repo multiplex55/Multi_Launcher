@@ -11,20 +11,32 @@ mod rendering;
 mod scene;
 mod session;
 mod templates;
+mod visual;
 
 pub use codec::{
-    DIAGRAM_SESSION_FORMAT_VERSION, DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION, DiagramCodecError,
-    MAX_DIAGRAM_SESSION_BYTES, MAX_VISUAL_DOCUMENT_TITLE_BYTES, decode_session, encode_session,
+    DIAGRAM_SESSION_FORMAT_VERSION, DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
+    DIAGRAM_VISUAL_LEGACY_FORMAT_VERSION, DiagramCodecError, MAX_DIAGRAM_SESSION_BYTES,
+    MAX_VISUAL_DOCUMENT_TITLE_BYTES, decode_session, encode_session,
 };
 pub use document::{
     DiagramAuthoringKind, DiagramDocumentController, DiagramDocumentError, DiagramSourceCopy,
     DiagramSourceCopyOrigin, PendingDiagramTransition, TransitionDecision, TransitionOutcome,
-    VisualDiagramDocument,
 };
 pub use export::{
     DiagramExportArtifact, DiagramExportError, DiagramExportFormat, DiagramExportWarnings,
     DiagramImageSnapshot, DiagramRenderedImageSnapshot, DiagramSourceSnapshot, MAX_EXPORT_PIXELS,
     MAX_EXPORT_SIDE, MAX_PNG_BYTES, MAX_PREPARED_GLYPHS, MAX_RASTER_PIXEL_VISITS, MAX_SVG_BYTES,
+};
+pub use visual::{
+    DEFAULT_LAYER_ID, MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_DIMENSION, MAX_VISUAL_HISTORY_BYTES,
+    MAX_VISUAL_HISTORY_ENTRIES, MAX_VISUAL_LAYERS, MAX_VISUAL_NAME_BYTES, MAX_VISUAL_OBJECTS,
+    MAX_VISUAL_PRESET_COMPONENTS, MAX_VISUAL_PRESETS, MAX_VISUAL_SCENE_BYTES,
+    MAX_VISUAL_TEXT_BYTES, MAX_VISUAL_TRANSACTION_OPERATIONS, MIN_VISUAL_DIMENSION,
+    TITLE_OBJECT_ID, VisualAssetId, VisualColor, VisualDiagramDocument, VisualDocumentError,
+    VisualLayer, VisualLayerId, VisualLineStyle, VisualObject, VisualObjectDraft, VisualObjectId,
+    VisualObjectKind, VisualOperation, VisualPreset, VisualPresetDraft, VisualPresetId,
+    VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle,
+    VisualTransactionOutcome, VisualTransform,
 };
 
 pub use layout::{DiagramLayoutError, layout_positions};

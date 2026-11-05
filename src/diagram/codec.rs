@@ -5,31 +5,30 @@ use super::model::DiagramDocument;
 use super::session::{
     DiagramSession, EditHistory, HistoryEntry, SessionSnapshot, semantically_equivalent,
 };
+use super::visual::{
+    MAX_VISUAL_HISTORY_ENTRIES, VisualAllocator, VisualDiagramDocument, VisualHistoryEntry,
+    VisualScene,
+};
 use serde::de::{self, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
 
 pub const DIAGRAM_SESSION_FORMAT_VERSION: u32 = 1;
-pub const DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION: u32 = 2;
+pub const DIAGRAM_VISUAL_LEGACY_FORMAT_VERSION: u32 = 2;
+pub const DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION: u32 = 3;
 pub const MAX_DIAGRAM_SESSION_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_VISUAL_DOCUMENT_TITLE_BYTES: usize = 4 * 1024;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct VisualDocumentData {
-    pub title: String,
-    pub revision: u64,
-}
+pub use super::visual::MAX_VISUAL_DOCUMENT_TITLE_BYTES;
 
 #[derive(Debug)]
 pub(super) enum DiagramFileDocument {
     Mermaid(DiagramSession),
-    Visual(VisualDocumentData),
+    Visual(VisualDiagramDocument),
 }
 
 pub(super) enum DiagramFileDocumentRef<'a> {
     Mermaid(&'a DiagramSession),
-    Visual { title: &'a str, revision: u64 },
+    Visual(&'a VisualDiagramDocument),
 }
 
 #[derive(Debug)]
@@ -94,14 +93,26 @@ struct SessionWire {
     history: Vec<HistoryEntry>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyVisualDocumentWire {
+    format_version: u32,
+    authoring_kind: VisualAuthoringKind,
+    revision: u64,
+    #[serde(deserialize_with = "deserialize_visual_title")]
+    title: String,
+}
+
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct VisualDocumentWireRef<'a> {
     format_version: u32,
     authoring_kind: VisualAuthoringKind,
     revision: u64,
-    #[serde(borrow)]
-    title: &'a str,
+    current: &'a VisualScene,
+    allocator: VisualAllocator,
+    undo_len: usize,
+    history: Vec<&'a VisualHistoryEntry>,
 }
 
 #[derive(Deserialize)]
@@ -110,8 +121,11 @@ struct VisualDocumentWire {
     format_version: u32,
     authoring_kind: VisualAuthoringKind,
     revision: u64,
-    #[serde(deserialize_with = "deserialize_visual_title")]
-    title: String,
+    current: VisualScene,
+    allocator: VisualAllocator,
+    undo_len: usize,
+    #[serde(deserialize_with = "deserialize_bounded_visual_history")]
+    history: Vec<VisualHistoryEntry>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -130,17 +144,24 @@ pub(super) fn encode_document(
 ) -> Result<Vec<u8>, DiagramCodecError> {
     match document {
         DiagramFileDocumentRef::Mermaid(session) => encode_session(session),
-        DiagramFileDocumentRef::Visual { title, revision } => {
-            if title.len() > MAX_VISUAL_DOCUMENT_TITLE_BYTES {
-                return Err(DiagramCodecError::InvalidState(format!(
-                    "visual title exceeds the {MAX_VISUAL_DOCUMENT_TITLE_BYTES}-byte limit"
-                )));
-            }
+        DiagramFileDocumentRef::Visual(visual) => {
+            visual
+                .validate()
+                .map_err(|error| DiagramCodecError::InvalidState(error.to_string()))?;
+            let history = visual
+                .history
+                .undo
+                .iter()
+                .chain(visual.history.redo.iter())
+                .collect();
             let wire = VisualDocumentWireRef {
                 format_version: DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
                 authoring_kind: VisualAuthoringKind::Visual,
-                revision,
-                title,
+                revision: visual.revision,
+                current: &visual.current,
+                allocator: visual.allocator,
+                undo_len: visual.history.undo.len(),
+                history,
             };
             let bytes = serde_json::to_vec(&wire).map_err(DiagramCodecError::Serialization)?;
             if bytes.len() > MAX_DIAGRAM_SESSION_BYTES {
@@ -163,6 +184,19 @@ pub(super) fn decode_document(bytes: &[u8]) -> Result<DiagramFileDocument, Diagr
         serde_json::from_slice(bytes).map_err(DiagramCodecError::Malformed)?;
     match header.format_version {
         DIAGRAM_SESSION_FORMAT_VERSION => decode_session(bytes).map(DiagramFileDocument::Mermaid),
+        DIAGRAM_VISUAL_LEGACY_FORMAT_VERSION => {
+            let wire: LegacyVisualDocumentWire =
+                serde_json::from_slice(bytes).map_err(DiagramCodecError::Malformed)?;
+            if wire.format_version != DIAGRAM_VISUAL_LEGACY_FORMAT_VERSION {
+                return Err(DiagramCodecError::InvalidState(
+                    "visual document version changed during decoding".into(),
+                ));
+            }
+            let VisualAuthoringKind::Visual = wire.authoring_kind;
+            VisualDiagramDocument::from_legacy_title(wire.title, wire.revision)
+                .map(DiagramFileDocument::Visual)
+                .map_err(|error| DiagramCodecError::InvalidState(error.to_string()))
+        }
         DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION => {
             let wire: VisualDocumentWire =
                 serde_json::from_slice(bytes).map_err(DiagramCodecError::Malformed)?;
@@ -172,10 +206,15 @@ pub(super) fn decode_document(bytes: &[u8]) -> Result<DiagramFileDocument, Diagr
                 ));
             }
             let VisualAuthoringKind::Visual = wire.authoring_kind;
-            Ok(DiagramFileDocument::Visual(VisualDocumentData {
-                title: wire.title,
-                revision: wire.revision,
-            }))
+            VisualDiagramDocument::from_wire(
+                wire.current,
+                wire.revision,
+                wire.allocator,
+                wire.history,
+                wire.undo_len,
+            )
+            .map(DiagramFileDocument::Visual)
+            .map_err(|error| DiagramCodecError::InvalidState(error.to_string()))
         }
         found => Err(DiagramCodecError::UnsupportedVersion {
             found,
@@ -195,6 +234,47 @@ where
         )));
     }
     Ok(title)
+}
+
+fn deserialize_bounded_visual_history<'de, D>(
+    deserializer: D,
+) -> Result<Vec<VisualHistoryEntry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct HistoryVisitor;
+    impl<'de> serde::de::Visitor<'de> for HistoryVisitor {
+        type Value = Vec<VisualHistoryEntry>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "visual history with at most {MAX_VISUAL_HISTORY_ENTRIES} entries"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut entries = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or(0)
+                    .min(MAX_VISUAL_HISTORY_ENTRIES),
+            );
+            while let Some(entry) = sequence.next_element()? {
+                if entries.len() == MAX_VISUAL_HISTORY_ENTRIES {
+                    return Err(de::Error::custom(format!(
+                        "visual history exceeds the {MAX_VISUAL_HISTORY_ENTRIES}-entry limit"
+                    )));
+                }
+                entries.push(entry);
+            }
+            Ok(entries)
+        }
+    }
+    deserializer.deserialize_seq(HistoryVisitor)
 }
 
 pub fn encode_session(session: &DiagramSession) -> Result<Vec<u8>, DiagramCodecError> {
@@ -476,11 +556,12 @@ fn validate_history_chain(session: &DiagramSession) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DIAGRAM_SESSION_FORMAT_VERSION, DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION, DiagramCodecError,
-        DiagramFileDocument, DiagramFileDocumentRef, DiagramSession, MAX_DIAGRAM_SESSION_BYTES,
+        DIAGRAM_SESSION_FORMAT_VERSION, DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
+        DIAGRAM_VISUAL_LEGACY_FORMAT_VERSION, DiagramCodecError, DiagramFileDocument,
+        DiagramFileDocumentRef, DiagramSession, MAX_DIAGRAM_SESSION_BYTES,
         MAX_VISUAL_DOCUMENT_TITLE_BYTES, decode_document, decode_session, encode_document,
     };
-    use crate::diagram::{GraphOperation, NodeId, PreviewState};
+    use crate::diagram::{GraphOperation, NodeId, PreviewState, VisualDiagramDocument};
 
     fn session_with_history() -> DiagramSession {
         let mut session = DiagramSession::new();
@@ -502,11 +583,8 @@ mod tests {
 
     #[test]
     fn diagram_codec_roundtrips_bounded_visual_documents_with_explicit_kind() {
-        let bytes = encode_document(DiagramFileDocumentRef::Visual {
-            title: "交付計画 — Phase 1",
-            revision: 12,
-        })
-        .unwrap();
+        let visual = VisualDiagramDocument::from_legacy_title("交付計画 — Phase 1", 12).unwrap();
+        let bytes = encode_document(DiagramFileDocumentRef::Visual(&visual)).unwrap();
         let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             wire["format_version"],
@@ -514,20 +592,27 @@ mod tests {
         );
         assert_eq!(wire["authoring_kind"], "visual");
         assert_eq!(wire["revision"], 12);
-        assert_eq!(wire["title"], "交付計画 — Phase 1");
+        assert_eq!(wire["current"]["objects"][0]["id"], 1);
+        assert_eq!(
+            wire["current"]["objects"][0]["kind"]["text"],
+            "交付計画 — Phase 1"
+        );
         match decode_document(&bytes).unwrap() {
             DiagramFileDocument::Visual(visual) => {
-                assert_eq!(visual.title, "交付計画 — Phase 1");
-                assert_eq!(visual.revision, 12);
+                assert_eq!(visual.label(), Some("交付計画 — Phase 1"));
+                assert_eq!(visual.revision(), 12);
             }
             DiagramFileDocument::Mermaid(_) => panic!("visual payload decoded as Mermaid"),
         }
 
+        let mut oversized = VisualDiagramDocument::new();
+        if let super::super::visual::VisualObjectKind::Text { text } =
+            &mut oversized.current.objects[0].kind
+        {
+            *text = "x".repeat(MAX_VISUAL_DOCUMENT_TITLE_BYTES + 1);
+        }
         assert!(matches!(
-            encode_document(DiagramFileDocumentRef::Visual {
-                title: &"x".repeat(MAX_VISUAL_DOCUMENT_TITLE_BYTES + 1),
-                revision: 0,
-            }),
+            encode_document(DiagramFileDocumentRef::Visual(&oversized)),
             Err(DiagramCodecError::InvalidState(_))
         ));
     }
@@ -535,7 +620,7 @@ mod tests {
     #[test]
     fn diagram_codec_rejects_unknown_visual_kinds_malformed_payloads_and_future_versions() {
         let mut visual = serde_json::json!({
-            "format_version": DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
+            "format_version": DIAGRAM_VISUAL_LEGACY_FORMAT_VERSION,
             "authoring_kind": "visual",
             "revision": 0,
             "title": "Canvas"
@@ -560,16 +645,89 @@ mod tests {
             Err(DiagramCodecError::UnsupportedVersion { found: 99, .. })
         ));
 
-        visual["format_version"] = serde_json::json!(DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION);
-        visual["title"] = serde_json::json!("x".repeat(MAX_VISUAL_DOCUMENT_TITLE_BYTES + 1));
+        let mut v3: serde_json::Value = serde_json::from_slice(
+            &encode_document(DiagramFileDocumentRef::Visual(&VisualDiagramDocument::new()))
+                .unwrap(),
+        )
+        .unwrap();
+        v3["current"]["objects"][0]["kind"]["text"] =
+            serde_json::json!("x".repeat(MAX_VISUAL_DOCUMENT_TITLE_BYTES + 1));
         assert!(matches!(
-            decode_document(&serde_json::to_vec(&visual).unwrap()),
-            Err(DiagramCodecError::Malformed(_))
+            decode_document(&serde_json::to_vec(&v3).unwrap()),
+            Err(DiagramCodecError::InvalidState(_))
         ));
 
         assert!(matches!(
             decode_document(&vec![b' '; MAX_DIAGRAM_SESSION_BYTES + 1]),
             Err(DiagramCodecError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn diagram_codec_migrates_frozen_visual_v2_title_to_one_deterministic_text_object() {
+        let frozen = r#"{"format_version":2,"authoring_kind":"visual","revision":12,"title":"Legacy canvas — 保存"}"#;
+        match decode_document(frozen.as_bytes()).unwrap() {
+            DiagramFileDocument::Visual(visual) => {
+                assert_eq!(visual.revision(), 12);
+                assert_eq!(visual.label(), Some("Legacy canvas — 保存"));
+                assert_eq!(visual.scene().objects.len(), 1);
+                assert_eq!(visual.scene().objects[0].id.get(), 1);
+            }
+            DiagramFileDocument::Mermaid(_) => panic!("visual payload decoded as Mermaid"),
+        }
+    }
+
+    #[test]
+    fn diagram_codec_rejects_noop_and_reused_id_visual_history() {
+        let mut base = VisualDiagramDocument::new();
+        let base_value: serde_json::Value = serde_json::from_slice(
+            &encode_document(DiagramFileDocumentRef::Visual(&base)).unwrap(),
+        )
+        .unwrap();
+        base.apply_transaction(&[super::super::visual::VisualOperation::AddObject(
+            super::super::visual::VisualObjectDraft {
+                layer_id: super::super::visual::DEFAULT_LAYER_ID,
+                transform: super::super::visual::VisualTransform::default(),
+                style: super::super::visual::VisualStyle::default(),
+                kind: super::super::visual::VisualObjectKind::Primitive {
+                    shape: super::super::visual::VisualPrimitiveShape::Rectangle,
+                },
+            },
+        )])
+        .unwrap();
+        let with_id_value: serde_json::Value = serde_json::from_slice(
+            &encode_document(DiagramFileDocumentRef::Visual(&base)).unwrap(),
+        )
+        .unwrap();
+
+        let mut no_op = with_id_value.clone();
+        no_op["current"] = base_value["current"].clone();
+        no_op["history"][0]["after"] = no_op["history"][0]["before"].clone();
+        assert!(matches!(
+            decode_document(&serde_json::to_vec(&no_op).unwrap()),
+            Err(DiagramCodecError::InvalidState(_))
+        ));
+
+        let mut reused = with_id_value.clone();
+        reused["revision"] = serde_json::json!(3);
+        reused["undo_len"] = serde_json::json!(3);
+        reused["history"] = serde_json::json!([
+            {
+                "before": base_value["current"],
+                "after": with_id_value["current"]
+            },
+            {
+                "before": with_id_value["current"],
+                "after": base_value["current"]
+            },
+            {
+                "before": base_value["current"],
+                "after": with_id_value["current"]
+            }
+        ]);
+        assert!(matches!(
+            decode_document(&serde_json::to_vec(&reused).unwrap()),
+            Err(DiagramCodecError::InvalidState(_))
         ));
     }
 
