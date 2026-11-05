@@ -36,8 +36,9 @@ pub use document::{
 };
 pub use export::{
     DiagramExportArtifact, DiagramExportError, DiagramExportFormat, DiagramExportWarnings,
-    DiagramImageSnapshot, DiagramRenderedImageSnapshot, DiagramSourceSnapshot, MAX_EXPORT_PIXELS,
-    MAX_EXPORT_SIDE, MAX_PNG_BYTES, MAX_PREPARED_GLYPHS, MAX_RASTER_PIXEL_VISITS, MAX_SVG_BYTES,
+    DiagramImageSnapshot, DiagramRenderedImageSnapshot, DiagramSourceSnapshot,
+    DiagramVisualExportOptions, DiagramVisualSnapshot, MAX_EXPORT_PIXELS, MAX_EXPORT_SIDE,
+    MAX_PNG_BYTES, MAX_PREPARED_GLYPHS, MAX_RASTER_PIXEL_VISITS, MAX_SVG_BYTES,
 };
 pub use visual::{
     DEFAULT_LAYER_ID, MAX_VISUAL_ASSET_BYTES, MAX_VISUAL_ASSET_DIMENSION, MAX_VISUAL_ASSET_PIXELS,

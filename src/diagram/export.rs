@@ -1,21 +1,34 @@
 //! Bounded, current-only Mermaid, SVG, and PNG export from the shared Diagram scene.
 
+use super::assets::decode_visual_asset_payload;
 use super::model::NodeShape;
 use super::persistence::DiagramExportPublicationError;
-use super::rendering::{DiagramRenderOutput, RasterSize, rasterize_output_svg};
+use super::rendering::{DiagramRenderOutput, RasterSize, rasterize_output_svg, unpremultiply_rgba};
 use super::scene::{
-    ArrowHead, CubicBezier, DiagramScene, PreparedText, SceneMetrics, SceneNode, ScenePoint,
-    SceneRect, TextHorizontalAlignment, build_scene,
+    ArrowHead, CubicBezier, DiagramScene, PreparedText, PreparedTextLine, SceneMetrics, SceneNode,
+    ScenePoint, SceneRect, TextHorizontalAlignment, build_scene,
 };
 use super::session::{DiagramSession, PreviewState};
-use ab_glyph::{Font, FontArc, FontRef, FontVec, ScaleFont, point};
+use super::visual::{
+    MAX_VISUAL_ASSET_DIMENSION, VisualAsset, VisualAssetFormat, VisualAssetId, VisualColor,
+    VisualLineStyle, VisualPrimitiveShape, VisualShadow,
+};
+use super::visual_scene::{
+    MAX_VISUAL_PROJECTED_ITEMS, MAX_VISUAL_PROJECTION_COORDINATE_ABS,
+    MAX_VISUAL_TEXT_LINES_PER_SCENE, ProjectedStrokePrimitive, ProjectedVisualItem,
+    VisualProjectedKind, VisualSceneProjection, color_with_opacity,
+};
+use ab_glyph::{Font, FontArc, FontRef, FontVec, OutlineCurve, ScaleFont, point};
+use base64::Engine as _;
 use eframe::egui::{FontDefinitions, FontFamily, FontTweak};
 use image::{ImageEncoder, Rgba, RgbaImage};
+use resvg::{tiny_skia, usvg};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub const MAX_EXPORT_SIDE: u32 = 4_096;
 pub const MAX_EXPORT_PIXELS: u64 = 16_777_216;
@@ -28,6 +41,9 @@ const EXPORT_PADDING: f64 = 24.0;
 const EMPTY_IMAGE_SIDE: u32 = 48;
 const CUBIC_SEGMENTS: usize = 64;
 const STROKE_WIDTH: f64 = 2.0;
+const MAX_VISUAL_EXPORT_DECODED_PIXELS: u64 = MAX_EXPORT_PIXELS / 2;
+const MIN_VISUAL_EXPORT_SCALE: f64 = 0.025;
+const MAX_VISUAL_EXPORT_SCALE: f64 = 8.0;
 
 /// An encoded Diagram artifact. Its payload and metadata are immutable after encoding.
 #[derive(Debug)]
@@ -95,11 +111,31 @@ impl DiagramExportFormat {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DiagramExportWarnings {
     glyph_substitutions: u32,
+    visual_asset_placeholders: u32,
+    visual_truncated_text_items: u32,
+    visual_simplified_dash_paths: u32,
+    visual_connector_route_fallbacks: u32,
 }
 
 impl DiagramExportWarnings {
     pub const fn glyph_substitutions(self) -> u32 {
         self.glyph_substitutions
+    }
+
+    pub const fn visual_asset_placeholders(self) -> u32 {
+        self.visual_asset_placeholders
+    }
+
+    pub const fn visual_truncated_text_items(self) -> u32 {
+        self.visual_truncated_text_items
+    }
+
+    pub const fn visual_simplified_dash_paths(self) -> u32 {
+        self.visual_simplified_dash_paths
+    }
+
+    pub const fn visual_connector_route_fallbacks(self) -> u32 {
+        self.visual_connector_route_fallbacks
     }
 }
 
@@ -191,6 +227,62 @@ impl DiagramImageSnapshot {
         fonts: &FontSet,
     ) -> Result<DiagramExportArtifact, DiagramExportError> {
         encode_png_with_font_set(self, scale, fonts)
+    }
+}
+
+/// Bounds and background for encoding a committed visual projection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiagramVisualExportOptions {
+    /// Export scale in the supported 0.025..=8 range.
+    pub scale: f64,
+    /// `None` preserves transparent output.
+    pub background: Option<VisualColor>,
+}
+
+impl Default for DiagramVisualExportOptions {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            background: None,
+        }
+    }
+}
+
+/// Immutable encoder input tied to one committed visual revision.
+#[derive(Clone, Debug)]
+pub struct DiagramVisualSnapshot {
+    revision: u64,
+    projection: Arc<VisualSceneProjection>,
+}
+
+impl DiagramVisualSnapshot {
+    pub fn capture(revision: u64, projection: Arc<VisualSceneProjection>) -> Self {
+        Self {
+            revision,
+            projection,
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn projection(&self) -> &Arc<VisualSceneProjection> {
+        &self.projection
+    }
+
+    pub fn encode_svg(
+        &self,
+        options: DiagramVisualExportOptions,
+    ) -> Result<DiagramExportArtifact, DiagramExportError> {
+        encode_visual_svg(self, options)
+    }
+
+    pub fn encode_png(
+        &self,
+        options: DiagramVisualExportOptions,
+    ) -> Result<DiagramExportArtifact, DiagramExportError> {
+        encode_visual_png(self, options, default_font_sets()?)
     }
 }
 
@@ -386,6 +478,7 @@ fn encode_png_with_font_set(
         dimensions: Some((transform.width, transform.height)),
         warnings: DiagramExportWarnings {
             glyph_substitutions: text.glyph_substitutions,
+            ..DiagramExportWarnings::default()
         },
     })
 }
@@ -395,6 +488,7 @@ pub enum DiagramExportError {
     PreviewUnavailable(PreviewState),
     Scene(super::scene::SceneError),
     InvalidScale,
+    VisualScaleOutOfRange,
     OutputTooLarge {
         width: u32,
         height: u32,
@@ -407,6 +501,10 @@ pub enum DiagramExportError {
     RasterWorkLimit {
         estimated: u64,
         max: u64,
+    },
+    VisualAssetDecodeLimit {
+        estimated_pixels: u64,
+        max_pixels: u64,
     },
     EncodedSizeLimit {
         format: DiagramExportFormat,
@@ -429,6 +527,9 @@ impl fmt::Display for DiagramExportError {
             }
             Self::Scene(error) => write!(formatter, "cannot prepare Diagram export scene: {error}"),
             Self::InvalidScale => formatter.write_str("export scale must be finite and positive"),
+            Self::VisualScaleOutOfRange => formatter.write_str(
+                "visual export scale must be finite and within the supported 0.025..=8 range",
+            ),
             Self::OutputTooLarge {
                 width,
                 height,
@@ -445,6 +546,13 @@ impl fmt::Display for DiagramExportError {
             Self::RasterWorkLimit { estimated, max } => write!(
                 formatter,
                 "raster export requires {estimated} pixel visits; the limit is {max}"
+            ),
+            Self::VisualAssetDecodeLimit {
+                estimated_pixels,
+                max_pixels,
+            } => write!(
+                formatter,
+                "visual export requires decoding {estimated_pixels} embedded image pixels; the limit is {max_pixels}"
             ),
             Self::EncodedSizeLimit { format, max_bytes } => write!(
                 formatter,
@@ -470,6 +578,1560 @@ impl std::error::Error for DiagramExportError {
             _ => None,
         }
     }
+}
+
+const MAX_VISUAL_EXPORT_VECTOR_OPS: usize = MAX_VISUAL_PROJECTED_ITEMS.saturating_mul(4);
+
+enum VisualExportOp {
+    Vector {
+        fragment: String,
+    },
+    Image {
+        asset_id: VisualAssetId,
+        placement: VisualImagePlacement,
+        bounds: SceneRect,
+        opacity: f64,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct VisualImagePlacement {
+    /// SVG/tiny-skia affine coefficients: x'=a*x+c*y+e, y'=b*x+d*y+f.
+    matrix: [f64; 6],
+}
+
+struct VisualExportAsset {
+    asset: VisualAsset,
+    pixmap: Option<Arc<tiny_skia::Pixmap>>,
+}
+
+struct VisualExportPlan {
+    transform: ExportTransform,
+    ops: Vec<VisualExportOp>,
+    assets: HashMap<VisualAssetId, VisualExportAsset>,
+    asset_order: Vec<VisualAssetId>,
+    asset_indices: HashMap<VisualAssetId, usize>,
+    warnings: DiagramExportWarnings,
+    raster_work: u64,
+    vector_bytes: usize,
+    vector_work: u64,
+    glyph_count: usize,
+}
+
+#[derive(Clone, Copy)]
+enum VisualFragmentMode {
+    Full,
+    ImageBorder,
+    ImagePlaceholder,
+}
+
+fn build_visual_export_plan(
+    snapshot: &DiagramVisualSnapshot,
+    options: DiagramVisualExportOptions,
+    fonts: (&FontSet, &FontSet),
+) -> Result<VisualExportPlan, DiagramExportError> {
+    if !options.scale.is_finite()
+        || !(MIN_VISUAL_EXPORT_SCALE..=MAX_VISUAL_EXPORT_SCALE).contains(&options.scale)
+    {
+        return Err(DiagramExportError::VisualScaleOutOfRange);
+    }
+    let projection = snapshot.projection.as_ref();
+    if projection.items.len() > MAX_VISUAL_PROJECTED_ITEMS {
+        return Err(DiagramExportError::Encode(
+            "visual projection exceeds the export item limit".into(),
+        ));
+    }
+
+    let mut bounds = None;
+    let mut total_lines = 0usize;
+    for item in &projection.items {
+        validate_visual_export_item(item)?;
+        bounds = Some(bounds.map_or(item.bounds, |current: SceneRect| {
+            union_scene_rect(current, item.bounds)
+        }));
+        if let Some(text) = &item.text {
+            total_lines = total_lines.saturating_add(text.lines.len());
+            if total_lines > MAX_VISUAL_TEXT_LINES_PER_SCENE {
+                return Err(DiagramExportError::Encode(
+                    "visual projection exceeds its prepared text line limit".into(),
+                ));
+            }
+        }
+    }
+    let transform = ExportTransform::new(bounds, options.scale)?;
+    let mut plan = VisualExportPlan {
+        transform,
+        ops: Vec::with_capacity(projection.items.len().saturating_mul(2)),
+        assets: HashMap::new(),
+        asset_order: Vec::new(),
+        asset_indices: HashMap::new(),
+        warnings: DiagramExportWarnings::default(),
+        raster_work: 0,
+        vector_bytes: 0,
+        vector_work: 0,
+        glyph_count: 0,
+    };
+    let mut decoded_pixels = 0u64;
+
+    for item in &projection.items {
+        plan.warnings.visual_truncated_text_items = plan
+            .warnings
+            .visual_truncated_text_items
+            .saturating_add(u32::from(item.text_truncated));
+        plan.warnings.visual_simplified_dash_paths = plan
+            .warnings
+            .visual_simplified_dash_paths
+            .saturating_add(u32::from(item.dash_simplified));
+        plan.warnings.visual_connector_route_fallbacks = plan
+            .warnings
+            .visual_connector_route_fallbacks
+            .saturating_add(u32::from(item.route_fallback));
+
+        if item.kind == VisualProjectedKind::MissingImagePlaceholder {
+            plan.warnings.visual_asset_placeholders =
+                plan.warnings.visual_asset_placeholders.saturating_add(1);
+        }
+
+        if item.kind == VisualProjectedKind::Image {
+            if item.outline.len() != 4 {
+                return Err(DiagramExportError::Encode(
+                    "visual image reference requires a four-corner projected outline".into(),
+                ));
+            }
+            let usable_asset = if let Some(asset) = &item.image_asset {
+                ensure_visual_export_asset(&mut plan, asset, &mut decoded_pixels)?
+            } else {
+                false
+            };
+            if usable_asset {
+                push_item_shadow(&mut plan, item, fonts)?;
+                let asset = item.image_asset.as_ref().ok_or_else(|| {
+                    DiagramExportError::Encode("visual image reference lost its asset".into())
+                })?;
+                let placement = image_placement(asset, &item.outline)?;
+                push_visual_image(
+                    &mut plan,
+                    asset.id().clone(),
+                    placement,
+                    item.bounds,
+                    item.style.opacity,
+                )?;
+                push_item_image_border(&mut plan, item, fonts)?;
+            } else {
+                plan.warnings.visual_asset_placeholders =
+                    plan.warnings.visual_asset_placeholders.saturating_add(1);
+                push_item_shadow(&mut plan, item, fonts)?;
+                push_item_fragment(&mut plan, item, fonts, VisualFragmentMode::ImagePlaceholder)?;
+            }
+        } else {
+            if item.kind != VisualProjectedKind::Connector {
+                push_item_shadow(&mut plan, item, fonts)?;
+            }
+            push_item_fragment(&mut plan, item, fonts, VisualFragmentMode::Full)?;
+        }
+    }
+    plan.raster_work = estimate_visual_raster_work(&plan);
+    Ok(plan)
+}
+
+fn validate_visual_export_item(item: &ProjectedVisualItem) -> Result<(), DiagramExportError> {
+    if !valid_export_rect(item.bounds)
+        || !item.style.opacity.is_finite()
+        || !(0.0..=1.0).contains(&item.style.opacity)
+        || !item.style.border_width.is_finite()
+        || item.style.border_width < 0.0
+        || !item.style.font_size.is_finite()
+        || item.style.font_size <= 0.0
+        || !item.text_rotation_degrees.is_finite()
+    {
+        return Err(DiagramExportError::Encode(
+            "visual projection contains invalid geometry or style values".into(),
+        ));
+    }
+    let points = item
+        .outline
+        .iter()
+        .chain(item.details.iter().flatten())
+        .chain(item.open_paths.iter().flatten());
+    if points.into_iter().any(|point| !valid_export_point(*point)) {
+        return Err(DiagramExportError::Encode(
+            "visual projection contains an invalid path coordinate".into(),
+        ));
+    }
+    if let Some(shadow) = item.style.shadow
+        && (!shadow.offset_x.is_finite()
+            || !shadow.offset_y.is_finite()
+            || !shadow.blur.is_finite()
+            || shadow.blur < 0.0)
+    {
+        return Err(DiagramExportError::Encode(
+            "visual projection contains an invalid shadow".into(),
+        ));
+    }
+    if let Some(text) = &item.text
+        && (!text.height.is_finite()
+            || text.height < 0.0
+            || !text.line_height.is_finite()
+            || text.line_height < 0.0
+            || !text.reserved_width.is_finite()
+            || text.reserved_width < 0.0
+            || text
+                .lines
+                .iter()
+                .any(|line| !line.reserved_width.is_finite() || line.reserved_width < 0.0))
+    {
+        return Err(DiagramExportError::Encode(
+            "visual projection contains invalid prepared text geometry".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_export_point(point: ScenePoint) -> bool {
+    point.x.is_finite()
+        && point.y.is_finite()
+        && point.x.abs() <= MAX_VISUAL_PROJECTION_COORDINATE_ABS
+        && point.y.abs() <= MAX_VISUAL_PROJECTION_COORDINATE_ABS
+}
+
+fn valid_export_rect(rect: SceneRect) -> bool {
+    valid_export_point(rect.min)
+        && valid_export_point(rect.max)
+        && rect.max.x >= rect.min.x
+        && rect.max.y >= rect.min.y
+}
+
+fn union_scene_rect(left: SceneRect, right: SceneRect) -> SceneRect {
+    SceneRect {
+        min: ScenePoint {
+            x: left.min.x.min(right.min.x),
+            y: left.min.y.min(right.min.y),
+        },
+        max: ScenePoint {
+            x: left.max.x.max(right.max.x),
+            y: left.max.y.max(right.max.y),
+        },
+    }
+}
+
+fn ensure_visual_export_asset(
+    plan: &mut VisualExportPlan,
+    asset: &VisualAsset,
+    decoded_pixels: &mut u64,
+) -> Result<bool, DiagramExportError> {
+    if let Some(existing) = plan.assets.get(asset.id()) {
+        if existing.asset != *asset {
+            return Err(DiagramExportError::Encode(
+                "visual projection reuses an asset ID for different payloads".into(),
+            ));
+        }
+        return Ok(existing.pixmap.is_some());
+    }
+    let (width, height) = asset.dimensions();
+    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(
+        DiagramExportError::VisualAssetDecodeLimit {
+            estimated_pixels: u64::MAX,
+            max_pixels: MAX_VISUAL_EXPORT_DECODED_PIXELS,
+        },
+    )?;
+    let next_pixels =
+        decoded_pixels
+            .checked_add(pixels)
+            .ok_or(DiagramExportError::VisualAssetDecodeLimit {
+                estimated_pixels: u64::MAX,
+                max_pixels: MAX_VISUAL_EXPORT_DECODED_PIXELS,
+            })?;
+    if next_pixels > MAX_VISUAL_EXPORT_DECODED_PIXELS {
+        return Err(DiagramExportError::VisualAssetDecodeLimit {
+            estimated_pixels: next_pixels,
+            max_pixels: MAX_VISUAL_EXPORT_DECODED_PIXELS,
+        });
+    }
+    *decoded_pixels = next_pixels;
+
+    let decoded = decode_visual_asset_payload(asset, MAX_VISUAL_ASSET_DIMENSION as usize);
+    let pixmap = decoded.ok().and_then(|decoded| {
+        if decoded.id != *asset.id() {
+            return None;
+        }
+        let mut rgba = decoded.rgba.to_vec();
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
+        let size = tiny_skia::IntSize::from_wh(decoded.width, decoded.height)?;
+        tiny_skia::Pixmap::from_vec(rgba, size).map(Arc::new)
+    });
+    let usable = pixmap.is_some();
+    if usable {
+        let index = plan.asset_order.len();
+        plan.asset_order.push(asset.id().clone());
+        plan.asset_indices.insert(asset.id().clone(), index);
+    }
+    plan.assets.insert(
+        asset.id().clone(),
+        VisualExportAsset {
+            asset: asset.clone(),
+            pixmap,
+        },
+    );
+    Ok(usable)
+}
+
+fn push_item_shadow(
+    plan: &mut VisualExportPlan,
+    item: &ProjectedVisualItem,
+    fonts: (&FontSet, &FontSet),
+) -> Result<(), DiagramExportError> {
+    let Some(shadow) = item.style.shadow else {
+        return Ok(());
+    };
+    if item.kind == VisualProjectedKind::Connector {
+        return Ok(());
+    }
+    let mut fragment = BoundedString::new(MAX_SVG_BYTES);
+    if item.kind != VisualProjectedKind::Text {
+        let opacity = item.style.opacity;
+        write_visual_filled_path(
+            &mut fragment,
+            &item.outline,
+            true,
+            shadow.color,
+            opacity,
+            Some((shadow.color, opacity, shadow.blur * 2.0)),
+            ScenePoint {
+                x: shadow.offset_x,
+                y: shadow.offset_y,
+            },
+        )?;
+    }
+    if let Some(text) = &item.text {
+        write_visual_text(
+            &mut fragment,
+            item,
+            text,
+            fonts,
+            shadow.color,
+            item.style.opacity,
+            0.0,
+            ScenePoint {
+                x: shadow.offset_x,
+                y: shadow.offset_y,
+            },
+            false,
+            &mut plan.warnings,
+            &mut plan.glyph_count,
+        )?;
+    }
+    push_visual_vector(plan, fragment.value, item.bounds, 0)
+}
+
+fn push_item_fragment(
+    plan: &mut VisualExportPlan,
+    item: &ProjectedVisualItem,
+    fonts: (&FontSet, &FontSet),
+    mode: VisualFragmentMode,
+) -> Result<(), DiagramExportError> {
+    let mut fragment = BoundedString::new(MAX_SVG_BYTES);
+    let connector = item.kind == VisualProjectedKind::Connector;
+    let is_text = item.kind == VisualProjectedKind::Text;
+    let image_border = matches!(mode, VisualFragmentMode::ImageBorder);
+    let placeholder = matches!(mode, VisualFragmentMode::ImagePlaceholder);
+    let draw_fill = !connector
+        && !is_text
+        && !image_border
+        && (item.kind != VisualProjectedKind::Image || placeholder);
+
+    if draw_fill {
+        write_visual_filled_path(
+            &mut fragment,
+            &item.outline,
+            true,
+            item.style.fill,
+            item.style.opacity,
+            None,
+            ScenePoint::default(),
+        )?;
+    }
+
+    if connector {
+        let color = if item.route_fallback {
+            VisualColor::rgba(196, 91, 42, item.style.border.alpha)
+        } else {
+            item.style.border
+        };
+        let dash_paths = item.dash_paths.as_deref();
+        for (index, points) in item.open_paths.iter().enumerate() {
+            write_visual_stroke_path(
+                &mut fragment,
+                points,
+                false,
+                color,
+                item.style.opacity,
+                item.style.border_width,
+                effective_line_style(item),
+                dash_paths
+                    .and_then(|paths| paths.get(index))
+                    .map(Vec::as_slice),
+            )?;
+        }
+    } else {
+        let draw_border =
+            !is_text && (image_border || placeholder || item.kind != VisualProjectedKind::Image);
+        if draw_border {
+            write_visual_stroke_path(
+                &mut fragment,
+                &item.outline,
+                true,
+                item.style.border,
+                item.style.opacity,
+                item.style.border_width,
+                effective_line_style(item),
+                item.dash_paths
+                    .as_deref()
+                    .and_then(|paths| paths.first())
+                    .map(Vec::as_slice),
+            )?;
+            let details_closed = matches!(
+                item.kind,
+                VisualProjectedKind::Primitive(VisualPrimitiveShape::Cylinder)
+                    | VisualProjectedKind::PresetPrimitive(VisualPrimitiveShape::Cylinder)
+            );
+            for (index, detail) in item.details.iter().enumerate() {
+                write_visual_stroke_path(
+                    &mut fragment,
+                    detail,
+                    details_closed,
+                    item.style.border,
+                    item.style.opacity,
+                    item.style.border_width,
+                    effective_line_style(item),
+                    item.dash_paths
+                        .as_deref()
+                        .and_then(|paths| paths.get(index + 1))
+                        .map(Vec::as_slice),
+                )?;
+            }
+            if placeholder {
+                let cross = [
+                    vec![item.outline[0], item.outline[2]],
+                    vec![item.outline[1], item.outline[3]],
+                ];
+                for path in cross {
+                    write_visual_stroke_path(
+                        &mut fragment,
+                        &path,
+                        false,
+                        item.style.border,
+                        item.style.opacity,
+                        item.style.border_width,
+                        VisualLineStyle::Solid,
+                        None,
+                    )?;
+                }
+            }
+        }
+    }
+
+    if let Some(text) = &item.text {
+        write_visual_text(
+            &mut fragment,
+            item,
+            text,
+            fonts,
+            item.style.border,
+            item.style.opacity,
+            0.0,
+            ScenePoint::default(),
+            true,
+            &mut plan.warnings,
+            &mut plan.glyph_count,
+        )?;
+    } else if placeholder {
+        write_visual_placeholder_label(&mut fragment, item, fonts, plan)?;
+    }
+
+    let path_points = item
+        .outline
+        .len()
+        .saturating_add(item.details.iter().map(Vec::len).sum::<usize>())
+        .saturating_add(item.open_paths.iter().map(Vec::len).sum::<usize>());
+    push_visual_vector(
+        plan,
+        fragment.value,
+        item.bounds,
+        u64::try_from(path_points)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(8),
+    )
+}
+
+fn push_item_image_border(
+    plan: &mut VisualExportPlan,
+    item: &ProjectedVisualItem,
+    fonts: (&FontSet, &FontSet),
+) -> Result<(), DiagramExportError> {
+    push_item_fragment(plan, item, fonts, VisualFragmentMode::ImageBorder)
+}
+
+fn push_visual_image(
+    plan: &mut VisualExportPlan,
+    asset_id: VisualAssetId,
+    placement: VisualImagePlacement,
+    bounds: SceneRect,
+    opacity: f64,
+) -> Result<(), DiagramExportError> {
+    if plan.ops.len() >= MAX_VISUAL_EXPORT_VECTOR_OPS {
+        return Err(DiagramExportError::Encode(
+            "visual export exceeds its ordered operation limit".into(),
+        ));
+    }
+    if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+        return Err(DiagramExportError::Encode(
+            "visual image opacity is invalid".into(),
+        ));
+    }
+    plan.ops.push(VisualExportOp::Image {
+        asset_id,
+        placement,
+        bounds,
+        opacity,
+    });
+    Ok(())
+}
+
+fn push_visual_vector(
+    plan: &mut VisualExportPlan,
+    fragment: String,
+    bounds: SceneRect,
+    additional_work: u64,
+) -> Result<(), DiagramExportError> {
+    if fragment.is_empty() {
+        return Ok(());
+    }
+    if plan.ops.len() >= MAX_VISUAL_EXPORT_VECTOR_OPS {
+        return Err(DiagramExportError::Encode(
+            "visual export exceeds its ordered operation limit".into(),
+        ));
+    }
+    plan.vector_bytes = plan.vector_bytes.saturating_add(fragment.len());
+    if plan.vector_bytes > MAX_SVG_BYTES {
+        return Err(DiagramExportError::EncodedSizeLimit {
+            format: DiagramExportFormat::Svg,
+            max_bytes: MAX_SVG_BYTES,
+        });
+    }
+    plan.vector_work = plan.vector_work.saturating_add(additional_work);
+    let footprint = plan
+        .transform
+        .rect(bounds)
+        .area_pixels()
+        .unwrap_or(u64::MAX);
+    plan.vector_work = plan.vector_work.saturating_add(footprint);
+    plan.ops.push(VisualExportOp::Vector { fragment });
+    Ok(())
+}
+
+fn effective_line_style(item: &ProjectedVisualItem) -> VisualLineStyle {
+    if item.dash_simplified || item.dash_paths.is_none() {
+        VisualLineStyle::Solid
+    } else {
+        item.style.line_style
+    }
+}
+
+fn estimate_visual_raster_work(plan: &VisualExportPlan) -> u64 {
+    let mut work = plan.transform.pixels;
+    let mut in_vector_run = false;
+    for operation in &plan.ops {
+        match operation {
+            VisualExportOp::Vector { .. } => {
+                if !in_vector_run {
+                    work = work.saturating_add(plan.transform.pixels);
+                    in_vector_run = true;
+                }
+            }
+            VisualExportOp::Image { bounds, .. } => {
+                in_vector_run = false;
+                let area = plan
+                    .transform
+                    .rect(*bounds)
+                    .area_pixels()
+                    .unwrap_or(u64::MAX);
+                work = work.saturating_add(area);
+            }
+        }
+    }
+    work.saturating_add(plan.vector_work).saturating_add(
+        u64::try_from(plan.glyph_count)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(32),
+    )
+}
+
+fn visual_view_box(transform: ExportTransform) -> (f64, f64, f64, f64) {
+    let x = transform.scene_min.x - EXPORT_PADDING / transform.scale;
+    let y = transform.scene_min.y - EXPORT_PADDING / transform.scale;
+    let width = f64::from(transform.width) / transform.scale;
+    let height = f64::from(transform.height) / transform.scale;
+    (x, y, width, height)
+}
+
+fn write_visual_svg_root(
+    output: &mut BoundedString,
+    transform: ExportTransform,
+    background: Option<VisualColor>,
+    declaration: bool,
+) -> Result<(), DiagramExportError> {
+    let (view_x, view_y, view_width, view_height) = visual_view_box(transform);
+    if declaration {
+        output.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
+    }
+    svg_fmt(
+        output,
+        format_args!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{}\" height=\"{}\" viewBox=\"{} {} {} {}\" version=\"1.1\">\n",
+            transform.width,
+            transform.height,
+            visual_svg_num(view_x),
+            visual_svg_num(view_y),
+            visual_svg_num(view_width),
+            visual_svg_num(view_height),
+        ),
+    )?;
+    if let Some(background) = background {
+        let (rgb, alpha) = svg_color(background, 1.0);
+        svg_fmt(
+            output,
+            format_args!(
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{rgb}\" fill-opacity=\"{}\"/>\n",
+                visual_svg_num(view_x),
+                visual_svg_num(view_y),
+                visual_svg_num(view_width),
+                visual_svg_num(view_height),
+                visual_svg_num(alpha),
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn write_visual_svg_asset_definitions(
+    output: &mut BoundedString,
+    plan: &VisualExportPlan,
+) -> Result<(), DiagramExportError> {
+    if plan.asset_order.is_empty() {
+        return Ok(());
+    }
+    output.push_str("<defs>\n")?;
+    for (index, asset_id) in plan.asset_order.iter().enumerate() {
+        let visual_asset = plan.assets.get(asset_id).ok_or_else(|| {
+            DiagramExportError::Encode("visual asset index is inconsistent".into())
+        })?;
+        let asset = &visual_asset.asset;
+        let mime = match asset.format() {
+            VisualAssetFormat::Png => "image/png",
+            VisualAssetFormat::Jpeg => "image/jpeg",
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(asset.payload().as_ref());
+        let (width, height) = asset.dimensions();
+        svg_fmt(
+            output,
+            format_args!(
+                "<image id=\"visual-asset-{index}\" x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" preserveAspectRatio=\"none\" xlink:href=\"data:{mime};base64,{encoded}\"/>\n"
+            ),
+        )?;
+    }
+    output.push_str("</defs>\n")
+}
+
+fn write_svg_image_use(
+    output: &mut BoundedString,
+    asset_index: usize,
+    placement: VisualImagePlacement,
+    opacity: f64,
+) -> Result<(), DiagramExportError> {
+    let [a, b, c, d, e, f] = placement.matrix;
+    svg_fmt(
+        output,
+        format_args!(
+            "<use xlink:href=\"#visual-asset-{asset_index}\" href=\"#visual-asset-{asset_index}\" opacity=\"{}\" transform=\"matrix({} {} {} {} {} {})\"/>\n",
+            visual_svg_num(opacity),
+            visual_svg_num(a),
+            visual_svg_num(b),
+            visual_svg_num(c),
+            visual_svg_num(d),
+            visual_svg_num(e),
+            visual_svg_num(f),
+        ),
+    )
+}
+
+fn image_placement(
+    asset: &VisualAsset,
+    outline: &[ScenePoint],
+) -> Result<VisualImagePlacement, DiagramExportError> {
+    if outline.len() != 4 {
+        return Err(DiagramExportError::Encode(
+            "visual image does not have a four-corner projected outline".into(),
+        ));
+    }
+    let (width, height) = asset.dimensions();
+    if width == 0 || height == 0 {
+        return Err(DiagramExportError::Encode(
+            "visual image has invalid source dimensions".into(),
+        ));
+    }
+    let top_left = outline[0];
+    let top_right = outline[1];
+    let bottom_left = outline[3];
+    let sx = (top_right.x - top_left.x) / f64::from(width);
+    let ky = (top_right.y - top_left.y) / f64::from(width);
+    let kx = (bottom_left.x - top_left.x) / f64::from(height);
+    let sy = (bottom_left.y - top_left.y) / f64::from(height);
+    let matrix = [sx, ky, kx, sy, top_left.x, top_left.y];
+    if matrix.iter().any(|coefficient| !coefficient.is_finite()) {
+        return Err(DiagramExportError::Encode(
+            "visual image transform is not finite".into(),
+        ));
+    }
+    Ok(VisualImagePlacement { matrix })
+}
+
+fn image_pixel_transform(
+    placement: VisualImagePlacement,
+    transform: ExportTransform,
+) -> Result<tiny_skia::Transform, DiagramExportError> {
+    let [a, b, c, d, e, f] = placement.matrix;
+    let scale = transform.scale;
+    let pixel_matrix = [
+        a * scale,
+        b * scale,
+        c * scale,
+        d * scale,
+        (e - transform.scene_min.x) * scale + EXPORT_PADDING,
+        (f - transform.scene_min.y) * scale + EXPORT_PADDING,
+    ];
+    if pixel_matrix
+        .iter()
+        .any(|coefficient| !coefficient.is_finite() || coefficient.abs() > f64::from(f32::MAX))
+    {
+        return Err(DiagramExportError::ImageAllocation);
+    }
+    let [sx, ky, kx, sy, tx, ty] = pixel_matrix.map(|coefficient| coefficient as f32);
+    let transform = tiny_skia::Transform::from_row(sx, ky, kx, sy, tx, ty);
+    transform
+        .is_finite()
+        .then_some(transform)
+        .ok_or(DiagramExportError::ImageAllocation)
+}
+
+fn render_visual_vector_run(
+    operations: &[VisualExportOp],
+    transform: ExportTransform,
+    pixmap: &mut tiny_skia::Pixmap,
+) -> Result<(), DiagramExportError> {
+    let mut svg = BoundedString::new(MAX_SVG_BYTES);
+    write_visual_svg_root(&mut svg, transform, None, false)?;
+    for operation in operations {
+        if let VisualExportOp::Vector { fragment, .. } = operation {
+            svg.push_str(fragment)?;
+        }
+    }
+    svg.push_str("</svg>")?;
+    let mut options = usvg::Options::default();
+    options.resources_dir = None;
+    options.image_href_resolver = usvg::ImageHrefResolver {
+        resolve_data: Box::new(|_, _, _| None),
+        resolve_string: Box::new(|_, _| None),
+    };
+    let tree = usvg::Tree::from_str(&svg.value, &options)
+        .map_err(|_| DiagramExportError::Encode("visual vector run is invalid SVG".into()))?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    Ok(())
+}
+
+fn svg_color(color: VisualColor, opacity: f64) -> (String, f64) {
+    let [red, green, blue, alpha] = color_with_opacity(color, opacity);
+    (
+        format!("#{red:02x}{green:02x}{blue:02x}"),
+        f64::from(alpha) / 255.0,
+    )
+}
+
+fn visual_svg_num(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_owned()
+    } else {
+        format!("{value:.6}")
+    }
+}
+
+fn write_visual_filled_path(
+    output: &mut BoundedString,
+    points: &[ScenePoint],
+    closed: bool,
+    color: VisualColor,
+    opacity: f64,
+    stroke: Option<(VisualColor, f64, f64)>,
+    offset: ScenePoint,
+) -> Result<(), DiagramExportError> {
+    if points.len() < 2 {
+        return Ok(());
+    }
+    let (fill, fill_opacity) = svg_color(color, opacity);
+    let mut stroke_attributes = String::from("stroke=\"none\"");
+    if let Some((stroke_color, stroke_opacity, width)) = stroke {
+        if width.is_finite() && width > 0.0 {
+            let (stroke, stroke_alpha) = svg_color(stroke_color, stroke_opacity);
+            stroke_attributes = format!(
+                "stroke=\"{stroke}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"",
+                visual_svg_num(stroke_alpha),
+                visual_svg_num(width),
+            );
+        }
+    }
+    svg_fmt(
+        output,
+        format_args!(
+            "<path d=\"{}\" fill=\"{fill}\" fill-opacity=\"{}\" {stroke_attributes} transform=\"translate({} {})\"/>\n",
+            visual_path_data(points, closed)?,
+            visual_svg_num(fill_opacity),
+            visual_svg_num(offset.x),
+            visual_svg_num(offset.y),
+        ),
+    )
+}
+
+fn write_visual_stroke_path(
+    output: &mut BoundedString,
+    points: &[ScenePoint],
+    closed: bool,
+    color: VisualColor,
+    opacity: f64,
+    width: f64,
+    line_style: VisualLineStyle,
+    pattern: Option<&[ProjectedStrokePrimitive]>,
+) -> Result<(), DiagramExportError> {
+    if width <= 0.0 || points.len() < 2 {
+        return Ok(());
+    }
+    if line_style != VisualLineStyle::Solid
+        && let Some(pattern) = pattern
+    {
+        let (stroke, stroke_alpha) = svg_color(color, opacity);
+        for primitive in pattern {
+            match *primitive {
+                ProjectedStrokePrimitive::Segment { start, end } => {
+                    if !valid_export_point(start) || !valid_export_point(end) {
+                        return Err(DiagramExportError::Encode(
+                            "visual dash path contains an invalid coordinate".into(),
+                        ));
+                    }
+                    svg_fmt(
+                        output,
+                        format_args!(
+                            "<path d=\"M {} {} L {} {}\" fill=\"none\" stroke=\"{stroke}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\"/>\n",
+                            visual_svg_num(start.x),
+                            visual_svg_num(start.y),
+                            visual_svg_num(end.x),
+                            visual_svg_num(end.y),
+                            visual_svg_num(stroke_alpha),
+                            visual_svg_num(width),
+                        ),
+                    )?;
+                }
+                ProjectedStrokePrimitive::Dot { center } => {
+                    if !valid_export_point(center) {
+                        return Err(DiagramExportError::Encode(
+                            "visual dash dot contains an invalid coordinate".into(),
+                        ));
+                    }
+                    svg_fmt(
+                        output,
+                        format_args!(
+                            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{stroke}\" fill-opacity=\"{}\"/>\n",
+                            visual_svg_num(center.x),
+                            visual_svg_num(center.y),
+                            visual_svg_num(width / 2.0),
+                            visual_svg_num(stroke_alpha),
+                        ),
+                    )?;
+                }
+            }
+        }
+        return Ok(());
+    }
+    let (stroke, stroke_alpha) = svg_color(color, opacity);
+    svg_fmt(
+        output,
+        format_args!(
+            "<path d=\"{}\" fill=\"none\" stroke=\"{stroke}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
+            visual_path_data(points, closed)?,
+            visual_svg_num(stroke_alpha),
+            visual_svg_num(width),
+        ),
+    )
+}
+
+fn visual_path_data(points: &[ScenePoint], closed: bool) -> Result<String, DiagramExportError> {
+    if points.iter().any(|point| !valid_export_point(*point)) {
+        return Err(DiagramExportError::Encode(
+            "visual path contains an invalid coordinate".into(),
+        ));
+    }
+    let mut path = String::with_capacity(points.len().saturating_mul(28).min(MAX_SVG_BYTES));
+    if let Some(first) = points.first() {
+        path.push_str(&format!(
+            "M {} {}",
+            visual_svg_num(first.x),
+            visual_svg_num(first.y)
+        ));
+        for point in &points[1..] {
+            path.push_str(&format!(
+                " L {} {}",
+                visual_svg_num(point.x),
+                visual_svg_num(point.y)
+            ));
+        }
+        if closed {
+            path.push_str(" Z");
+        }
+    }
+    Ok(path)
+}
+
+#[derive(Clone)]
+struct VisualGlyphSelection {
+    face_index: usize,
+    character: char,
+}
+
+struct VisualGlyphGeometry {
+    outline: Option<ab_glyph::Outline>,
+    advance: f64,
+    scale_x: f64,
+    scale_y: f64,
+    y_offset: f64,
+}
+
+fn write_visual_placeholder_label(
+    output: &mut BoundedString,
+    item: &ProjectedVisualItem,
+    fonts: (&FontSet, &FontSet),
+    plan: &mut VisualExportPlan,
+) -> Result<(), DiagramExportError> {
+    if item.transform.width < 76.0 || item.transform.height < 24.0 {
+        return Ok(());
+    }
+    let width = item.transform.width * 0.84;
+    let height = item.transform.height * 0.75;
+    let line = PreparedTextLine {
+        text: "Image unavailable".to_owned(),
+        scalar_count: "Image unavailable".chars().count(),
+        reserved_width: width,
+    };
+    let prepared = PreparedText {
+        lines: vec![line],
+        reserved_width: width,
+        height,
+        line_height: height,
+    };
+    write_visual_text(
+        output,
+        item,
+        &prepared,
+        fonts,
+        item.style.border,
+        item.style.opacity,
+        0.0,
+        ScenePoint::default(),
+        true,
+        &mut plan.warnings,
+        &mut plan.glyph_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_visual_text(
+    output: &mut BoundedString,
+    item: &ProjectedVisualItem,
+    text: &PreparedText,
+    fonts: (&FontSet, &FontSet),
+    color: VisualColor,
+    opacity: f64,
+    stroke_width: f64,
+    offset: ScenePoint,
+    count_glyphs: bool,
+    warnings: &mut DiagramExportWarnings,
+    glyph_count: &mut usize,
+) -> Result<(), DiagramExportError> {
+    if text.lines.is_empty() {
+        return Ok(());
+    }
+    let center = item.text_transform.unwrap_or(item.transform);
+    let center_point = ScenePoint {
+        x: center.x + offset.x,
+        y: center.y + offset.y,
+    };
+    let line_count = text.lines.len();
+    let line_height = text.line_height.min(text.height / line_count as f64);
+    if !line_height.is_finite() || line_height <= 0.0 {
+        return Ok(());
+    }
+    let rotation = item.text_rotation_degrees;
+    if !center_point.x.is_finite() || !center_point.y.is_finite() || !rotation.is_finite() {
+        return Err(DiagramExportError::Encode(
+            "visual text transform is not finite".into(),
+        ));
+    }
+    let font_set = if item.style.font_family.eq_ignore_ascii_case("monospace") {
+        fonts.1
+    } else {
+        fonts.0
+    };
+    let (fill, fill_alpha) = svg_color(color, opacity);
+    let stroke_attributes = if stroke_width > 0.0 && stroke_width.is_finite() {
+        let (stroke, stroke_alpha) = svg_color(color, opacity);
+        format!(
+            " stroke=\"{stroke}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linejoin=\"round\"",
+            visual_svg_num(stroke_alpha),
+            visual_svg_num(stroke_width),
+        )
+    } else {
+        String::new()
+    };
+    let group_transform = format!(
+        "translate({} {}) rotate({})",
+        visual_svg_num(center_point.x),
+        visual_svg_num(center_point.y),
+        visual_svg_num(rotation),
+    );
+    svg_fmt(
+        output,
+        format_args!(
+            "<g transform=\"{group_transform}\" fill=\"{fill}\" fill-opacity=\"{}\">\n",
+            visual_svg_num(fill_alpha)
+        ),
+    )?;
+
+    let total_text_height = line_height * line_count as f64;
+    let mut suppressed_line = false;
+    for (line_index, line) in text.lines.iter().enumerate() {
+        if line.text.is_empty() {
+            continue;
+        }
+        let mut selections = Vec::with_capacity(line.text.chars().count());
+        for character in line.text.chars() {
+            if !is_xml_character(character) {
+                return Err(DiagramExportError::InvalidXmlControl(character));
+            }
+            if count_glyphs {
+                *glyph_count = add_glyph_count(*glyph_count, 1)?;
+            }
+            let (face_index, character, substituted) = font_set.choose(character);
+            if substituted && count_glyphs {
+                warnings.glyph_substitutions = warnings.glyph_substitutions.saturating_add(1);
+            }
+            selections.push(VisualGlyphSelection {
+                face_index,
+                character,
+            });
+        }
+        if selections.is_empty() {
+            continue;
+        }
+        let reserved_width = line.reserved_width.min(text.reserved_width);
+        if !reserved_width.is_finite() || reserved_width <= 0.0 {
+            continue;
+        }
+        let mut font_size = item.style.font_size.min(line_height * 0.8);
+        if !font_size.is_finite() || font_size < 0.5 || font_size > f64::from(f32::MAX) {
+            suppressed_line = true;
+            continue;
+        }
+        let line_center_y = -total_text_height / 2.0 + line_height * (line_index as f64 + 0.5);
+        let mut layout = Vec::new();
+        let mut total_advance = 0.0;
+        let mut baseline_y = 0.0;
+        let mut fits = false;
+        for _ in 0..6 {
+            let (candidate, advance, ink_bounds, baseline) =
+                visual_glyph_line(&selections, font_size, line_center_y, font_set)?;
+            layout = candidate;
+            total_advance = advance;
+            baseline_y = baseline;
+            let advance_width = total_advance.max(0.0);
+            let ink_width = ink_bounds.map_or(0.0, |(left, _, right, _)| {
+                let left_from_center = left - total_advance / 2.0;
+                let right_from_center = right - total_advance / 2.0;
+                2.0 * (-left_from_center).max(right_from_center).max(0.0)
+            });
+            let ink_height = ink_bounds.map_or(0.0, |(_, top, _, bottom)| {
+                let top_from_center = top - line_center_y;
+                let bottom_from_center = bottom - line_center_y;
+                2.0 * (-top_from_center).max(bottom_from_center).max(0.0)
+            });
+            let needed_width = advance_width.max(ink_width);
+            let mut fit = 1.0f64;
+            if needed_width > reserved_width && needed_width > 0.0 {
+                fit = fit.min(reserved_width / needed_width);
+            }
+            if ink_height > line_height && ink_height > 0.0 {
+                fit = fit.min(line_height / ink_height);
+            }
+            if fit >= 0.999 {
+                fits = true;
+                break;
+            }
+            font_size *= fit * 0.98;
+            if font_size < 0.5 {
+                layout.clear();
+                break;
+            }
+        }
+        if !fits || layout.is_empty() || total_advance <= 0.0 {
+            suppressed_line = true;
+            continue;
+        }
+        let mut cursor_x = -total_advance / 2.0;
+        for glyph in &layout {
+            if let Some(outline) = &glyph.outline {
+                write_visual_glyph_outline(
+                    output,
+                    outline,
+                    cursor_x,
+                    glyph.scale_x,
+                    glyph.scale_y,
+                    glyph.y_offset,
+                    line_center_y,
+                    baseline_y,
+                    &stroke_attributes,
+                )?;
+            }
+            cursor_x += glyph.advance;
+        }
+    }
+    if suppressed_line && count_glyphs && !item.text_truncated {
+        warnings.visual_truncated_text_items =
+            warnings.visual_truncated_text_items.saturating_add(1);
+    }
+    output.push_str("</g>\n")
+}
+
+fn visual_glyph_line(
+    selections: &[VisualGlyphSelection],
+    font_size: f64,
+    line_center_y: f64,
+    fonts: &FontSet,
+) -> Result<
+    (
+        Vec<VisualGlyphGeometry>,
+        f64,
+        Option<(f64, f64, f64, f64)>,
+        f64,
+    ),
+    DiagramExportError,
+> {
+    let primary = &fonts.faces[0];
+    let primary_size = (font_size * f64::from(primary.tweak.scale)) as f32;
+    let primary_scaled = primary.font.as_scaled(primary_size);
+    let baseline = f64::from(primary_scaled.ascent()) - f64::from(primary_scaled.height()) / 2.0;
+    let mut total_advance = 0.0;
+    let mut ink_bounds = None::<(f64, f64, f64, f64)>;
+    let mut output = Vec::with_capacity(selections.len());
+    for selection in selections {
+        let face = &fonts.faces[selection.face_index];
+        let layout_scaled = face.font.as_scaled(font_size as f32);
+        let visual_scaled = face
+            .font
+            .as_scaled((font_size * f64::from(face.tweak.scale)) as f32);
+        let glyph_id = layout_scaled.glyph_id(selection.character);
+        let space_advance = f64::from(layout_scaled.h_advance(layout_scaled.glyph_id(' ')));
+        let advance = match selection.character {
+            '\t' => space_advance * f64::from(face.tweak.tab_size),
+            '\u{2009}' | '\u{202f}' => space_advance * f64::from(face.tweak.thin_space_width),
+            _ => f64::from(layout_scaled.h_advance(glyph_id)),
+        };
+        if !advance.is_finite() || advance < 0.0 {
+            return Err(DiagramExportError::ImageAllocation);
+        }
+        let outline = if selection.character.is_whitespace() {
+            None
+        } else {
+            face.font
+                .outline(visual_scaled.glyph_id(selection.character))
+        };
+        let scale = visual_scaled.scale_factor();
+        let scale_x = f64::from(scale.horizontal);
+        let scale_y = f64::from(scale.vertical);
+        let y_offset =
+            font_size * f64::from(face.tweak.scale) * f64::from(face.tweak.y_offset_factor)
+                + f64::from(face.tweak.y_offset);
+        if let Some(outline) = &outline {
+            let left = total_advance + f64::from(outline.bounds.min.x) * scale_x;
+            let right = total_advance + f64::from(outline.bounds.max.x) * scale_x;
+            let top =
+                line_center_y + baseline + y_offset - f64::from(outline.bounds.min.y) * scale_y;
+            let bottom =
+                line_center_y + baseline + y_offset - f64::from(outline.bounds.max.y) * scale_y;
+            ink_bounds = Some(match ink_bounds {
+                Some((min_x, min_y, max_x, max_y)) => (
+                    min_x.min(left),
+                    min_y.min(top),
+                    max_x.max(right),
+                    max_y.max(bottom),
+                ),
+                None => (left, top, right, bottom),
+            });
+        }
+        output.push(VisualGlyphGeometry {
+            outline,
+            advance,
+            scale_x,
+            scale_y,
+            y_offset,
+        });
+        total_advance += advance;
+    }
+    if !total_advance.is_finite()
+        || output.iter().any(|glyph| {
+            !glyph.scale_x.is_finite() || !glyph.scale_y.is_finite() || !glyph.y_offset.is_finite()
+        })
+    {
+        return Err(DiagramExportError::ImageAllocation);
+    }
+    Ok((output, total_advance, ink_bounds, baseline))
+}
+
+fn write_visual_glyph_outline(
+    output: &mut BoundedString,
+    outline: &ab_glyph::Outline,
+    cursor_x: f64,
+    scale_x: f64,
+    scale_y: f64,
+    y_offset: f64,
+    line_center_y: f64,
+    baseline_y: f64,
+    stroke_attributes: &str,
+) -> Result<(), DiagramExportError> {
+    let mut path = BoundedString::new(MAX_SVG_BYTES);
+    let mut previous_end = None::<ab_glyph::Point>;
+    for curve in &outline.curves {
+        match curve {
+            OutlineCurve::Line(start, end) => {
+                begin_visual_glyph_contour(
+                    &mut path,
+                    *start,
+                    &mut previous_end,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                )?;
+                let (x, y) = visual_glyph_point(
+                    *end,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                );
+                svg_fmt(
+                    &mut path,
+                    format_args!(" L {} {}", visual_svg_num(x), visual_svg_num(y)),
+                )?;
+                previous_end = Some(*end);
+            }
+            OutlineCurve::Quad(start, control, end) => {
+                begin_visual_glyph_contour(
+                    &mut path,
+                    *start,
+                    &mut previous_end,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                )?;
+                let (cx, cy) = visual_glyph_point(
+                    *control,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                );
+                let (x, y) = visual_glyph_point(
+                    *end,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                );
+                svg_fmt(
+                    &mut path,
+                    format_args!(
+                        " Q {} {}, {} {}",
+                        visual_svg_num(cx),
+                        visual_svg_num(cy),
+                        visual_svg_num(x),
+                        visual_svg_num(y)
+                    ),
+                )?;
+                previous_end = Some(*end);
+            }
+            OutlineCurve::Cubic(start, control_a, control_b, end) => {
+                begin_visual_glyph_contour(
+                    &mut path,
+                    *start,
+                    &mut previous_end,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                )?;
+                let (ax, ay) = visual_glyph_point(
+                    *control_a,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                );
+                let (bx, by) = visual_glyph_point(
+                    *control_b,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                );
+                let (x, y) = visual_glyph_point(
+                    *end,
+                    cursor_x,
+                    scale_x,
+                    scale_y,
+                    y_offset,
+                    line_center_y,
+                    baseline_y,
+                );
+                svg_fmt(
+                    &mut path,
+                    format_args!(
+                        " C {} {}, {} {}, {} {}",
+                        visual_svg_num(ax),
+                        visual_svg_num(ay),
+                        visual_svg_num(bx),
+                        visual_svg_num(by),
+                        visual_svg_num(x),
+                        visual_svg_num(y)
+                    ),
+                )?;
+                previous_end = Some(*end);
+            }
+        }
+    }
+    if !path.value.is_empty() {
+        path.push_str(" Z")?;
+        svg_fmt(
+            output,
+            format_args!("<path d=\"{}\"{stroke_attributes}/>\n", path.value),
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn begin_visual_glyph_contour(
+    path: &mut BoundedString,
+    start: ab_glyph::Point,
+    previous_end: &mut Option<ab_glyph::Point>,
+    cursor_x: f64,
+    scale_x: f64,
+    scale_y: f64,
+    y_offset: f64,
+    line_center_y: f64,
+    baseline_y: f64,
+) -> Result<(), DiagramExportError> {
+    let starts_new_contour = previous_end.is_none_or(|previous| {
+        (f64::from(previous.x) - f64::from(start.x)).abs() > 1.0e-5
+            || (f64::from(previous.y) - f64::from(start.y)).abs() > 1.0e-5
+    });
+    if starts_new_contour {
+        if previous_end.is_some() {
+            path.push_str(" Z")?;
+        }
+        let (x, y) = visual_glyph_point(
+            start,
+            cursor_x,
+            scale_x,
+            scale_y,
+            y_offset,
+            line_center_y,
+            baseline_y,
+        );
+        svg_fmt(
+            path,
+            format_args!(" M {} {}", visual_svg_num(x), visual_svg_num(y)),
+        )?;
+    }
+    Ok(())
+}
+
+fn visual_glyph_point(
+    point: ab_glyph::Point,
+    cursor_x: f64,
+    scale_x: f64,
+    scale_y: f64,
+    y_offset: f64,
+    line_center_y: f64,
+    baseline_y: f64,
+) -> (f64, f64) {
+    (
+        cursor_x + f64::from(point.x) * scale_x,
+        line_center_y + baseline_y + y_offset - f64::from(point.y) * scale_y,
+    )
+}
+
+fn encode_visual_svg(
+    snapshot: &DiagramVisualSnapshot,
+    options: DiagramVisualExportOptions,
+) -> Result<DiagramExportArtifact, DiagramExportError> {
+    let plan = build_visual_export_plan(snapshot, options, default_font_sets()?)?;
+    let mut output = BoundedString::new(MAX_SVG_BYTES);
+    write_visual_svg_root(&mut output, plan.transform, options.background, true)?;
+    write_visual_svg_asset_definitions(&mut output, &plan)?;
+    for operation in &plan.ops {
+        match operation {
+            VisualExportOp::Vector { fragment, .. } => output.push_str(fragment)?,
+            VisualExportOp::Image {
+                asset_id,
+                placement,
+                opacity,
+                ..
+            } => {
+                let asset_index = *plan.asset_indices.get(asset_id).ok_or_else(|| {
+                    DiagramExportError::Encode("visual image asset order is inconsistent".into())
+                })?;
+                write_svg_image_use(&mut output, asset_index, *placement, *opacity)?;
+            }
+        }
+    }
+    output.push_str("</svg>\n")?;
+    Ok(DiagramExportArtifact {
+        revision: snapshot.revision,
+        format: DiagramExportFormat::Svg,
+        bytes: output.value.into_bytes(),
+        dimensions: Some((plan.transform.width, plan.transform.height)),
+        warnings: plan.warnings,
+    })
+}
+
+fn encode_visual_png(
+    snapshot: &DiagramVisualSnapshot,
+    options: DiagramVisualExportOptions,
+    fonts: (&FontSet, &FontSet),
+) -> Result<DiagramExportArtifact, DiagramExportError> {
+    let plan = build_visual_export_plan(snapshot, options, fonts)?;
+    if plan.raster_work > MAX_RASTER_PIXEL_VISITS {
+        return Err(DiagramExportError::RasterWorkLimit {
+            estimated: plan.raster_work,
+            max: MAX_RASTER_PIXEL_VISITS,
+        });
+    }
+    let mut pixmap = tiny_skia::Pixmap::new(plan.transform.width, plan.transform.height)
+        .ok_or(DiagramExportError::ImageAllocation)?;
+    if let Some(background) = options.background {
+        let [red, green, blue, alpha] = color_with_opacity(background, 1.0);
+        pixmap.fill(tiny_skia::Color::from_rgba8(red, green, blue, alpha));
+    }
+
+    let mut index = 0usize;
+    while index < plan.ops.len() {
+        match &plan.ops[index] {
+            VisualExportOp::Image {
+                asset_id,
+                placement,
+                opacity,
+                ..
+            } => {
+                let asset = plan.assets.get(asset_id).ok_or_else(|| {
+                    DiagramExportError::Encode("visual image asset is unavailable".into())
+                })?;
+                let source = asset.pixmap.as_ref().ok_or_else(|| {
+                    DiagramExportError::Encode(
+                        "an invalid image was not converted to a placeholder".into(),
+                    )
+                })?;
+                let transform = image_pixel_transform(*placement, plan.transform)?;
+                let paint = tiny_skia::PixmapPaint {
+                    opacity: opacity.clamp(0.0, 1.0) as f32,
+                    quality: tiny_skia::FilterQuality::Bicubic,
+                    ..tiny_skia::PixmapPaint::default()
+                };
+                pixmap.as_mut().draw_pixmap(
+                    0,
+                    0,
+                    source.as_ref().as_ref(),
+                    &paint,
+                    transform,
+                    None,
+                );
+                index += 1;
+            }
+            VisualExportOp::Vector { .. } => {
+                let start = index;
+                while index < plan.ops.len()
+                    && matches!(plan.ops[index], VisualExportOp::Vector { .. })
+                {
+                    index += 1;
+                }
+                render_visual_vector_run(&plan.ops[start..index], plan.transform, &mut pixmap)?;
+            }
+        }
+    }
+
+    let mut writer = BoundedBytes::new(MAX_PNG_BYTES);
+    let mut rgba = pixmap.take();
+    unpremultiply_rgba(&mut rgba);
+    let result = image::codecs::png::PngEncoder::new(&mut writer).write_image(
+        &rgba,
+        plan.transform.width,
+        plan.transform.height,
+        image::ColorType::Rgba8,
+    );
+    if writer.exceeded {
+        return Err(DiagramExportError::EncodedSizeLimit {
+            format: DiagramExportFormat::Png,
+            max_bytes: MAX_PNG_BYTES,
+        });
+    }
+    result.map_err(|error| DiagramExportError::Encode(error.to_string()))?;
+    Ok(DiagramExportArtifact {
+        revision: snapshot.revision,
+        format: DiagramExportFormat::Png,
+        bytes: writer.bytes,
+        dimensions: Some((plan.transform.width, plan.transform.height)),
+        warnings: plan.warnings,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -613,10 +2275,14 @@ struct FontSet {
 
 impl FontSet {
     fn from_definitions(definitions: &FontDefinitions) -> Result<Self, String> {
+        Self::from_family(definitions, &FontFamily::Proportional)
+    }
+
+    fn from_family(definitions: &FontDefinitions, family: &FontFamily) -> Result<Self, String> {
         let family = definitions
             .families
-            .get(&FontFamily::Proportional)
-            .ok_or_else(|| "proportional font family is missing".to_owned())?;
+            .get(family)
+            .ok_or_else(|| "requested font family is missing".to_owned())?;
         let mut faces = Vec::with_capacity(family.len());
         for name in family {
             let data = definitions
@@ -692,12 +2358,24 @@ impl FontSet {
 }
 
 static DEFAULT_FONT_SET: OnceLock<Result<FontSet, String>> = OnceLock::new();
+static DEFAULT_MONOSPACE_FONT_SET: OnceLock<Result<FontSet, String>> = OnceLock::new();
 
 fn default_font_set() -> Result<&'static FontSet, DiagramExportError> {
     match DEFAULT_FONT_SET.get_or_init(|| FontSet::from_definitions(&FontDefinitions::default())) {
         Ok(fonts) => Ok(fonts),
         Err(error) => Err(DiagramExportError::Fonts(error.clone())),
     }
+}
+
+fn default_font_sets() -> Result<(&'static FontSet, &'static FontSet), DiagramExportError> {
+    let proportional = default_font_set()?;
+    let monospace = match DEFAULT_MONOSPACE_FONT_SET
+        .get_or_init(|| FontSet::from_family(&FontDefinitions::default(), &FontFamily::Monospace))
+    {
+        Ok(fonts) => fonts,
+        Err(error) => return Err(DiagramExportError::Fonts(error.clone())),
+    };
+    Ok((proportional, monospace))
 }
 
 #[derive(Clone, Debug)]
@@ -1888,18 +3566,24 @@ impl Write for BoundedBytes {
 mod tests {
     use super::{
         BoundedBytes, BoundedString, DiagramExportError, DiagramExportFormat,
-        DiagramExportPublicationError, DiagramImageSnapshot, DiagramSourceSnapshot, FontSet,
-        MAX_EXPORT_PIXELS, MAX_EXPORT_SIDE, MAX_PNG_BYTES, MAX_PREPARED_GLYPHS,
-        MAX_RASTER_PIXEL_VISITS, is_xml_character,
+        DiagramExportPublicationError, DiagramImageSnapshot, DiagramSourceSnapshot,
+        DiagramVisualExportOptions, DiagramVisualSnapshot, FontSet, MAX_EXPORT_PIXELS,
+        MAX_EXPORT_SIDE, MAX_PNG_BYTES, MAX_PREPARED_GLYPHS, MAX_RASTER_PIXEL_VISITS,
+        is_xml_character,
     };
     use crate::diagram::{
-        DiagramDocumentController, DiagramSession, FlowDirection, GraphOperation, NodePosition,
-        Position, SceneMetrics,
+        DEFAULT_LAYER_ID, DiagramDocumentController, DiagramSession, FlowDirection, GraphOperation,
+        NodePosition, Position, ProjectedVisualItem, SceneMetrics, ScenePoint, SceneRect,
+        VisualAsset, VisualAssetFormat, VisualAssetId, VisualColor, VisualDiagramDocument,
+        VisualLineStyle, VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation,
+        VisualPrimitiveShape, VisualSceneProjection, VisualShadow, VisualStyle, VisualTransform,
+        project_visual_document,
     };
     use eframe::egui::{FontDefinitions, FontTweak};
-    use image::RgbaImage;
+    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use resvg::usvg;
     use std::fs;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
     use std::sync::Arc;
 
     fn fresh_session(source: &str) -> DiagramSession {
@@ -2484,5 +4168,394 @@ mod tests {
             }
         }
         found.then_some((min_x, min_y, max_x, max_y))
+    }
+
+    fn visual_export_snapshot(
+        document: &VisualDiagramDocument,
+    ) -> (DiagramVisualSnapshot, VisualSceneProjection) {
+        let projection = project_visual_document(document).unwrap();
+        (
+            DiagramVisualSnapshot::capture(document.revision(), Arc::new(projection.clone())),
+            projection,
+        )
+    }
+
+    fn visual_style(fill: VisualColor, border: VisualColor, opacity: f64) -> VisualStyle {
+        VisualStyle {
+            fill,
+            border,
+            border_width: 0.0,
+            line_style: VisualLineStyle::Solid,
+            font_family: "sans-serif".into(),
+            font_size: 20.0,
+            opacity,
+            shadow: None,
+        }
+    }
+
+    fn add_visual_object(
+        document: &mut VisualDiagramDocument,
+        transform: VisualTransform,
+        style: VisualStyle,
+        kind: VisualObjectKind,
+    ) -> VisualObjectId {
+        document
+            .apply_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform,
+                style,
+                kind,
+            })])
+            .unwrap()
+            .created_objects[0]
+    }
+
+    fn visual_png_bytes(image: RgbaImage) -> Vec<u8> {
+        let mut output = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut output, ImageFormat::Png)
+            .unwrap();
+        output.into_inner()
+    }
+
+    fn visual_export_pixel(
+        artifact: &super::DiagramExportArtifact,
+        projection: &VisualSceneProjection,
+        world: ScenePoint,
+    ) -> image::Rgba<u8> {
+        let transform = super::ExportTransform::new(projection.bounds, 1.0).unwrap();
+        let position = transform.point(world);
+        let image = image::load_from_memory(artifact.bytes())
+            .unwrap()
+            .to_rgba8();
+        let x = position.x.floor().clamp(0.0, f64::from(image.width() - 1)) as u32;
+        let y = position.y.floor().clamp(0.0, f64::from(image.height() - 1)) as u32;
+        *image.get_pixel(x, y)
+    }
+
+    #[test]
+    fn visual_scene_export_vector_svg_and_png_preserve_rotated_outlines_text_and_alpha() {
+        let mut document = VisualDiagramDocument::new();
+        document.replace_label("").unwrap();
+        let mut ellipse_style = visual_style(
+            VisualColor::rgba(20, 70, 225, 128),
+            VisualColor::rgba(15, 25, 45, 210),
+            0.5,
+        );
+        ellipse_style.border_width = 2.0;
+        ellipse_style.line_style = VisualLineStyle::Dashed;
+        ellipse_style.shadow = Some(VisualShadow {
+            offset_x: 4.0,
+            offset_y: -3.0,
+            blur: 2.0,
+            color: VisualColor::rgba(30, 40, 50, 100),
+        });
+        add_visual_object(
+            &mut document,
+            VisualTransform {
+                x: 300.0,
+                y: 100.0,
+                width: 120.0,
+                height: 80.0,
+                rotation_degrees: 31.0,
+            },
+            ellipse_style,
+            VisualObjectKind::Primitive {
+                shape: VisualPrimitiveShape::Ellipse,
+            },
+        );
+        let text_transform = VisualTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 88.0,
+            rotation_degrees: -17.0,
+        };
+        add_visual_object(
+            &mut document,
+            text_transform,
+            visual_style(
+                VisualColor::rgba(0, 0, 0, 0),
+                VisualColor::rgba(20, 25, 35, 255),
+                1.0,
+            ),
+            VisualObjectKind::Text {
+                text: "gyp\nO8".into(),
+            },
+        );
+
+        let (snapshot, projection) = visual_export_snapshot(&document);
+        let svg_artifact = snapshot
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        let svg = std::str::from_utf8(svg_artifact.bytes()).unwrap();
+        assert_eq!(svg_artifact.revision(), document.revision());
+        assert_eq!(svg_artifact.format(), DiagramExportFormat::Svg);
+        assert!(svg.contains("rotate(-17"));
+        assert!(svg.contains("fill-opacity=\"0.250980\""));
+        assert!(svg.contains("stroke-opacity="));
+        assert!(svg.contains("<path d=\""));
+        assert!(svg.contains(" Q ") || svg.contains(" C "));
+        assert!(!svg.contains("<text"));
+        assert!(!svg.contains("gyp"));
+        let mut options = usvg::Options::default();
+        options.resources_dir = None;
+        options.image_href_resolver = usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        };
+        usvg::Tree::from_str(svg, &options)
+            .expect("visual SVG should parse without external resources");
+
+        let png = snapshot
+            .encode_png(DiagramVisualExportOptions::default())
+            .unwrap();
+        let pixels = image::load_from_memory(png.bytes()).unwrap().to_rgba8();
+        assert_eq!(pixels.get_pixel(0, 0).0[3], 0);
+        let ellipse_pixel =
+            visual_export_pixel(&png, &projection, ScenePoint { x: 300.0, y: 100.0 });
+        assert!(ellipse_pixel[2] > ellipse_pixel[0]);
+        assert!((96..=106).contains(&ellipse_pixel[3]));
+        let text_item = projection
+            .items
+            .iter()
+            .find(|item| item.text.is_some())
+            .expect("the rotated multiline text should be projected");
+        let export_transform = super::ExportTransform::new(projection.bounds, 1.0).unwrap();
+        assert!(dark_ink_bounds_in(&pixels, export_transform.rect(text_item.bounds)).is_some());
+        assert_eq!(png.warnings().glyph_substitutions(), 0);
+        assert_eq!(png.warnings().visual_simplified_dash_paths(), 0);
+    }
+
+    #[test]
+    fn visual_scene_export_embeds_rasters_once_and_preserves_z_order_and_opacity() {
+        let mut document = VisualDiagramDocument::new();
+        document.replace_label("").unwrap();
+        let source = RgbaImage::from_pixel(2, 2, Rgba([245, 20, 10, 255]));
+        let prepared = crate::diagram::assets::prepare_visual_asset_bytes(
+            visual_png_bytes(source),
+            usize::MAX,
+        )
+        .unwrap();
+        let image_style = visual_style(
+            VisualColor::rgba(0, 0, 0, 0),
+            VisualColor::rgba(0, 0, 0, 0),
+            0.5,
+        );
+        document
+            .apply_transaction(&[
+                VisualOperation::AddImageReference {
+                    asset: prepared.asset.clone(),
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 140.0,
+                        height: 100.0,
+                        rotation_degrees: 27.0,
+                    },
+                    style: image_style.clone(),
+                },
+                VisualOperation::AddImageReference {
+                    asset: prepared.asset.clone(),
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 200.0,
+                        y: 0.0,
+                        width: 80.0,
+                        height: 80.0,
+                        rotation_degrees: 0.0,
+                    },
+                    style: image_style,
+                },
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 24.0,
+                        height: 24.0,
+                        rotation_degrees: 0.0,
+                    },
+                    style: visual_style(
+                        VisualColor::rgba(15, 40, 220, 255),
+                        VisualColor::rgba(0, 0, 0, 0),
+                        1.0,
+                    ),
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Rectangle,
+                    },
+                }),
+            ])
+            .unwrap();
+
+        let (snapshot, projection) = visual_export_snapshot(&document);
+        let svg_artifact = snapshot
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        let svg = std::str::from_utf8(svg_artifact.bytes()).unwrap();
+        assert_eq!(svg.matches("data:image/png;base64,").count(), 1);
+        assert_eq!(svg.matches("<use ").count(), 2);
+        assert!(svg.matches("opacity=\"0.500000\"").count() >= 2);
+        assert!(svg.contains("xlink:href=\"#visual-asset-0\""));
+
+        let png = snapshot
+            .encode_png(DiagramVisualExportOptions::default())
+            .unwrap();
+        let blue_top = visual_export_pixel(&png, &projection, ScenePoint { x: 0.0, y: 0.0 });
+        assert!(blue_top[2] > blue_top[0] + 80);
+        let translucent_raster =
+            visual_export_pixel(&png, &projection, ScenePoint { x: 40.0, y: 0.0 });
+        assert!(translucent_raster[0] > translucent_raster[2]);
+        assert!((120..=136).contains(&translucent_raster[3]));
+    }
+
+    #[test]
+    fn visual_scene_export_reports_invalid_image_placeholders_and_rejects_unbounded_scale() {
+        use sha2::Digest as _;
+
+        let payload = b"not an image".to_vec();
+        let digest = hex::encode(sha2::Sha256::digest(&payload));
+        let asset = VisualAsset::from_verified_parts(
+            VisualAssetId::new(digest).unwrap(),
+            VisualAssetFormat::Png,
+            2,
+            2,
+            Arc::from(payload.into_boxed_slice()),
+        );
+        let object_id = VisualObjectId::from_raw(2);
+        let transform = VisualTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+            rotation_degrees: 0.0,
+        };
+        let bounds = SceneRect {
+            min: ScenePoint { x: -50.0, y: -40.0 },
+            max: ScenePoint { x: 50.0, y: 40.0 },
+        };
+        let item = ProjectedVisualItem {
+            object_id,
+            component_index: None,
+            layer_id: DEFAULT_LAYER_ID,
+            kind: crate::diagram::VisualProjectedKind::Image,
+            image_asset: Some(asset),
+            transform,
+            style: visual_style(
+                VisualColor::rgba(230, 230, 235, 255),
+                VisualColor::rgba(20, 30, 40, 255),
+                1.0,
+            ),
+            outline: vec![
+                ScenePoint { x: -50.0, y: -40.0 },
+                ScenePoint { x: 50.0, y: -40.0 },
+                ScenePoint { x: 50.0, y: 40.0 },
+                ScenePoint { x: -50.0, y: 40.0 },
+            ],
+            details: Vec::new(),
+            open_paths: Vec::new(),
+            text: None,
+            text_transform: None,
+            text_bounds: None,
+            text_truncated: false,
+            text_rotation_degrees: 0.0,
+            bounds,
+            dash_simplified: false,
+            dash_paths: None,
+            route_fallback: false,
+        };
+        let projection = VisualSceneProjection {
+            items: vec![item],
+            bounds: Some(bounds),
+            simplified_dash_paths: 0,
+            truncated_text_items: 0,
+            text_lines: 0,
+            connector_route_fallbacks: 0,
+        };
+        let snapshot = DiagramVisualSnapshot::capture(9, Arc::new(projection));
+        assert!(matches!(
+            snapshot.encode_svg(DiagramVisualExportOptions {
+                scale: 0.001,
+                background: None,
+            }),
+            Err(DiagramExportError::VisualScaleOutOfRange)
+        ));
+
+        let svg = snapshot
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        assert_eq!(svg.warnings().visual_asset_placeholders(), 1);
+        let png = snapshot
+            .encode_png(DiagramVisualExportOptions::default())
+            .unwrap();
+        assert_eq!(png.warnings().visual_asset_placeholders(), 1);
+        let pixels = image::load_from_memory(png.bytes()).unwrap().to_rgba8();
+        assert!(pixels.pixels().any(|pixel| pixel.0[3] > 0));
+
+        let mut malformed_projection = snapshot.projection().as_ref().clone();
+        malformed_projection.items[0].outline.pop();
+        let malformed = DiagramVisualSnapshot::capture(10, Arc::new(malformed_projection));
+        assert!(matches!(
+            malformed.encode_svg(DiagramVisualExportOptions::default()),
+            Err(DiagramExportError::Encode(message))
+                if message.contains("four-corner")
+        ));
+    }
+
+    #[test]
+    fn visual_scene_export_bounds_overlapping_vector_and_repeated_image_work() {
+        let source = RgbaImage::from_pixel(2, 2, Rgba([40, 80, 120, 255]));
+        let prepared = crate::diagram::assets::prepare_visual_asset_bytes(
+            visual_png_bytes(source),
+            usize::MAX,
+        )
+        .unwrap();
+        let transform = VisualTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 3_500.0,
+            height: 3_500.0,
+            rotation_degrees: 0.0,
+        };
+        let mut operations = Vec::new();
+        for _ in 0..6 {
+            operations.push(VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform,
+                style: visual_style(
+                    VisualColor::rgba(120, 150, 190, 255),
+                    VisualColor::rgba(20, 30, 40, 255),
+                    1.0,
+                ),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            }));
+        }
+        for _ in 0..6 {
+            operations.push(VisualOperation::AddImageReference {
+                asset: prepared.asset.clone(),
+                layer_id: DEFAULT_LAYER_ID,
+                transform,
+                style: visual_style(
+                    VisualColor::rgba(0, 0, 0, 0),
+                    VisualColor::rgba(0, 0, 0, 0),
+                    1.0,
+                ),
+            });
+        }
+        let mut document = VisualDiagramDocument::new();
+        document.replace_label("").unwrap();
+        document.apply_transaction(&operations).unwrap();
+
+        let (snapshot, _) = visual_export_snapshot(&document);
+        assert!(matches!(
+            snapshot.encode_png(DiagramVisualExportOptions::default()),
+            Err(DiagramExportError::RasterWorkLimit {
+                estimated,
+                max: MAX_RASTER_PIXEL_VISITS,
+            }) if estimated > MAX_RASTER_PIXEL_VISITS
+        ));
     }
 }

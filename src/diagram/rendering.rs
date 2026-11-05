@@ -898,7 +898,7 @@ fn validate_svg_dimensions(width: f32, height: f32) -> Result<(), DiagramRenderE
     Ok(())
 }
 
-fn unpremultiply_rgba(rgba: &mut [u8]) {
+pub(crate) fn unpremultiply_rgba(rgba: &mut [u8]) {
     for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = u16::from(pixel[3]);
         if alpha == 0 {
