@@ -452,12 +452,30 @@ mod tests {
 
     #[test]
     fn utility_dialog_size_selection_is_session_only_and_save_preserves_latest_sizes() {
-        use crate::settings::utility_dialog_sizes::{PreferredWindowSize, UtilityToolKey};
+        use crate::settings::utility_dialog_sizes::{
+            NativeWindowGeometry, PreferredWindowSize, SavedWindowPosition, UtilityToolKey,
+        };
 
         let key = UtilityToolKey::parse("diff").unwrap();
         let size = PreferredWindowSize::new(700.0, 510.0).unwrap();
+        let old_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-1280.0, -100.0).unwrap(),
+            PreferredWindowSize::new(760.0, 520.0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+        let latest_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-1920.0, -120.0).unwrap(),
+            PreferredWindowSize::new(920.0, 700.0).unwrap(),
+            1.5,
+        )
+        .unwrap();
         let mut stale_draft = Settings::default();
         stale_draft.utility_dialog_sizes.set(key, size).unwrap();
+        stale_draft
+            .utility_dialog_sizes
+            .set_native_geometry(key, old_geometry)
+            .unwrap();
         let mut editor = SettingsEditor::from_settings(&stale_draft);
         assert_eq!(
             editor.utility_dialog_size_selected_tool,
@@ -466,6 +484,21 @@ mod tests {
         editor.utility_dialog_size_selected_tool = Some(key);
 
         let mut latest = stale_draft.clone();
+        latest
+            .utility_dialog_sizes
+            .set(key, PreferredWindowSize::new(840.0, 620.0).unwrap())
+            .unwrap();
+        latest
+            .utility_dialog_sizes
+            .set_native_geometry(key, latest_geometry)
+            .unwrap();
+        let saved = editor.to_settings(&latest).unwrap();
+        assert_eq!(saved.utility_dialog_sizes, latest.utility_dialog_sizes);
+        assert_eq!(
+            saved.utility_dialog_sizes.native_geometry(key),
+            Some(latest_geometry)
+        );
+
         latest.utility_dialog_sizes.reset(key).unwrap();
         let saved = editor.to_settings(&latest).unwrap();
         assert_eq!(saved.utility_dialog_sizes, latest.utility_dialog_sizes);
@@ -474,6 +507,7 @@ mod tests {
             crate::settings::UtilitySizePreference::Reset,
             "a stale editor draft cannot restore its older preferred size"
         );
+        assert_eq!(saved.utility_dialog_sizes.native_geometry(key), None);
     }
 
     #[test]

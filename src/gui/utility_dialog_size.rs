@@ -1197,27 +1197,31 @@ impl UtilityDialogSizeState {
             return Ok(());
         }
 
-        match acknowledgement.preference {
-            UtilitySizePreference::Preferred(size) => self
-                .sizes
-                .set(key, size)
-                .map(|_| ())
-                .map_err(|error| error.to_string())?,
-            UtilitySizePreference::Reset => self
-                .sizes
-                .reset(key)
-                .map(|_| ())
-                .map_err(|error| error.to_string())?,
-            UtilitySizePreference::Missing | UtilitySizePreference::Unsupported => return Ok(()),
-        }
+        self.sizes
+            .replace_committed(
+                key,
+                acknowledgement.preference,
+                acknowledgement.native_geometry,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())?;
 
         self.accepted_revisions.insert(key, revision);
         self.waiting_for_ack.remove(&key);
-        let locally_resized = self.local_resize_revisions.get(&key) == Some(&revision);
+        // A later native-only revision can be the first current acknowledgement
+        // after an in-flight resize/reset committed. Carry that older accepted
+        // intent forward before retiring its per-window bookkeeping.
+        let locally_resized = self
+            .local_resize_revisions
+            .get(&key)
+            .is_some_and(|resize_revision| *resize_revision <= revision);
         if locally_resized {
             self.local_resize_revisions.remove(&key);
         }
-        let explicitly_reset = self.reset_revisions.get(&key) == Some(&revision);
+        let explicitly_reset = self
+            .reset_revisions
+            .get(&key)
+            .is_some_and(|reset_revision| *reset_revision <= revision);
         if explicitly_reset {
             self.reset_revisions.remove(&key);
         }
@@ -1231,12 +1235,15 @@ impl UtilityDialogSizeState {
             if !instance.is_open || !instance.has_applied_restore || instance.restore_pending {
                 continue;
             }
-            if explicitly_reset || !locally_resized || instance.restore_after_size_ack {
+            if explicitly_reset
+                || (acknowledgement.affects_size && !locally_resized)
+                || instance.restore_after_size_ack
+            {
                 instance.restore_pending = true;
                 instance.restore_after_size_ack = false;
             } else {
-                // A completed grip drag changes the shared value for future
-                // openings without moving other currently open instances.
+                // A grip resize or native-only update changes durable size
+                // bookkeeping without moving existing docked instances.
                 instance.last_preference = Some(acknowledgement.preference);
                 instance.last_revision = Some(revision);
             }
@@ -1367,6 +1374,296 @@ mod tests {
         );
         manager.install_in_context(&ctx);
         (directory, path, settings, ctx, workers, manager)
+    }
+
+    #[test]
+    fn latest_geometry_ack_replaces_complete_cache_without_size_side_effects() {
+        use crate::settings::utility_dialog_sizes::{
+            NativeWindowGeometry, SavedWindowPosition, UtilitySizeMutation,
+        };
+        use std::sync::mpsc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let path_text = path.to_string_lossy().into_owned();
+        let key = key();
+        let initial_size = PreferredWindowSize::new(700.0, 500.0).unwrap();
+        let initial_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-900.0, -80.0).unwrap(),
+            PreferredWindowSize::new(800.0, 600.0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+        let first_size = PreferredWindowSize::new(720.0, 480.0).unwrap();
+        let first_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-1280.0, -100.0).unwrap(),
+            PreferredWindowSize::new(920.0, 700.0).unwrap(),
+            1.5,
+        )
+        .unwrap();
+        let final_size = PreferredWindowSize::new(840.0, 620.0).unwrap();
+        let mut settings = Settings::default();
+        settings
+            .utility_dialog_sizes
+            .set(key, initial_size)
+            .unwrap();
+        settings
+            .utility_dialog_sizes
+            .set_native_geometry(key, initial_geometry)
+            .unwrap();
+        settings.save(&path_text).unwrap();
+
+        let (first_started_sender, first_started_receiver) = mpsc::channel();
+        let (first_release_sender, first_release_receiver) = mpsc::channel();
+        let (reset_started_sender, reset_started_receiver) = mpsc::channel();
+        let (reset_release_sender, reset_release_receiver) = mpsc::channel();
+        let (superseded_reset_started_sender, superseded_reset_started_receiver) = mpsc::channel();
+        let (superseded_reset_release_sender, superseded_reset_release_receiver) = mpsc::channel();
+        let first_release_receiver = Arc::new(Mutex::new(first_release_receiver));
+        let reset_release_receiver = Arc::new(Mutex::new(reset_release_receiver));
+        let superseded_reset_release_receiver =
+            Arc::new(Mutex::new(superseded_reset_release_receiver));
+        let before_write = {
+            let first_release_receiver = Arc::clone(&first_release_receiver);
+            let reset_release_receiver = Arc::clone(&reset_release_receiver);
+            let superseded_reset_release_receiver = Arc::clone(&superseded_reset_release_receiver);
+            Arc::new(move |_key: UtilityToolKey, revision: UtilitySizeRevision| {
+                let (sender, receiver) = match revision.0 {
+                    1 => (&first_started_sender, &first_release_receiver),
+                    3 => (&reset_started_sender, &reset_release_receiver),
+                    5 => (
+                        &superseded_reset_started_sender,
+                        &superseded_reset_release_receiver,
+                    ),
+                    _ => return,
+                };
+                let _ = sender.send(revision);
+                let _ = receiver
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            })
+        };
+        let workers = SettingsSaveWorkerRegistry::default();
+        workers.set_utility_size_before_write_hook(before_write);
+        let ctx = Context::default();
+        let manager = UtilityDialogSizeManager::new(
+            path_text.clone(),
+            workers.clone(),
+            settings.utility_dialog_sizes.clone(),
+        );
+        manager.install_in_context(&ctx);
+        let instance_id = Id::new("native-geometry-cache-test");
+        manager.lock().instances.insert(
+            instance_id,
+            WindowInstance {
+                key,
+                is_open: true,
+                last_seen_frame: Some(0),
+                last_preference: Some(UtilitySizePreference::Preferred(initial_size)),
+                last_revision: None,
+                has_applied_restore: true,
+                restore_pending: false,
+                last_outer_rect: None,
+                last_body_rect: None,
+                last_body_clip: None,
+                resize_start: None,
+                resize_release: None,
+                locally_resized: false,
+                restore_after_size_ack: false,
+            },
+        );
+        let run_window_frame = || {
+            let mut restore_pending = None;
+            ctx.run_ui(raw_input(egui::vec2(1000.0, 800.0), vec![], 1.0), |root| {
+                let frame_ctx = root.ctx().clone();
+                manager.begin_frame(&frame_ctx).unwrap();
+                let plan = manager
+                    .prepare_window(
+                        &frame_ctx,
+                        key,
+                        instance_id,
+                        true,
+                        UtilityWindowSizeRecipe::outer(DEFAULT_OUTER),
+                    )
+                    .unwrap();
+                restore_pending = Some(plan.restore_pending);
+                manager.observe_window(
+                    plan,
+                    true,
+                    true,
+                    Some(Rect::from_min_size(Pos2::ZERO, DEFAULT_OUTER)),
+                    None,
+                    None,
+                    ResizeGripState::default(),
+                    &frame_ctx,
+                );
+            })
+            .drop_without_applying_deltas();
+            restore_pending.unwrap()
+        };
+
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::Set(first_size),
+            )
+            .unwrap();
+        assert_eq!(
+            first_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(1)
+        );
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::SetNative(first_geometry),
+            )
+            .unwrap();
+        first_release_sender.send(()).unwrap();
+        let first_ack_deadline = Instant::now() + Duration::from_secs(5);
+        let first_ack_restore;
+        loop {
+            let restore_pending = run_window_frame();
+            if manager.status(key).acknowledged_revision == Some(UtilitySizeRevision(2)) {
+                first_ack_restore = restore_pending;
+                break;
+            }
+            assert!(
+                Instant::now() < first_ack_deadline,
+                "timed out waiting for the size/native acknowledgement"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        let sizes = manager.snapshot();
+        assert_eq!(sizes.preferred(key), Some(first_size));
+        assert_eq!(sizes.native_geometry(key), Some(first_geometry));
+        assert_eq!(
+            manager.status(key).acknowledged_revision,
+            Some(UtilitySizeRevision(2))
+        );
+        {
+            let state = manager.lock();
+            let instance = state.instances.get(&instance_id).unwrap();
+            assert!(!instance.restore_pending);
+            assert_eq!(
+                instance.last_preference,
+                Some(UtilitySizePreference::Preferred(first_size)),
+                "a native-only acknowledgement cannot change an open docked presentation"
+            );
+            assert_eq!(instance.last_revision, Some(UtilitySizeRevision(2)));
+        }
+        assert_eq!(
+            first_ack_restore, false,
+            "the next actual window frame must not schedule a size restore"
+        );
+
+        // A reset succeeds in flight, then the latest size-only update
+        // commits without native geometry. Its acknowledgement must clear
+        // the stale geometry retained in the previous in-memory snapshot.
+        workers
+            .queue_utility_size_mutation(path_text.clone(), key, UtilitySizeMutation::Reset)
+            .unwrap();
+        assert_eq!(
+            reset_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(3)
+        );
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::Set(final_size),
+            )
+            .unwrap();
+        reset_release_sender.send(()).unwrap();
+        let final_ack_deadline = Instant::now() + Duration::from_secs(5);
+        let final_ack_restore;
+        loop {
+            let restore_pending = run_window_frame();
+            if manager.status(key).acknowledged_revision == Some(UtilitySizeRevision(4)) {
+                final_ack_restore = restore_pending;
+                break;
+            }
+            assert!(
+                Instant::now() < final_ack_deadline,
+                "timed out waiting for the reset/size acknowledgement"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        let sizes = manager.snapshot();
+        assert_eq!(sizes.preferred(key), Some(final_size));
+        assert_eq!(sizes.native_geometry(key), None);
+        assert_eq!(
+            manager.status(key).acknowledged_revision,
+            Some(UtilitySizeRevision(4))
+        );
+        assert!(final_ack_restore);
+
+        // Apply the size restore in an actual window frame, then supersede a
+        // pending explicit reset with a native-only write. The accepted native
+        // revision must still carry the reset's docked restore effect.
+        assert!(
+            !manager
+                .lock()
+                .instances
+                .get(&instance_id)
+                .unwrap()
+                .restore_pending
+        );
+
+        assert_eq!(manager.reset(key).unwrap(), UtilitySizeRevision(5));
+        assert_eq!(
+            superseded_reset_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(5)
+        );
+        let latest_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-2560.0, -200.0).unwrap(),
+            PreferredWindowSize::new(1000.0, 760.0).unwrap(),
+            2.0,
+        )
+        .unwrap();
+        workers
+            .queue_utility_size_mutation(
+                path_text,
+                key,
+                UtilitySizeMutation::SetNative(latest_geometry),
+            )
+            .unwrap();
+        superseded_reset_release_sender.send(()).unwrap();
+        let superseded_reset_deadline = Instant::now() + Duration::from_secs(5);
+        let superseded_reset_restore;
+        loop {
+            let restore_pending = run_window_frame();
+            if manager.status(key).acknowledged_revision == Some(UtilitySizeRevision(6)) {
+                superseded_reset_restore = restore_pending;
+                break;
+            }
+            assert!(
+                Instant::now() < superseded_reset_deadline,
+                "timed out waiting for the reset/native acknowledgement"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert_eq!(
+            manager.snapshot().preference(key),
+            UtilitySizePreference::Reset
+        );
+        assert_eq!(
+            manager.snapshot().native_geometry(key),
+            Some(latest_geometry)
+        );
+        assert_eq!(
+            superseded_reset_restore, true,
+            "a native-only acknowledgement must not retire an older explicit reset"
+        );
+        workers.join_all();
     }
 
     fn render_recipe_window(

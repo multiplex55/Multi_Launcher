@@ -699,6 +699,13 @@ impl SettingsSaveWorkerRegistry {
         }
         bind_utility_settings_path(&mut state, &settings_path)?;
         let revision = next_utility_size_revision(&mut state, key)?;
+        let mut mutation = mutation;
+        if let Some(failed) = state.utility_sizes_failed.remove(&key) {
+            mutation = failed.mutation.followed_by(mutation);
+        }
+        if let Some(pending) = state.utility_sizes_pending.remove(&key) {
+            mutation = pending.mutation.followed_by(mutation);
+        }
         state.utility_sizes_latest_revision.insert(key, revision);
         state
             .utility_sizes_pending
@@ -853,7 +860,7 @@ impl SettingsSaveWorkerRegistry {
     }
 
     #[cfg(test)]
-    fn set_utility_size_before_write_hook(
+    pub(crate) fn set_utility_size_before_write_hook(
         &self,
         hook: Arc<dyn Fn(UtilityToolKey, UtilitySizeRevision) + Send + Sync>,
     ) {
@@ -896,7 +903,7 @@ impl SettingsSaveWorkerRegistry {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match result {
-                    Ok(preference) => {
+                    Ok((preference, native_geometry)) => {
                         if state.utility_sizes_latest_revision.get(&key) == Some(&pending.revision)
                         {
                             state.utility_sizes_acknowledgements.insert(
@@ -905,6 +912,8 @@ impl SettingsSaveWorkerRegistry {
                                     key,
                                     revision: pending.revision,
                                     preference,
+                                    native_geometry,
+                                    affects_size: pending.mutation.affects_size(),
                                 },
                             );
                             if state
@@ -920,9 +929,14 @@ impl SettingsSaveWorkerRegistry {
                         // Keep the failed intent separately so the worker
                         // cannot spin on it. A new event replaces it; retry
                         // explicitly moves it back to the pending queue.
-                        if !state.utility_sizes_pending.contains_key(&key)
-                            && state.utility_sizes_latest_revision.get(&key)
-                                == Some(&pending.revision)
+                        if let Some(newer_pending) = state.utility_sizes_pending.get_mut(&key) {
+                            // A later component write can recover a failed
+                            // in-flight write. Carry forward any unaffected
+                            // component from that failed intent.
+                            newer_pending.mutation =
+                                pending.mutation.followed_by(newer_pending.mutation);
+                        } else if state.utility_sizes_latest_revision.get(&key)
+                            == Some(&pending.revision)
                         {
                             state.utility_sizes_failed.insert(key, pending);
                             state
@@ -3406,6 +3420,197 @@ mod tests {
         assert_eq!(
             workers.utility_size_latest_revision(key),
             Some(UtilitySizeRevision(2))
+        );
+    }
+
+    #[test]
+    fn utility_dialog_sizes_later_native_write_recovers_failed_inflight_size() {
+        use crate::settings::utility_dialog_sizes::{
+            NativeWindowGeometry, PreferredWindowSize, SavedWindowPosition, UtilitySizeMutation,
+            UtilityToolKey,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let path_text = path.to_string_lossy().into_owned();
+        Settings::default().save(&path_text).unwrap();
+        let key = UtilityToolKey::parse("calculation-pad").unwrap();
+        let size = PreferredWindowSize::new(640.0, 480.0).unwrap();
+        let geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-1280.0, -100.0).unwrap(),
+            PreferredWindowSize::new(920.0, 700.0).unwrap(),
+            1.5,
+        )
+        .unwrap();
+
+        let (first_started_sender, first_started_receiver) = mpsc::channel();
+        let (first_release_sender, first_release_receiver) = mpsc::channel();
+        let (second_started_sender, second_started_receiver) = mpsc::channel();
+        let (second_release_sender, second_release_receiver) = mpsc::channel();
+        let first_release_receiver = Arc::new(Mutex::new(first_release_receiver));
+        let second_release_receiver = Arc::new(Mutex::new(second_release_receiver));
+        let before_write = {
+            let first_release_receiver = Arc::clone(&first_release_receiver);
+            let second_release_receiver = Arc::clone(&second_release_receiver);
+            Arc::new(move |_key: UtilityToolKey, revision: UtilitySizeRevision| {
+                let (sender, receiver) = match revision.0 {
+                    1 => (&first_started_sender, &first_release_receiver),
+                    2 => (&second_started_sender, &second_release_receiver),
+                    _ => return,
+                };
+                let _ = sender.send(revision);
+                let _ = receiver
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            })
+        };
+        let workers = SettingsSaveWorkerRegistry::default();
+        workers.set_utility_size_before_write_hook(before_write);
+        workers
+            .queue_utility_size_mutation(path_text.clone(), key, UtilitySizeMutation::Set(size))
+            .unwrap();
+        assert_eq!(
+            first_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(1)
+        );
+
+        // Make the in-flight size write fail, then queue an independent
+        // geometry update before allowing the worker to continue.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::SetNative(geometry),
+            )
+            .unwrap();
+        first_release_sender.send(()).unwrap();
+        assert_eq!(
+            second_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(2)
+        );
+
+        // The newer revision is now processing the merged intent. Restore a
+        // valid settings file so that the retry can commit both components.
+        std::fs::remove_dir(&path).unwrap();
+        Settings::default().save(&path_text).unwrap();
+        second_release_sender.send(()).unwrap();
+        workers.join_all();
+
+        let saved = Settings::load(&path_text).unwrap();
+        assert_eq!(saved.utility_dialog_sizes.preferred(key), Some(size));
+        assert_eq!(
+            saved.utility_dialog_sizes.native_geometry(key),
+            Some(geometry)
+        );
+        assert_eq!(workers.utility_size_write_error(key), None);
+        assert!(workers.utility_size_shutdown_failures().is_empty());
+
+        let acknowledgements = workers.drain_utility_size_acknowledgements();
+        assert_eq!(
+            acknowledgements.len(),
+            1,
+            "the failed stale revision is not published"
+        );
+        assert_eq!(acknowledgements[0].revision, UtilitySizeRevision(2));
+        assert!(acknowledgements[0].affects_size);
+        assert_eq!(
+            acknowledgements[0].preference,
+            UtilitySizePreference::Preferred(size)
+        );
+        assert_eq!(acknowledgements[0].native_geometry, Some(geometry));
+    }
+
+    #[test]
+    fn utility_dialog_sizes_latest_size_after_reset_survives_older_write_failure() {
+        use crate::settings::utility_dialog_sizes::{
+            PreferredWindowSize, UtilitySizeMutation, UtilityToolKey,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let path_text = path.to_string_lossy().into_owned();
+        Settings::default().save(&path_text).unwrap();
+        let key = UtilityToolKey::parse("calculation-pad").unwrap();
+        let old_size = PreferredWindowSize::new(640.0, 480.0).unwrap();
+        let latest_size = PreferredWindowSize::new(920.0, 720.0).unwrap();
+
+        let (first_started_sender, first_started_receiver) = mpsc::channel();
+        let (first_release_sender, first_release_receiver) = mpsc::channel();
+        let (latest_started_sender, latest_started_receiver) = mpsc::channel();
+        let (latest_release_sender, latest_release_receiver) = mpsc::channel();
+        let first_release_receiver = Arc::new(Mutex::new(first_release_receiver));
+        let latest_release_receiver = Arc::new(Mutex::new(latest_release_receiver));
+        let before_write = {
+            let first_release_receiver = Arc::clone(&first_release_receiver);
+            let latest_release_receiver = Arc::clone(&latest_release_receiver);
+            Arc::new(move |_key: UtilityToolKey, revision: UtilitySizeRevision| {
+                let (sender, receiver) = match revision.0 {
+                    1 => (&first_started_sender, &first_release_receiver),
+                    3 => (&latest_started_sender, &latest_release_receiver),
+                    _ => return,
+                };
+                let _ = sender.send(revision);
+                let _ = receiver
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            })
+        };
+        let workers = SettingsSaveWorkerRegistry::default();
+        workers.set_utility_size_before_write_hook(before_write);
+        workers
+            .queue_utility_size_mutation(path_text.clone(), key, UtilitySizeMutation::Set(old_size))
+            .unwrap();
+        assert_eq!(
+            first_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(1)
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        workers
+            .queue_utility_size_mutation(path_text.clone(), key, UtilitySizeMutation::Reset)
+            .unwrap();
+        workers
+            .queue_utility_size_mutation(
+                path_text.clone(),
+                key,
+                UtilitySizeMutation::Set(latest_size),
+            )
+            .unwrap();
+        first_release_sender.send(()).unwrap();
+        assert_eq!(
+            latest_started_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            UtilitySizeRevision(3)
+        );
+
+        std::fs::remove_dir(&path).unwrap();
+        Settings::default().save(&path_text).unwrap();
+        latest_release_sender.send(()).unwrap();
+        workers.join_all();
+
+        let saved = Settings::load(&path_text).unwrap();
+        assert_eq!(saved.utility_dialog_sizes.preferred(key), Some(latest_size));
+        assert_eq!(saved.utility_dialog_sizes.native_geometry(key), None);
+        assert_eq!(workers.utility_size_write_error(key), None);
+        let acknowledgements = workers.drain_utility_size_acknowledgements();
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(acknowledgements[0].revision, UtilitySizeRevision(3));
+        assert!(acknowledgements[0].affects_size);
+        assert_eq!(
+            acknowledgements[0].preference,
+            UtilitySizePreference::Preferred(latest_size)
         );
     }
 

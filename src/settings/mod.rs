@@ -8,8 +8,9 @@ pub use defaults::*;
 pub use io::{set_settings_path, settings_path};
 pub use model::*;
 pub use utility_dialog_sizes::{
-    AppliedWindowSize, ObservedWindowSize, PreferredWindowSize, UtilityDialogSizes,
-    UtilitySizeAcknowledgement, UtilitySizePreference, UtilitySizeRevision, UtilityToolKey,
+    AppliedWindowSize, NativeWindowGeometry, ObservedWindowSize, PreferredWindowSize,
+    SavedWindowPosition, UtilityDialogSizes, UtilitySizeAcknowledgement, UtilitySizePreference,
+    UtilitySizeRevision, UtilityToolKey,
 };
 
 pub use crate::gui::jump_mode::config::{
