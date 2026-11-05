@@ -23,6 +23,96 @@ pub(super) const DECODER_METADATA_RESERVATION_BYTES: usize = MAX_ENCODED_FILE_BY
 const MAX_DECODER_AND_CONVERSION_BYTES_PER_PIXEL: usize = 20;
 const FILE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
+/// A decoded local PNG/JPEG with the same bounded header preflight used by
+/// image comparison. The original encoded bytes remain the caller's
+/// persistence authority; this RGBA surface is only a transient render cache.
+pub(crate) struct DecodedLocalRaster {
+    pub(crate) format: ImageFormat,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgba: Arc<[u8]>,
+}
+
+/// Decode an already size-capped local raster after checking its signature and
+/// exact header dimensions. Only PNG/JPEG are accepted by the Diagram asset
+/// importer; SVG and other active or multi-frame formats are not interpreted.
+pub(crate) fn decode_local_png_jpeg(
+    bytes: &[u8],
+    max_encoded_bytes: usize,
+    max_pixels: usize,
+) -> Result<DecodedLocalRaster, String> {
+    let (format, width, height) = inspect_local_png_jpeg(bytes, max_encoded_bytes, max_pixels)?;
+    let rgba_len = checked_rgba_len(width, height).map_err(|error| error.to_string())?;
+    let decoder_allocation_limit = rgba_len
+        .checked_mul(2)
+        .and_then(|surface_allowance| surface_allowance.checked_add(max_encoded_bytes))
+        .ok_or_else(|| "image decoder allocation limit is not representable".to_owned())?;
+
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(width);
+    limits.max_image_height = Some(height);
+    // Allow the decoded surface and bounded working copy (up to eight bytes
+    // per pixel), plus the capped encoded input for metadata. Using the
+    // compressed file size alone rejects valid highly-compressed images.
+    limits.max_alloc = Some(u64::try_from(decoder_allocation_limit).unwrap_or(u64::MAX));
+    let mut reader = ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|error| format!("image could not be decoded: {error}"))?;
+    if decoded.dimensions() != (width, height) {
+        return Err("decoded dimensions did not match the bounded image header".into());
+    }
+    let rgba = decoded.into_rgba8().into_raw();
+    if rgba.len() != rgba_len {
+        return Err("decoded pixel buffer had an unexpected length".into());
+    }
+
+    Ok(DecodedLocalRaster {
+        format,
+        width,
+        height,
+        rgba: Arc::from(rgba.into_boxed_slice()),
+    })
+}
+
+/// Inspect bounded PNG/JPEG signatures and dimensions without constructing a
+/// decoder or allocating the decoded pixel surface.
+pub(crate) fn inspect_local_png_jpeg(
+    bytes: &[u8],
+    max_encoded_bytes: usize,
+    max_pixels: usize,
+) -> Result<(ImageFormat, u32, u32), String> {
+    if bytes.len() > max_encoded_bytes {
+        return Err(format!(
+            "encoded image exceeds the {max_encoded_bytes}-byte limit"
+        ));
+    }
+
+    let header_reader = ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| format!("image signature could not be read: {error}"))?;
+    let format = header_reader
+        .format()
+        .ok_or_else(|| "image signature is not recognized; choose PNG or JPEG".to_owned())?;
+    if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg) {
+        return Err(format!(
+            "{} images are not supported; choose PNG or JPEG",
+            format_name(format)
+        ));
+    }
+
+    let (width, height) = preflight_dimensions(bytes, format).map_err(|error| error.to_string())?;
+    let rgba_len = checked_rgba_len(width, height).map_err(|error| error.to_string())?;
+    let pixels = rgba_len / 4;
+    if pixels > max_pixels {
+        return Err(format!(
+            "image contains {pixels} pixels; the pixel limit is {max_pixels}"
+        ));
+    }
+    Ok((format, width, height))
+}
+
 static NEXT_IMAGE_INPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

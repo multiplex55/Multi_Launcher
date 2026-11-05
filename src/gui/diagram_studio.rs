@@ -3,19 +3,20 @@ use super::native_keyboard::reserve_windows_system_menu_alt_space;
 use super::utility_host::ViewportPassProvenance;
 use crate::diagram::{
     CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping,
-    CanvasMinimap, DEFAULT_LAYER_ID, DiagramDocument, DiagramDocumentController,
-    DiagramDocumentError, DiagramExportFormat, DiagramImageSnapshot, DiagramRenderOutput,
-    DiagramRenderedImageSnapshot, DiagramScene, DiagramSession, DiagramSourceCopy,
-    DiagramSourceCopyOrigin, DiagramSourceSnapshot, DiagramTemplate, EdgeId, FlowDirection,
-    GenericPreviewStatus, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES,
-    MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_TRANSACTION_OPERATIONS, MermaidFile, NodeId,
-    NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText, PreviewState,
+    CanvasMinimap, DEFAULT_LAYER_ID, DecodedVisualAsset, DiagramDocument,
+    DiagramDocumentController, DiagramDocumentError, DiagramExportFormat, DiagramImageSnapshot,
+    DiagramRenderOutput, DiagramRenderedImageSnapshot, DiagramScene, DiagramSession,
+    DiagramSourceCopy, DiagramSourceCopyOrigin, DiagramSourceSnapshot, DiagramTemplate, EdgeId,
+    FlowDirection, GenericPreviewStatus, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS,
+    MAX_DIAGRAM_NODES, MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_PRESET_COMPONENTS,
+    MAX_VISUAL_TRANSACTION_OPERATIONS, MermaidFile, NodeId, NodePosition, NodeShape,
+    PendingDiagramTransition, Position, PreparedText, PreparedVisualAsset, PreviewState,
     ProjectedStrokePrimitive, RasterSize, RenderDocumentIdentity, RenderKey, RenderOptions,
     RendererService, SceneMetrics, ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment,
-    TransitionDecision, TransitionOutcome, VisualAlign, VisualAnchor, VisualColor, VisualConnector,
-    VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute, VisualDistribution,
-    VisualLineStyle, VisualObject, VisualObjectDraft, VisualObjectId, VisualObjectKind,
-    VisualOperation, VisualPresetDraft, VisualPrimitiveComponent, VisualPrimitiveShape,
+    TransitionDecision, TransitionOutcome, VisualAlign, VisualAnchor, VisualAsset, VisualAssetId,
+    VisualColor, VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint,
+    VisualConnectorRoute, VisualDistribution, VisualLineStyle, VisualObject, VisualObjectDraft,
+    VisualObjectId, VisualObjectKind, VisualOperation, VisualPresetDraft, VisualPrimitiveShape,
     VisualProjectedKind, VisualProjectionError, VisualScene, VisualSceneProjection, VisualShadow,
     VisualStyle, VisualTransform, VisualTransformMode, build_scene, color_with_opacity,
     generic_preview_family, is_generic_preview_candidate, preview_visual_transforms,
@@ -25,12 +26,14 @@ use crate::diagram::{
     visual_canvas_snap_translation_delta,
 };
 use eframe::egui;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 
 const DEFAULT_VIEWPORT_SIZE: [f32; 2] = [1180.0, 760.0];
 const MIN_VIEWPORT_SIZE: [f32; 2] = [480.0, 360.0];
@@ -467,6 +470,50 @@ struct VisualProjectionCache {
     projection: Result<Arc<VisualSceneProjection>, VisualProjectionError>,
 }
 
+#[derive(Clone)]
+struct VisualAssetTexture {
+    texture: egui::TextureHandle,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone)]
+struct VisualAssetImportFence {
+    document: RenderDocumentIdentity,
+    revision: u64,
+    owner_generation: u64,
+    owner_viewport_id: egui::ViewportId,
+    start_pass: ViewportPassProvenance,
+    start_pass_accepted: bool,
+}
+
+enum VisualAssetWorkKind {
+    Import(VisualAssetImportFence),
+    Hydrate,
+}
+
+enum VisualAssetWorkResult {
+    Import(Result<PreparedVisualAsset, String>),
+    Hydrate(Vec<Result<DecodedVisualAsset, (VisualAssetId, String)>>),
+}
+
+struct PendingVisualAssetWork {
+    document: RenderDocumentIdentity,
+    revision: u64,
+    owner_generation: u64,
+    owner_viewport_id: egui::ViewportId,
+    kind: VisualAssetWorkKind,
+    cancelled: Arc<AtomicBool>,
+    receiver: Receiver<VisualAssetWorkResult>,
+    hydration_ids: Vec<VisualAssetId>,
+    retired: bool,
+}
+
+struct CompletedVisualAssetImport {
+    fence: VisualAssetImportFence,
+    prepared: PreparedVisualAsset,
+}
+
 #[derive(Clone, Debug)]
 struct VisualPropertyDraft {
     document: RenderDocumentIdentity,
@@ -520,6 +567,13 @@ enum PendingMutation {
         expected_document: RenderDocumentIdentity,
         expected_revision: u64,
         select_after: Option<VisualObjectId>,
+    },
+    VisualAssetImport {
+        prepared: PreparedVisualAsset,
+        layer_id: crate::diagram::VisualLayerId,
+        transform: VisualTransform,
+        style: VisualStyle,
+        fence: VisualAssetImportFence,
     },
     VisualLayoutFailure {
         message: String,
@@ -593,6 +647,8 @@ struct DrawBodyEffects {
     active_menu_scope: Option<MenuFocusScope>,
     visual_selection: Option<VisualSelectionState>,
     visual_canvas_editing_allowed: bool,
+    visual_structural_editing_allowed: bool,
+    visual_asset_picker_requested: Option<VisualAssetImportFence>,
 }
 
 struct PendingRootEffects {
@@ -615,6 +671,8 @@ struct PendingRootEffects {
     active_menu_scope: Option<MenuFocusScope>,
     visual_selection: Option<VisualSelectionState>,
     visual_canvas_editing_allowed: bool,
+    visual_structural_editing_allowed: bool,
+    visual_asset_picker_requested: Option<VisualAssetImportFence>,
     open_viewer_requested: bool,
     mutation: Option<PendingMutation>,
     document_intent: Option<DocumentIntent>,
@@ -664,6 +722,14 @@ pub(crate) struct DiagramStudioDialog {
     export_scale: ExportScale,
     cache: Option<RevisionCache>,
     visual_projection_cache: Option<VisualProjectionCache>,
+    visual_asset_textures: HashMap<VisualAssetId, VisualAssetTexture>,
+    visual_asset_pixels: HashMap<VisualAssetId, DecodedVisualAsset>,
+    visual_asset_errors: HashMap<VisualAssetId, String>,
+    visual_asset_document: Option<RenderDocumentIdentity>,
+    visual_asset_revision: Option<u64>,
+    visual_asset_owner_generation: u64,
+    visual_asset_work: Option<PendingVisualAssetWork>,
+    completed_visual_asset_import: Option<CompletedVisualAssetImport>,
     renderer: Option<RendererService>,
     camera: Camera,
     viewer_camera: Camera,
@@ -819,6 +885,14 @@ impl DiagramStudioDialog {
             export_scale: ExportScale::default(),
             cache: None,
             visual_projection_cache: None,
+            visual_asset_textures: HashMap::new(),
+            visual_asset_pixels: HashMap::new(),
+            visual_asset_errors: HashMap::new(),
+            visual_asset_document: None,
+            visual_asset_revision: None,
+            visual_asset_owner_generation: 0,
+            visual_asset_work: None,
+            completed_visual_asset_import: None,
             renderer: None,
             camera: Camera::default(),
             viewer_camera: Camera::default(),
@@ -1163,6 +1237,7 @@ impl DiagramStudioDialog {
         >,
     ) {
         self.refresh_cache();
+        self.poll_visual_asset_work();
         if !self.open {
             self.pending_root_effects = None;
             return;
@@ -1182,6 +1257,8 @@ impl DiagramStudioDialog {
         let mut active_menu_scope = None;
         let mut visual_selection_requested = None;
         let mut visual_canvas_editing_allowed = false;
+        let mut visual_structural_editing_allowed = false;
+        let mut visual_asset_picker_requested = None;
         let mut open_viewer_requested = false;
         let mut document_intent = None;
         let mut body_rendered = false;
@@ -1309,6 +1386,8 @@ impl DiagramStudioDialog {
                     active_menu_scope = effects.active_menu_scope;
                     visual_selection_requested = effects.visual_selection;
                     visual_canvas_editing_allowed = effects.visual_canvas_editing_allowed;
+                    visual_structural_editing_allowed = effects.visual_structural_editing_allowed;
+                    visual_asset_picker_requested = effects.visual_asset_picker_requested;
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
@@ -1328,6 +1407,8 @@ impl DiagramStudioDialog {
                 active_menu_scope = effects.active_menu_scope;
                 visual_selection_requested = effects.visual_selection;
                 visual_canvas_editing_allowed = effects.visual_canvas_editing_allowed;
+                visual_structural_editing_allowed = effects.visual_structural_editing_allowed;
+                visual_asset_picker_requested = effects.visual_asset_picker_requested;
             }
             if body_rendered
                 && pass_authorized
@@ -1486,6 +1567,14 @@ impl DiagramStudioDialog {
                 visual_canvas_editing_allowed: child_pass_accepted
                     && body_rendered
                     && visual_canvas_editing_allowed,
+                visual_structural_editing_allowed: child_pass_accepted
+                    && body_rendered
+                    && visual_structural_editing_allowed,
+                visual_asset_picker_requested: (child_pass_accepted
+                    && body_rendered
+                    && !close_requested)
+                    .then_some(visual_asset_picker_requested)
+                    .flatten(),
                 open_viewer_requested: owner_effects_accepted
                     && !close_requested
                     && open_viewer_requested,
@@ -1682,7 +1771,15 @@ impl DiagramStudioDialog {
         canvas_focus_requested: &mut Option<egui::Id>,
     ) -> bool {
         if let Some(label) = self.documents.visual_label().map(str::to_owned) {
-            let projection = self.visual_projection().map(|(_, projection)| projection);
+            let presentation = self.visual_projection();
+            if let Some((scene, _)) = presentation.as_ref() {
+                let revision = self.documents.visual_revision().unwrap_or(0);
+                let pending = self.documents.pending_transition().is_some();
+                self.sync_visual_asset_scope(scene, revision, pending);
+                self.poll_visual_asset_work();
+                self.upload_visual_asset_textures(ui.ctx());
+            }
+            let projection = presentation.map(|(_, projection)| projection);
             return self.draw_visual_viewer_body(
                 ui,
                 actions_allowed,
@@ -1947,6 +2044,16 @@ impl DiagramStudioDialog {
         });
         ui.separator();
         ui.label("Read-only visual document preview");
+        if let Some((id, error)) = self
+            .visual_asset_errors
+            .iter()
+            .min_by_key(|(id, _)| id.as_str())
+        {
+            ui.colored_label(
+                egui::Color32::from_rgb(185, 65, 65),
+                format!("Image {} is unavailable: {error}", &id.as_str()[..8]),
+            );
+        }
         let desired = egui::vec2(ui.available_width().max(240.0), 300.0);
         let (canvas_response, painter) =
             ui.allocate_painter(desired, egui::Sense::click_and_drag());
@@ -2015,8 +2122,15 @@ impl DiagramStudioDialog {
             .map_or(0, |projection| projection.items.len());
         match projection.as_ref() {
             Some(Ok(projection)) => {
-                paint_report =
-                    paint_visual_projection(&painter, projection, canvas, camera, &BTreeSet::new());
+                paint_report = paint_visual_projection(
+                    &painter,
+                    projection,
+                    canvas,
+                    camera,
+                    &BTreeSet::new(),
+                    &self.visual_asset_textures,
+                    &self.visual_asset_errors,
+                );
             }
             Some(Err(error)) => {
                 ui.painter()
@@ -2105,6 +2219,7 @@ impl DiagramStudioDialog {
             return false;
         }
         let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
+        self.process_visual_asset_picker_request(ctx, &effects, owner_pass_current);
         let mut cancel_visual_gesture = false;
         if let Some(gesture) = self.visual_gesture.as_mut() {
             let document_current = gesture.document == self.render_document
@@ -2188,6 +2303,7 @@ impl DiagramStudioDialog {
                 mutation,
                 PendingMutation::ReplaceVisualLabel { .. }
                     | PendingMutation::VisualTransaction { .. }
+                    | PendingMutation::VisualAssetImport { .. }
                     | PendingMutation::VisualLayoutFailure { .. }
                     | PendingMutation::VisualGestureTransaction { .. }
                     | PendingMutation::VisualHistory { .. }
@@ -2204,6 +2320,13 @@ impl DiagramStudioDialog {
                     *owner_generation == self.owner_generation
                         && *owner_viewport_id == effects.owner_viewport_id
                         && *start_pass_accepted
+                }
+                PendingMutation::VisualAssetImport { fence, .. } => {
+                    fence.owner_generation == self.owner_generation
+                        && fence.owner_viewport_id == effects.owner_viewport_id
+                        && fence.start_pass_accepted
+                        && fence.document == self.render_document
+                        && Some(fence.revision) == self.documents.visual_revision()
                 }
                 _ => true,
             };
@@ -2880,6 +3003,471 @@ impl DiagramStudioDialog {
         self.drag = None;
     }
 
+    fn pick_visual_asset_file(&mut self) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
+            return self.test_next_file_picker_result.take().unwrap_or(None);
+        }
+        #[cfg(not(test))]
+        {
+            let directory = self.picker_directory();
+            let mut picker =
+                rfd::FileDialog::new().add_filter("PNG or JPEG image", &["png", "jpg", "jpeg"]);
+            if directory.is_dir() {
+                picker = picker.set_directory(directory);
+            }
+            picker.pick_file()
+        }
+    }
+
+    fn start_visual_asset_import(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        mut fence: VisualAssetImportFence,
+    ) {
+        if self.visual_asset_work.is_some() || self.completed_visual_asset_import.is_some() {
+            self.message = Some(StudioNotice::error(
+                "Wait for the current image operation to finish before importing another image.",
+            ));
+            return;
+        }
+        if !self.visual_intent_is_current(&fence.document, fence.revision)
+            || fence.owner_generation != self.owner_generation
+            || !fence.start_pass_accepted
+            || fence.start_pass.viewport_id != fence.owner_viewport_id
+            || !fence.start_pass.was_retained(ctx)
+        {
+            self.reject_stale_visual_intent();
+            return;
+        }
+        fence.start_pass_accepted = true;
+        let revision = fence.revision;
+        let owner_viewport_id = fence.owner_viewport_id;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let wake_context = ctx.clone();
+        let renderer_max_side = ctx.input(|input| input.max_texture_side);
+        let (sender, receiver) = sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name("diagram-visual-asset-import".into())
+            .spawn(move || {
+                let result = if worker_cancelled.load(Ordering::Acquire) {
+                    Err("image import was cancelled".to_owned())
+                } else {
+                    crate::diagram::prepare_visual_asset_file(&path, renderer_max_side)
+                };
+                if !worker_cancelled.load(Ordering::Acquire) {
+                    let _ = sender.send(VisualAssetWorkResult::Import(result));
+                }
+                wake_context.request_repaint_of(owner_viewport_id);
+            });
+        if let Err(error) = worker {
+            self.message = Some(StudioNotice::error(format!(
+                "Could not start image import: {error}"
+            )));
+            return;
+        }
+        self.visual_asset_work = Some(PendingVisualAssetWork {
+            document: fence.document.clone(),
+            revision,
+            owner_generation: self.owner_generation,
+            owner_viewport_id,
+            kind: VisualAssetWorkKind::Import(fence),
+            cancelled,
+            receiver,
+            hydration_ids: Vec::new(),
+            retired: false,
+        });
+        self.message = Some(StudioNotice::info(
+            "Importing image; the document will update after the accepted owner pass.",
+        ));
+    }
+
+    fn process_visual_asset_picker_request(
+        &mut self,
+        ctx: &egui::Context,
+        effects: &PendingRootEffects,
+        owner_pass_current: bool,
+    ) {
+        let Some(mut fence) = effects.visual_asset_picker_requested.clone() else {
+            return;
+        };
+        let pass_matches = if effects.owner_pass.is_some() {
+            effects.owner_pass == Some(fence.start_pass)
+        } else {
+            effects.root_pass == fence.start_pass
+        };
+        if !owner_pass_current
+            || !effects.visual_structural_editing_allowed
+            || !effects.owner_pass_accepted
+            || !pass_matches
+            || !fence.start_pass.was_retained(ctx)
+            || effects.close_dialog
+            || effects.close_viewport
+            || effects.os_close_requested
+            || effects.document_intent.is_some()
+            || effects.mutation.is_some()
+            || fence.owner_generation != self.owner_generation
+            || fence.owner_viewport_id != effects.owner_viewport_id
+            || !self.visual_intent_is_current(&fence.document, fence.revision)
+        {
+            return;
+        }
+
+        let Some(path) = self.pick_visual_asset_file() else {
+            return;
+        };
+        // Native file pickers can outlive the initiating frame. Recheck the
+        // document fence immediately after they return before starting IO.
+        if effects.close_dialog
+            || effects.close_viewport
+            || effects.document_intent.is_some()
+            || fence.owner_generation != self.owner_generation
+            || fence.owner_viewport_id != effects.owner_viewport_id
+            || !self.visual_intent_is_current(&fence.document, fence.revision)
+        {
+            return;
+        }
+        fence.start_pass_accepted = true;
+        self.start_visual_asset_import(ctx, path, fence);
+    }
+
+    fn start_visual_asset_hydration(
+        &mut self,
+        ctx: &egui::Context,
+        scene: &VisualScene,
+        revision: u64,
+    ) {
+        if self.visual_asset_work.is_some() || self.completed_visual_asset_import.is_some() {
+            return;
+        }
+        let assets = scene
+            .assets
+            .iter()
+            .filter(|asset| {
+                !self.visual_asset_textures.contains_key(asset.id())
+                    && !self.visual_asset_pixels.contains_key(asset.id())
+                    && !self.visual_asset_errors.contains_key(asset.id())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if assets.is_empty() {
+            return;
+        }
+        let asset_ids = assets
+            .iter()
+            .map(|asset| asset.id().clone())
+            .collect::<Vec<_>>();
+        let document = self.render_document.clone();
+        let owner_generation = self.owner_generation;
+        let owner_viewport_id = ctx.viewport_id();
+        let renderer_max_side = ctx.input(|input| input.max_texture_side);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let wake_context = ctx.clone();
+        let (sender, receiver) = sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name("diagram-visual-asset-decode".into())
+            .spawn(move || {
+                let mut decoded = Vec::with_capacity(assets.len());
+                for asset in &assets {
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    decoded.push(
+                        crate::diagram::decode_visual_asset_payload(asset, renderer_max_side)
+                            .map_err(|error| (asset.id().clone(), error)),
+                    );
+                }
+                if !worker_cancelled.load(Ordering::Acquire) {
+                    let _ = sender.send(VisualAssetWorkResult::Hydrate(decoded));
+                }
+                wake_context.request_repaint_of(owner_viewport_id);
+            });
+        if let Err(error) = worker {
+            for id in asset_ids {
+                self.visual_asset_errors
+                    .insert(id, format!("could not start image decoder: {error}"));
+            }
+            return;
+        }
+        self.visual_asset_work = Some(PendingVisualAssetWork {
+            document,
+            revision,
+            owner_generation,
+            owner_viewport_id,
+            kind: VisualAssetWorkKind::Hydrate,
+            cancelled,
+            receiver,
+            hydration_ids: asset_ids,
+            retired: false,
+        });
+    }
+
+    fn retire_visual_asset_work(&mut self) {
+        if let Some(work) = self.visual_asset_work.as_mut() {
+            work.retired = true;
+            work.cancelled.store(true, Ordering::Release);
+        }
+        self.completed_visual_asset_import = None;
+    }
+
+    fn clear_visual_asset_state(&mut self) {
+        self.retire_visual_asset_work();
+        self.visual_asset_textures.clear();
+        self.visual_asset_pixels.clear();
+        self.visual_asset_errors.clear();
+        self.visual_asset_document = None;
+        self.visual_asset_revision = None;
+        self.visual_asset_owner_generation = self.owner_generation;
+    }
+
+    fn sync_visual_asset_scope(&mut self, scene: &VisualScene, revision: u64, pending: bool) {
+        let identity = self.render_document.clone();
+        if self.visual_asset_document.as_ref() != Some(&identity) {
+            self.retire_visual_asset_work();
+            self.visual_asset_textures.clear();
+            self.visual_asset_pixels.clear();
+            self.visual_asset_errors.clear();
+            self.visual_asset_document = Some(identity.clone());
+            self.visual_asset_revision = Some(revision);
+            self.visual_asset_owner_generation = self.owner_generation;
+        } else {
+            if self.visual_asset_owner_generation != self.owner_generation {
+                self.retire_visual_asset_work();
+                self.visual_asset_owner_generation = self.owner_generation;
+            }
+            if self.visual_asset_revision != Some(revision) {
+                if self
+                    .visual_asset_work
+                    .as_ref()
+                    .is_some_and(|work| work.document != identity || work.revision != revision)
+                {
+                    self.retire_visual_asset_work();
+                }
+                if self
+                    .completed_visual_asset_import
+                    .as_ref()
+                    .is_some_and(|import| {
+                        import.fence.document != identity || import.fence.revision != revision
+                    })
+                {
+                    self.completed_visual_asset_import = None;
+                }
+                self.visual_asset_revision = Some(revision);
+            }
+        }
+        if pending {
+            self.retire_visual_asset_work();
+        }
+        let active_assets = scene
+            .assets
+            .iter()
+            .map(|asset| asset.id().clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.visual_asset_textures
+            .retain(|id, _| active_assets.contains(id));
+        self.visual_asset_pixels
+            .retain(|id, _| active_assets.contains(id));
+        self.visual_asset_errors
+            .retain(|id, _| active_assets.contains(id));
+        if self
+            .completed_visual_asset_import
+            .as_ref()
+            .is_some_and(|import| {
+                import.fence.document != identity
+                    || import.fence.revision != revision
+                    || import.fence.owner_generation != self.owner_generation
+            })
+        {
+            self.completed_visual_asset_import = None;
+        }
+    }
+
+    fn poll_visual_asset_work(&mut self) {
+        let Some(work) = self.visual_asset_work.as_ref() else {
+            return;
+        };
+        let disconnected_import = matches!(&work.kind, VisualAssetWorkKind::Import(_));
+        let was_retired = work.retired;
+        let hydration_ids = work.hydration_ids.clone();
+        let result = match work.receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => return,
+        };
+        if result.is_none() {
+            self.visual_asset_work = None;
+            if !was_retired {
+                if disconnected_import {
+                    self.message = Some(StudioNotice::error(
+                        "Image import worker stopped before returning a result.",
+                    ));
+                } else {
+                    for id in hydration_ids {
+                        self.visual_asset_errors.insert(
+                            id,
+                            "image decoder stopped before returning this resource".into(),
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        let work = self
+            .visual_asset_work
+            .take()
+            .expect("work was checked above");
+        if work.retired
+            || work.document != self.render_document
+            || Some(work.revision) != self.documents.visual_revision()
+            || work.owner_generation != self.owner_generation
+            || self.documents.pending_transition().is_some()
+        {
+            return;
+        }
+        match (work.kind, result.expect("available worker result")) {
+            (VisualAssetWorkKind::Import(fence), VisualAssetWorkResult::Import(Ok(prepared))) => {
+                if fence.start_pass_accepted {
+                    self.completed_visual_asset_import =
+                        Some(CompletedVisualAssetImport { fence, prepared });
+                    self.message = Some(StudioNotice::info(
+                        "Image is ready; accepting it in the current Diagram Studio pass.",
+                    ));
+                }
+            }
+            (VisualAssetWorkKind::Import(_), VisualAssetWorkResult::Import(Err(error))) => {
+                self.message = Some(StudioNotice::error(format!(
+                    "Could not import image: {error}"
+                )));
+            }
+            (VisualAssetWorkKind::Hydrate, VisualAssetWorkResult::Hydrate(decoded)) => {
+                for result in decoded {
+                    match result {
+                        Ok(asset) => {
+                            self.visual_asset_errors.remove(&asset.id);
+                            self.visual_asset_pixels.insert(asset.id.clone(), asset);
+                        }
+                        Err((id, error)) => {
+                            self.visual_asset_errors.insert(id, error);
+                        }
+                    }
+                }
+            }
+            _ => {
+                self.message = Some(StudioNotice::error(
+                    "Image worker returned an unexpected result.",
+                ));
+            }
+        }
+    }
+
+    fn upload_visual_asset_textures(&mut self, ctx: &egui::Context) {
+        let Some(id) = self
+            .visual_asset_pixels
+            .keys()
+            .filter(|id| !self.visual_asset_textures.contains_key(*id))
+            .min()
+            .cloned()
+        else {
+            return;
+        };
+        let max_texture_side = ctx.input(|input| input.max_texture_side);
+        if let Some(pixels) = self.visual_asset_pixels.get(&id)
+            && (pixels.width as usize > max_texture_side
+                || pixels.height as usize > max_texture_side)
+        {
+            self.visual_asset_pixels.remove(&id);
+            self.visual_asset_errors.insert(
+                id,
+                format!("image exceeds the renderer's {max_texture_side}-pixel texture side limit"),
+            );
+            return;
+        }
+        let Some(pixels) = self.visual_asset_pixels.remove(&id) else {
+            return;
+        };
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [pixels.width as usize, pixels.height as usize],
+            &pixels.rgba,
+        );
+        let texture = ctx.load_texture(
+            format!("diagram-visual-asset-{}", id.as_str()),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.visual_asset_textures.insert(
+            id,
+            VisualAssetTexture {
+                texture,
+                width: pixels.width,
+                height: pixels.height,
+            },
+        );
+        if !self.visual_asset_pixels.is_empty() {
+            ctx.request_repaint_of(ctx.viewport_id());
+        }
+    }
+
+    fn stage_completed_visual_asset_import(
+        &mut self,
+        ctx: &egui::Context,
+        actions_allowed: bool,
+        closing_requested: bool,
+        pending: &mut Option<PendingMutation>,
+        document_intent_pending: bool,
+    ) {
+        if !actions_allowed
+            || closing_requested
+            || pending.is_some()
+            || document_intent_pending
+            || self.documents.pending_transition().is_some()
+        {
+            return;
+        }
+        let Some(import) = self.completed_visual_asset_import.as_ref() else {
+            return;
+        };
+        let fence = &import.fence;
+        if ctx.viewport_id() != fence.owner_viewport_id
+            || !fence.start_pass_accepted
+            || fence.document != self.render_document
+            || Some(fence.revision) != self.documents.visual_revision()
+            || fence.owner_generation != self.owner_generation
+        {
+            self.completed_visual_asset_import = None;
+            return;
+        }
+        let import = self
+            .completed_visual_asset_import
+            .take()
+            .expect("completed image was checked above");
+        let mut transform = next_visual_object_transform(self.documents.visual_scene());
+        let (width, height) = import.prepared.asset.dimensions();
+        let scale = (180.0 / f64::from(width.max(1)))
+            .min(120.0 / f64::from(height.max(1)))
+            .max(crate::diagram::MIN_VISUAL_DIMENSION / f64::from(width.min(height).max(1)));
+        transform.width = f64::from(width) * scale;
+        transform.height = f64::from(height) * scale;
+        if transform.width < crate::diagram::MIN_VISUAL_DIMENSION
+            || transform.height < crate::diagram::MIN_VISUAL_DIMENSION
+        {
+            self.message = Some(StudioNotice::error(
+                "Image dimensions cannot be represented within the visual document bounds.",
+            ));
+            return;
+        }
+        *pending = Some(PendingMutation::VisualAssetImport {
+            prepared: import.prepared,
+            layer_id: DEFAULT_LAYER_ID,
+            transform,
+            style: VisualStyle::default(),
+            fence: import.fence,
+        });
+    }
+
     fn visual_projection(
         &mut self,
     ) -> Option<(
@@ -3204,6 +3792,59 @@ impl DiagramStudioDialog {
                     }
                 }
             }
+            PendingMutation::VisualAssetImport {
+                prepared,
+                layer_id,
+                transform,
+                style,
+                fence,
+            } => {
+                if !self.visual_intent_is_current(&fence.document, fence.revision)
+                    || fence.owner_generation != self.owner_generation
+                    || !fence.start_pass_accepted
+                {
+                    return self.reject_stale_visual_intent();
+                }
+                let asset_id = prepared.asset.id().clone();
+                let needs_pixels = !self.visual_asset_textures.contains_key(&asset_id)
+                    && !self.visual_asset_pixels.contains_key(&asset_id);
+                let decoded = needs_pixels.then(|| DecodedVisualAsset {
+                    id: asset_id.clone(),
+                    width: prepared.asset.dimensions().0,
+                    height: prepared.asset.dimensions().1,
+                    rgba: prepared.rgba.clone(),
+                });
+                match self.documents.apply_visual_transaction(&[
+                    VisualOperation::AddImageReference {
+                        asset: prepared.asset,
+                        layer_id,
+                        transform,
+                        style,
+                    },
+                ]) {
+                    Ok(outcome) => {
+                        self.message = None;
+                        self.visual_property_draft = None;
+                        if outcome.changed {
+                            self.visual_asset_errors.remove(&asset_id);
+                            if let Some(decoded) = decoded {
+                                self.visual_asset_pixels.insert(asset_id, decoded);
+                            }
+                            if let Some(id) = outcome.created_objects.last().copied() {
+                                self.visual_selected_objects.clear();
+                                self.visual_selected_objects.insert(id);
+                                self.visual_selection = Some(id);
+                            }
+                            self.revalidate_visual_selection();
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        self.message = Some(StudioNotice::error(error.to_string()));
+                        false
+                    }
+                }
+            }
             PendingMutation::VisualLayoutFailure {
                 message,
                 expected_document,
@@ -3295,6 +3936,7 @@ impl DiagramStudioDialog {
                 .map(|changed| (changed, None)),
             PendingMutation::ReplaceVisualLabel { .. }
             | PendingMutation::VisualTransaction { .. }
+            | PendingMutation::VisualAssetImport { .. }
             | PendingMutation::VisualLayoutFailure { .. }
             | PendingMutation::VisualGestureTransaction { .. }
             | PendingMutation::VisualHistory { .. } => {
@@ -3377,6 +4019,7 @@ impl DiagramStudioDialog {
     }
 
     fn reset_document_presentation(&mut self) {
+        self.clear_visual_asset_state();
         if let Some(renderer) = &self.renderer {
             renderer.retire(&self.render_document);
         }
@@ -4708,6 +5351,19 @@ impl DiagramStudioDialog {
         let projection = visual_presentation.map(|(_, projection)| projection);
         let visual_revision = self.documents.visual_revision().unwrap_or(0);
         let visual_identity = self.render_document.clone();
+        let mut visual_asset_picker_requested = None;
+        if let Some(scene) = scene_snapshot.as_deref() {
+            self.sync_visual_asset_scope(
+                scene,
+                visual_revision,
+                pending_transition.is_some() || closing_requested,
+            );
+            self.poll_visual_asset_work();
+            if pending_transition.is_none() && !closing_requested {
+                self.start_visual_asset_hydration(ui.ctx(), scene, visual_revision);
+            }
+            self.upload_visual_asset_textures(ui.ctx());
+        }
         let document_actions_allowed = actions_allowed
             && !closing_requested
             && pending_transition.is_none()
@@ -4822,6 +5478,34 @@ impl DiagramStudioDialog {
                     if self.documents.is_dirty() {
                         ui.weak("Modified");
                     }
+                    let import_enabled = structural_edits_allowed
+                        && self.visual_asset_work.is_none()
+                        && self.completed_visual_asset_import.is_none();
+                    let add_image = ui.add_enabled(
+                        import_enabled,
+                        egui::Button::new("Add image…"),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "visual_add_image".into(),
+                        add_image.rect,
+                        ui.clip_rect(),
+                    ));
+                    if add_image.clicked() && document_intent.is_none() && pending.is_none()
+                    {
+                        let owner_viewport_id = ui.ctx().viewport_id();
+                        visual_asset_picker_requested = Some(VisualAssetImportFence {
+                            document: visual_identity.clone(),
+                            revision: visual_revision,
+                            owner_generation: self.owner_generation,
+                            owner_viewport_id,
+                            start_pass: ViewportPassProvenance::current(
+                                ui.ctx(),
+                                owner_viewport_id,
+                            ),
+                            start_pass_accepted: false,
+                        });
+                    }
                 });
 
                 let mut label = self.documents.visual_label().unwrap_or_default().to_owned();
@@ -4852,6 +5536,16 @@ impl DiagramStudioDialog {
                 }
 
                 ui.label("Canvas (drag objects or handles; wheel or middle-drag to navigate)");
+                if let Some((id, error)) = self
+                    .visual_asset_errors
+                    .iter()
+                    .min_by_key(|(id, _)| id.as_str())
+                {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(185, 65, 65),
+                        format!("Image {} is unavailable: {error}", &id.as_str()[..8]),
+                    );
+                }
                 let mut camera = self.camera;
                 let navigation_controls_allowed = visual_edits_allowed && self.visual_gesture.is_none();
                 ui.horizontal(|ui| {
@@ -5309,6 +6003,8 @@ impl DiagramStudioDialog {
                             canvas_rect,
                             camera,
                             painted_selection,
+                            &self.visual_asset_textures,
+                            &self.visual_asset_errors,
                         );
                         if visual_canvas_editing_allowed && !visual_draft_active
                             && let Some(active_scene) = active_scene
@@ -5719,26 +6415,43 @@ impl DiagramStudioDialog {
                             ));
                         }
                     }
-                    let add_preset = ui.add_enabled(structural_edits_allowed, egui::Button::new("Create preset"));
+                    let selected_primitives = scene_snapshot
+                        .as_ref()
+                        .map(|scene| {
+                            scene
+                                .objects
+                                .iter()
+                                .filter(|object| selection_state.objects.contains(&object.id))
+                                .filter(|object| {
+                                    matches!(object.kind, VisualObjectKind::Primitive { .. })
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let create_preset_enabled = structural_edits_allowed
+                        && !selected_primitives.is_empty()
+                        && selected_primitives.len() <= MAX_VISUAL_PRESET_COMPONENTS;
+                    let add_preset = ui.add_enabled(
+                        create_preset_enabled,
+                        egui::Button::new("Create preset from selection"),
+                    );
                     #[cfg(test)]
                     self.test_action_rects.push(("visual_create_preset".into(), add_preset.rect, ui.clip_rect()));
                     if add_preset.clicked() && document_intent.is_none() {
                         let count = scene_snapshot.as_ref().map_or(0, |scene| scene.presets.len());
-                        staged_operations = Some((
-                            vec![VisualOperation::AddPreset(VisualPresetDraft {
-                                name: format!("Preset {}", count + 1),
-                                components: vec![VisualPrimitiveComponent {
-                                    shape: self.visual_create_shape,
-                                    transform: VisualTransform {
-                                        width: 40.0,
-                                        height: 32.0,
-                                        ..VisualTransform::default()
-                                    },
-                                    style: VisualStyle::default(),
-                                }],
-                            })],
-                            None,
-                        ));
+                        match VisualPresetDraft::from_primitives(
+                            format!("Preset {}", count + 1),
+                            &selected_primitives,
+                        ) {
+                            Ok(preset) => {
+                                staged_operations =
+                                    Some((vec![VisualOperation::AddPreset(preset)], None));
+                            }
+                            Err(error) => {
+                                self.message = Some(StudioNotice::error(error.to_string()));
+                            }
+                        }
                     }
                     if let Some(scene) = scene_snapshot.as_ref() {
                         if selected_preset.is_none() {
@@ -5770,7 +6483,9 @@ impl DiagramStudioDialog {
                         staged_operations = Some((
                             vec![VisualOperation::AddObject(VisualObjectDraft {
                                 layer_id: DEFAULT_LAYER_ID,
-                                transform: next_visual_object_transform(scene_snapshot.as_deref()),
+                                transform: next_visual_preset_instance_transform(
+                                    scene_snapshot.as_deref(),
+                                ),
                                 style: VisualStyle::default(),
                                 kind: VisualObjectKind::PresetInstance { preset_id },
                             })],
@@ -6201,8 +6916,17 @@ impl DiagramStudioDialog {
                 });
             }
         }
+        self.stage_completed_visual_asset_import(
+            ui.ctx(),
+            structural_edits_allowed,
+            closing_requested,
+            pending,
+            document_intent.is_some(),
+        );
         effects.visual_selection = Some(selection_state);
         effects.visual_canvas_editing_allowed = canvas_interaction_authorized;
+        effects.visual_structural_editing_allowed = structural_edits_allowed;
+        effects.visual_asset_picker_requested = visual_asset_picker_requested;
         effects
     }
 }
@@ -6213,6 +6937,8 @@ fn paint_visual_projection(
     canvas: egui::Rect,
     camera: Camera,
     selected_objects: &BTreeSet<VisualObjectId>,
+    asset_textures: &HashMap<VisualAssetId, VisualAssetTexture>,
+    asset_errors: &HashMap<VisualAssetId, String>,
 ) -> VisualPaintReport {
     const MAX_PAINT_WORK_UNITS: usize = 65_536;
     let canvas_color = egui::Color32::from_gray(249);
@@ -6249,6 +6975,7 @@ fn paint_visual_projection(
         }
         let is_text = item.kind == VisualProjectedKind::Text;
         let is_connector = item.kind == VisualProjectedKind::Connector;
+        let is_image = item.kind == VisualProjectedKind::Image;
         let outline = item
             .outline
             .iter()
@@ -6322,6 +7049,76 @@ fn paint_visual_projection(
                     &mapping,
                 );
             }
+        } else if is_image {
+            let texture = item.image_asset.as_ref().and_then(|asset| {
+                asset_textures
+                    .get(asset.id())
+                    .filter(|texture| (texture.width, texture.height) == asset.dimensions())
+            });
+            if let Some(texture) = texture.filter(|_| outline.len() == 4) {
+                let mut mesh = egui::epaint::Mesh::with_texture(texture.texture.id());
+                let alpha = (item.style.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+                let uv = [
+                    egui::pos2(0.0, 0.0),
+                    egui::pos2(1.0, 0.0),
+                    egui::pos2(1.0, 1.0),
+                    egui::pos2(0.0, 1.0),
+                ];
+                for (position, uv) in outline.iter().copied().zip(uv) {
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos: position,
+                        uv,
+                        color: egui::Color32::from_white_alpha(alpha),
+                    });
+                }
+                mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+                painter.add(egui::Shape::mesh(mesh));
+            } else {
+                painter.add(egui::Shape::convex_polygon(
+                    outline.clone(),
+                    visual_color(item.style.fill, item.style.opacity),
+                    egui::Stroke::NONE,
+                ));
+                let bounds = egui::Rect::from_points(&outline);
+                if bounds.width() >= 76.0 && bounds.height() >= 24.0 {
+                    let failed = item
+                        .image_asset
+                        .as_ref()
+                        .is_some_and(|asset| asset_errors.contains_key(asset.id()));
+                    painter.text(
+                        bounds.center(),
+                        egui::Align2::CENTER_CENTER,
+                        if failed {
+                            "Image unavailable"
+                        } else {
+                            "Image loading"
+                        },
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::DARK_GRAY,
+                    );
+                }
+            }
+            let style = if item.dash_simplified || item.dash_paths.is_none() {
+                VisualLineStyle::Solid
+            } else {
+                item.style.line_style
+            };
+            let stroke = egui::Stroke::new(
+                (item.style.border_width * f64::from(camera.zoom)).max(0.0) as f32,
+                visual_color(item.style.border, item.style.opacity),
+            );
+            paint_styled_path(
+                painter,
+                &outline,
+                true,
+                stroke,
+                style,
+                item.dash_paths
+                    .as_deref()
+                    .and_then(|paths| paths.first())
+                    .map(Vec::as_slice),
+                &mapping,
+            );
         } else if !is_text {
             painter.add(egui::Shape::convex_polygon(
                 outline.clone(),
@@ -7171,6 +7968,14 @@ fn next_visual_object_transform(scene: Option<&VisualScene>) -> VisualTransform 
         height: 82.0,
         rotation_degrees: 0.0,
     }
+}
+
+fn next_visual_preset_instance_transform(scene: Option<&VisualScene>) -> VisualTransform {
+    let mut transform = next_visual_object_transform(scene);
+    let side = transform.width.max(transform.height);
+    transform.width = side;
+    transform.height = side;
+    transform
 }
 
 fn generic_preview_output<'a>(
@@ -8964,6 +9769,15 @@ mod tests {
     use eframe::egui;
 
     const TEST_VIEWPORT_SIZE: egui::Vec2 = egui::vec2(1200.0, 900.0);
+
+    fn write_test_png(path: &Path, width: u32, height: u32) {
+        let image = image::RgbaImage::from_pixel(width, height, image::Rgba([42, 107, 188, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(path, bytes.into_inner()).unwrap();
+    }
 
     fn frame(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
         frame_with_root_input(dialog, ctx, true);
@@ -14357,5 +15171,262 @@ mod tests {
             dialog.test_visual_items_painted + dialog.test_visual_items_omitted,
             projected_items
         );
+    }
+
+    #[test]
+    fn diagram_studio_visual_asset_picker_waits_for_accepted_owner_pass_and_cancel_is_nonmutating()
+    {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("discarded.png");
+        write_test_png(&path, 4, 3);
+        let before = dialog.documents.visual_scene().unwrap().clone();
+        dialog.test_set_next_file_picker_result(Some(path));
+        click_action_with_child_discard(&mut dialog, &ctx, "visual_add_image");
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert!(dialog.visual_asset_work.is_none());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+
+        dialog.test_set_next_file_picker_result(None);
+        click_action(&mut dialog, &ctx, "visual_add_image");
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert!(dialog.visual_asset_work.is_none());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+    }
+
+    #[test]
+    fn diagram_studio_visual_asset_import_embeds_and_shares_one_decoded_texture() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("local-image.png");
+        write_test_png(&path, 32, 20);
+        let original_revision = dialog.documents.visual_revision().unwrap();
+        dialog.test_set_next_file_picker_result(Some(path.clone()));
+        click_action(&mut dialog, &ctx, "visual_add_image");
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+
+        for _ in 0..100 {
+            let has_reference = dialog.documents.visual_scene().is_some_and(|scene| {
+                scene
+                    .objects
+                    .iter()
+                    .any(|object| matches!(object.kind, VisualObjectKind::ImageReference { .. }))
+            });
+            let texture_ready = dialog.documents.visual_scene().is_some_and(|scene| {
+                scene
+                    .assets
+                    .iter()
+                    .all(|asset| dialog.visual_asset_textures.contains_key(asset.id()))
+            });
+            if has_reference && texture_ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            frame(&mut dialog, &ctx);
+        }
+
+        let scene = dialog.documents.visual_scene().unwrap();
+        assert_eq!(
+            dialog.documents.visual_revision(),
+            Some(original_revision + 1)
+        );
+        assert_eq!(scene.assets.len(), 1);
+        assert!(
+            scene
+                .objects
+                .iter()
+                .any(|object| matches!(object.kind, VisualObjectKind::ImageReference { .. }))
+        );
+        assert_eq!(dialog.visual_asset_textures.len(), 1);
+        assert!(dialog.documents.is_dirty());
+        assert!(dialog.documents.session().is_none());
+
+        dialog.test_set_next_file_picker_result(Some(path.clone()));
+        click_action(&mut dialog, &ctx, "visual_add_image");
+        assert_eq!(dialog.test_file_picker_calls(), 2);
+        for _ in 0..100 {
+            let references = dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .filter(|object| matches!(object.kind, VisualObjectKind::ImageReference { .. }))
+                .count();
+            if references == 2 && dialog.visual_asset_work.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            frame(&mut dialog, &ctx);
+        }
+        assert_eq!(dialog.documents.visual_scene().unwrap().assets.len(), 1);
+        assert_eq!(dialog.visual_asset_textures.len(), 1);
+        assert!(dialog.visual_asset_pixels.is_empty());
+
+        let saved_path = temp.path().join("embedded-image.mld");
+        dialog.documents.save_as(&saved_path).unwrap();
+        assert!(!dialog.documents.is_dirty());
+        let saved = std::fs::read_to_string(&saved_path).unwrap();
+        assert!(!saved.contains(path.to_str().unwrap()));
+
+        open_viewer(&mut dialog, &ctx);
+        assert_eq!(dialog.visual_asset_textures.len(), 1);
+        assert_eq!(dialog.test_viewer_visual_projection_items, 3);
+    }
+
+    #[test]
+    fn diagram_studio_visual_component_preset_copies_selected_primitives_and_uses_uniform_instance()
+    {
+        let mut dialog = initialized_visual_dialog();
+        let mut first = VisualObjectDraft {
+            layer_id: DEFAULT_LAYER_ID,
+            transform: VisualTransform {
+                x: -80.0,
+                y: 20.0,
+                width: 40.0,
+                height: 20.0,
+                rotation_degrees: 35.0,
+            },
+            style: VisualStyle::default(),
+            kind: VisualObjectKind::Primitive {
+                shape: VisualPrimitiveShape::Diamond,
+            },
+        };
+        first.style.border = VisualColor::rgba(166, 30, 55, 255);
+        let second = VisualObjectDraft {
+            layer_id: DEFAULT_LAYER_ID,
+            transform: VisualTransform {
+                x: 80.0,
+                y: 20.0,
+                width: 30.0,
+                height: 15.0,
+                rotation_degrees: -10.0,
+            },
+            style: VisualStyle::default(),
+            kind: VisualObjectKind::Primitive {
+                shape: VisualPrimitiveShape::Circle,
+            },
+        };
+        let outcome = dialog
+            .documents
+            .apply_visual_transaction(&[
+                VisualOperation::AddObject(first),
+                VisualOperation::AddObject(second),
+            ])
+            .unwrap();
+        let originals = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .filter(|object| outcome.created_objects.contains(&object.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        dialog.set_visual_selection(VisualSelectionState {
+            objects: outcome.created_objects.iter().copied().collect(),
+            primary: outcome.created_objects.last().copied(),
+        });
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let revision = dialog.documents.visual_revision().unwrap();
+        click_action(&mut dialog, &ctx, "visual_create_preset");
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        let preset = dialog.documents.visual_scene().unwrap().presets[0].clone();
+        assert_eq!(preset.components.len(), 2);
+        assert_eq!(preset.components[0].shape, VisualPrimitiveShape::Diamond);
+        assert_eq!(
+            preset.components[0].style.border,
+            VisualColor::rgba(166, 30, 55, 255)
+        );
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .filter(|object| outcome.created_objects.contains(&object.id))
+                .cloned()
+                .collect::<Vec<_>>(),
+            originals
+        );
+
+        click_action(&mut dialog, &ctx, "visual_add_preset_instance");
+        let instance = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| matches!(object.kind, VisualObjectKind::PresetInstance { .. }))
+            .unwrap();
+        assert_eq!(instance.transform.width, instance.transform.height);
+        let projection = dialog.visual_projection().unwrap().1.unwrap();
+        assert!(projection.items.iter().any(|item| {
+            item.kind == VisualProjectedKind::PresetPrimitive(VisualPrimitiveShape::Diamond)
+        }));
+    }
+
+    #[test]
+    fn diagram_studio_visual_asset_worker_result_is_retired_after_document_identity_changes() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let prepared =
+            crate::diagram::prepare_visual_asset_bytes(bytes.into_inner(), usize::MAX).unwrap();
+        let viewport_id = egui::ViewportId::ROOT;
+        let (sender, receiver) = sync_channel(1);
+        let old_document = dialog.render_document.clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        dialog.visual_asset_work = Some(PendingVisualAssetWork {
+            document: old_document.clone(),
+            revision,
+            owner_generation: dialog.owner_generation,
+            owner_viewport_id: viewport_id,
+            kind: VisualAssetWorkKind::Import(VisualAssetImportFence {
+                document: old_document,
+                revision,
+                owner_generation: dialog.owner_generation,
+                owner_viewport_id: viewport_id,
+                start_pass: ViewportPassProvenance::current(&ctx, viewport_id),
+                start_pass_accepted: true,
+            }),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            receiver,
+            hydration_ids: Vec::new(),
+            retired: false,
+        });
+
+        dialog.reset_document_presentation();
+        assert!(
+            dialog
+                .visual_asset_work
+                .as_ref()
+                .is_some_and(|work| work.retired)
+        );
+        sender
+            .send(VisualAssetWorkResult::Import(Ok(prepared)))
+            .unwrap();
+        dialog.poll_visual_asset_work();
+        assert!(dialog.visual_asset_work.is_none());
+        assert!(dialog.completed_visual_asset_import.is_none());
+        assert!(dialog.documents.visual_scene().unwrap().assets.is_empty());
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
     }
 }

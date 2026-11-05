@@ -15,8 +15,8 @@ pub(crate) use budget::{
 };
 pub(crate) use compare::{DifferenceClass, ImageComparison};
 pub(crate) use input::{
-    ImageInput, ImageInputId, ImageInputSource, ImageSide, MAX_IMAGE_PIXELS,
-    SUPPORTED_IMAGE_FILE_EXTENSIONS,
+    DecodedLocalRaster, ImageInput, ImageInputId, ImageInputSource, ImageSide, MAX_IMAGE_PIXELS,
+    SUPPORTED_IMAGE_FILE_EXTENSIONS, decode_local_png_jpeg, inspect_local_png_jpeg,
 };
 pub(crate) use session::{
     ImageCompareSession, ImageCompareSnapshot, ImageLoadStatus, ImageSessionError,

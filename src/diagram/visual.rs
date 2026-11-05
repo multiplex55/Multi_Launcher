@@ -2,8 +2,10 @@
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
 
 pub const MAX_VISUAL_OBJECTS: usize = 1_024;
 pub const MAX_VISUAL_LAYERS: usize = 64;
@@ -17,6 +19,11 @@ pub const MAX_VISUAL_HISTORY_ENTRIES: usize = 64;
 pub const MAX_VISUAL_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_VISUAL_SCENE_BYTES: usize = MAX_VISUAL_HISTORY_BYTES / 2 - 64 * 1024;
 pub const MAX_VISUAL_TRANSACTION_OPERATIONS: usize = 256;
+pub const MAX_VISUAL_ASSETS: usize = 16;
+pub const MAX_VISUAL_ASSET_BYTES: usize = 512 * 1024;
+pub const MAX_VISUAL_ASSET_TOTAL_BYTES: usize = 512 * 1024;
+pub const MAX_VISUAL_ASSET_PIXELS: usize = 4_194_304;
+pub const MAX_VISUAL_ASSET_DIMENSION: u32 = 4_096;
 pub const MAX_VISUAL_COORDINATE_ABS: f64 = 1_000_000.0;
 pub const MAX_VISUAL_DIMENSION: f64 = 1_000_000.0;
 pub const MIN_VISUAL_DIMENSION: f64 = 0.1;
@@ -78,6 +85,60 @@ impl<'de> Deserialize<'de> for VisualAssetId {
         let value = deserialize_bounded_string::<D, MAX_VISUAL_NAME_BYTES>(deserializer)?;
         validate_asset_id(&value).map_err(de::Error::custom)?;
         Ok(Self(value))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualAssetFormat {
+    Png,
+    Jpeg,
+}
+
+/// Immutable, content-addressed local raster data. `payload` is the original
+/// bounded PNG/JPEG byte stream; it is never a path, URL, or decoder command.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualAsset {
+    id: VisualAssetId,
+    format: VisualAssetFormat,
+    width: u32,
+    height: u32,
+    #[serde(with = "visual_asset_payload")]
+    payload: Arc<[u8]>,
+}
+
+impl VisualAsset {
+    pub(crate) fn from_verified_parts(
+        id: VisualAssetId,
+        format: VisualAssetFormat,
+        width: u32,
+        height: u32,
+        payload: Arc<[u8]>,
+    ) -> Self {
+        Self {
+            id,
+            format,
+            width,
+            height,
+            payload,
+        }
+    }
+
+    pub fn id(&self) -> &VisualAssetId {
+        &self.id
+    }
+
+    pub const fn format(&self) -> VisualAssetFormat {
+        self.format
+    }
+
+    pub const fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    pub(crate) fn payload(&self) -> &Arc<[u8]> {
+        &self.payload
     }
 }
 
@@ -301,6 +362,14 @@ pub struct VisualScene {
     pub objects: Vec<VisualObject>,
     #[serde(deserialize_with = "deserialize_bounded_presets")]
     pub presets: Vec<VisualPreset>,
+    /// Embedded payloads are absent from old v3 documents, preserving their
+    /// canonical wire bytes exactly when a scene contains no local assets.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_bounded_assets"
+    )]
+    pub assets: Vec<VisualAsset>,
 }
 
 impl VisualScene {
@@ -318,6 +387,7 @@ impl VisualScene {
                 kind: VisualObjectKind::Text { text: title.into() },
             }],
             presets: Vec::new(),
+            assets: Vec::new(),
         }
     }
 
@@ -437,16 +507,109 @@ pub struct VisualPresetDraft {
     pub components: Vec<VisualPrimitiveComponent>,
 }
 
+impl VisualPresetDraft {
+    /// Build a nonrecursive, center-origin preset from an ordered set of
+    /// primitive objects. A single uniform scale maps their rotated world
+    /// bounds into the existing 100×100 design space while retaining each
+    /// local rotation and style.
+    pub fn from_primitives(
+        name: impl Into<String>,
+        objects: &[VisualObject],
+    ) -> Result<Self, VisualDocumentError> {
+        let name = name.into();
+        validate_name(&name)?;
+        if objects.is_empty() || objects.len() > MAX_VISUAL_PRESET_COMPONENTS {
+            return Err(VisualDocumentError::TooManyPresetComponents {
+                max_components: MAX_VISUAL_PRESET_COMPONENTS,
+            });
+        }
+        let mut bounds = None::<(f64, f64, f64, f64)>;
+        for object in objects {
+            validate_transform(object.transform)?;
+            validate_style(&object.style)?;
+            let corners = visual_transform_corners(object.transform);
+            for (x, y) in corners {
+                bounds = Some(bounds.map_or((x, y, x, y), |(min_x, min_y, max_x, max_y)| {
+                    (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                }));
+            }
+        }
+        let (min_x, min_y, max_x, max_y) = bounds.ok_or(VisualDocumentError::InvalidGeometry)?;
+        let width = max_x - min_x;
+        let height = max_y - min_y;
+        let max_extent = width.max(height);
+        if !max_extent.is_finite() || max_extent <= 0.0 {
+            return Err(VisualDocumentError::InvalidGeometry);
+        }
+        let scale = 100.0 / max_extent;
+        let center_x = (min_x + max_x) / 2.0;
+        let center_y = (min_y + max_y) / 2.0;
+        let mut components = Vec::with_capacity(objects.len());
+        for object in objects {
+            let VisualObjectKind::Primitive { shape } = &object.kind else {
+                return Err(VisualDocumentError::InvalidState(
+                    "only primitive objects can be copied into a reusable preset".into(),
+                ));
+            };
+            let component = VisualPrimitiveComponent {
+                shape: *shape,
+                transform: VisualTransform {
+                    x: (object.transform.x - center_x) * scale,
+                    y: (object.transform.y - center_y) * scale,
+                    width: object.transform.width * scale,
+                    height: object.transform.height * scale,
+                    rotation_degrees: object.transform.rotation_degrees,
+                },
+                style: object.style.clone(),
+            };
+            validate_component(&component)?;
+            components.push(component);
+        }
+        Ok(Self { name, components })
+    }
+}
+
+fn visual_transform_corners(transform: VisualTransform) -> [(f64, f64); 4] {
+    let (sin, cos) = transform.rotation_degrees.to_radians().sin_cos();
+    [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)].map(|(x, y)| {
+        let x = x * transform.width;
+        let y = y * transform.height;
+        (
+            transform.x + x * cos - y * sin,
+            transform.y + x * sin + y * cos,
+        )
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum VisualOperation {
     AddObject(VisualObjectDraft),
+    /// Atomically adds (or reuses) embedded bytes and creates their reference.
+    AddImageReference {
+        asset: VisualAsset,
+        layer_id: VisualLayerId,
+        transform: VisualTransform,
+        style: VisualStyle,
+    },
     RemoveObject(VisualObjectId),
     ReplaceObject(VisualObject),
-    MoveObject { id: VisualObjectId, to_index: usize },
-    AddLayer { name: String, to_index: usize },
-    RenameLayer { id: VisualLayerId, name: String },
+    MoveObject {
+        id: VisualObjectId,
+        to_index: usize,
+    },
+    AddLayer {
+        name: String,
+        to_index: usize,
+    },
+    RenameLayer {
+        id: VisualLayerId,
+        name: String,
+    },
     RemoveLayer(VisualLayerId),
-    MoveLayer { id: VisualLayerId, to_index: usize },
+    MoveLayer {
+        id: VisualLayerId,
+        to_index: usize,
+    },
     AddPreset(VisualPresetDraft),
     ReplacePreset(VisualPreset),
     RemovePreset(VisualPresetId),
@@ -467,9 +630,15 @@ pub enum VisualDocumentError {
     TooManyLayers { max_layers: usize },
     TooManyPresets { max_presets: usize },
     TooManyPresetComponents { max_components: usize },
+    TooManyAssets { max_assets: usize },
+    AssetPayloadTooLarge { max_bytes: usize },
+    AssetPayloadsTooLarge { max_bytes: usize },
+    AssetPixelsTooLarge { max_pixels: usize },
     TextTooLarge { max_bytes: usize },
     NameInvalid,
     AssetIdInvalid,
+    AssetInvalid,
+    AssetIdCollision(VisualAssetId),
     UnknownConnectorEndpoint(VisualObjectId),
     ConnectorEndpointIsConnector(VisualObjectId),
     InvalidConnectorGeometry,
@@ -520,6 +689,22 @@ impl fmt::Display for VisualDocumentError {
                 formatter,
                 "visual preset exceeds the {max_components}-primitive limit"
             ),
+            Self::TooManyAssets { max_assets } => write!(
+                formatter,
+                "visual document exceeds the {max_assets}-asset limit"
+            ),
+            Self::AssetPayloadTooLarge { max_bytes } => write!(
+                formatter,
+                "embedded image exceeds the {max_bytes}-byte limit"
+            ),
+            Self::AssetPayloadsTooLarge { max_bytes } => write!(
+                formatter,
+                "embedded images exceed the {max_bytes}-byte total limit"
+            ),
+            Self::AssetPixelsTooLarge { max_pixels } => write!(
+                formatter,
+                "embedded images exceed the {max_pixels}-pixel total limit"
+            ),
             Self::TextTooLarge { max_bytes } => {
                 write!(formatter, "visual text exceeds the {max_bytes}-byte limit")
             }
@@ -529,6 +714,13 @@ impl fmt::Display for VisualDocumentError {
             Self::AssetIdInvalid => {
                 formatter.write_str("image reference is not a bounded local asset key")
             }
+            Self::AssetInvalid => formatter
+                .write_str("embedded image metadata does not match its bounded PNG/JPEG payload"),
+            Self::AssetIdCollision(id) => write!(
+                formatter,
+                "embedded image key {} refers to different content",
+                id.as_str()
+            ),
             Self::UnknownConnectorEndpoint(id) => write!(
                 formatter,
                 "connector endpoint object {} was not found",
@@ -783,6 +975,7 @@ impl VisualDiagramDocument {
         for operation in operations {
             apply_visual_operation(&mut candidate, &mut allocator, operation, &mut outcome)?;
         }
+        prune_unreferenced_assets(&mut candidate);
         validate_scene(&candidate, allocator)?;
         if candidate == self.current {
             return Ok(VisualTransactionOutcome::default());
@@ -931,6 +1124,34 @@ fn apply_visual_operation(
                 transform: draft.transform,
                 style: draft.style.clone(),
                 kind: draft.kind.clone(),
+            };
+            validate_object(&object)?;
+            scene.objects.push(object);
+            outcome.created_objects.push(id);
+        }
+        VisualOperation::AddImageReference {
+            asset,
+            layer_id,
+            transform,
+            style,
+        } => {
+            validate_visual_asset(asset)?;
+            if let Some(existing) = scene.assets.iter().find(|existing| existing.id == asset.id) {
+                if existing != asset {
+                    return Err(VisualDocumentError::AssetIdCollision(asset.id.clone()));
+                }
+            } else {
+                scene.assets.push(asset.clone());
+            }
+            let id = allocate_object_id(allocator)?;
+            let object = VisualObject {
+                id,
+                layer_id: *layer_id,
+                transform: *transform,
+                style: style.clone(),
+                kind: VisualObjectKind::ImageReference {
+                    asset_id: asset.id.clone(),
+                },
             };
             validate_object(&object)?;
             scene.objects.push(object);
@@ -1282,6 +1503,11 @@ fn validate_scene(
             max_presets: MAX_VISUAL_PRESETS,
         });
     }
+    if scene.assets.len() > MAX_VISUAL_ASSETS {
+        return Err(VisualDocumentError::TooManyAssets {
+            max_assets: MAX_VISUAL_ASSETS,
+        });
+    }
     if allocator.next_object_id == 0
         || allocator.next_layer_id == 0
         || allocator.next_preset_id == 0
@@ -1316,6 +1542,7 @@ fn validate_scene(
 
     let mut object_ids = std::collections::HashSet::with_capacity(scene.objects.len());
     let mut connector_ids = std::collections::HashSet::new();
+    let mut referenced_assets = std::collections::HashSet::new();
     for object in &scene.objects {
         if object.id.get() == 0 {
             return Err(VisualDocumentError::InvalidId);
@@ -1332,9 +1559,58 @@ fn validate_scene(
         {
             return Err(VisualDocumentError::UnknownPreset(*preset_id));
         }
+        if let VisualObjectKind::ImageReference { asset_id } = &object.kind {
+            referenced_assets.insert(asset_id.clone());
+        }
         if matches!(&object.kind, VisualObjectKind::Connector { .. }) {
             connector_ids.insert(object.id);
         }
+    }
+
+    let mut asset_ids = std::collections::HashSet::with_capacity(scene.assets.len());
+    let mut total_asset_bytes = 0usize;
+    let mut total_asset_pixels = 0usize;
+    for asset in &scene.assets {
+        validate_visual_asset(asset)?;
+        if !asset_ids.insert(asset.id.clone()) {
+            return Err(VisualDocumentError::AssetIdCollision(asset.id.clone()));
+        }
+        if !referenced_assets.contains(&asset.id) {
+            return Err(VisualDocumentError::InvalidState(
+                "visual scene contains an unreferenced image payload".into(),
+            ));
+        }
+        total_asset_bytes = total_asset_bytes.checked_add(asset.payload.len()).ok_or(
+            VisualDocumentError::AssetPayloadsTooLarge {
+                max_bytes: MAX_VISUAL_ASSET_TOTAL_BYTES,
+            },
+        )?;
+        total_asset_pixels = total_asset_pixels
+            .checked_add(
+                usize::try_from(asset.width)
+                    .ok()
+                    .and_then(|width| {
+                        usize::try_from(asset.height)
+                            .ok()
+                            .and_then(|height| width.checked_mul(height))
+                    })
+                    .ok_or(VisualDocumentError::AssetPixelsTooLarge {
+                        max_pixels: MAX_VISUAL_ASSET_PIXELS,
+                    })?,
+            )
+            .ok_or(VisualDocumentError::AssetPixelsTooLarge {
+                max_pixels: MAX_VISUAL_ASSET_PIXELS,
+            })?;
+    }
+    if total_asset_bytes > MAX_VISUAL_ASSET_TOTAL_BYTES {
+        return Err(VisualDocumentError::AssetPayloadsTooLarge {
+            max_bytes: MAX_VISUAL_ASSET_TOTAL_BYTES,
+        });
+    }
+    if total_asset_pixels > MAX_VISUAL_ASSET_PIXELS {
+        return Err(VisualDocumentError::AssetPixelsTooLarge {
+            max_pixels: MAX_VISUAL_ASSET_PIXELS,
+        });
     }
 
     for object in &scene.objects {
@@ -1396,6 +1672,50 @@ fn validate_scene(
         });
     }
     Ok(())
+}
+
+fn validate_visual_asset(asset: &VisualAsset) -> Result<(), VisualDocumentError> {
+    validate_asset_id(asset.id.as_str())?;
+    if asset.payload.is_empty() || asset.payload.len() > MAX_VISUAL_ASSET_BYTES {
+        return Err(VisualDocumentError::AssetPayloadTooLarge {
+            max_bytes: MAX_VISUAL_ASSET_BYTES,
+        });
+    }
+    let digest = hex::encode(Sha256::digest(asset.payload.as_ref()));
+    if digest != asset.id.as_str() {
+        return Err(VisualDocumentError::AssetInvalid);
+    }
+    let (format, width, height) = crate::image_compare::inspect_local_png_jpeg(
+        &asset.payload,
+        MAX_VISUAL_ASSET_BYTES,
+        MAX_VISUAL_ASSET_PIXELS,
+    )
+    .map_err(|_| VisualDocumentError::AssetInvalid)?;
+    let expected_format = match asset.format {
+        VisualAssetFormat::Png => image::ImageFormat::Png,
+        VisualAssetFormat::Jpeg => image::ImageFormat::Jpeg,
+    };
+    if format != expected_format
+        || width != asset.width
+        || height != asset.height
+        || width > MAX_VISUAL_ASSET_DIMENSION
+        || height > MAX_VISUAL_ASSET_DIMENSION
+    {
+        return Err(VisualDocumentError::AssetInvalid);
+    }
+    Ok(())
+}
+
+fn prune_unreferenced_assets(scene: &mut VisualScene) {
+    let referenced = scene
+        .objects
+        .iter()
+        .filter_map(|object| match &object.kind {
+            VisualObjectKind::ImageReference { asset_id } => Some(asset_id.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    scene.assets.retain(|asset| referenced.contains(&asset.id));
 }
 
 fn validate_name(name: &str) -> Result<(), VisualDocumentError> {
@@ -1644,6 +1964,70 @@ where
     deserialize_bounded_vec::<D, _, MAX_VISUAL_PRESETS>(deserializer)
 }
 
+fn deserialize_bounded_assets<'de, D>(deserializer: D) -> Result<Vec<VisualAsset>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_VISUAL_ASSETS>(deserializer)
+}
+
+mod visual_asset_payload {
+    use super::{MAX_VISUAL_ASSET_BYTES, de};
+    use base64::Engine as _;
+    use serde::de::Visitor;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+    use std::sync::Arc;
+
+    pub fn serialize<S>(payload: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload.as_ref());
+        serializer.serialize_str(&encoded)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PayloadVisitor;
+        impl<'de> Visitor<'de> for PayloadVisitor {
+            type Value = Arc<[u8]>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    formatter,
+                    "base64 image bytes no larger than {MAX_VISUAL_ASSET_BYTES} bytes"
+                )
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let max_encoded =
+                    base64::encoded_len(MAX_VISUAL_ASSET_BYTES, false).unwrap_or(usize::MAX);
+                if value.len() > max_encoded {
+                    return Err(E::custom(format!(
+                        "encoded image exceeds the {MAX_VISUAL_ASSET_BYTES}-byte limit"
+                    )));
+                }
+                let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+                    .decode(value)
+                    .map_err(E::custom)?;
+                if decoded.len() > MAX_VISUAL_ASSET_BYTES {
+                    return Err(E::custom(format!(
+                        "image exceeds the {MAX_VISUAL_ASSET_BYTES}-byte limit"
+                    )));
+                }
+                Ok(Arc::from(decoded.into_boxed_slice()))
+            }
+        }
+        deserializer.deserialize_str(PayloadVisitor)
+    }
+}
+
 fn deserialize_bounded_preset_components<'de, D>(
     deserializer: D,
 ) -> Result<Vec<VisualPrimitiveComponent>, D::Error>
@@ -1656,13 +2040,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LAYER_ID, MAX_VISUAL_DOCUMENT_TITLE_BYTES, MAX_VISUAL_HISTORY_BYTES,
-        MAX_VISUAL_SCENE_BYTES, TITLE_OBJECT_ID, VisualAnchor, VisualAssetId, VisualColor,
-        VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute,
-        VisualDiagramDocument, VisualDocumentError, VisualHistoryEntry, VisualLayer, VisualLayerId,
-        VisualLineStyle, VisualObject, VisualObjectDraft, VisualObjectId, VisualObjectKind,
-        VisualOperation, VisualPresetDraft, VisualPrimitiveComponent, VisualPrimitiveShape,
-        VisualScene, VisualShadow, VisualStyle, VisualTransform,
+        DEFAULT_LAYER_ID, MAX_VISUAL_ASSETS, MAX_VISUAL_DOCUMENT_TITLE_BYTES,
+        MAX_VISUAL_HISTORY_BYTES, MAX_VISUAL_SCENE_BYTES, TITLE_OBJECT_ID, VisualAnchor,
+        VisualAssetId, VisualColor, VisualConnector, VisualConnectorDirection,
+        VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError,
+        VisualHistoryEntry, VisualLayer, VisualLayerId, VisualLineStyle, VisualObject,
+        VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualPresetDraft,
+        VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle,
+        VisualTransform,
     };
     use crate::diagram::codec::{
         DiagramFileDocument, DiagramFileDocumentRef, decode_document, encode_document,
@@ -1711,6 +2096,17 @@ mod tests {
             },
         });
         scene
+    }
+
+    fn one_pixel_asset(color: [u8; 4]) -> super::VisualAsset {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba(color));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        crate::diagram::prepare_visual_asset_bytes(encoded.into_inner(), usize::MAX)
+            .unwrap()
+            .asset
     }
 
     #[test]
@@ -1825,6 +2221,236 @@ mod tests {
             }
             DiagramFileDocument::Mermaid(_) => panic!("visual payload decoded as Mermaid"),
         }
+    }
+
+    #[test]
+    fn visual_asset_replacement_at_capacity_is_one_atomic_transaction() {
+        let mut document = VisualDiagramDocument::new();
+        let mut imports = Vec::new();
+        for index in 0..MAX_VISUAL_ASSETS {
+            let image = image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([index as u8, (index as u8).wrapping_add(1), 17, 255]),
+            );
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            let prepared =
+                crate::diagram::prepare_visual_asset_bytes(encoded.into_inner(), usize::MAX)
+                    .unwrap();
+            imports.push(prepared.asset);
+        }
+        let initial_ops = imports
+            .iter()
+            .cloned()
+            .map(|asset| VisualOperation::AddImageReference {
+                asset,
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+            })
+            .collect::<Vec<_>>();
+        document.apply_transaction(&initial_ops).unwrap();
+        assert_eq!(document.current.assets.len(), MAX_VISUAL_ASSETS);
+        let oldest_reference = document
+            .current
+            .objects
+            .iter()
+            .find_map(|object| {
+                matches!(object.kind, VisualObjectKind::ImageReference { .. }).then_some(object.id)
+            })
+            .unwrap();
+
+        let replacement_image = image::RgbaImage::from_pixel(1, 1, image::Rgba([240, 12, 31, 255]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(replacement_image)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let replacement =
+            crate::diagram::prepare_visual_asset_bytes(encoded.into_inner(), usize::MAX)
+                .unwrap()
+                .asset;
+        let outcome = document
+            .apply_transaction(&[
+                VisualOperation::AddImageReference {
+                    asset: replacement.clone(),
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform::default(),
+                    style: VisualStyle::default(),
+                },
+                VisualOperation::RemoveObject(oldest_reference),
+            ])
+            .unwrap();
+        assert!(outcome.changed);
+        assert_eq!(document.current.assets.len(), MAX_VISUAL_ASSETS);
+        assert!(
+            document
+                .current
+                .assets
+                .iter()
+                .any(|asset| asset.id() == replacement.id())
+        );
+    }
+
+    #[test]
+    fn visual_asset_base64_wire_rejects_encoded_payload_above_limit_before_decode() {
+        let max_encoded = (super::MAX_VISUAL_ASSET_BYTES / 3) * 4
+            + match super::MAX_VISUAL_ASSET_BYTES % 3 {
+                0 => 0,
+                1 => 2,
+                _ => 3,
+            };
+        let encoded = "A".repeat(max_encoded + 1);
+        let content_id = "a".repeat(64);
+        let json = format!(
+            r#"{{"id":"{content_id}","format":"png","width":1,"height":1,"payload":"{encoded}"}}"#
+        );
+        let error = serde_json::from_str::<super::VisualAsset>(&json).unwrap_err();
+        assert!(error.to_string().contains("encoded image exceeds"));
+    }
+
+    #[test]
+    fn visual_asset_payload_roundtrips_and_prunes_only_after_accepted_reference_removal() {
+        let mut document = VisualDiagramDocument::new();
+        let asset = one_pixel_asset([23, 57, 91, 255]);
+        let outcome = document
+            .apply_transaction(&[VisualOperation::AddImageReference {
+                asset: asset.clone(),
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform {
+                    width: 20.0,
+                    height: 20.0,
+                    ..VisualTransform::default()
+                },
+                style: VisualStyle::default(),
+            }])
+            .unwrap();
+        assert!(outcome.changed);
+        assert_eq!(outcome.created_objects.len(), 1);
+        assert_eq!(document.scene().assets, vec![asset.clone()]);
+        let saved = document.capture_saved_content();
+        document.acknowledge_saved_content(&saved);
+        assert!(!document.is_dirty());
+
+        let encoded = encode_document(DiagramFileDocumentRef::Visual(&document)).unwrap();
+        let DiagramFileDocument::Visual(mut reopened) = decode_document(&encoded).unwrap() else {
+            panic!("image document decoded as Mermaid");
+        };
+        assert_eq!(reopened.scene().assets, vec![asset.clone()]);
+        assert!(!reopened.is_dirty());
+        assert!(
+            reopened
+                .apply_transaction(&[VisualOperation::RemoveObject(outcome.created_objects[0])])
+                .unwrap()
+                .changed
+        );
+        assert!(reopened.scene().assets.is_empty());
+        assert!(reopened.is_dirty());
+        assert!(reopened.undo().unwrap());
+        assert_eq!(reopened.scene().assets, vec![asset.clone()]);
+        assert!(reopened.redo().unwrap());
+        assert!(reopened.scene().assets.is_empty());
+    }
+
+    #[test]
+    fn visual_component_preset_captures_rotated_selection_and_reopens_as_composition() {
+        let mut document = VisualDiagramDocument::new();
+        let mut first = draft(VisualObjectKind::Primitive {
+            shape: VisualPrimitiveShape::Diamond,
+        });
+        first.transform = VisualTransform {
+            x: -100.0,
+            y: 25.0,
+            width: 44.0,
+            height: 26.0,
+            rotation_degrees: 35.0,
+        };
+        first.style.border = VisualColor::rgba(150, 50, 20, 255);
+        let mut second = draft(VisualObjectKind::Primitive {
+            shape: VisualPrimitiveShape::Circle,
+        });
+        second.transform = VisualTransform {
+            x: 100.0,
+            y: 25.0,
+            width: 44.0,
+            height: 26.0,
+            rotation_degrees: 35.0,
+        };
+        let created = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(first),
+                VisualOperation::AddObject(second),
+            ])
+            .unwrap();
+        let original_objects = document
+            .scene()
+            .objects
+            .iter()
+            .filter(|object| created.created_objects.contains(&object.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let preset =
+            VisualPresetDraft::from_primitives("Selected marker", &original_objects).unwrap();
+        assert!(preset.components[0].transform.x < 0.0);
+        assert!(preset.components[1].transform.x > 0.0);
+        assert!(preset.components[0].transform.y.abs() < 1e-9);
+        assert!(preset.components[1].transform.y.abs() < 1e-9);
+        assert_eq!(preset.components[0].style, original_objects[0].style);
+
+        let preset_id = document
+            .apply_transaction(&[VisualOperation::AddPreset(preset)])
+            .unwrap()
+            .created_presets[0];
+        document
+            .apply_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform {
+                    x: 320.0,
+                    y: -80.0,
+                    width: 100.0,
+                    height: 100.0,
+                    rotation_degrees: 20.0,
+                },
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::PresetInstance { preset_id },
+            })])
+            .unwrap();
+        assert_eq!(
+            document
+                .scene()
+                .objects
+                .iter()
+                .filter(|object| created.created_objects.contains(&object.id))
+                .cloned()
+                .collect::<Vec<_>>(),
+            original_objects
+        );
+        let encoded = encode_document(DiagramFileDocumentRef::Visual(&document)).unwrap();
+        let DiagramFileDocument::Visual(reopened) = decode_document(&encoded).unwrap() else {
+            panic!("preset document decoded as Mermaid");
+        };
+        let projection = crate::diagram::project_visual_scene(reopened.scene()).unwrap();
+        let mut parts = projection
+            .items
+            .iter()
+            .filter(|item| {
+                item.kind
+                    == crate::diagram::VisualProjectedKind::PresetPrimitive(
+                        VisualPrimitiveShape::Diamond,
+                    )
+                    || item.kind
+                        == crate::diagram::VisualProjectedKind::PresetPrimitive(
+                            VisualPrimitiveShape::Circle,
+                        )
+            })
+            .collect::<Vec<_>>();
+        parts.sort_by_key(|item| item.component_index);
+        assert_eq!(parts.len(), 2);
+        assert!((parts[0].transform.x + parts[1].transform.x - 640.0).abs() < 1e-9);
+        assert!((parts[0].transform.y + parts[1].transform.y + 160.0).abs() < 1e-9);
+        assert_ne!(parts[0].transform.rotation_degrees, 0.0);
     }
 
     #[test]

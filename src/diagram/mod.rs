@@ -1,5 +1,6 @@
 //! Bounded Diagram Studio model, native document state, and scene geometry.
 
+mod assets;
 mod codec;
 mod document;
 mod export;
@@ -14,6 +15,11 @@ mod templates;
 mod visual;
 mod visual_canvas;
 mod visual_scene;
+
+pub(crate) use assets::{
+    DecodedVisualAsset, PreparedVisualAsset, decode_visual_asset_payload,
+    prepare_visual_asset_bytes, prepare_visual_asset_file,
+};
 
 pub use codec::{
     DIAGRAM_SESSION_FORMAT_VERSION, DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
@@ -30,11 +36,13 @@ pub use export::{
     MAX_EXPORT_SIDE, MAX_PNG_BYTES, MAX_PREPARED_GLYPHS, MAX_RASTER_PIXEL_VISITS, MAX_SVG_BYTES,
 };
 pub use visual::{
-    DEFAULT_LAYER_ID, MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_COORDINATE_ABS,
-    MAX_VISUAL_DIMENSION, MAX_VISUAL_HISTORY_BYTES, MAX_VISUAL_HISTORY_ENTRIES, MAX_VISUAL_LAYERS,
-    MAX_VISUAL_NAME_BYTES, MAX_VISUAL_OBJECTS, MAX_VISUAL_PRESET_COMPONENTS, MAX_VISUAL_PRESETS,
-    MAX_VISUAL_SCENE_BYTES, MAX_VISUAL_TEXT_BYTES, MAX_VISUAL_TRANSACTION_OPERATIONS,
-    MIN_VISUAL_DIMENSION, TITLE_OBJECT_ID, VisualAnchor, VisualAssetId, VisualColor,
+    DEFAULT_LAYER_ID, MAX_VISUAL_ASSET_BYTES, MAX_VISUAL_ASSET_DIMENSION, MAX_VISUAL_ASSET_PIXELS,
+    MAX_VISUAL_ASSET_TOTAL_BYTES, MAX_VISUAL_ASSETS, MAX_VISUAL_CONNECTOR_LABEL_BYTES,
+    MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_DIMENSION, MAX_VISUAL_HISTORY_BYTES,
+    MAX_VISUAL_HISTORY_ENTRIES, MAX_VISUAL_LAYERS, MAX_VISUAL_NAME_BYTES, MAX_VISUAL_OBJECTS,
+    MAX_VISUAL_PRESET_COMPONENTS, MAX_VISUAL_PRESETS, MAX_VISUAL_SCENE_BYTES,
+    MAX_VISUAL_TEXT_BYTES, MAX_VISUAL_TRANSACTION_OPERATIONS, MIN_VISUAL_DIMENSION,
+    TITLE_OBJECT_ID, VisualAnchor, VisualAsset, VisualAssetFormat, VisualAssetId, VisualColor,
     VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute,
     VisualDiagramDocument, VisualDocumentError, VisualLayer, VisualLayerId, VisualLineStyle,
     VisualObject, VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation,

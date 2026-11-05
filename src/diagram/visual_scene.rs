@@ -2,10 +2,10 @@
 
 use super::scene::{PreparedText, PreparedTextLine, ScenePoint, SceneRect};
 use super::visual::{
-    VisualAnchor, VisualColor, VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint,
-    VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError, VisualLayerId, VisualObject,
-    VisualObjectId, VisualObjectKind, VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene,
-    VisualShadow, VisualStyle, VisualTransform,
+    VisualAnchor, VisualAsset, VisualColor, VisualConnector, VisualConnectorDirection,
+    VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError,
+    VisualLayerId, VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveComponent,
+    VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle, VisualTransform,
 };
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
@@ -40,6 +40,7 @@ pub enum VisualProjectedKind {
     Primitive(VisualPrimitiveShape),
     Text,
     PresetPrimitive(VisualPrimitiveShape),
+    Image,
     MissingImagePlaceholder,
     Connector,
 }
@@ -50,6 +51,7 @@ pub struct ProjectedVisualItem {
     pub component_index: Option<usize>,
     pub layer_id: VisualLayerId,
     pub kind: VisualProjectedKind,
+    pub image_asset: Option<VisualAsset>,
     pub transform: VisualTransform,
     pub style: VisualStyle,
     /// Closed, rotated outline path in document coordinates.
@@ -166,16 +168,33 @@ pub fn project_visual_scene(
                     Some(text),
                     false,
                 )?],
-                VisualObjectKind::ImageReference { .. } => vec![build_item(
-                    object.id,
-                    None,
-                    layer.id,
-                    VisualProjectedKind::MissingImagePlaceholder,
-                    object.transform,
-                    object.style.clone(),
-                    Some("Missing image"),
-                    true,
-                )?],
+                VisualObjectKind::ImageReference { asset_id } => {
+                    if let Some(asset) = scene.assets.iter().find(|asset| asset.id() == asset_id) {
+                        let mut item = build_item(
+                            object.id,
+                            None,
+                            layer.id,
+                            VisualProjectedKind::Image,
+                            object.transform,
+                            object.style.clone(),
+                            None,
+                            false,
+                        )?;
+                        item.image_asset = Some(asset.clone());
+                        vec![item]
+                    } else {
+                        vec![build_item(
+                            object.id,
+                            None,
+                            layer.id,
+                            VisualProjectedKind::MissingImagePlaceholder,
+                            object.transform,
+                            object.style.clone(),
+                            Some("Missing image"),
+                            true,
+                        )?]
+                    }
+                }
                 VisualObjectKind::PresetInstance { preset_id } => {
                     let preset = scene
                         .presets
@@ -302,6 +321,7 @@ pub fn project_visual_scene(
             component_index: None,
             layer_id: object.layer_id,
             kind: VisualProjectedKind::Connector,
+            image_asset: None,
             transform: object.transform,
             style: object.style.clone(),
             outline: Vec::new(),
@@ -1427,6 +1447,7 @@ fn build_item_with_paths(
         component_index,
         layer_id,
         kind,
+        image_asset: None,
         transform,
         style,
         outline,
@@ -1450,6 +1471,7 @@ fn kind_shape(kind: VisualProjectedKind) -> VisualPrimitiveShape {
             shape
         }
         VisualProjectedKind::Text
+        | VisualProjectedKind::Image
         | VisualProjectedKind::MissingImagePlaceholder
         | VisualProjectedKind::Connector => VisualPrimitiveShape::Rectangle,
     }
