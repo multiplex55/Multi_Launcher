@@ -20,8 +20,8 @@ Authority: ../../../CODEX_GOAL_DESKTOP_PRODUCTIVITY_EXPANSION.md and companion K
 
 | Category | Checkpoints | Implementation | Automated | Native | Review | Delivery |
 | --- | --- | --- | --- | --- | --- | --- |
-| C01 | M0-A, M0-B, M1–M4 | Frozen PARTIAL/BLOCKED; B.2 inactive/preserved; M2–M4 not started | M1-A12/12; B.1 22/22; archived B.2 52/54 across scoped runs,2 failed | inherited capture timeout; unverified | source review completed; click failures unresolved | accepted checkpoints/stop report pushed; final handoff preparing |
-| C02 | M0-A, M5–M7 | not started | not run | not run | pending | not started |
+| C01 | M0-A, M0-B, M1–M4 | Frozen PARTIAL/BLOCKED; B.2 inactive/preserved; M2–M4 not started | M1-A12/12; B.1 22/22; archived B.2 52/54 across scoped runs,2 failed | inherited capture timeout; unverified | source review completed; click failures unresolved | all committed work pushed; final754ba939 |
+| C02 | M0-A, M5–M7 | M0-A bootstrap; independent M5-A pending | not run | not run | pending | baseline preparing |
 | C03 | M0-A, M8–M11 | not started | not run | not run | pending | not started |
 | C04 | M0-A, M12 | not started | not run | not run | pending | not started |
 | C05 | M0-A, M13 | not started | not run | not run | pending | not started |
@@ -209,3 +209,13 @@ Only task-owned B.2 source was restored to committed HEAD after preservation: ei
 C01 is accurately frozen **PARTIAL / BLOCKED**: M0-A/M0-B/M1-A/M1-B.1 complete; B.2 inactive and preserved, two failed click paths/budget exhausted; M2–M4 unimplemented. IDs13–26 remain incomplete (24–26 partial foundations). Native N1–N12 remain unverified, inherited observer failure unchanged. A future B.2 repair still needs renewed authority or materially new evidence; this continuation does not reset that budget. No failing tests were weakened/deleted to claim completion: the entire unaccepted increment and its tests are archived together, and C01 is not accepted.
 
 This ordinary category-handoff documentation checkpoint updates the tracked canonical ledger/status for actual independent continuation; the prior stalled-goal reporting-only commit/report remains historical and unchanged. After this commit/push, record its actual final HEAD, then create C02 directly from it, create/verify C02/M0-A and attempt upstream push before source implementation. C02 starts with M5-A only; do not infer M6 inspector hosting independence or silently release its C01 dependency. All approved IDs remain required; no narrower success definition adopted.
+
+## C02/M0-A — independent calculation branch baseline
+
+- parent_branch: feat/utility-dock-popout
+- parent_tip_sha / C01 actual final frozen tip: 754ba93929fc0021e50e24343707a7f2878a4142 (handoff documentation committed and normally pushed; checkout/index clean).
+- category_branch: feat/calculation-programmer-tools; initial HEAD verified exactly equals parent_tip_sha.
+- This is C02's own M0-A, separate from C01's baseline. Baseline SHA/push receipt follows after commit; verify direct parent.
+- C01 remains Partial/Blocked with inactive preserved B.2 and unimplemented M2–M4. No B.2 repair/test budget renewed; source/evidence patch retained, failed tests not represented as passing.
+- Authorized independent start: M5-A exact integer primitives only, no GUI/native dependency. Planner reconfirms actual domain owners after this bootstrap. M6 inspector hosting dependency remains unresolved; later work needs explicit dependency assessment.
+- No application code or implementation build/test on C02 before baseline. No unrelated user changes, worktrees, auxiliary checkouts, intermediate merge/rebase/cherry-pick or reset used.
