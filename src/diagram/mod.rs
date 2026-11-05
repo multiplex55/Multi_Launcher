@@ -12,6 +12,7 @@ mod scene;
 mod session;
 mod templates;
 mod visual;
+mod visual_scene;
 
 pub use codec::{
     DIAGRAM_SESSION_FORMAT_VERSION, DIAGRAM_VISUAL_DOCUMENT_FORMAT_VERSION,
@@ -37,6 +38,13 @@ pub use visual::{
     VisualObjectKind, VisualOperation, VisualPreset, VisualPresetDraft, VisualPresetId,
     VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle,
     VisualTransactionOutcome, VisualTransform,
+};
+pub use visual_scene::{
+    MAX_VISUAL_DASH_SEGMENTS_PER_ITEM, MAX_VISUAL_DASH_SEGMENTS_PER_SCENE,
+    MAX_VISUAL_OUTLINE_POINTS, MAX_VISUAL_PROJECTED_ITEMS, MAX_VISUAL_PROJECTION_COORDINATE_ABS,
+    MAX_VISUAL_TEXT_LINES_PER_OBJECT, MAX_VISUAL_TEXT_LINES_PER_SCENE, ProjectedStrokePrimitive,
+    ProjectedVisualItem, VisualProjectedKind, VisualProjectionError, VisualSceneProjection,
+    color_with_opacity, project_visual_document, project_visual_scene,
 };
 
 pub use layout::{DiagramLayoutError, layout_positions};

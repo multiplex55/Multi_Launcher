@@ -2,15 +2,19 @@
 use super::native_keyboard::reserve_windows_system_menu_alt_space;
 use super::utility_host::ViewportPassProvenance;
 use crate::diagram::{
-    DiagramDocument, DiagramDocumentController, DiagramDocumentError, DiagramExportFormat,
-    DiagramImageSnapshot, DiagramRenderOutput, DiagramRenderedImageSnapshot, DiagramScene,
-    DiagramSession, DiagramSourceCopy, DiagramSourceCopyOrigin, DiagramSourceSnapshot,
-    DiagramTemplate, EdgeId, FlowDirection, GenericPreviewStatus, GraphOperation, GroupId,
-    MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, MermaidFile, NodeId, NodePosition, NodeShape,
-    PendingDiagramTransition, Position, PreparedText, PreviewState, RasterSize,
-    RenderDocumentIdentity, RenderKey, RenderOptions, RendererService, SceneMetrics, ScenePoint,
-    SceneRect, SessionStatus, TextHorizontalAlignment, TransitionDecision, TransitionOutcome,
-    build_scene, generic_preview_family, is_generic_preview_candidate,
+    DEFAULT_LAYER_ID, DiagramDocument, DiagramDocumentController, DiagramDocumentError,
+    DiagramExportFormat, DiagramImageSnapshot, DiagramRenderOutput, DiagramRenderedImageSnapshot,
+    DiagramScene, DiagramSession, DiagramSourceCopy, DiagramSourceCopyOrigin,
+    DiagramSourceSnapshot, DiagramTemplate, EdgeId, FlowDirection, GenericPreviewStatus,
+    GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, MermaidFile, NodeId,
+    NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText, PreviewState,
+    ProjectedStrokePrimitive, RasterSize, RenderDocumentIdentity, RenderKey, RenderOptions,
+    RendererService, SceneMetrics, ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment,
+    TransitionDecision, TransitionOutcome, VisualColor, VisualLineStyle, VisualObject,
+    VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualPresetDraft,
+    VisualPrimitiveComponent, VisualPrimitiveShape, VisualProjectedKind, VisualProjectionError,
+    VisualScene, VisualSceneProjection, VisualShadow, VisualStyle, VisualTransform, build_scene,
+    color_with_opacity, generic_preview_family, is_generic_preview_candidate, project_visual_scene,
 };
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -18,6 +22,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 const DEFAULT_VIEWPORT_SIZE: [f32; 2] = [1180.0, 760.0];
 const MIN_VIEWPORT_SIZE: [f32; 2] = [480.0, 360.0];
@@ -446,9 +451,39 @@ struct GenericPreviewTexture {
     content_uv: egui::Rect,
 }
 
+#[derive(Clone)]
+struct VisualProjectionCache {
+    document: RenderDocumentIdentity,
+    revision: u64,
+    scene: Arc<VisualScene>,
+    projection: Result<Arc<VisualSceneProjection>, VisualProjectionError>,
+}
+
+#[derive(Clone, Debug)]
+struct VisualPropertyDraft {
+    document: RenderDocumentIdentity,
+    basis_revision: u64,
+    object: VisualObject,
+}
+
 enum PendingMutation {
     ReplaceSource(String),
-    ReplaceVisualLabel(String),
+    ReplaceVisualLabel {
+        label: String,
+        expected_document: RenderDocumentIdentity,
+        expected_revision: u64,
+    },
+    VisualTransaction {
+        operations: Vec<VisualOperation>,
+        expected_document: RenderDocumentIdentity,
+        expected_revision: u64,
+        select_after: Option<VisualObjectId>,
+    },
+    VisualHistory {
+        redo: bool,
+        expected_document: RenderDocumentIdentity,
+        expected_revision: u64,
+    },
     Transaction {
         operations: Vec<GraphOperation>,
         expected_revision: u64,
@@ -568,6 +603,7 @@ pub(crate) struct DiagramStudioDialog {
     inspector_canvas_split_ratio: f32,
     export_scale: ExportScale,
     cache: Option<RevisionCache>,
+    visual_projection_cache: Option<VisualProjectionCache>,
     renderer: Option<RendererService>,
     camera: Camera,
     viewer_camera: Camera,
@@ -578,6 +614,10 @@ pub(crate) struct DiagramStudioDialog {
     selection: Option<DiagramElement>,
     selected_nodes: BTreeSet<NodeId>,
     property_draft: Option<PropertyDraft>,
+    visual_create_shape: VisualPrimitiveShape,
+    visual_selection: Option<VisualObjectId>,
+    visual_selected_preset: Option<crate::diagram::VisualPresetId>,
+    visual_property_draft: Option<VisualPropertyDraft>,
     drag: Option<DragState>,
     message: Option<StudioNotice>,
     #[cfg(test)]
@@ -619,6 +659,12 @@ pub(crate) struct DiagramStudioDialog {
     #[cfg(test)]
     test_viewer_render_key: Option<RenderKey>,
     #[cfg(test)]
+    test_viewer_visual_projection_items: usize,
+    #[cfg(test)]
+    test_viewer_visual_items_painted: usize,
+    #[cfg(test)]
+    test_viewer_visual_items_omitted: usize,
+    #[cfg(test)]
     test_application_input_allowed: bool,
     #[cfg(test)]
     test_child_focused: bool,
@@ -640,6 +686,12 @@ pub(crate) struct DiagramStudioDialog {
     test_file_picker_calls: usize,
     #[cfg(test)]
     test_scene_build_count: usize,
+    #[cfg(test)]
+    test_visual_projection_build_count: usize,
+    #[cfg(test)]
+    test_visual_items_painted: usize,
+    #[cfg(test)]
+    test_visual_items_omitted: usize,
     #[cfg(test)]
     test_action_enabled: Vec<(String, bool)>,
     #[cfg(test)]
@@ -699,6 +751,7 @@ impl DiagramStudioDialog {
             inspector_canvas_split_ratio: DEFAULT_INSPECTOR_CANVAS_RATIO,
             export_scale: ExportScale::default(),
             cache: None,
+            visual_projection_cache: None,
             renderer: None,
             camera: Camera::default(),
             viewer_camera: Camera::default(),
@@ -709,6 +762,10 @@ impl DiagramStudioDialog {
             selection: None,
             selected_nodes: BTreeSet::new(),
             property_draft: None,
+            visual_create_shape: VisualPrimitiveShape::Rectangle,
+            visual_selection: None,
+            visual_selected_preset: None,
+            visual_property_draft: None,
             drag: None,
             message: None,
             #[cfg(test)]
@@ -750,6 +807,12 @@ impl DiagramStudioDialog {
             #[cfg(test)]
             test_viewer_render_key: None,
             #[cfg(test)]
+            test_viewer_visual_projection_items: 0,
+            #[cfg(test)]
+            test_viewer_visual_items_painted: 0,
+            #[cfg(test)]
+            test_viewer_visual_items_omitted: 0,
+            #[cfg(test)]
             test_application_input_allowed: false,
             #[cfg(test)]
             test_child_focused: false,
@@ -771,6 +834,12 @@ impl DiagramStudioDialog {
             test_file_picker_calls: 0,
             #[cfg(test)]
             test_scene_build_count: 0,
+            #[cfg(test)]
+            test_visual_projection_build_count: 0,
+            #[cfg(test)]
+            test_visual_items_painted: 0,
+            #[cfg(test)]
+            test_visual_items_omitted: 0,
             #[cfg(test)]
             test_action_enabled: Vec::new(),
             #[cfg(test)]
@@ -1516,7 +1585,8 @@ impl DiagramStudioDialog {
         canvas_focus_requested: &mut Option<egui::Id>,
     ) -> bool {
         if let Some(label) = self.documents.visual_label().map(str::to_owned) {
-            return self.draw_visual_viewer_body(ui, actions_allowed, &label);
+            let projection = self.visual_projection().map(|(_, projection)| projection);
+            return self.draw_visual_viewer_body(ui, actions_allowed, &label, projection);
         }
         self.ensure_generic_texture(ui.ctx());
         let Self {
@@ -1717,6 +1787,7 @@ impl DiagramStudioDialog {
         ui: &mut egui::Ui,
         actions_allowed: bool,
         label: &str,
+        projection: Option<Result<Arc<VisualSceneProjection>, VisualProjectionError>>,
     ) -> bool {
         let mut close_requested = false;
         ui.horizontal_wrapped(|ui| {
@@ -1727,12 +1798,66 @@ impl DiagramStudioDialog {
                 .clicked();
         });
         ui.separator();
-        ui.label("Visual document preview");
-        ui.group(|ui| {
-            ui.centered_and_justified(|ui| {
-                ui.heading(label);
-            });
-        });
+        ui.label("Read-only visual document preview");
+        let desired = egui::vec2(ui.available_width().max(240.0), 300.0);
+        let (canvas, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
+        let mut paint_report = VisualPaintReport::default();
+        #[cfg(test)]
+        let projected_item_count = projection
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |projection| projection.items.len());
+        match projection.as_ref() {
+            Some(Ok(projection)) => {
+                paint_report = paint_visual_projection(
+                    &ui.painter().with_clip_rect(canvas),
+                    projection,
+                    canvas,
+                    None,
+                );
+            }
+            Some(Err(error)) => {
+                ui.painter()
+                    .rect_filled(canvas, 4.0, egui::Color32::from_gray(248));
+                ui.painter().text(
+                    canvas.center(),
+                    egui::Align2::CENTER_CENTER,
+                    error.to_string(),
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::DARK_RED,
+                );
+            }
+            None => {
+                ui.painter().text(
+                    canvas.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    egui::FontId::proportional(18.0),
+                    ui.visuals().text_color(),
+                );
+            }
+        }
+        if let Some(Ok(projection)) = projection.as_ref()
+            && (projection.simplified_dash_paths > 0
+                || projection.truncated_text_items > 0
+                || paint_report.omitted_items > 0
+                || paint_report.suppressed_text_lines > 0)
+        {
+            ui.weak(format!(
+                "{} large dashed outline(s) simplified; {} text item(s) shortened, {} small text line(s) omitted; {} item(s) omitted to keep the preview responsive.",
+                projection.simplified_dash_paths,
+                projection.truncated_text_items,
+                paint_report.suppressed_text_lines,
+                paint_report.omitted_items
+            ));
+        }
+        #[cfg(test)]
+        {
+            self.test_viewer_canvas_rect = Some(canvas);
+            self.test_viewer_visual_projection_items = projected_item_count;
+            self.test_viewer_visual_items_painted = paint_report.painted_items;
+            self.test_viewer_visual_items_omitted = paint_report.omitted_items;
+        }
         close_requested
     }
 
@@ -1760,6 +1885,7 @@ impl DiagramStudioDialog {
             }
             return false;
         }
+        let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
 
         let bootstrap_completed =
             self.viewport_bootstrap_pending && effects.viewport_callback_observed;
@@ -1802,9 +1928,21 @@ impl DiagramStudioDialog {
             self.focus_viewport = false;
         }
         let source_mutation_requested = effects.mutation.is_some();
-        let mutation_succeeded = effects
-            .mutation
-            .is_none_or(|mutation| self.apply_pending(mutation));
+        let visual_mutation_requested = effects.mutation.as_ref().is_some_and(|mutation| {
+            matches!(
+                mutation,
+                PendingMutation::ReplaceVisualLabel { .. }
+                    | PendingMutation::VisualTransaction { .. }
+                    | PendingMutation::VisualHistory { .. }
+            )
+        });
+        let mutation_succeeded = effects.mutation.is_none_or(|mutation| {
+            if visual_mutation_requested && !owner_pass_current {
+                self.reject_stale_visual_intent()
+            } else {
+                self.apply_pending(mutation)
+            }
+        });
         let debounce_accepted_source = source_mutation_requested && mutation_succeeded;
         let viewer_was_open = self.viewer_open;
         let accepted_close = mutation_succeeded
@@ -1824,19 +1962,8 @@ impl DiagramStudioDialog {
                 ctx.request_repaint_of(viewer_viewport_id());
             }
         }
-        let owner_viewer_request_is_current = effects.open_viewer_requested
-            && self.open
-            && effects.owner_generation == self.owner_generation
-            && effects.owner_pass_accepted
-            && effects.viewport_callback_observed
-            && (match effects.owner_pass {
-                Some(pass) => {
-                    effects.owner_viewport_id == pass.viewport_id
-                        && pass.viewport_id == viewport_id()
-                        && pass.was_retained(ctx)
-                }
-                None => effects.owner_viewport_id == egui::ViewportId::ROOT,
-            });
+        let owner_viewer_request_is_current =
+            effects.open_viewer_requested && self.open && owner_pass_current;
         if owner_viewer_request_is_current {
             if !self.viewer_open {
                 self.viewer_generation = self.viewer_generation.wrapping_add(1);
@@ -1922,6 +2049,20 @@ impl DiagramStudioDialog {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         accepted_close
+    }
+
+    fn owner_pass_is_current(&self, effects: &PendingRootEffects, ctx: &egui::Context) -> bool {
+        effects.owner_generation == self.owner_generation
+            && effects.owner_pass_accepted
+            && effects.viewport_callback_observed
+            && match effects.owner_pass {
+                Some(pass) => {
+                    effects.owner_viewport_id == pass.viewport_id
+                        && pass.viewport_id == viewport_id()
+                        && pass.was_retained(ctx)
+                }
+                None => effects.owner_viewport_id == egui::ViewportId::ROOT,
+            }
     }
 
     #[cfg(test)]
@@ -2419,6 +2560,11 @@ impl DiagramStudioDialog {
             self.test_viewer_canvas_rect = None;
             self.test_viewer_canvas_id = None;
             self.test_viewer_render_key = None;
+            self.test_viewer_visual_projection_items = 0;
+            self.test_viewer_visual_items_painted = 0;
+            self.test_viewer_visual_items_omitted = 0;
+            self.test_visual_items_painted = 0;
+            self.test_visual_items_omitted = 0;
             self.test_viewer_discard_requested = false;
         }
     }
@@ -2460,6 +2606,62 @@ impl DiagramStudioDialog {
         });
         self.revalidate_selection();
         self.drag = None;
+    }
+
+    fn visual_projection(
+        &mut self,
+    ) -> Option<(
+        Arc<VisualScene>,
+        Result<Arc<VisualSceneProjection>, VisualProjectionError>,
+    )> {
+        let revision = self.documents.visual_revision()?;
+        if let Some(cache) = self.visual_projection_cache.as_ref()
+            && cache.document == self.render_document
+            && cache.revision == revision
+        {
+            return Some((cache.scene.clone(), cache.projection.clone()));
+        }
+        let scene = Arc::new(self.documents.visual_scene()?.clone());
+        let projection = project_visual_scene(&scene).map(Arc::new);
+        self.visual_projection_cache = Some(VisualProjectionCache {
+            document: self.render_document.clone(),
+            revision,
+            scene: scene.clone(),
+            projection: projection.clone(),
+        });
+        #[cfg(test)]
+        {
+            self.test_visual_projection_build_count =
+                self.test_visual_projection_build_count.saturating_add(1);
+        }
+        Some((scene, projection))
+    }
+
+    fn revalidate_visual_selection(&mut self) {
+        let Some(scene) = self.documents.visual_scene() else {
+            self.visual_selection = None;
+            self.visual_property_draft = None;
+            return;
+        };
+        if self
+            .visual_selection
+            .is_some_and(|id| !scene.objects.iter().any(|object| object.id == id))
+        {
+            self.visual_selection = None;
+            self.visual_property_draft = None;
+        }
+        let revision = self.documents.visual_revision();
+        if self.visual_property_draft.as_ref().is_some_and(|draft| {
+            draft.document != self.render_document || Some(draft.basis_revision) != revision
+        }) {
+            self.visual_property_draft = None;
+        }
+        if self
+            .visual_selected_preset
+            .is_some_and(|id| !scene.presets.iter().any(|preset| preset.id == id))
+        {
+            self.visual_selected_preset = None;
+        }
     }
 
     fn sync_generic_preview_after_accepted_pass(
@@ -2631,15 +2833,115 @@ impl DiagramStudioDialog {
     }
 
     fn apply_pending(&mut self, pending: PendingMutation) -> bool {
+        match pending {
+            PendingMutation::ReplaceVisualLabel {
+                label,
+                expected_document,
+                expected_revision,
+            } => {
+                if !self.visual_intent_is_current(&expected_document, expected_revision) {
+                    return self.reject_stale_visual_intent();
+                }
+                match self.documents.replace_visual_label(label) {
+                    Ok(changed) => {
+                        self.message = None;
+                        if changed {
+                            self.visual_property_draft = None;
+                            self.revalidate_visual_selection();
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        self.message = Some(StudioNotice::error(error.to_string()));
+                        false
+                    }
+                }
+            }
+            PendingMutation::VisualTransaction {
+                operations,
+                expected_document,
+                expected_revision,
+                select_after,
+            } => {
+                if !self.visual_intent_is_current(&expected_document, expected_revision) {
+                    return self.reject_stale_visual_intent();
+                }
+                match self.documents.apply_visual_transaction(&operations) {
+                    Ok(outcome) => {
+                        self.message = None;
+                        self.visual_property_draft = None;
+                        if outcome.changed {
+                            if let Some(selection) = select_after {
+                                self.visual_selection = Some(selection);
+                            } else if let Some(selection) = outcome.created_objects.last().copied()
+                            {
+                                self.visual_selection = Some(selection);
+                            }
+                            if let Some(preset) = outcome.created_presets.last().copied() {
+                                self.visual_selected_preset = Some(preset);
+                            }
+                            self.revalidate_visual_selection();
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        self.message = Some(StudioNotice::error(error.to_string()));
+                        false
+                    }
+                }
+            }
+            PendingMutation::VisualHistory {
+                redo,
+                expected_document,
+                expected_revision,
+            } => {
+                if !self.visual_intent_is_current(&expected_document, expected_revision) {
+                    return self.reject_stale_visual_intent();
+                }
+                let result = if redo {
+                    self.documents.redo()
+                } else {
+                    self.documents.undo()
+                };
+                match result {
+                    Ok(changed) => {
+                        self.message = None;
+                        if changed {
+                            self.visual_property_draft = None;
+                            self.revalidate_visual_selection();
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        self.message = Some(StudioNotice::error(error.to_string()));
+                        false
+                    }
+                }
+            }
+            pending => self.apply_mermaid_pending(pending),
+        }
+    }
+
+    fn apply_mermaid_pending(&mut self, pending: PendingMutation) -> bool {
+        if matches!(&pending, PendingMutation::Undo | PendingMutation::Redo)
+            && self.documents.authoring_kind()
+                != Some(crate::diagram::DiagramAuthoringKind::Mermaid)
+        {
+            self.message = Some(StudioNotice::error(
+                "Mermaid history is no longer active for this document.",
+            ));
+            return false;
+        }
         let result = match pending {
             PendingMutation::ReplaceSource(source) => self
                 .documents
                 .replace_source(source)
                 .map(|changed| (changed, None)),
-            PendingMutation::ReplaceVisualLabel(label) => self
-                .documents
-                .replace_visual_label(label)
-                .map(|changed| (changed, None)),
+            PendingMutation::ReplaceVisualLabel { .. }
+            | PendingMutation::VisualTransaction { .. }
+            | PendingMutation::VisualHistory { .. } => {
+                unreachable!("visual mutation dispatched above")
+            }
             PendingMutation::Transaction {
                 operations,
                 expected_revision,
@@ -2681,6 +2983,23 @@ impl DiagramStudioDialog {
         }
     }
 
+    fn visual_intent_is_current(
+        &self,
+        expected_document: &RenderDocumentIdentity,
+        expected_revision: u64,
+    ) -> bool {
+        self.render_document == *expected_document
+            && self.documents.visual_revision() == Some(expected_revision)
+            && self.documents.pending_transition().is_none()
+    }
+
+    fn reject_stale_visual_intent(&mut self) -> bool {
+        self.message = Some(StudioNotice::error(
+            "The visual document changed while these properties were open. Reload them before applying.",
+        ));
+        false
+    }
+
     #[cfg(test)]
     pub(crate) fn test_replace_source(&mut self, source: &str) {
         let _ = self.documents.replace_source(source);
@@ -2707,9 +3026,13 @@ impl DiagramStudioDialog {
         self.generic_preview = GenericPreviewStatus::Idle;
         self.generic_texture = None;
         self.cache = None;
+        self.visual_projection_cache = None;
         self.selection = None;
         self.selected_nodes.clear();
         self.property_draft = None;
+        self.visual_selection = None;
+        self.visual_selected_preset = None;
+        self.visual_property_draft = None;
         self.drag = None;
         self.camera = Camera::default();
         self.viewer_camera = Camera::default();
@@ -4012,11 +4335,54 @@ impl DiagramStudioDialog {
 
         let pending_transition = self.documents.pending_transition().cloned();
         let path = self.documents.path().map(Path::to_path_buf);
+        let visual_presentation = self.visual_projection();
+        let scene_snapshot = visual_presentation.as_ref().map(|(scene, _)| scene.clone());
+        let projection = visual_presentation.map(|(_, projection)| projection);
+        let visual_revision = self.documents.visual_revision().unwrap_or(0);
+        let visual_identity = self.render_document.clone();
         let document_actions_allowed = actions_allowed
             && !closing_requested
             && pending_transition.is_none()
             && !egui::Popup::is_any_open(ui.ctx());
+        let visual_edits_allowed = document_actions_allowed && pending.is_none();
+        let visual_draft_active = self.visual_property_draft.is_some();
+        let structural_edits_allowed = visual_edits_allowed && !visual_draft_active;
         let mut effects = DrawBodyEffects::default();
+        let mut selected_object = self
+            .visual_selection
+            .filter(|id| {
+                scene_snapshot
+                    .as_ref()
+                    .is_some_and(|scene| scene.objects.iter().any(|object| object.id == *id))
+            })
+            .or_else(|| {
+                scene_snapshot
+                    .as_ref()
+                    .map(|_| crate::diagram::TITLE_OBJECT_ID)
+            });
+        let mut selected_preset = self.visual_selected_preset.filter(|id| {
+            scene_snapshot
+                .as_ref()
+                .is_some_and(|scene| scene.presets.iter().any(|preset| preset.id == *id))
+        });
+        let mut working_object = selected_object.and_then(|id| {
+            let saved_draft = self.visual_property_draft.as_ref().filter(|draft| {
+                draft.document == visual_identity
+                    && draft.basis_revision == visual_revision
+                    && draft.object.id == id
+            });
+            saved_draft.map(|draft| draft.object.clone()).or_else(|| {
+                scene_snapshot
+                    .as_ref()?
+                    .objects
+                    .iter()
+                    .find(|object| object.id == id)
+                    .cloned()
+            })
+        });
+        let mut staged_operations: Option<(Vec<VisualOperation>, Option<VisualObjectId>)> = None;
+        let mut stage_history: Option<bool> = None;
+        let mut clear_visual_draft = false;
         egui::ScrollArea::vertical()
             .id_salt("diagram-studio-visual-document-scroll")
             .show(ui, |ui| {
@@ -4077,7 +4443,7 @@ impl DiagramStudioDialog {
                 let label_editor_id = ui.make_persistent_id("diagram-studio-visual-label-editor");
                 clear_text_edit_undoer(ui.ctx(), label_editor_id);
                 let label_response = ui.add_enabled(
-                    document_actions_allowed && pending.is_none(),
+                    document_actions_allowed && pending.is_none() && !visual_draft_active,
                     egui::TextEdit::singleline(&mut label)
                         .id(label_editor_id)
                         .hint_text("Visual canvas label")
@@ -4090,18 +4456,463 @@ impl DiagramStudioDialog {
                     ui.clip_rect(),
                 ));
                 if label_response.changed() && pending.is_none() {
-                    *pending = Some(PendingMutation::ReplaceVisualLabel(label.clone()));
+                    *pending = Some(PendingMutation::ReplaceVisualLabel {
+                        label: label.clone(),
+                        expected_document: visual_identity.clone(),
+                        expected_revision: visual_revision,
+                    });
                 }
 
-                ui.group(|ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.heading(&label);
-                            ui.label("Visual diagram preview");
-                            ui.label("This document is stored as visual data and is not converted to Mermaid.");
+                ui.label("Canvas preview (apply a complete property edit as one undo step)");
+                let canvas_size = egui::vec2(ui.available_width().clamp(240.0, 1_400.0), 300.0);
+                let (canvas_rect, _) = ui.allocate_exact_size(canvas_size, egui::Sense::hover());
+                let mut paint_report = VisualPaintReport::default();
+                match projection.as_ref() {
+                    Some(Ok(projection)) => {
+                        paint_report = paint_visual_projection(
+                            &ui.painter().with_clip_rect(canvas_rect),
+                            projection,
+                            canvas_rect,
+                            selected_object,
+                        );
+                    }
+                    Some(Err(error)) => {
+                        ui.painter().rect_filled(
+                            canvas_rect,
+                            4.0,
+                            egui::Color32::from_gray(248),
+                        );
+                        ui.painter().text(
+                            canvas_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            error.to_string(),
+                            egui::FontId::proportional(14.0),
+                            egui::Color32::DARK_RED,
+                        );
+                    }
+                    None => {}
+                }
+                if let Some(Ok(projection)) = projection.as_ref()
+                    && (projection.simplified_dash_paths > 0
+                        || projection.truncated_text_items > 0
+                        || paint_report.omitted_items > 0
+                        || paint_report.suppressed_text_lines > 0)
+                {
+                    ui.weak(format!(
+                        "{} large dashed outline(s) simplified; {} text item(s) shortened, {} small text line(s) omitted; {} item(s) omitted to keep the canvas responsive.",
+                        projection.simplified_dash_paths,
+                        projection.truncated_text_items,
+                        paint_report.suppressed_text_lines,
+                        paint_report.omitted_items
+                    ));
+                }
+                #[cfg(test)]
+                {
+                    self.test_canvas_rect = Some(canvas_rect);
+                    self.test_canvas_id = None;
+                    self.test_visual_items_painted = paint_report.painted_items;
+                    self.test_visual_items_omitted = paint_report.omitted_items;
+                    self.test_action_rects.push((
+                        "visual_canvas".into(),
+                        canvas_rect,
+                        ui.clip_rect(),
+                    ));
+                }
+
+                ui.separator();
+                ui.add_enabled_ui(visual_edits_allowed && !visual_draft_active, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                    ui.label("Object");
+                    egui::ComboBox::from_id_salt("diagram-visual-object-selection")
+                        .selected_text(selected_object.map_or_else(
+                            || "None".to_owned(),
+                            |id| format!("#{}", id.get()),
+                        ))
+                        .show_ui(ui, |ui| {
+                            if let Some(scene) = scene_snapshot.as_ref() {
+                                for object in &scene.objects {
+                                    ui.selectable_value(
+                                        &mut selected_object,
+                                        Some(object.id),
+                                        visual_object_label(object),
+                                    );
+                                }
+                            }
                         });
+                    let before_selection = self.visual_selection;
+                    if selected_object != before_selection {
+                        working_object = selected_object.and_then(|id| {
+                            scene_snapshot
+                                .as_ref()?
+                                .objects
+                                .iter()
+                                .find(|object| object.id == id)
+                                .cloned()
+                        });
+                        clear_visual_draft = true;
+                    }
+                    let selected_shape = ui.add_enabled_ui(structural_edits_allowed, |ui| {
+                        let mut shape = self.visual_create_shape;
+                        egui::ComboBox::from_id_salt("diagram-visual-create-shape")
+                            .selected_text(visual_shape_label(shape))
+                            .show_ui(ui, |ui| {
+                                for candidate in visual_primitive_shapes() {
+                                    ui.selectable_value(
+                                        &mut shape,
+                                        candidate,
+                                        visual_shape_label(candidate),
+                                    );
+                                }
+                            });
+                        shape
+                    });
+                    self.visual_create_shape = selected_shape.inner;
+
+                    let add_shape = ui.add_enabled(structural_edits_allowed, egui::Button::new("Add shape"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_add_shape".into(), add_shape.rect, ui.clip_rect()));
+                    if add_shape.clicked() && document_intent.is_none() {
+                        staged_operations = Some((
+                            vec![VisualOperation::AddObject(VisualObjectDraft {
+                                layer_id: DEFAULT_LAYER_ID,
+                                transform: next_visual_object_transform(scene_snapshot.as_deref()),
+                                style: VisualStyle::default(),
+                                kind: VisualObjectKind::Primitive {
+                                    shape: self.visual_create_shape,
+                                },
+                            })],
+                            None,
+                        ));
+                    }
+                    let add_text = ui.add_enabled(structural_edits_allowed, egui::Button::new("Add text"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_add_text".into(), add_text.rect, ui.clip_rect()));
+                    if add_text.clicked() && document_intent.is_none() {
+                        staged_operations = Some((
+                            vec![VisualOperation::AddObject(VisualObjectDraft {
+                                layer_id: DEFAULT_LAYER_ID,
+                                transform: next_visual_object_transform(scene_snapshot.as_deref()),
+                                style: VisualStyle::default(),
+                                kind: VisualObjectKind::Text {
+                                    text: "New text".into(),
+                                },
+                            })],
+                            None,
+                        ));
+                    }
+                    let add_layer = ui.add_enabled(structural_edits_allowed, egui::Button::new("Add layer"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_add_layer".into(), add_layer.rect, ui.clip_rect()));
+                    if add_layer.clicked() && document_intent.is_none() {
+                        let index = scene_snapshot.as_ref().map_or(0, |scene| scene.layers.len());
+                        staged_operations = Some((
+                            vec![VisualOperation::AddLayer {
+                                name: format!("Layer {}", index + 1),
+                                to_index: index,
+                            }],
+                            None,
+                        ));
+                    }
+                    if let (Some(scene), Some(object)) = (
+                        scene_snapshot.as_ref(),
+                        selected_object.and_then(|id| {
+                            scene_snapshot
+                                .as_ref()?
+                                .objects
+                                .iter()
+                                .find(|object| object.id == id)
+                        }),
+                    ) && let Some(layer_index) = scene
+                        .layers
+                        .iter()
+                        .position(|layer| layer.id == object.layer_id)
+                    {
+                        let send_layer_back = ui.add_enabled(
+                            structural_edits_allowed && layer_index > 0,
+                            egui::Button::new("Layer back"),
+                        );
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "visual_layer_back".into(),
+                            send_layer_back.rect,
+                            ui.clip_rect(),
+                        ));
+                        if send_layer_back.clicked()
+                            && document_intent.is_none()
+                            && pending.is_none()
+                        {
+                            staged_operations = Some((
+                                vec![VisualOperation::MoveLayer {
+                                    id: object.layer_id,
+                                    to_index: layer_index - 1,
+                                }],
+                                None,
+                            ));
+                        }
+                        let bring_layer_forward = ui.add_enabled(
+                            structural_edits_allowed && layer_index + 1 < scene.layers.len(),
+                            egui::Button::new("Layer forward"),
+                        );
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "visual_layer_forward".into(),
+                            bring_layer_forward.rect,
+                            ui.clip_rect(),
+                        ));
+                        if bring_layer_forward.clicked()
+                            && document_intent.is_none()
+                            && pending.is_none()
+                        {
+                            staged_operations = Some((
+                                vec![VisualOperation::MoveLayer {
+                                    id: object.layer_id,
+                                    to_index: layer_index + 1,
+                                }],
+                                None,
+                            ));
+                        }
+                    }
+                    let add_preset = ui.add_enabled(structural_edits_allowed, egui::Button::new("Create preset"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_create_preset".into(), add_preset.rect, ui.clip_rect()));
+                    if add_preset.clicked() && document_intent.is_none() {
+                        let count = scene_snapshot.as_ref().map_or(0, |scene| scene.presets.len());
+                        staged_operations = Some((
+                            vec![VisualOperation::AddPreset(VisualPresetDraft {
+                                name: format!("Preset {}", count + 1),
+                                components: vec![VisualPrimitiveComponent {
+                                    shape: self.visual_create_shape,
+                                    transform: VisualTransform {
+                                        width: 40.0,
+                                        height: 32.0,
+                                        ..VisualTransform::default()
+                                    },
+                                    style: VisualStyle::default(),
+                                }],
+                            })],
+                            None,
+                        ));
+                    }
+                    if let Some(scene) = scene_snapshot.as_ref() {
+                        if selected_preset.is_none() {
+                            selected_preset = scene.presets.first().map(|preset| preset.id);
+                        }
+                        egui::ComboBox::from_id_salt("diagram-visual-preset-selection")
+                            .selected_text(selected_preset.and_then(|id| {
+                                scene.presets.iter().find(|preset| preset.id == id)
+                            }).map_or_else(|| "No preset".to_owned(), |preset| preset.name.clone()))
+                            .show_ui(ui, |ui| {
+                                for preset in &scene.presets {
+                                    ui.selectable_value(
+                                        &mut selected_preset,
+                                        Some(preset.id),
+                                        preset.name.clone(),
+                                    );
+                                }
+                            });
+                    }
+                    let add_instance = ui.add_enabled(
+                        structural_edits_allowed && selected_preset.is_some(),
+                        egui::Button::new("Add preset instance"),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_add_preset_instance".into(), add_instance.rect, ui.clip_rect()));
+                    if add_instance.clicked() && document_intent.is_none()
+                        && let Some(preset_id) = selected_preset
+                    {
+                        staged_operations = Some((
+                            vec![VisualOperation::AddObject(VisualObjectDraft {
+                                layer_id: DEFAULT_LAYER_ID,
+                                transform: next_visual_object_transform(scene_snapshot.as_deref()),
+                                style: VisualStyle::default(),
+                                kind: VisualObjectKind::PresetInstance { preset_id },
+                            })],
+                            None,
+                        ));
+                    }
+                    let undo = ui.add_enabled(
+                        structural_edits_allowed && self.documents.can_undo(),
+                        egui::Button::new("Undo"),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_undo".into(), undo.rect, ui.clip_rect()));
+                    if undo.clicked() && document_intent.is_none() {
+                        stage_history = Some(false);
+                    }
+                    let redo = ui.add_enabled(
+                        structural_edits_allowed && self.documents.can_redo(),
+                        egui::Button::new("Redo"),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_redo".into(), redo.rect, ui.clip_rect()));
+                    if redo.clicked() && document_intent.is_none() {
+                        stage_history = Some(true);
+                    }
                     });
                 });
+
+                if let (Some(scene), Some(selected_id), Some(object)) = (
+                    scene_snapshot.as_ref(),
+                    selected_object,
+                    working_object.as_mut(),
+                ) {
+                    ui.add_enabled_ui(visual_edits_allowed, |ui| {
+                    egui::CollapsingHeader::new("Object properties")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Position / size");
+                            ui.add(egui::DragValue::new(&mut object.transform.x).prefix("x ").speed(1.0));
+                            ui.add(egui::DragValue::new(&mut object.transform.y).prefix("y ").speed(1.0));
+                            ui.add(egui::DragValue::new(&mut object.transform.width).prefix("w ").speed(1.0));
+                            ui.add(egui::DragValue::new(&mut object.transform.height).prefix("h ").speed(1.0));
+                            ui.add(egui::DragValue::new(&mut object.transform.rotation_degrees).prefix("° ").speed(1.0));
+                        });
+                        match &mut object.kind {
+                            VisualObjectKind::Text { text } => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Ink");
+                                    edit_visual_color(ui, &mut object.style.border);
+                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
+                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Font ").speed(0.5));
+                                    ui.text_edit_singleline(&mut object.style.font_family);
+                                });
+                                ui.label("Text");
+                                ui.add(egui::TextEdit::multiline(text).desired_rows(2));
+                            }
+                            VisualObjectKind::Primitive { .. } => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Fill");
+                                    edit_visual_color(ui, &mut object.style.fill);
+                                    ui.label("Border");
+                                    edit_visual_color(ui, &mut object.style.border);
+                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
+                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
+                                    ui.label("Line");
+                                    egui::ComboBox::from_id_salt("diagram-visual-line-style")
+                                        .selected_text(visual_line_style_label(object.style.line_style))
+                                        .show_ui(ui, |ui| {
+                                            for style in [VisualLineStyle::Solid, VisualLineStyle::Dashed, VisualLineStyle::Dotted] {
+                                                ui.selectable_value(&mut object.style.line_style, style, visual_line_style_label(style));
+                                            }
+                                        });
+                                });
+                            }
+                            VisualObjectKind::ImageReference { .. } => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Placeholder fill");
+                                    edit_visual_color(ui, &mut object.style.fill);
+                                    ui.label("Border / ink");
+                                    edit_visual_color(ui, &mut object.style.border);
+                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
+                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
+                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Font ").speed(0.5));
+                                    ui.text_edit_singleline(&mut object.style.font_family);
+                                    egui::ComboBox::from_id_salt("diagram-visual-image-line-style")
+                                        .selected_text(visual_line_style_label(object.style.line_style))
+                                        .show_ui(ui, |ui| {
+                                            for style in [VisualLineStyle::Solid, VisualLineStyle::Dashed, VisualLineStyle::Dotted] {
+                                                ui.selectable_value(&mut object.style.line_style, style, visual_line_style_label(style));
+                                            }
+                                        });
+                                });
+                                ui.weak("Image assets are not loaded in this checkpoint.");
+                            }
+                            VisualObjectKind::PresetInstance { .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("Preset instance opacity");
+                                    ui.add(egui::DragValue::new(&mut object.style.opacity).range(0.0..=1.0).speed(0.02));
+                                });
+                                ui.weak("Primitive styles are defined in the preset.");
+                            }
+                        }
+                        if !matches!(&object.kind, VisualObjectKind::PresetInstance { .. }) {
+                            let mut has_shadow = object.style.shadow.is_some();
+                            if ui.checkbox(&mut has_shadow, "Shadow").changed() {
+                                object.style.shadow = has_shadow.then_some(VisualShadow {
+                                    offset_x: 4.0,
+                                    offset_y: 4.0,
+                                    blur: 5.0,
+                                    color: VisualColor::rgba(0, 0, 0, 90),
+                                });
+                            }
+                            if let Some(shadow) = object.style.shadow.as_mut() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add(egui::DragValue::new(&mut shadow.offset_x).prefix("Shadow x ").speed(0.5));
+                                    ui.add(egui::DragValue::new(&mut shadow.offset_y).prefix("y ").speed(0.5));
+                                    ui.add(egui::DragValue::new(&mut shadow.blur).prefix("Blur ").speed(0.5));
+                                });
+                            }
+                        }
+                        if let Some(scene_layer) = scene.layers.iter().find(|layer| layer.id == object.layer_id) {
+                            egui::ComboBox::from_id_salt("diagram-visual-object-layer")
+                                .selected_text(scene_layer.name.clone())
+                                .show_ui(ui, |ui| {
+                                    for layer in &scene.layers {
+                                        ui.selectable_value(&mut object.layer_id, layer.id, layer.name.clone());
+                                    }
+                                });
+                        }
+                        let object_index = scene
+                            .objects
+                            .iter()
+                            .position(|candidate| candidate.id == selected_id)
+                            .unwrap_or(0);
+                        let same_layer_indices = scene
+                            .objects
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, candidate)| candidate.layer_id == object.layer_id)
+                            .map(|(index, _)| index)
+                            .collect::<Vec<_>>();
+                        let layer_position = same_layer_indices
+                            .iter()
+                            .position(|index| *index == object_index)
+                            .unwrap_or(0);
+                        let back_target = layer_position
+                            .checked_sub(1)
+                            .and_then(|position| same_layer_indices.get(position).copied());
+                        let forward_target = same_layer_indices.get(layer_position + 1).copied();
+                        ui.horizontal(|ui| {
+                            let back = ui.add_enabled(structural_edits_allowed && back_target.is_some(), egui::Button::new("Send back"));
+                            #[cfg(test)]
+                            self.test_action_rects.push(("visual_send_back".into(), back.rect, ui.clip_rect()));
+                            if back.clicked() && pending.is_none() && document_intent.is_none() {
+                                if let Some(to_index) = back_target {
+                                    staged_operations = Some((vec![VisualOperation::MoveObject { id: selected_id, to_index }], None));
+                                }
+                            }
+                            let forward = ui.add_enabled(structural_edits_allowed && forward_target.is_some(), egui::Button::new("Bring forward"));
+                            #[cfg(test)]
+                            self.test_action_rects.push(("visual_bring_forward".into(), forward.rect, ui.clip_rect()));
+                            if forward.clicked() && pending.is_none() && document_intent.is_none() {
+                                if let Some(to_index) = forward_target {
+                                    staged_operations = Some((vec![VisualOperation::MoveObject { id: selected_id, to_index }], None));
+                                }
+                            }
+                            let remove = ui.add_enabled(structural_edits_allowed && selected_id != crate::diagram::TITLE_OBJECT_ID, egui::Button::new("Remove object"));
+                            #[cfg(test)]
+                            self.test_action_rects.push(("visual_remove_object".into(), remove.rect, ui.clip_rect()));
+                            if remove.clicked() && pending.is_none() && document_intent.is_none() {
+                                staged_operations = Some((vec![VisualOperation::RemoveObject(selected_id)], None));
+                            }
+                            let changed = scene.objects.iter().find(|candidate| candidate.id == selected_id).is_some_and(|saved| *saved != *object);
+                            let apply = ui.add_enabled(visual_edits_allowed && changed, egui::Button::new("Apply properties"));
+                            #[cfg(test)]
+                            self.test_action_rects.push(("visual_apply_properties".into(), apply.rect, ui.clip_rect()));
+                            if apply.clicked() && pending.is_none() && document_intent.is_none() {
+                                staged_operations = Some((vec![VisualOperation::ReplaceObject(object.clone())], Some(selected_id)));
+                            }
+                            let cancel = ui.add_enabled(visual_edits_allowed, egui::Button::new("Cancel property edit"));
+                            #[cfg(test)]
+                            self.test_action_rects.push(("visual_cancel_properties".into(), cancel.rect, ui.clip_rect()));
+                            if cancel.clicked() {
+                                clear_visual_draft = true;
+                            }
+                        });
+                    });
+                    });
+                }
 
                 if let Some(message) = self.message.as_ref() {
                     match message {
@@ -4142,7 +4953,493 @@ impl DiagramStudioDialog {
                     });
                 }
             });
+        self.visual_selection = selected_object;
+        self.visual_selected_preset = selected_preset;
+        if clear_visual_draft {
+            self.visual_property_draft = None;
+        } else if let (Some(scene), Some(selected_id), Some(object)) =
+            (scene_snapshot.as_ref(), selected_object, working_object)
+            && let Some(original) = scene
+                .objects
+                .iter()
+                .find(|candidate| candidate.id == selected_id)
+        {
+            if object == *original {
+                self.visual_property_draft = None;
+            } else {
+                self.visual_property_draft = Some(VisualPropertyDraft {
+                    document: visual_identity.clone(),
+                    basis_revision: visual_revision,
+                    object,
+                });
+            }
+        }
+        if pending.is_none() && document_intent.is_none() {
+            if let Some((operations, select_after)) = staged_operations {
+                *pending = Some(PendingMutation::VisualTransaction {
+                    operations,
+                    expected_document: visual_identity,
+                    expected_revision: visual_revision,
+                    select_after,
+                });
+            } else if let Some(redo) = stage_history {
+                *pending = Some(PendingMutation::VisualHistory {
+                    redo,
+                    expected_document: visual_identity,
+                    expected_revision: visual_revision,
+                });
+            }
+        }
         effects
+    }
+}
+
+fn paint_visual_projection(
+    painter: &egui::Painter,
+    projection: &VisualSceneProjection,
+    canvas: egui::Rect,
+    selected_object: Option<VisualObjectId>,
+) -> VisualPaintReport {
+    const MAX_PAINT_WORK_UNITS: usize = 65_536;
+    let canvas_color = egui::Color32::from_gray(249);
+    painter.rect_filled(canvas, 4.0, canvas_color);
+    let Some(bounds) = projection.bounds else {
+        painter.text(
+            canvas.center(),
+            egui::Align2::CENTER_CENTER,
+            "Empty visual scene",
+            egui::FontId::proportional(14.0),
+            egui::Color32::DARK_GRAY,
+        );
+        return VisualPaintReport::default();
+    };
+    let available = canvas.shrink(12.0);
+    let world_width = bounds.width().max(1e-6);
+    let world_height = bounds.height().max(1e-6);
+    let scale = (f64::from(available.width()) / world_width)
+        .min(f64::from(available.height()) / world_height)
+        .max(1e-12);
+    let mapping = VisualCanvasMapping {
+        bounds,
+        canvas: available,
+        scale,
+    };
+    let mut remaining_work = MAX_PAINT_WORK_UNITS;
+    let mut report = VisualPaintReport::default();
+
+    for (item_index, item) in projection.items.iter().enumerate() {
+        let item_work = visual_item_paint_work(item);
+        if item_work > remaining_work {
+            report.omitted_items = projection.items.len() - item_index;
+            break;
+        }
+        remaining_work -= item_work;
+        report.painted_items += 1;
+        let is_text = item.kind == VisualProjectedKind::Text;
+        let outline = item
+            .outline
+            .iter()
+            .map(|point| mapping.point(*point))
+            .collect::<Vec<_>>();
+        if outline.len() < 3 {
+            continue;
+        }
+
+        if let Some(shadow) = item.style.shadow {
+            let shadow_color = visual_color(shadow.color, item.style.opacity);
+            let offset = egui::vec2(
+                (shadow.offset_x * scale) as f32,
+                (shadow.offset_y * scale) as f32,
+            );
+            let shadow_outline = outline
+                .iter()
+                .map(|point| *point + offset)
+                .collect::<Vec<_>>();
+            if !is_text {
+                painter.add(egui::Shape::convex_polygon(
+                    shadow_outline.clone(),
+                    shadow_color,
+                    egui::Stroke::NONE,
+                ));
+            }
+            let shadow_width = (shadow.blur * 2.0 * scale) as f32;
+            if shadow_width > 0.0 {
+                paint_solid_path(
+                    painter,
+                    &shadow_outline,
+                    true,
+                    egui::Stroke::new(shadow_width, shadow_color),
+                );
+            }
+        }
+
+        if !is_text {
+            painter.add(egui::Shape::convex_polygon(
+                outline.clone(),
+                visual_color(item.style.fill, item.style.opacity),
+                egui::Stroke::NONE,
+            ));
+            let style = if item.dash_simplified || item.dash_paths.is_none() {
+                VisualLineStyle::Solid
+            } else {
+                item.style.line_style
+            };
+            let stroke = egui::Stroke::new(
+                (item.style.border_width * scale).max(0.0) as f32,
+                visual_color(item.style.border, item.style.opacity),
+            );
+            let mut mapped_details = Vec::with_capacity(item.details.len());
+            for path in &item.details {
+                mapped_details.push(
+                    path.iter()
+                        .map(|point| mapping.point(*point))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let dash_paths = item.dash_paths.as_deref();
+            paint_styled_path(
+                painter,
+                &outline,
+                true,
+                stroke,
+                style,
+                dash_paths
+                    .and_then(|paths| paths.first())
+                    .map(Vec::as_slice),
+                &mapping,
+            );
+            for (index, detail) in mapped_details.iter().enumerate() {
+                let details_closed = matches!(
+                    item.kind,
+                    VisualProjectedKind::Primitive(VisualPrimitiveShape::Cylinder)
+                        | VisualProjectedKind::PresetPrimitive(VisualPrimitiveShape::Cylinder)
+                );
+                paint_styled_path(
+                    painter,
+                    detail,
+                    details_closed,
+                    stroke,
+                    style,
+                    dash_paths
+                        .and_then(|paths| paths.get(index + 1))
+                        .map(Vec::as_slice),
+                    &mapping,
+                );
+            }
+        }
+
+        if let Some(text) = item.text.as_ref() {
+            report.suppressed_text_lines += paint_visual_text(painter, &mapping, item, text);
+        }
+
+        if selected_object == Some(item.object_id) {
+            let selected_bounds = mapping.rect(item.bounds).shrink(1.0);
+            painter.rect_stroke(
+                selected_bounds,
+                2.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 112, 201)),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    report
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VisualPaintReport {
+    painted_items: usize,
+    omitted_items: usize,
+    suppressed_text_lines: usize,
+}
+
+fn visual_item_paint_work(item: &crate::diagram::ProjectedVisualItem) -> usize {
+    let path_points = item
+        .outline
+        .len()
+        .saturating_add(item.details.iter().map(Vec::len).sum::<usize>());
+    let text_work = item.text.as_ref().map_or(0, |text| {
+        text.lines
+            .iter()
+            .map(|line| line.scalar_count.saturating_mul(2).saturating_add(8))
+            .sum::<usize>()
+    });
+    let patterned_strokes = item
+        .dash_paths
+        .as_ref()
+        .map_or(0, |paths| paths.iter().map(Vec::len).sum::<usize>());
+    path_points
+        .saturating_mul(4)
+        .saturating_add(text_work)
+        .saturating_add(patterned_strokes.saturating_mul(3))
+        .saturating_add(32)
+}
+
+#[derive(Clone, Copy)]
+struct VisualCanvasMapping {
+    bounds: SceneRect,
+    canvas: egui::Rect,
+    scale: f64,
+}
+
+impl VisualCanvasMapping {
+    fn point(self, point: ScenePoint) -> egui::Pos2 {
+        egui::pos2(
+            self.canvas.center().x + ((point.x - self.bounds.center().x) * self.scale) as f32,
+            self.canvas.center().y + ((point.y - self.bounds.center().y) * self.scale) as f32,
+        )
+    }
+
+    fn rect(self, rect: SceneRect) -> egui::Rect {
+        egui::Rect::from_min_max(self.point(rect.min), self.point(rect.max))
+    }
+}
+
+fn paint_styled_path(
+    painter: &egui::Painter,
+    points: &[egui::Pos2],
+    closed: bool,
+    stroke: egui::Stroke,
+    style: VisualLineStyle,
+    pattern: Option<&[ProjectedStrokePrimitive]>,
+    mapping: &VisualCanvasMapping,
+) {
+    if stroke.width <= 0.0 || points.len() < 2 {
+        return;
+    }
+    if style != VisualLineStyle::Solid
+        && let Some(pattern) = pattern
+    {
+        for primitive in pattern {
+            match *primitive {
+                ProjectedStrokePrimitive::Segment { start, end } => {
+                    let start = mapping.point(start);
+                    let end = mapping.point(end);
+                    painter.line_segment([start, end], stroke);
+                    painter.circle_filled(start, stroke.width / 2.0, stroke.color);
+                    painter.circle_filled(end, stroke.width / 2.0, stroke.color);
+                }
+                ProjectedStrokePrimitive::Dot { center } => {
+                    let center = mapping.point(center);
+                    painter.circle_filled(center, stroke.width / 2.0, stroke.color);
+                }
+            }
+        }
+        return;
+    }
+    paint_solid_path(painter, points, closed, stroke);
+}
+
+fn paint_solid_path(
+    painter: &egui::Painter,
+    points: &[egui::Pos2],
+    closed: bool,
+    stroke: egui::Stroke,
+) {
+    if points.len() < 2 || stroke.width <= 0.0 {
+        return;
+    }
+    let edge_count = points.len() - 1 + usize::from(closed);
+    for edge in 0..edge_count {
+        let start = points[edge];
+        let end = points[(edge + 1) % points.len()];
+        painter.line_segment([start, end], stroke);
+    }
+    let radius = stroke.width / 2.0;
+    for point in points {
+        painter.circle_filled(*point, radius, stroke.color);
+    }
+}
+
+fn paint_visual_text(
+    painter: &egui::Painter,
+    mapping: &VisualCanvasMapping,
+    item: &crate::diagram::ProjectedVisualItem,
+    text: &PreparedText,
+) -> usize {
+    if text.lines.is_empty() {
+        return 0;
+    }
+    let center = ScenePoint {
+        x: item.transform.x,
+        y: item.transform.y,
+    };
+    let line_count = text.lines.len() as f64;
+    let line_height = (text.line_height.min(text.height / line_count) * mapping.scale) as f32;
+    if !line_height.is_finite() || line_height <= 0.0 {
+        return text.lines.len();
+    }
+    let total_height = line_height * text.lines.len() as f32;
+    let font_family = if item.style.font_family.eq_ignore_ascii_case("monospace") {
+        egui::FontFamily::Monospace
+    } else {
+        // Unknown persisted font names deliberately fall back to the platform's
+        // proportional family; document opening never depends on local fonts.
+        egui::FontFamily::Proportional
+    };
+    let text_color = visual_color(item.style.border, item.style.opacity);
+    let font_size = ((item.style.font_size * mapping.scale) as f32).min(line_height * 0.8);
+    let angle = item.text_rotation_degrees.to_radians() as f32;
+    let (sin, cos) = angle.sin_cos();
+    let screen_center = mapping.point(center);
+    let shadow = item.style.shadow.map(|shadow| {
+        (
+            egui::vec2(
+                (shadow.offset_x * mapping.scale) as f32,
+                (shadow.offset_y * mapping.scale) as f32,
+            ),
+            visual_color(shadow.color, item.style.opacity),
+        )
+    });
+
+    let mut suppressed = 0;
+    for (index, line) in text.lines.iter().enumerate() {
+        if line.text.is_empty() {
+            continue;
+        }
+        let max_width = (line.reserved_width * mapping.scale) as f32;
+        if !max_width.is_finite() || max_width < 0.75 || font_size < 0.75 {
+            suppressed += 1;
+            continue;
+        }
+        let mut fitted_size = font_size;
+        let mut galley = None;
+        for _ in 0..4 {
+            let candidate = painter.layout_no_wrap(
+                line.text.clone(),
+                egui::FontId::new(fitted_size, font_family.clone()),
+                text_color,
+            );
+            let Some(fit) = visual_galley_ink_fit(&candidate, max_width, line_height) else {
+                break;
+            };
+            if fit >= 1.0 {
+                galley = Some(candidate);
+                break;
+            }
+            fitted_size *= fit * 0.99;
+            if fitted_size < 0.75 {
+                break;
+            }
+        }
+        let Some(galley) = galley else {
+            suppressed += 1;
+            continue;
+        };
+        let local_y = -total_height / 2.0 + line_height * (index as f32 + 0.5);
+        let rotated_y = local_y * cos;
+        let rotated_x = -local_y * sin;
+        let line_center = screen_center + egui::vec2(rotated_x, rotated_y);
+        let top_left = line_center - galley.rect.center().to_vec2();
+        if let Some((offset, shadow_color)) = shadow {
+            let shadow_shape =
+                egui::epaint::TextShape::new(top_left + offset, galley.clone(), shadow_color)
+                    .with_override_text_color(shadow_color)
+                    .with_angle_and_anchor(angle, egui::Align2::CENTER_CENTER);
+            painter.add(shadow_shape);
+        }
+        let shape = egui::epaint::TextShape::new(top_left, galley, text_color)
+            .with_override_text_color(text_color)
+            .with_angle_and_anchor(angle, egui::Align2::CENTER_CENTER);
+        painter.add(shape);
+    }
+    suppressed
+}
+
+fn visual_galley_ink_fit(galley: &egui::Galley, max_width: f32, max_height: f32) -> Option<f32> {
+    let bounds = galley.mesh_bounds;
+    let center = galley.rect.center();
+    let coordinates = [bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y];
+    if coordinates.iter().any(|coordinate| !coordinate.is_finite()) {
+        return None;
+    }
+    let left = (center.x - bounds.min.x).max(0.0);
+    let right = (bounds.max.x - center.x).max(0.0);
+    let top = (center.y - bounds.min.y).max(0.0);
+    let bottom = (bounds.max.y - center.y).max(0.0);
+    let ink_width = left.max(right);
+    let ink_height = top.max(bottom);
+    if ink_width <= 0.0 || ink_height <= 0.0 {
+        return None;
+    }
+    let width_fit = (max_width / 2.0) / ink_width;
+    let height_fit = (max_height / 2.0) / ink_height;
+    let fit = width_fit.min(height_fit).min(1.0);
+    fit.is_finite().then_some(fit.max(0.0))
+}
+
+fn visual_color(color: VisualColor, opacity: f64) -> egui::Color32 {
+    let [red, green, blue, alpha] = color_with_opacity(color, opacity);
+    egui::Color32::from_rgba_unmultiplied(red, green, blue, alpha)
+}
+
+fn edit_visual_color(ui: &mut egui::Ui, color: &mut VisualColor) -> egui::Response {
+    let mut selected = [color.red, color.green, color.blue, color.alpha];
+    let response = ui.color_edit_button_srgba_unmultiplied(&mut selected);
+    if response.changed() {
+        *color = VisualColor::rgba(selected[0], selected[1], selected[2], selected[3]);
+    }
+    response
+}
+
+fn visual_primitive_shapes() -> [VisualPrimitiveShape; 8] {
+    [
+        VisualPrimitiveShape::Rectangle,
+        VisualPrimitiveShape::RoundRect,
+        VisualPrimitiveShape::Diamond,
+        VisualPrimitiveShape::Circle,
+        VisualPrimitiveShape::Ellipse,
+        VisualPrimitiveShape::Cylinder,
+        VisualPrimitiveShape::Parallelogram,
+        VisualPrimitiveShape::Triangle,
+    ]
+}
+
+const fn visual_shape_label(shape: VisualPrimitiveShape) -> &'static str {
+    match shape {
+        VisualPrimitiveShape::Rectangle => "Rectangle",
+        VisualPrimitiveShape::RoundRect => "Rounded rectangle",
+        VisualPrimitiveShape::Diamond => "Diamond",
+        VisualPrimitiveShape::Circle => "Circle",
+        VisualPrimitiveShape::Ellipse => "Ellipse",
+        VisualPrimitiveShape::Cylinder => "Cylinder",
+        VisualPrimitiveShape::Parallelogram => "Parallelogram",
+        VisualPrimitiveShape::Triangle => "Triangle",
+    }
+}
+
+fn visual_object_label(object: &VisualObject) -> String {
+    let label = match &object.kind {
+        VisualObjectKind::Primitive { shape } => visual_shape_label(*shape),
+        VisualObjectKind::Text { text } if object.id == crate::diagram::TITLE_OBJECT_ID => {
+            return format!("Title — {}", text.chars().take(32).collect::<String>());
+        }
+        VisualObjectKind::Text { .. } => "Text",
+        VisualObjectKind::PresetInstance { .. } => "Preset instance",
+        VisualObjectKind::ImageReference { .. } => "Image reference",
+    };
+    format!("{label} #{}", object.id.get())
+}
+
+fn visual_line_style_label(style: VisualLineStyle) -> &'static str {
+    match style {
+        VisualLineStyle::Solid => "Solid",
+        VisualLineStyle::Dashed => "Dashed",
+        VisualLineStyle::Dotted => "Dotted",
+    }
+}
+
+fn next_visual_object_transform(scene: Option<&VisualScene>) -> VisualTransform {
+    let index = scene
+        .map_or(1, |scene| scene.objects.len())
+        .saturating_sub(1);
+    let column = index % 4;
+    let row = index / 4;
+    VisualTransform {
+        x: (column as f64 - 1.5) * 190.0,
+        y: row as f64 * 130.0,
+        width: 150.0,
+        height: 82.0,
+        rotation_degrees: 0.0,
     }
 }
 
@@ -6287,6 +7584,37 @@ mod tests {
         dialog.test_replace_source("flowchart TD\n    A[\"Alpha\"]");
         dialog.open();
         dialog
+    }
+
+    fn initialized_visual_dialog() -> DiagramStudioDialog {
+        let mut dialog = DiagramStudioDialog::default();
+        assert_eq!(
+            dialog.documents.request_new_visual().unwrap(),
+            TransitionOutcome::Applied
+        );
+        dialog.reset_document_presentation();
+        dialog.open();
+        dialog
+    }
+
+    fn frame_with_retired_owner_generation(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
+        super::super::render::with_immediate_viewport_renderer(ctx, || {
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    TEST_VIEWPORT_SIZE,
+                )),
+                focused: true,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(raw_input, |ui| {
+                let first_pass = ui.ctx().current_pass_index() == 0;
+                dialog.show(ui.ctx(), first_pass, true, true);
+            });
+            output.drop_without_applying_deltas();
+            dialog.owner_generation = dialog.owner_generation.wrapping_add(1);
+            dialog.on_ui_frame_complete(ctx);
+        });
     }
 
     fn wait_for_generic_preview(
@@ -9958,6 +11286,262 @@ mod tests {
         assert_eq!(
             dialog.documents.visual_label(),
             Some("Untitled visual diagram")
+        );
+    }
+
+    #[test]
+    fn diagram_studio_visual_scene_accepted_property_edit_is_one_undo_step_and_cache_is_shared() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        assert_eq!(dialog.test_visual_projection_build_count, 1);
+        assert_eq!(dialog.test_visual_items_omitted, 0);
+
+        let mut title = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+            .unwrap()
+            .clone();
+        title.transform.x = 48.0;
+        let document = dialog.render_document.clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        dialog.visual_selection = Some(crate::diagram::TITLE_OBJECT_ID);
+        dialog.visual_property_draft = Some(VisualPropertyDraft {
+            document,
+            basis_revision: revision,
+            object: title,
+        });
+
+        click_action(&mut dialog, &ctx, "visual_apply_properties");
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+                .unwrap()
+                .transform
+                .x,
+            48.0
+        );
+        assert!(dialog.documents.can_undo());
+        assert!(dialog.visual_property_draft.is_none());
+
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_visual_projection_build_count, 2);
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_visual_projection_build_count, 2);
+        assert_eq!(
+            dialog.test_visual_items_painted,
+            dialog
+                .visual_projection_cache
+                .as_ref()
+                .unwrap()
+                .projection
+                .as_ref()
+                .unwrap()
+                .items
+                .len()
+        );
+
+        open_viewer(&mut dialog, &ctx);
+        assert_eq!(dialog.test_visual_projection_build_count, 2);
+        assert_eq!(dialog.test_viewer_visual_projection_items, 1);
+        assert_eq!(dialog.test_viewer_visual_items_painted, 1);
+        assert!(dialog.viewer_open);
+
+        click_action(&mut dialog, &ctx, "visual_undo");
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 2));
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+                .unwrap()
+                .transform
+                .x,
+            0.0
+        );
+        assert!(dialog.documents.can_redo());
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.test_visual_projection_build_count, 3);
+    }
+
+    #[test]
+    fn diagram_studio_visual_scene_discarded_and_rejected_properties_keep_the_draft() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let original = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+            .unwrap()
+            .clone();
+        let mut edited = original.clone();
+        edited.transform.x = 77.0;
+        let identity = dialog.render_document.clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        dialog.visual_selection = Some(edited.id);
+        dialog.visual_property_draft = Some(VisualPropertyDraft {
+            document: identity.clone(),
+            basis_revision: revision,
+            object: edited.clone(),
+        });
+        click_action_with_child_discard(&mut dialog, &ctx, "visual_apply_properties");
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert_eq!(
+            dialog.documents.visual_scene().unwrap().objects[0],
+            original
+        );
+        assert_eq!(
+            dialog
+                .visual_property_draft
+                .as_ref()
+                .map(|draft| draft.object.clone()),
+            Some(edited.clone())
+        );
+
+        let mut invalid = edited.clone();
+        invalid.transform.width = 0.0;
+        dialog.visual_property_draft = Some(VisualPropertyDraft {
+            document: identity,
+            basis_revision: revision,
+            object: invalid.clone(),
+        });
+        click_action(&mut dialog, &ctx, "visual_apply_properties");
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert_eq!(
+            dialog.documents.visual_scene().unwrap().objects[0]
+                .transform
+                .x,
+            0.0
+        );
+        assert_eq!(
+            dialog
+                .visual_property_draft
+                .as_ref()
+                .map(|draft| draft.object.clone()),
+            Some(invalid)
+        );
+    }
+
+    #[test]
+    fn diagram_studio_visual_scene_stale_identity_and_retired_owner_effects_are_rejected() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let old_document = dialog.render_document.clone();
+        let old_revision = dialog.documents.visual_revision().unwrap();
+        assert_eq!(old_revision, 0);
+
+        assert_eq!(
+            dialog.documents.request_new_visual().unwrap(),
+            TransitionOutcome::Applied
+        );
+        dialog.reset_document_presentation();
+        assert_eq!(dialog.documents.visual_revision(), Some(old_revision));
+        assert_ne!(dialog.render_document, old_document);
+        dialog.test_pending_mutation = Some(PendingMutation::VisualTransaction {
+            operations: vec![VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Diamond,
+                },
+            })],
+            expected_document: old_document,
+            expected_revision: old_revision,
+            select_after: None,
+        });
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.documents.visual_revision(), Some(old_revision));
+        assert_eq!(dialog.documents.visual_scene().unwrap().objects.len(), 1);
+
+        let current_document = dialog.render_document.clone();
+        dialog.test_pending_mutation = Some(PendingMutation::VisualTransaction {
+            operations: vec![VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Triangle,
+                },
+            })],
+            expected_document: current_document,
+            expected_revision: old_revision,
+            select_after: None,
+        });
+        frame_with_retired_owner_generation(&mut dialog, &ctx);
+        assert_eq!(dialog.documents.visual_revision(), Some(old_revision));
+        assert_eq!(dialog.documents.visual_scene().unwrap().objects.len(), 1);
+    }
+
+    #[test]
+    fn diagram_studio_visual_scene_paint_work_is_bounded_and_reports_omissions() {
+        let mut dialog = initialized_visual_dialog();
+        for batch in 0..8 {
+            let operations = (0..64)
+                .map(|offset| {
+                    let index = batch * 64 + offset;
+                    VisualOperation::AddObject(VisualObjectDraft {
+                        layer_id: DEFAULT_LAYER_ID,
+                        transform: VisualTransform {
+                            x: f64::from(index % 32) * 30.0,
+                            y: f64::from(index / 32) * 30.0,
+                            width: 25.0,
+                            height: 18.0,
+                            rotation_degrees: 0.0,
+                        },
+                        style: VisualStyle::default(),
+                        kind: VisualObjectKind::Primitive {
+                            shape: VisualPrimitiveShape::Ellipse,
+                        },
+                    })
+                })
+                .collect::<Vec<_>>();
+            dialog
+                .documents
+                .apply_visual_transaction(&operations)
+                .unwrap();
+        }
+        dialog.open();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        let projected_items = dialog
+            .visual_projection_cache
+            .as_ref()
+            .unwrap()
+            .projection
+            .as_ref()
+            .unwrap()
+            .items
+            .len();
+        assert_eq!(projected_items, 513);
+        assert!(dialog.test_visual_items_omitted > 0);
+        assert_eq!(
+            dialog.test_visual_items_painted + dialog.test_visual_items_omitted,
+            projected_items
         );
     }
 }
