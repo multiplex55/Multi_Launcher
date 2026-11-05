@@ -12,6 +12,7 @@ mod scene;
 mod session;
 mod templates;
 mod visual;
+mod visual_canvas;
 mod visual_scene;
 
 pub use codec::{
@@ -38,6 +39,13 @@ pub use visual::{
     VisualObjectKind, VisualOperation, VisualPreset, VisualPresetDraft, VisualPresetId,
     VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle,
     VisualTransactionOutcome, VisualTransform,
+};
+pub use visual_canvas::{
+    CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping, VisualTransformMode,
+    hit_test as visual_canvas_hit_test, marquee_selection as visual_canvas_marquee_selection,
+    preview_transforms as preview_visual_transforms,
+    selection_bounds as visual_canvas_selection_bounds,
+    selection_handles as visual_canvas_selection_handles,
 };
 pub use visual_scene::{
     MAX_VISUAL_DASH_SEGMENTS_PER_ITEM, MAX_VISUAL_DASH_SEGMENTS_PER_SCENE,

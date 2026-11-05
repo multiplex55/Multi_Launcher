@@ -2,19 +2,23 @@
 use super::native_keyboard::reserve_windows_system_menu_alt_space;
 use super::utility_host::ViewportPassProvenance;
 use crate::diagram::{
-    DEFAULT_LAYER_ID, DiagramDocument, DiagramDocumentController, DiagramDocumentError,
-    DiagramExportFormat, DiagramImageSnapshot, DiagramRenderOutput, DiagramRenderedImageSnapshot,
-    DiagramScene, DiagramSession, DiagramSourceCopy, DiagramSourceCopyOrigin,
-    DiagramSourceSnapshot, DiagramTemplate, EdgeId, FlowDirection, GenericPreviewStatus,
-    GraphOperation, GroupId, MAX_DIAGRAM_GROUPS, MAX_DIAGRAM_NODES, MermaidFile, NodeId,
-    NodePosition, NodeShape, PendingDiagramTransition, Position, PreparedText, PreviewState,
+    CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping, DEFAULT_LAYER_ID, DiagramDocument,
+    DiagramDocumentController, DiagramDocumentError, DiagramExportFormat, DiagramImageSnapshot,
+    DiagramRenderOutput, DiagramRenderedImageSnapshot, DiagramScene, DiagramSession,
+    DiagramSourceCopy, DiagramSourceCopyOrigin, DiagramSourceSnapshot, DiagramTemplate, EdgeId,
+    FlowDirection, GenericPreviewStatus, GraphOperation, GroupId, MAX_DIAGRAM_GROUPS,
+    MAX_DIAGRAM_NODES, MAX_VISUAL_TRANSACTION_OPERATIONS, MermaidFile, NodeId, NodePosition,
+    NodeShape, PendingDiagramTransition, Position, PreparedText, PreviewState,
     ProjectedStrokePrimitive, RasterSize, RenderDocumentIdentity, RenderKey, RenderOptions,
     RendererService, SceneMetrics, ScenePoint, SceneRect, SessionStatus, TextHorizontalAlignment,
     TransitionDecision, TransitionOutcome, VisualColor, VisualLineStyle, VisualObject,
     VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualPresetDraft,
     VisualPrimitiveComponent, VisualPrimitiveShape, VisualProjectedKind, VisualProjectionError,
-    VisualScene, VisualSceneProjection, VisualShadow, VisualStyle, VisualTransform, build_scene,
-    color_with_opacity, generic_preview_family, is_generic_preview_candidate, project_visual_scene,
+    VisualScene, VisualSceneProjection, VisualShadow, VisualStyle, VisualTransform,
+    VisualTransformMode, build_scene, color_with_opacity, generic_preview_family,
+    is_generic_preview_candidate, preview_visual_transforms, project_visual_scene,
+    visual_canvas_hit_test, visual_canvas_marquee_selection, visual_canvas_selection_bounds,
+    visual_canvas_selection_handles,
 };
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -466,6 +470,39 @@ struct VisualPropertyDraft {
     object: VisualObject,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct VisualSelectionState {
+    objects: BTreeSet<VisualObjectId>,
+    primary: Option<VisualObjectId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum VisualGestureMode {
+    Transform(VisualTransformMode),
+    Marquee { extend: bool },
+}
+
+#[derive(Clone)]
+struct VisualGesture {
+    document: RenderDocumentIdentity,
+    revision: u64,
+    owner_generation: u64,
+    owner_viewport_id: egui::ViewportId,
+    start_pass: ViewportPassProvenance,
+    start_pass_accepted: bool,
+    mode: VisualGestureMode,
+    mapping: CanvasMapping,
+    pointer_start: egui::Pos2,
+    pointer_start_world: ScenePoint,
+    initial_selection: VisualSelectionState,
+    initial_objects: Vec<VisualObject>,
+    last_pointer: egui::Pos2,
+    preview_objects: Vec<VisualObject>,
+    preview_scene: Option<Arc<VisualScene>>,
+    preview_projection: Option<Arc<VisualSceneProjection>>,
+    did_move: bool,
+}
+
 enum PendingMutation {
     ReplaceSource(String),
     ReplaceVisualLabel {
@@ -478,6 +515,15 @@ enum PendingMutation {
         expected_document: RenderDocumentIdentity,
         expected_revision: u64,
         select_after: Option<VisualObjectId>,
+    },
+    VisualGestureTransaction {
+        operations: Vec<VisualOperation>,
+        expected_document: RenderDocumentIdentity,
+        expected_revision: u64,
+        owner_generation: u64,
+        owner_viewport_id: egui::ViewportId,
+        start_pass: ViewportPassProvenance,
+        start_pass_accepted: bool,
     },
     VisualHistory {
         redo: bool,
@@ -535,6 +581,8 @@ struct DrawBodyEffects {
     export_scale_requested: Option<ExportScale>,
     open_viewer_requested: bool,
     active_menu_scope: Option<MenuFocusScope>,
+    visual_selection: Option<VisualSelectionState>,
+    visual_canvas_editing_allowed: bool,
 }
 
 struct PendingRootEffects {
@@ -555,6 +603,8 @@ struct PendingRootEffects {
     export_scale_requested: Option<ExportScale>,
     menu_scope_observed: bool,
     active_menu_scope: Option<MenuFocusScope>,
+    visual_selection: Option<VisualSelectionState>,
+    visual_canvas_editing_allowed: bool,
     open_viewer_requested: bool,
     mutation: Option<PendingMutation>,
     document_intent: Option<DocumentIntent>,
@@ -616,8 +666,11 @@ pub(crate) struct DiagramStudioDialog {
     property_draft: Option<PropertyDraft>,
     visual_create_shape: VisualPrimitiveShape,
     visual_selection: Option<VisualObjectId>,
+    visual_selected_objects: BTreeSet<VisualObjectId>,
     visual_selected_preset: Option<crate::diagram::VisualPresetId>,
     visual_property_draft: Option<VisualPropertyDraft>,
+    visual_gesture: Option<VisualGesture>,
+    visual_canvas_press_authorized: Option<bool>,
     drag: Option<DragState>,
     message: Option<StudioNotice>,
     #[cfg(test)]
@@ -693,6 +746,10 @@ pub(crate) struct DiagramStudioDialog {
     #[cfg(test)]
     test_visual_items_omitted: usize,
     #[cfg(test)]
+    test_visual_canvas_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_visual_canvas_id: Option<egui::Id>,
+    #[cfg(test)]
     test_action_enabled: Vec<(String, bool)>,
     #[cfg(test)]
     test_generic_preview_drawn: bool,
@@ -764,8 +821,11 @@ impl DiagramStudioDialog {
             property_draft: None,
             visual_create_shape: VisualPrimitiveShape::Rectangle,
             visual_selection: None,
+            visual_selected_objects: BTreeSet::new(),
             visual_selected_preset: None,
             visual_property_draft: None,
+            visual_gesture: None,
+            visual_canvas_press_authorized: None,
             drag: None,
             message: None,
             #[cfg(test)]
@@ -840,6 +900,10 @@ impl DiagramStudioDialog {
             test_visual_items_painted: 0,
             #[cfg(test)]
             test_visual_items_omitted: 0,
+            #[cfg(test)]
+            test_visual_canvas_rect: None,
+            #[cfg(test)]
+            test_visual_canvas_id: None,
             #[cfg(test)]
             test_action_enabled: Vec::new(),
             #[cfg(test)]
@@ -1106,6 +1170,8 @@ impl DiagramStudioDialog {
         let mut menu_focus_request = None;
         let mut export_scale_requested = None;
         let mut active_menu_scope = None;
+        let mut visual_selection_requested = None;
+        let mut visual_canvas_editing_allowed = false;
         let mut open_viewer_requested = false;
         let mut document_intent = None;
         let mut body_rendered = false;
@@ -1166,10 +1232,21 @@ impl DiagramStudioDialog {
 
             let popup_open = egui::Popup::is_any_open(child);
             let keyboard_close = if actions_allowed {
-                child.input_mut(|input| {
-                    (!popup_open && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-                        || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-                })
+                let (escape_pressed, close_shortcut) = child.input_mut(|input| {
+                    (
+                        !popup_open && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                        input.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
+                    )
+                });
+                if escape_pressed {
+                    let gesture_active = self.visual_gesture.take().is_some();
+                    let press_authorized =
+                        self.visual_canvas_press_authorized.take().unwrap_or(false);
+                    let owned_gesture = gesture_active || press_authorized;
+                    !owned_gesture
+                } else {
+                    close_shortcut
+                }
             } else {
                 false
             };
@@ -1220,6 +1297,8 @@ impl DiagramStudioDialog {
                     export_scale_requested = effects.export_scale_requested;
                     open_viewer_requested = effects.open_viewer_requested;
                     active_menu_scope = effects.active_menu_scope;
+                    visual_selection_requested = effects.visual_selection;
+                    visual_canvas_editing_allowed = effects.visual_canvas_editing_allowed;
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
@@ -1237,6 +1316,8 @@ impl DiagramStudioDialog {
                 export_scale_requested = effects.export_scale_requested;
                 open_viewer_requested = effects.open_viewer_requested;
                 active_menu_scope = effects.active_menu_scope;
+                visual_selection_requested = effects.visual_selection;
+                visual_canvas_editing_allowed = effects.visual_canvas_editing_allowed;
             }
             if body_rendered
                 && pass_authorized
@@ -1389,6 +1470,12 @@ impl DiagramStudioDialog {
                 active_menu_scope: (child_pass_accepted && body_rendered)
                     .then_some(active_menu_scope)
                     .flatten(),
+                visual_selection: (child_pass_accepted && body_rendered)
+                    .then_some(visual_selection_requested)
+                    .flatten(),
+                visual_canvas_editing_allowed: child_pass_accepted
+                    && body_rendered
+                    && visual_canvas_editing_allowed,
                 open_viewer_requested: owner_effects_accepted
                     && !close_requested
                     && open_viewer_requested,
@@ -1586,7 +1673,13 @@ impl DiagramStudioDialog {
     ) -> bool {
         if let Some(label) = self.documents.visual_label().map(str::to_owned) {
             let projection = self.visual_projection().map(|(_, projection)| projection);
-            return self.draw_visual_viewer_body(ui, actions_allowed, &label, projection);
+            return self.draw_visual_viewer_body(
+                ui,
+                actions_allowed,
+                &label,
+                projection,
+                canvas_focus_requested,
+            );
         }
         self.ensure_generic_texture(ui.ctx());
         let Self {
@@ -1788,11 +1881,56 @@ impl DiagramStudioDialog {
         actions_allowed: bool,
         label: &str,
         projection: Option<Result<Arc<VisualSceneProjection>, VisualProjectionError>>,
+        canvas_focus_requested: &mut Option<egui::Id>,
     ) -> bool {
+        let mut camera = self.viewer_camera;
         let mut close_requested = false;
         ui.horizontal_wrapped(|ui| {
             ui.strong("Diagram Viewer");
             ui.separator();
+            let zoom_out = ui.add_enabled(actions_allowed, egui::Button::new("−"));
+            #[cfg(test)]
+            self.test_action_rects.push((
+                "visual_viewer_zoom_out".into(),
+                zoom_out.rect,
+                ui.clip_rect(),
+            ));
+            if zoom_out.clicked() {
+                camera.zoom = (camera.zoom / CAMERA_KEYBOARD_ZOOM_FACTOR)
+                    .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+                camera.fit_next = false;
+            }
+            ui.label(format!("{:.0}%", camera.zoom * 100.0));
+            let zoom_in = ui.add_enabled(actions_allowed, egui::Button::new("+"));
+            #[cfg(test)]
+            self.test_action_rects.push((
+                "visual_viewer_zoom_in".into(),
+                zoom_in.rect,
+                ui.clip_rect(),
+            ));
+            if zoom_in.clicked() {
+                camera.zoom = (camera.zoom * CAMERA_KEYBOARD_ZOOM_FACTOR)
+                    .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+                camera.fit_next = false;
+            }
+            let fit = ui.add_enabled(actions_allowed, egui::Button::new("Fit"));
+            #[cfg(test)]
+            self.test_action_rects
+                .push(("visual_viewer_fit".into(), fit.rect, ui.clip_rect()));
+            if fit.clicked() {
+                camera.fit_next = true;
+            }
+            let zoom_100 = ui.add_enabled(actions_allowed, egui::Button::new("100%"));
+            #[cfg(test)]
+            self.test_action_rects.push((
+                "visual_viewer_zoom_100".into(),
+                zoom_100.rect,
+                ui.clip_rect(),
+            ));
+            if zoom_100.clicked() {
+                camera.zoom = 1.0;
+                camera.fit_next = false;
+            }
             close_requested = ui
                 .add_enabled(actions_allowed, egui::Button::new("Close viewer"))
                 .clicked();
@@ -1800,7 +1938,30 @@ impl DiagramStudioDialog {
         ui.separator();
         ui.label("Read-only visual document preview");
         let desired = egui::vec2(ui.available_width().max(240.0), 300.0);
-        let (canvas, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
+        let (canvas_response, painter) =
+            ui.allocate_painter(desired, egui::Sense::click_and_drag());
+        let canvas = canvas_response.rect;
+        let painter = painter.with_clip_rect(canvas);
+        let canvas_bounds = projection
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|projection| projection.bounds);
+        if camera.fit_next
+            && let Some(bounds) = canvas_bounds
+        {
+            fit_camera(&mut camera, bounds, canvas);
+        }
+        handle_visual_canvas_camera_input(
+            ui,
+            &canvas_response,
+            canvas,
+            &mut camera,
+            actions_allowed,
+        );
+        viewer_canvas_shortcuts(ui, canvas_response.id, &mut camera);
+        if actions_allowed && canvas_response.clicked() {
+            *canvas_focus_requested = Some(canvas_response.id);
+        }
         let mut paint_report = VisualPaintReport::default();
         #[cfg(test)]
         let projected_item_count = projection
@@ -1809,12 +1970,8 @@ impl DiagramStudioDialog {
             .map_or(0, |projection| projection.items.len());
         match projection.as_ref() {
             Some(Ok(projection)) => {
-                paint_report = paint_visual_projection(
-                    &ui.painter().with_clip_rect(canvas),
-                    projection,
-                    canvas,
-                    None,
-                );
+                paint_report =
+                    paint_visual_projection(&painter, projection, canvas, camera, &BTreeSet::new());
             }
             Some(Err(error)) => {
                 ui.painter()
@@ -1854,10 +2011,12 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         {
             self.test_viewer_canvas_rect = Some(canvas);
+            self.test_viewer_canvas_id = Some(canvas_response.id);
             self.test_viewer_visual_projection_items = projected_item_count;
             self.test_viewer_visual_items_painted = paint_report.painted_items;
             self.test_viewer_visual_items_omitted = paint_report.omitted_items;
         }
+        self.viewer_camera = camera;
         close_requested
     }
 
@@ -1874,6 +2033,13 @@ impl DiagramStudioDialog {
         };
         let retained_pass = effects.root_pass.was_retained(ctx);
         if !retained_pass {
+            let discarded_gesture_commit = effects.mutation.as_ref().is_some_and(|mutation| {
+                matches!(mutation, PendingMutation::VisualGestureTransaction { .. })
+            });
+            if self.visual_gesture.is_some() || discarded_gesture_commit {
+                self.visual_gesture = None;
+                self.visual_canvas_press_authorized = None;
+            }
             if effects.os_close_requested {
                 ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::CancelClose);
             }
@@ -1886,6 +2052,42 @@ impl DiagramStudioDialog {
             return false;
         }
         let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
+        let mut cancel_visual_gesture = false;
+        if let Some(gesture) = self.visual_gesture.as_mut() {
+            let document_current = gesture.document == self.render_document
+                && Some(gesture.revision) == self.documents.visual_revision();
+            let owner_current = gesture.owner_generation == self.owner_generation
+                && gesture.owner_viewport_id == effects.owner_viewport_id;
+            let start_pass_matches = if gesture.owner_viewport_id == egui::ViewportId::ROOT {
+                gesture.start_pass == effects.root_pass
+            } else {
+                effects.owner_pass == Some(gesture.start_pass)
+            };
+            if !document_current
+                || !owner_current
+                || effects.close_dialog
+                || effects.close_viewport
+                || effects.os_close_requested
+                || effects.document_intent.is_some()
+                || !owner_pass_current
+                || !effects.visual_canvas_editing_allowed
+            {
+                cancel_visual_gesture = true;
+            } else if !gesture.start_pass_accepted {
+                if start_pass_matches && owner_pass_current && effects.owner_pass_accepted {
+                    gesture.start_pass_accepted = true;
+                } else {
+                    cancel_visual_gesture = true;
+                }
+            }
+        }
+        if cancel_visual_gesture {
+            self.visual_gesture = None;
+            self.visual_canvas_press_authorized = None;
+        }
+        if owner_pass_current && let Some(selection) = effects.visual_selection.as_ref() {
+            self.set_visual_selection(selection.clone());
+        }
 
         let bootstrap_completed =
             self.viewport_bootstrap_pending && effects.viewport_callback_observed;
@@ -1933,11 +2135,25 @@ impl DiagramStudioDialog {
                 mutation,
                 PendingMutation::ReplaceVisualLabel { .. }
                     | PendingMutation::VisualTransaction { .. }
+                    | PendingMutation::VisualGestureTransaction { .. }
                     | PendingMutation::VisualHistory { .. }
             )
         });
         let mutation_succeeded = effects.mutation.is_none_or(|mutation| {
-            if visual_mutation_requested && !owner_pass_current {
+            let gesture_capture_is_current = match &mutation {
+                PendingMutation::VisualGestureTransaction {
+                    owner_generation,
+                    owner_viewport_id,
+                    start_pass_accepted,
+                    ..
+                } => {
+                    *owner_generation == self.owner_generation
+                        && *owner_viewport_id == effects.owner_viewport_id
+                        && *start_pass_accepted
+                }
+                _ => true,
+            };
+            if visual_mutation_requested && (!owner_pass_current || !gesture_capture_is_current) {
                 self.reject_stale_visual_intent()
             } else {
                 self.apply_pending(mutation)
@@ -2565,6 +2781,8 @@ impl DiagramStudioDialog {
             self.test_viewer_visual_items_omitted = 0;
             self.test_visual_items_painted = 0;
             self.test_visual_items_omitted = 0;
+            self.test_visual_canvas_rect = None;
+            self.test_visual_canvas_id = None;
             self.test_viewer_discard_requested = false;
         }
     }
@@ -2640,14 +2858,22 @@ impl DiagramStudioDialog {
     fn revalidate_visual_selection(&mut self) {
         let Some(scene) = self.documents.visual_scene() else {
             self.visual_selection = None;
+            self.visual_selected_objects.clear();
             self.visual_property_draft = None;
+            self.visual_gesture = None;
+            self.visual_canvas_press_authorized = None;
             return;
         };
+        let previous_primary = self.visual_selection;
+        self.visual_selected_objects
+            .retain(|id| scene.objects.iter().any(|object| object.id == *id));
         if self
             .visual_selection
-            .is_some_and(|id| !scene.objects.iter().any(|object| object.id == id))
+            .is_some_and(|id| !self.visual_selected_objects.contains(&id))
         {
-            self.visual_selection = None;
+            self.visual_selection = self.visual_selected_objects.last().copied();
+        }
+        if previous_primary != self.visual_selection {
             self.visual_property_draft = None;
         }
         let revision = self.documents.visual_revision();
@@ -2662,6 +2888,34 @@ impl DiagramStudioDialog {
         {
             self.visual_selected_preset = None;
         }
+        if self.visual_gesture.as_ref().is_some_and(|gesture| {
+            gesture.document != self.render_document
+                || Some(gesture.revision) != self.documents.visual_revision()
+        }) {
+            self.visual_gesture = None;
+            self.visual_canvas_press_authorized = None;
+        }
+    }
+
+    fn set_visual_selection(&mut self, mut selection: VisualSelectionState) {
+        if let Some(scene) = self.documents.visual_scene() {
+            selection
+                .objects
+                .retain(|id| scene.objects.iter().any(|object| object.id == *id));
+        } else {
+            selection.objects.clear();
+        }
+        if selection
+            .primary
+            .is_none_or(|primary| !selection.objects.contains(&primary))
+        {
+            selection.primary = selection.objects.last().copied();
+        }
+        if self.visual_selection != selection.primary {
+            self.visual_property_draft = None;
+        }
+        self.visual_selection = selection.primary;
+        self.visual_selected_objects = selection.objects;
     }
 
     fn sync_generic_preview_after_accepted_pass(
@@ -2873,13 +3127,50 @@ impl DiagramStudioDialog {
                         if outcome.changed {
                             if let Some(selection) = select_after {
                                 self.visual_selection = Some(selection);
+                                if !self.visual_selected_objects.contains(&selection) {
+                                    self.visual_selected_objects.clear();
+                                    self.visual_selected_objects.insert(selection);
+                                }
                             } else if let Some(selection) = outcome.created_objects.last().copied()
                             {
+                                self.visual_selected_objects.clear();
+                                self.visual_selected_objects.insert(selection);
                                 self.visual_selection = Some(selection);
                             }
                             if let Some(preset) = outcome.created_presets.last().copied() {
                                 self.visual_selected_preset = Some(preset);
                             }
+                            self.revalidate_visual_selection();
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        self.message = Some(StudioNotice::error(error.to_string()));
+                        false
+                    }
+                }
+            }
+            PendingMutation::VisualGestureTransaction {
+                operations,
+                expected_document,
+                expected_revision,
+                owner_generation,
+                owner_viewport_id,
+                start_pass,
+                start_pass_accepted,
+            } => {
+                if !self.visual_intent_is_current(&expected_document, expected_revision)
+                    || owner_generation != self.owner_generation
+                    || owner_viewport_id != start_pass.viewport_id
+                    || !start_pass_accepted
+                {
+                    return self.reject_stale_visual_intent();
+                }
+                match self.documents.apply_visual_transaction(&operations) {
+                    Ok(outcome) => {
+                        self.message = None;
+                        self.visual_property_draft = None;
+                        if outcome.changed {
                             self.revalidate_visual_selection();
                         }
                         true
@@ -2939,6 +3230,7 @@ impl DiagramStudioDialog {
                 .map(|changed| (changed, None)),
             PendingMutation::ReplaceVisualLabel { .. }
             | PendingMutation::VisualTransaction { .. }
+            | PendingMutation::VisualGestureTransaction { .. }
             | PendingMutation::VisualHistory { .. } => {
                 unreachable!("visual mutation dispatched above")
             }
@@ -3030,9 +3322,17 @@ impl DiagramStudioDialog {
         self.selection = None;
         self.selected_nodes.clear();
         self.property_draft = None;
-        self.visual_selection = None;
+        if self.documents.visual_scene().is_some() {
+            self.visual_selection = Some(crate::diagram::TITLE_OBJECT_ID);
+            self.visual_selected_objects = [crate::diagram::TITLE_OBJECT_ID].into_iter().collect();
+        } else {
+            self.visual_selection = None;
+            self.visual_selected_objects.clear();
+        }
         self.visual_selected_preset = None;
         self.visual_property_draft = None;
+        self.visual_gesture = None;
+        self.visual_canvas_press_authorized = None;
         self.drag = None;
         self.camera = Camera::default();
         self.viewer_camera = Camera::default();
@@ -3283,6 +3583,7 @@ impl DiagramStudioDialog {
                 closing_requested,
                 pending,
                 document_intent,
+                canvas_focus_requested,
             );
         }
         self.ensure_generic_texture(ui.ctx());
@@ -4319,6 +4620,7 @@ impl DiagramStudioDialog {
         closing_requested: bool,
         pending: &mut Option<PendingMutation>,
         document_intent: &mut Option<DocumentIntent>,
+        canvas_focus_requested: &mut Option<egui::Id>,
     ) -> DrawBodyEffects {
         #[cfg(test)]
         if !closing_requested && pending.is_none() {
@@ -4346,8 +4648,28 @@ impl DiagramStudioDialog {
             && !egui::Popup::is_any_open(ui.ctx());
         let visual_edits_allowed = document_actions_allowed && pending.is_none();
         let visual_draft_active = self.visual_property_draft.is_some();
+        let visual_canvas_editing_allowed = visual_edits_allowed && !visual_draft_active;
         let structural_edits_allowed = visual_edits_allowed && !visual_draft_active;
         let mut effects = DrawBodyEffects::default();
+        let mut selection_state = VisualSelectionState {
+            objects: self
+                .visual_selected_objects
+                .iter()
+                .copied()
+                .filter(|id| {
+                    scene_snapshot
+                        .as_ref()
+                        .is_some_and(|scene| scene.objects.iter().any(|object| object.id == *id))
+                })
+                .collect(),
+            primary: self.visual_selection,
+        };
+        if selection_state
+            .primary
+            .is_none_or(|primary| !selection_state.objects.contains(&primary))
+        {
+            selection_state.primary = selection_state.objects.last().copied();
+        }
         let mut selected_object = self
             .visual_selection
             .filter(|id| {
@@ -4355,11 +4677,7 @@ impl DiagramStudioDialog {
                     .as_ref()
                     .is_some_and(|scene| scene.objects.iter().any(|object| object.id == *id))
             })
-            .or_else(|| {
-                scene_snapshot
-                    .as_ref()
-                    .map(|_| crate::diagram::TITLE_OBJECT_ID)
-            });
+            .or(selection_state.primary);
         let mut selected_preset = self.visual_selected_preset.filter(|id| {
             scene_snapshot
                 .as_ref()
@@ -4383,6 +4701,7 @@ impl DiagramStudioDialog {
         let mut staged_operations: Option<(Vec<VisualOperation>, Option<VisualObjectId>)> = None;
         let mut stage_history: Option<bool> = None;
         let mut clear_visual_draft = false;
+        let mut canvas_interaction_authorized = false;
         egui::ScrollArea::vertical()
             .id_salt("diagram-studio-visual-document-scroll")
             .show(ui, |ui| {
@@ -4455,6 +4774,9 @@ impl DiagramStudioDialog {
                     label_response.rect,
                     ui.clip_rect(),
                 ));
+                #[cfg(test)]
+                self.test_action_focus_ids
+                    .push(("visual_label".into(), label_response.id));
                 if label_response.changed() && pending.is_none() {
                     *pending = Some(PendingMutation::ReplaceVisualLabel {
                         label: label.clone(),
@@ -4463,35 +4785,424 @@ impl DiagramStudioDialog {
                     });
                 }
 
-                ui.label("Canvas preview (apply a complete property edit as one undo step)");
-                let canvas_size = egui::vec2(ui.available_width().clamp(240.0, 1_400.0), 300.0);
-                let (canvas_rect, _) = ui.allocate_exact_size(canvas_size, egui::Sense::hover());
-                let mut paint_report = VisualPaintReport::default();
-                match projection.as_ref() {
-                    Some(Ok(projection)) => {
-                        paint_report = paint_visual_projection(
-                            &ui.painter().with_clip_rect(canvas_rect),
-                            projection,
-                            canvas_rect,
-                            selected_object,
-                        );
+                ui.label("Canvas (drag objects or handles; wheel or middle-drag to navigate)");
+                let mut camera = self.camera;
+                let navigation_controls_allowed = visual_edits_allowed && self.visual_gesture.is_none();
+                ui.horizontal(|ui| {
+                    let zoom_out = ui.add_enabled(navigation_controls_allowed, egui::Button::new("−"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_zoom_out".into(), zoom_out.rect, ui.clip_rect()));
+                    if zoom_out.clicked() {
+                        camera.zoom = (camera.zoom / CAMERA_KEYBOARD_ZOOM_FACTOR)
+                            .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+                        camera.fit_next = false;
                     }
-                    Some(Err(error)) => {
-                        ui.painter().rect_filled(
-                            canvas_rect,
-                            4.0,
-                            egui::Color32::from_gray(248),
-                        );
-                        ui.painter().text(
-                            canvas_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            error.to_string(),
-                            egui::FontId::proportional(14.0),
-                            egui::Color32::DARK_RED,
-                        );
+                    ui.label(format!("{:.0}%", camera.zoom * 100.0));
+                    let zoom_in = ui.add_enabled(navigation_controls_allowed, egui::Button::new("+"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_zoom_in".into(), zoom_in.rect, ui.clip_rect()));
+                    if zoom_in.clicked() {
+                        camera.zoom = (camera.zoom * CAMERA_KEYBOARD_ZOOM_FACTOR)
+                            .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+                        camera.fit_next = false;
                     }
-                    None => {}
+                    let fit = ui.add_enabled(navigation_controls_allowed, egui::Button::new("Fit"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_fit".into(), fit.rect, ui.clip_rect()));
+                    if fit.clicked() {
+                        camera.fit_next = true;
+                    }
+                    let zoom_100 = ui.add_enabled(navigation_controls_allowed, egui::Button::new("100%"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_zoom_100".into(), zoom_100.rect, ui.clip_rect()));
+                    if zoom_100.clicked() {
+                        camera.zoom = 1.0;
+                        camera.fit_next = false;
+                    }
+                });
+                let canvas_size = egui::vec2(ui.available_width().clamp(240.0, 1_400.0), 340.0);
+                let focused_widget_before_canvas = ui.memory(|memory| memory.focused());
+                let (canvas_response, canvas_painter) = ui.allocate_painter(
+                    canvas_size,
+                    egui::Sense::click_and_drag(),
+                );
+                let canvas_rect = canvas_response.rect;
+                let canvas_mapping = pure_canvas_mapping(canvas_rect.shrink(12.0), camera);
+                ui.painter().rect_filled(
+                    canvas_rect,
+                    4.0,
+                    egui::Color32::from_gray(249),
+                );
+                let canvas_painter = canvas_painter.with_clip_rect(canvas_mapping_rect(canvas_mapping));
+                let base_projection = projection
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(Arc::as_ref);
+                let canvas_bounds = base_projection.and_then(|projection| projection.bounds);
+                if camera.fit_next && let Some(bounds) = canvas_bounds {
+                    fit_camera(&mut camera, bounds, canvas_rect.shrink(12.0));
                 }
+                let mut gesture = self.visual_gesture.clone();
+                handle_visual_canvas_camera_input(
+                    ui,
+                    &canvas_response,
+                    canvas_painter.clip_rect(),
+                    &mut camera,
+                    navigation_controls_allowed,
+                );
+                if navigation_controls_allowed {
+                    viewer_canvas_shortcuts(ui, canvas_response.id, &mut camera);
+                }
+
+                let base_painted_prefix = base_projection.map_or(0, visual_painted_item_prefix);
+                let widget_focus_allows_canvas = ui
+                    .memory(|memory| memory.focused())
+                    .is_none_or(|focused| focused == canvas_response.id);
+                canvas_interaction_authorized =
+                    visual_canvas_editing_allowed && widget_focus_allows_canvas;
+                let pointer_press_authorized = self
+                    .visual_canvas_press_authorized
+                    .unwrap_or(canvas_interaction_authorized);
+                let canvas_editing_allowed = canvas_interaction_authorized
+                    && pointer_press_authorized
+                    && gesture.is_none();
+                if !visual_canvas_editing_allowed || !widget_focus_allows_canvas {
+                    gesture = None;
+                    self.visual_canvas_press_authorized = None;
+                }
+                let mut start_gesture = None;
+                let mut pointer_selection = None;
+                let modifiers = ui.ctx().input(|input| input.modifiers);
+                let extend_selection = modifiers.command || modifiers.shift;
+                let mut mapping = pure_canvas_mapping(canvas_rect.shrink(12.0), camera);
+                mapping.clip = canvas_rect_to_scene_rect(
+                    canvas_painter.clip_rect().intersect(canvas_rect.shrink(12.0)),
+                );
+                let (primary_pressed, pointer_position) = ui.ctx().input(|input| {
+                    (
+                        input.pointer.button_pressed(egui::PointerButton::Primary),
+                        input.pointer.interact_pos(),
+                    )
+                });
+                if primary_pressed
+                    && pointer_position.is_some_and(|point| {
+                        mapping.contains_screen_point(scene_point_from_screen(point))
+                    })
+                {
+                    self.visual_canvas_press_authorized = Some(
+                        visual_canvas_editing_allowed
+                            && focused_widget_before_canvas
+                                .is_none_or(|focused| focused == canvas_response.id),
+                    );
+                }
+                let current_projection_for_hit = base_projection;
+                let current_scene_for_hit = scene_snapshot.as_deref();
+                let selected_for_hit = selection_state.objects.clone();
+                let handles = match (current_scene_for_hit, current_projection_for_hit) {
+                    (Some(scene), Some(projection)) => visual_canvas_selection_handles(
+                        scene,
+                        projection,
+                        &selected_for_hit,
+                        base_painted_prefix,
+                        mapping,
+                    ),
+                    _ => Vec::new(),
+                };
+
+                if document_actions_allowed
+                    && canvas_response.drag_started_by(egui::PointerButton::Primary)
+                    && ui.ctx().input(|input| input.pointer.press_origin()).is_some_and(|point| {
+                        mapping.contains_screen_point(scene_point_from_screen(point))
+                    })
+                {
+                    *canvas_focus_requested = Some(canvas_response.id);
+                }
+
+                if visual_edits_allowed
+                    && canvas_editing_allowed
+                    && canvas_response.drag_started_by(egui::PointerButton::Primary)
+                    && let Some(pointer_start) = ui.ctx().input(|input| input.pointer.press_origin())
+                    && mapping.contains_screen_point(scene_point_from_screen(pointer_start))
+                    && let (Some(scene), Some(projected)) =
+                        (current_scene_for_hit, current_projection_for_hit)
+                {
+                    let hit = visual_canvas_hit_test(
+                        projected,
+                        base_painted_prefix,
+                        &handles,
+                        mapping,
+                        scene_point_from_screen(pointer_start),
+                        9.0,
+                    );
+                    let next_selection = reduce_canvas_selection(
+                        &selection_state,
+                        hit,
+                        extend_selection,
+                        true,
+                    );
+                    let mode = canvas_gesture_mode(hit, &next_selection, projected, base_painted_prefix, extend_selection);
+                    if let Some(mode) = mode {
+                        let selected_ids = next_selection.objects.clone();
+                        let initial_objects = scene
+                            .objects
+                            .iter()
+                            .filter(|object| selected_ids.contains(&object.id))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if !matches!(mode, VisualGestureMode::Transform(_)) || !initial_objects.is_empty() {
+                            pointer_selection = Some(next_selection.clone());
+                            start_gesture = Some(VisualGesture {
+                                document: visual_identity.clone(),
+                                revision: visual_revision,
+                                owner_generation: self.owner_generation,
+                                owner_viewport_id: ui.ctx().viewport_id(),
+                                start_pass: ViewportPassProvenance::current(
+                                    ui.ctx(),
+                                    ui.ctx().viewport_id(),
+                                ),
+                                start_pass_accepted: false,
+                                mode,
+                                mapping,
+                                pointer_start,
+                                pointer_start_world: mapping.screen_to_world(scene_point_from_screen(pointer_start)),
+                                initial_selection: next_selection,
+                                initial_objects: initial_objects.clone(),
+                                last_pointer: pointer_start,
+                                preview_objects: initial_objects,
+                                preview_scene: None,
+                                preview_projection: None,
+                                did_move: false,
+                            });
+                        }
+                    }
+                    *canvas_focus_requested = Some(canvas_response.id);
+                }
+                if document_actions_allowed
+                    && canvas_response.clicked_by(egui::PointerButton::Primary)
+                    && !canvas_response.dragged_by(egui::PointerButton::Primary)
+                    && let Some(pointer) = canvas_response.interact_pointer_pos()
+                    && mapping.contains_screen_point(scene_point_from_screen(pointer))
+                {
+                    *canvas_focus_requested = Some(canvas_response.id);
+                    if canvas_editing_allowed
+                    && let (Some(_scene), Some(projected)) =
+                        (current_scene_for_hit, current_projection_for_hit)
+                    {
+                        let hit = visual_canvas_hit_test(
+                            projected,
+                            base_painted_prefix,
+                            &handles,
+                            mapping,
+                            scene_point_from_screen(pointer),
+                            9.0,
+                        );
+                        if !matches!(hit, CanvasHit::Handle(_)) {
+                            pointer_selection = Some(reduce_canvas_selection(
+                                &selection_state,
+                                hit,
+                                extend_selection,
+                                false,
+                            ));
+                        }
+                    }
+                }
+                if let Some(next_selection) = pointer_selection {
+                    selection_state = next_selection;
+                    selected_object = selection_state.primary;
+                    working_object = None;
+                    clear_visual_draft = true;
+                }
+
+                if gesture
+                    .as_ref()
+                    .is_some_and(|active| active.mapping != mapping)
+                {
+                    gesture = None;
+                    self.visual_canvas_press_authorized = None;
+                }
+
+                if let Some(mut active) = start_gesture.or_else(|| gesture.take()) {
+                    let (pointer, button_down, button_released) = ui.ctx().input(|input| {
+                        (
+                            input.pointer.interact_pos(),
+                            input.pointer.button_down(egui::PointerButton::Primary),
+                            input.pointer.button_released(egui::PointerButton::Primary),
+                        )
+                    });
+                    let pointer = clamp_canvas_screen_point(
+                        active.mapping,
+                        pointer.unwrap_or(active.last_pointer),
+                    );
+                    let moved = pointer.distance(active.pointer_start) > 1.5;
+                    active.did_move |= moved;
+                    let pointer_changed = pointer != active.last_pointer;
+                    if active.did_move
+                        && (button_down || button_released)
+                        && canvas_interaction_authorized
+                    {
+                        match active.mode {
+                            VisualGestureMode::Marquee { .. } => {}
+                            VisualGestureMode::Transform(mode) if pointer_changed => {
+                                let current_world = active
+                                    .mapping
+                                    .screen_to_world(scene_point_from_screen(pointer));
+                                if let Some(objects) = preview_visual_transforms(
+                                    &active.initial_objects,
+                                    mode,
+                                    active.pointer_start_world,
+                                    current_world,
+                                ) {
+                                    if let Some(mut preview_scene) = scene_snapshot.as_ref().map(|scene| scene.as_ref().clone()) {
+                                        for object in &objects {
+                                            if let Some(saved) = preview_scene.objects.iter_mut().find(|saved| saved.id == object.id) {
+                                                *saved = object.clone();
+                                            }
+                                        }
+                                            if let Ok(projected) = project_visual_scene(&preview_scene) {
+                                                active.preview_projection = Some(Arc::new(projected));
+                                                active.preview_scene = Some(Arc::new(preview_scene));
+                                                active.preview_objects = objects;
+                                            } else {
+                                                active.preview_projection = None;
+                                                active.preview_scene = None;
+                                                active.preview_objects = active.initial_objects.clone();
+                                            }
+                                    }
+                                } else {
+                                        active.preview_projection = None;
+                                        active.preview_scene = None;
+                                        active.preview_objects = active.initial_objects.clone();
+                                }
+                            }
+                            VisualGestureMode::Transform(_) => {}
+                        }
+                        active.last_pointer = pointer;
+                    }
+                    let released = button_released || canvas_response.drag_stopped_by(egui::PointerButton::Primary);
+                    if released {
+                        if active.did_move && active.start_pass_accepted && visual_edits_allowed {
+                            match active.mode {
+                                VisualGestureMode::Marquee { extend } => {
+                                    if let Some(projected) = current_projection_for_hit {
+                                        let end_world = active
+                                            .mapping
+                                            .screen_to_world(scene_point_from_screen(pointer));
+                                        let marquee = SceneRect {
+                                            min: active.pointer_start_world,
+                                            max: end_world,
+                                        };
+                                        let mut objects = if extend { active.initial_selection.objects } else { BTreeSet::new() };
+                                        let hits = visual_canvas_marquee_selection(projected, base_painted_prefix, marquee);
+                                        objects.extend(hits);
+                                        let primary = objects.last().copied();
+                                        selection_state = VisualSelectionState { objects, primary };
+                                        selected_object = primary;
+                                        working_object = None;
+                                    }
+                                }
+                                VisualGestureMode::Transform(_) => {
+                                    let operations = active
+                                        .preview_objects
+                                        .iter()
+                                        .filter(|preview| active.initial_objects.iter().find(|initial| initial.id == preview.id).is_some_and(|initial| initial != *preview))
+                                        .cloned()
+                                        .map(VisualOperation::ReplaceObject)
+                                        .collect::<Vec<_>>();
+                                    if !operations.is_empty()
+                                        && operations.len() <= MAX_VISUAL_TRANSACTION_OPERATIONS
+                                    {
+                                        *pending = Some(PendingMutation::VisualGestureTransaction {
+                                            operations,
+                                            expected_document: active.document,
+                                            expected_revision: active.revision,
+                                            owner_generation: active.owner_generation,
+                                            owner_viewport_id: active.owner_viewport_id,
+                                            start_pass: active.start_pass,
+                                            start_pass_accepted: active.start_pass_accepted,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        gesture = None;
+                    } else if button_down && visual_edits_allowed {
+                        gesture = Some(active);
+                    } else {
+                        gesture = None;
+                    }
+                }
+                if !ui.ctx().input(|input| {
+                    input.pointer.button_down(egui::PointerButton::Primary)
+                }) {
+                    self.visual_canvas_press_authorized = None;
+                }
+                if let Some(active) = gesture.as_ref()
+                    && matches!(active.mode, VisualGestureMode::Marquee { .. })
+                    && active.did_move
+                {
+                    let pointer = clamp_canvas_screen_point(
+                        active.mapping,
+                        ui.ctx().input(|input| input.pointer.interact_pos()).unwrap_or(active.last_pointer),
+                    );
+                    let marquee = egui::Rect::from_two_pos(active.pointer_start, pointer);
+                    canvas_painter.rect_stroke(
+                        marquee.intersect(canvas_mapping_rect(active.mapping)),
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 112, 201)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+
+                let active_scene = gesture
+                    .as_ref()
+                    .and_then(|gesture| gesture.preview_scene.as_deref())
+                    .or(scene_snapshot.as_deref());
+                let active_projection = gesture
+                    .as_ref()
+                    .and_then(|gesture| gesture.preview_projection.as_deref())
+                    .or(base_projection);
+                let painted_selection = gesture
+                    .as_ref()
+                    .map_or(&selection_state.objects, |gesture| &gesture.initial_selection.objects);
+                let mut paint_report = VisualPaintReport::default();
+                match active_projection {
+                    Some(active_projection) => {
+                        paint_report = paint_visual_projection(
+                            &canvas_painter,
+                            active_projection,
+                            canvas_rect,
+                            camera,
+                            painted_selection,
+                        );
+                        if visual_canvas_editing_allowed && !visual_draft_active
+                            && let Some(active_scene) = active_scene
+                        {
+                            let prefix = paint_report.visible_item_prefix;
+                            let active_handles = visual_canvas_selection_handles(
+                                active_scene,
+                                active_projection,
+                                painted_selection,
+                                prefix,
+                                mapping,
+                            );
+                            paint_visual_canvas_handles(&canvas_painter, &active_handles, mapping);
+                        }
+                    }
+                    None => {
+                        if let Some(Some(error)) = projection.as_ref().map(|result| result.as_ref().err()) {
+                            canvas_painter.rect_filled(canvas_rect, 4.0, egui::Color32::from_gray(248));
+                            canvas_painter.text(
+                                canvas_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                error.to_string(),
+                                egui::FontId::proportional(14.0),
+                                egui::Color32::DARK_RED,
+                            );
+                        }
+                    }
+                }
+                self.visual_gesture = gesture;
+                self.camera = camera;
                 if let Some(Ok(projection)) = projection.as_ref()
                     && (projection.simplified_dash_paths > 0
                         || projection.truncated_text_items > 0
@@ -4508,8 +5219,10 @@ impl DiagramStudioDialog {
                 }
                 #[cfg(test)]
                 {
-                    self.test_canvas_rect = Some(canvas_rect);
-                    self.test_canvas_id = None;
+                    self.test_visual_canvas_rect = Some(canvas_rect);
+                    self.test_visual_canvas_id = Some(canvas_response.id);
+                    self.test_action_focus_ids
+                        .push(("visual_canvas".into(), canvas_response.id));
                     self.test_visual_items_painted = paint_report.painted_items;
                     self.test_visual_items_omitted = paint_report.omitted_items;
                     self.test_action_rects.push((
@@ -4953,7 +5666,13 @@ impl DiagramStudioDialog {
                     });
                 }
             });
-        self.visual_selection = selected_object;
+        if selected_object != selection_state.primary {
+            selection_state.objects.clear();
+            if let Some(id) = selected_object {
+                selection_state.objects.insert(id);
+            }
+            selection_state.primary = selected_object;
+        }
         self.visual_selected_preset = selected_preset;
         if clear_visual_draft {
             self.visual_property_draft = None;
@@ -4990,6 +5709,8 @@ impl DiagramStudioDialog {
                 });
             }
         }
+        effects.visual_selection = Some(selection_state);
+        effects.visual_canvas_editing_allowed = canvas_interaction_authorized;
         effects
     }
 }
@@ -4998,12 +5719,13 @@ fn paint_visual_projection(
     painter: &egui::Painter,
     projection: &VisualSceneProjection,
     canvas: egui::Rect,
-    selected_object: Option<VisualObjectId>,
+    camera: Camera,
+    selected_objects: &BTreeSet<VisualObjectId>,
 ) -> VisualPaintReport {
     const MAX_PAINT_WORK_UNITS: usize = 65_536;
     let canvas_color = egui::Color32::from_gray(249);
     painter.rect_filled(canvas, 4.0, canvas_color);
-    let Some(bounds) = projection.bounds else {
+    let Some(_bounds) = projection.bounds else {
         painter.text(
             canvas.center(),
             egui::Align2::CENTER_CENTER,
@@ -5014,15 +5736,9 @@ fn paint_visual_projection(
         return VisualPaintReport::default();
     };
     let available = canvas.shrink(12.0);
-    let world_width = bounds.width().max(1e-6);
-    let world_height = bounds.height().max(1e-6);
-    let scale = (f64::from(available.width()) / world_width)
-        .min(f64::from(available.height()) / world_height)
-        .max(1e-12);
     let mapping = VisualCanvasMapping {
-        bounds,
         canvas: available,
-        scale,
+        camera,
     };
     let mut remaining_work = MAX_PAINT_WORK_UNITS;
     let mut report = VisualPaintReport::default();
@@ -5035,6 +5751,10 @@ fn paint_visual_projection(
         }
         remaining_work -= item_work;
         report.painted_items += 1;
+        report.visible_item_prefix = item_index + 1;
+        if !mapping.rect(item.bounds).intersects(canvas) {
+            continue;
+        }
         let is_text = item.kind == VisualProjectedKind::Text;
         let outline = item
             .outline
@@ -5048,8 +5768,8 @@ fn paint_visual_projection(
         if let Some(shadow) = item.style.shadow {
             let shadow_color = visual_color(shadow.color, item.style.opacity);
             let offset = egui::vec2(
-                (shadow.offset_x * scale) as f32,
-                (shadow.offset_y * scale) as f32,
+                (shadow.offset_x * camera.zoom as f64) as f32,
+                (shadow.offset_y * camera.zoom as f64) as f32,
             );
             let shadow_outline = outline
                 .iter()
@@ -5062,7 +5782,7 @@ fn paint_visual_projection(
                     egui::Stroke::NONE,
                 ));
             }
-            let shadow_width = (shadow.blur * 2.0 * scale) as f32;
+            let shadow_width = (shadow.blur * 2.0 * f64::from(camera.zoom)) as f32;
             if shadow_width > 0.0 {
                 paint_solid_path(
                     painter,
@@ -5085,7 +5805,7 @@ fn paint_visual_projection(
                 item.style.line_style
             };
             let stroke = egui::Stroke::new(
-                (item.style.border_width * scale).max(0.0) as f32,
+                (item.style.border_width * f64::from(camera.zoom)).max(0.0) as f32,
                 visual_color(item.style.border, item.style.opacity),
             );
             let mut mapped_details = Vec::with_capacity(item.details.len());
@@ -5132,7 +5852,7 @@ fn paint_visual_projection(
             report.suppressed_text_lines += paint_visual_text(painter, &mapping, item, text);
         }
 
-        if selected_object == Some(item.object_id) {
+        if selected_objects.contains(&item.object_id) {
             let selected_bounds = mapping.rect(item.bounds).shrink(1.0);
             painter.rect_stroke(
                 selected_bounds,
@@ -5145,11 +5865,12 @@ fn paint_visual_projection(
     report
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VisualPaintReport {
     painted_items: usize,
     omitted_items: usize,
     suppressed_text_lines: usize,
+    visible_item_prefix: usize,
 }
 
 fn visual_item_paint_work(item: &crate::diagram::ProjectedVisualItem) -> usize {
@@ -5176,21 +5897,237 @@ fn visual_item_paint_work(item: &crate::diagram::ProjectedVisualItem) -> usize {
 
 #[derive(Clone, Copy)]
 struct VisualCanvasMapping {
-    bounds: SceneRect,
     canvas: egui::Rect,
-    scale: f64,
+    camera: Camera,
 }
 
 impl VisualCanvasMapping {
     fn point(self, point: ScenePoint) -> egui::Pos2 {
-        egui::pos2(
-            self.canvas.center().x + ((point.x - self.bounds.center().x) * self.scale) as f32,
-            self.canvas.center().y + ((point.y - self.bounds.center().y) * self.scale) as f32,
-        )
+        world_to_screen(point, self.canvas, self.camera)
     }
 
     fn rect(self, rect: SceneRect) -> egui::Rect {
-        egui::Rect::from_min_max(self.point(rect.min), self.point(rect.max))
+        world_rect_to_screen(rect, self.canvas, self.camera)
+    }
+}
+
+fn pure_canvas_mapping(canvas: egui::Rect, camera: Camera) -> CanvasMapping {
+    let viewport = canvas_rect_to_scene_rect(canvas);
+    CanvasMapping {
+        viewport,
+        clip: viewport,
+        center: camera.center,
+        zoom: f64::from(camera.zoom),
+    }
+}
+
+fn canvas_rect_to_scene_rect(rect: egui::Rect) -> SceneRect {
+    SceneRect {
+        min: ScenePoint {
+            x: f64::from(rect.left()),
+            y: f64::from(rect.top()),
+        },
+        max: ScenePoint {
+            x: f64::from(rect.right()),
+            y: f64::from(rect.bottom()),
+        },
+    }
+}
+
+fn scene_point_from_screen(point: egui::Pos2) -> ScenePoint {
+    ScenePoint {
+        x: f64::from(point.x),
+        y: f64::from(point.y),
+    }
+}
+
+fn canvas_mapping_rect(mapping: CanvasMapping) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(mapping.clip.min.x as f32, mapping.clip.min.y as f32),
+        egui::pos2(mapping.clip.max.x as f32, mapping.clip.max.y as f32),
+    )
+}
+
+fn clamp_canvas_screen_point(mapping: CanvasMapping, point: egui::Pos2) -> egui::Pos2 {
+    let viewport = canvas_mapping_rect(mapping);
+    egui::pos2(
+        point.x.clamp(viewport.left(), viewport.right()),
+        point.y.clamp(viewport.top(), viewport.bottom()),
+    )
+}
+
+fn reduce_canvas_selection(
+    current: &VisualSelectionState,
+    hit: CanvasHit,
+    extend: bool,
+    retain_selected_member_for_drag: bool,
+) -> VisualSelectionState {
+    if retain_selected_member_for_drag
+        && let CanvasHit::Object(id) = hit
+        && current.objects.contains(&id)
+        && !extend
+    {
+        return current.clone();
+    }
+    let mut next = current.clone();
+    match hit {
+        CanvasHit::Object(id) if extend => {
+            if !next.objects.remove(&id) {
+                next.objects.insert(id);
+                next.primary = Some(id);
+            } else if next.primary == Some(id) {
+                next.primary = next.objects.last().copied();
+            }
+        }
+        CanvasHit::Object(id) => {
+            next.objects.clear();
+            next.objects.insert(id);
+            next.primary = Some(id);
+        }
+        CanvasHit::Empty if !extend => {
+            next.objects.clear();
+            next.primary = None;
+        }
+        CanvasHit::Empty | CanvasHit::Handle(_) => {}
+    }
+    next
+}
+
+fn canvas_gesture_mode(
+    hit: CanvasHit,
+    selection: &VisualSelectionState,
+    projection: &VisualSceneProjection,
+    painted_item_prefix: usize,
+    extend: bool,
+) -> Option<VisualGestureMode> {
+    match hit {
+        CanvasHit::Handle(CanvasHandleKind::ResizeCorner {
+            object_id,
+            sign_x,
+            sign_y,
+        }) if selection.objects.len() == 1 && selection.objects.contains(&object_id) => Some(
+            VisualGestureMode::Transform(VisualTransformMode::ResizeCorner { sign_x, sign_y }),
+        ),
+        CanvasHit::Handle(CanvasHandleKind::RotateObject { object_id })
+            if selection.objects.len() == 1 && selection.objects.contains(&object_id) =>
+        {
+            Some(VisualGestureMode::Transform(
+                VisualTransformMode::RotateObject,
+            ))
+        }
+        CanvasHit::Handle(CanvasHandleKind::ResizeSelection) if selection.objects.len() > 1 => {
+            let pivot = visual_canvas_selection_bounds(
+                projection,
+                &selection.objects,
+                painted_item_prefix,
+            )?
+            .center();
+            Some(VisualGestureMode::Transform(
+                VisualTransformMode::ResizeSelection { pivot },
+            ))
+        }
+        CanvasHit::Handle(CanvasHandleKind::RotateSelection) if selection.objects.len() > 1 => {
+            let pivot = visual_canvas_selection_bounds(
+                projection,
+                &selection.objects,
+                painted_item_prefix,
+            )?
+            .center();
+            Some(VisualGestureMode::Transform(
+                VisualTransformMode::RotateSelection { pivot },
+            ))
+        }
+        CanvasHit::Object(id) if selection.objects.contains(&id) => {
+            Some(VisualGestureMode::Transform(VisualTransformMode::Translate))
+        }
+        CanvasHit::Empty => Some(VisualGestureMode::Marquee { extend }),
+        _ => None,
+    }
+}
+
+fn paint_visual_canvas_handles(
+    painter: &egui::Painter,
+    handles: &[CanvasHandle],
+    mapping: CanvasMapping,
+) {
+    let fill = egui::Color32::WHITE;
+    let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(36, 112, 201));
+    for handle in handles {
+        let center = mapping.world_to_screen(handle.center);
+        let position = egui::pos2(center.x as f32, center.y as f32);
+        match handle.kind {
+            CanvasHandleKind::ResizeCorner { .. } | CanvasHandleKind::ResizeSelection => {
+                painter.rect_filled(
+                    egui::Rect::from_center_size(position, egui::vec2(8.0, 8.0)),
+                    1.0,
+                    fill,
+                );
+                painter.rect_stroke(
+                    egui::Rect::from_center_size(position, egui::vec2(8.0, 8.0)),
+                    1.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            CanvasHandleKind::RotateObject { .. } | CanvasHandleKind::RotateSelection => {
+                painter.circle_filled(position, 4.5, fill);
+                painter.circle_stroke(position, 4.5, stroke);
+            }
+        }
+    }
+}
+
+fn visual_painted_item_prefix(projection: &VisualSceneProjection) -> usize {
+    const MAX_PAINT_WORK_UNITS: usize = 65_536;
+    let mut remaining = MAX_PAINT_WORK_UNITS;
+    let mut visible_prefix = 0;
+    for item in &projection.items {
+        let work = visual_item_paint_work(item);
+        if work > remaining {
+            break;
+        }
+        remaining -= work;
+        visible_prefix += 1;
+    }
+    visible_prefix
+}
+
+fn handle_visual_canvas_camera_input(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    visible_canvas: egui::Rect,
+    camera: &mut Camera,
+    actions_allowed: bool,
+) {
+    let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+    if actions_allowed && pointer.is_some_and(|pointer| visible_canvas.contains(pointer)) {
+        let scroll = ui.ctx().input_mut(|input| {
+            let scroll = input.smooth_scroll_delta.y;
+            if scroll.abs() > 0.01 {
+                input.smooth_scroll_delta = egui::Vec2::ZERO;
+            }
+            scroll
+        });
+        if scroll.abs() > 0.01 {
+            camera.zoom =
+                (camera.zoom * (scroll * 0.001).exp()).clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
+            camera.fit_next = false;
+        }
+    }
+    let middle_press_started_visible = ui.ctx().input(|input| {
+        input
+            .pointer
+            .press_origin()
+            .is_some_and(|origin| visible_canvas.contains(origin))
+    });
+    if actions_allowed
+        && middle_press_started_visible
+        && response.dragged_by(egui::PointerButton::Middle)
+    {
+        let delta = response.drag_delta();
+        camera.center.x -= f64::from(delta.x / camera.zoom);
+        camera.center.y -= f64::from(delta.y / camera.zoom);
+        camera.fit_next = false;
     }
 }
 
@@ -5264,7 +6201,8 @@ fn paint_visual_text(
         y: item.transform.y,
     };
     let line_count = text.lines.len() as f64;
-    let line_height = (text.line_height.min(text.height / line_count) * mapping.scale) as f32;
+    let scale = f64::from(mapping.camera.zoom);
+    let line_height = (text.line_height.min(text.height / line_count) * scale) as f32;
     if !line_height.is_finite() || line_height <= 0.0 {
         return text.lines.len();
     }
@@ -5277,15 +6215,15 @@ fn paint_visual_text(
         egui::FontFamily::Proportional
     };
     let text_color = visual_color(item.style.border, item.style.opacity);
-    let font_size = ((item.style.font_size * mapping.scale) as f32).min(line_height * 0.8);
+    let font_size = ((item.style.font_size * scale) as f32).min(line_height * 0.8);
     let angle = item.text_rotation_degrees.to_radians() as f32;
     let (sin, cos) = angle.sin_cos();
     let screen_center = mapping.point(center);
     let shadow = item.style.shadow.map(|shadow| {
         (
             egui::vec2(
-                (shadow.offset_x * mapping.scale) as f32,
-                (shadow.offset_y * mapping.scale) as f32,
+                (shadow.offset_x * scale) as f32,
+                (shadow.offset_y * scale) as f32,
             ),
             visual_color(shadow.color, item.style.opacity),
         )
@@ -5296,7 +6234,7 @@ fn paint_visual_text(
         if line.text.is_empty() {
             continue;
         }
-        let max_width = (line.reserved_width * mapping.scale) as f32;
+        let max_width = (line.reserved_width * scale) as f32;
         if !max_width.is_finite() || max_width < 0.75 || font_size < 0.75 {
             suppressed += 1;
             continue;
@@ -7597,6 +8535,344 @@ mod tests {
         dialog
     }
 
+    #[test]
+    fn diagram_studio_visual_canvas_pointer_drag_moves_selection_once_and_supports_undo_redo() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let initial = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+            .unwrap()
+            .transform;
+        let revision = dialog.documents.visual_revision().unwrap();
+        let start = visual_canvas_world_point(&dialog, ScenePoint::default());
+        let end = start + egui::vec2(36.0, -18.0);
+
+        drag_visual_canvas(&mut dialog, &ctx, start, end);
+
+        let moved = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+            .unwrap()
+            .transform;
+        let expected_x = f64::from(end.x - start.x) / f64::from(dialog.camera.zoom);
+        let expected_y = f64::from(end.y - start.y) / f64::from(dialog.camera.zoom);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        assert!(dialog.documents.can_undo());
+        assert!((moved.x - initial.x - expected_x).abs() < 0.05);
+        assert!((moved.y - initial.y - expected_y).abs() < 0.05);
+
+        click_action(&mut dialog, &ctx, "visual_undo");
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 2));
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+                .unwrap()
+                .transform,
+            initial
+        );
+        click_action(&mut dialog, &ctx, "visual_redo");
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 3));
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == crate::diagram::TITLE_OBJECT_ID)
+                .unwrap()
+                .transform,
+            moved
+        );
+    }
+
+    #[test]
+    fn diagram_studio_visual_canvas_escape_cancels_owned_gesture_before_close() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let revision = dialog.documents.visual_revision().unwrap();
+        let start = visual_canvas_world_point(&dialog, ScenePoint::default());
+        let end = start + egui::vec2(40.0, 12.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        assert!(
+            dialog
+                .visual_gesture
+                .as_ref()
+                .is_some_and(|gesture| gesture.start_pass_accepted)
+        );
+
+        send_child_key(&mut dialog, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(end), button(end, false)],
+        );
+
+        assert!(dialog.open, "first Escape cancels the canvas gesture");
+        assert!(dialog.visual_gesture.is_none());
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert!(!dialog.documents.can_undo());
+    }
+
+    #[test]
+    fn diagram_studio_visual_canvas_discarded_release_keeps_document_unchanged() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let revision = dialog.documents.visual_revision().unwrap();
+        let start = visual_canvas_world_point(&dialog, ScenePoint::default());
+        let end = start + egui::vec2(40.0, 16.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        assert!(dialog.visual_gesture.is_some());
+        dialog.test_request_child_discard();
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(end), button(end, false)],
+        );
+
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert!(!dialog.documents.can_undo());
+        assert!(dialog.visual_gesture.is_none());
+    }
+
+    #[test]
+    fn diagram_studio_visual_canvas_rejects_release_from_retired_owner_generation() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let revision = dialog.documents.visual_revision().unwrap();
+        let start = visual_canvas_world_point(&dialog, ScenePoint::default());
+        let end = start + egui::vec2(34.0, 18.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        dialog.owner_generation = dialog.owner_generation.wrapping_add(1);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(end), button(end, false)],
+        );
+
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert!(!dialog.documents.can_undo());
+        assert!(dialog.visual_gesture.is_none());
+    }
+
+    #[test]
+    fn diagram_studio_visual_canvas_text_focus_blocks_pointer_transform() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_label");
+        assert!(dialog.test_action_has_focus("visual_label"));
+        let revision = dialog.documents.visual_revision().unwrap();
+        let original_x = dialog.documents.visual_scene().unwrap().objects[0]
+            .transform
+            .x;
+        let start = visual_canvas_world_point(&dialog, ScenePoint::default());
+        let end = start + egui::vec2(42.0, 15.0);
+        drag_visual_canvas(&mut dialog, &ctx, start, end);
+
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert_eq!(
+            dialog.documents.visual_scene().unwrap().objects[0]
+                .transform
+                .x,
+            original_x
+        );
+        assert!(dialog.visual_gesture.is_none());
+    }
+
+    #[test]
+    fn diagram_studio_visual_canvas_multiselect_drag_is_one_group_transaction() {
+        let mut dialog = initialized_visual_dialog();
+        let shape_id = dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform {
+                    x: 170.0,
+                    y: 85.0,
+                    width: 70.0,
+                    height: 46.0,
+                    ..VisualTransform::default()
+                },
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let shape_center = visual_canvas_world_point(&dialog, ScenePoint { x: 170.0, y: 85.0 });
+        for pressed in [true, false] {
+            let modifiers = egui::Modifiers::SHIFT;
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(shape_center),
+                    egui::Event::PointerButton {
+                        pos: shape_center,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers,
+                    },
+                ],
+            );
+        }
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)],
+        );
+        assert!(
+            dialog
+                .visual_selected_objects
+                .contains(&crate::diagram::TITLE_OBJECT_ID)
+        );
+        assert!(dialog.visual_selected_objects.contains(&shape_id));
+        let before_title_x = dialog.documents.visual_scene().unwrap().objects[0]
+            .transform
+            .x;
+        let before_shape_x = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == shape_id)
+            .unwrap()
+            .transform
+            .x;
+        let revision = dialog.documents.visual_revision().unwrap();
+        let end = shape_center + egui::vec2(30.0, 12.0);
+        drag_visual_canvas(&mut dialog, &ctx, shape_center, end);
+
+        let scene = dialog.documents.visual_scene().unwrap();
+        let after_title_x = scene.objects[0].transform.x;
+        let after_shape_x = scene
+            .objects
+            .iter()
+            .find(|object| object.id == shape_id)
+            .unwrap()
+            .transform
+            .x;
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        assert!((after_title_x - before_title_x - after_shape_x + before_shape_x).abs() < 1e-9);
+        assert!(after_shape_x > before_shape_x);
+        assert_eq!(dialog.visual_selected_objects.len(), 2);
+    }
+
+    #[test]
+    fn diagram_studio_visual_canvas_created_object_becomes_only_primary_selection() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        click_action(&mut dialog, &ctx, "visual_add_shape");
+
+        let created = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .map(|object| object.id)
+            .find(|id| *id != crate::diagram::TITLE_OBJECT_ID)
+            .unwrap();
+        assert_eq!(dialog.visual_selection, Some(created));
+        assert_eq!(
+            dialog.visual_selected_objects,
+            [created].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn diagram_studio_visual_canvas_viewer_navigation_keeps_editor_camera_independent() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        open_viewer(&mut dialog, &ctx);
+        let editor_center = dialog.camera.center;
+        let editor_zoom = dialog.camera.zoom;
+        let viewer_zoom = dialog.viewer_camera.zoom;
+        let revision = dialog.documents.visual_revision().unwrap();
+        click_viewer_action(&mut dialog, &ctx, "visual_viewer_zoom_in");
+
+        assert!(dialog.viewer_camera.zoom > viewer_zoom);
+        assert_eq!(dialog.camera.center, editor_center);
+        assert_eq!(dialog.camera.zoom, editor_zoom);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+    }
+
     fn frame_with_retired_owner_generation(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
         super::super::render::with_immediate_viewport_renderer(ctx, || {
             let raw_input = egui::RawInput {
@@ -8008,6 +9284,60 @@ mod tests {
                 ],
             );
         }
+    }
+
+    fn click_viewer_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
+        frame(dialog, ctx);
+        let click = action_center(dialog, name);
+        for pressed in [true, false] {
+            frame_with_viewer_events(
+                dialog,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(click),
+                    egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    fn visual_canvas_world_point(dialog: &DiagramStudioDialog, world: ScenePoint) -> egui::Pos2 {
+        let canvas = dialog
+            .test_visual_canvas_rect
+            .expect("visual canvas was laid out in the current frame")
+            .shrink(12.0);
+        world_to_screen(world, canvas, dialog.camera)
+    }
+
+    fn drag_visual_canvas(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        start: egui::Pos2,
+        end: egui::Pos2,
+    ) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with_child_events(
+            dialog,
+            ctx,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        frame_with_child_events(dialog, ctx, vec![egui::Event::PointerMoved(end)]);
+        frame_with_child_events(
+            dialog,
+            ctx,
+            vec![egui::Event::PointerMoved(end), button(end, false)],
+        );
+        frame(dialog, ctx);
     }
 
     fn click_action_with_child_discard(
