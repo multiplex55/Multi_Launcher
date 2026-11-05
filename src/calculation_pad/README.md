@@ -131,9 +131,34 @@ r1 to cm
 ```
 
 The value keeps its physical unit and any approximation metadata. A scalar
-expression cannot use a physical quantity as a scalar, and the engine does not
-perform unit algebra. Incompatible units produce the catalog's conversion
-diagnostic.
+expression cannot use a physical quantity as a scalar.
+
+Linear quantities also support bounded dimensional arithmetic using units from
+that same catalog:
+
+```text
+10 m + 20 cm
+(2 m) * (3 m)
+(5 m) / (2 s)
+area = (2 m) * (3 m)
+area to cm^2
+```
+
+Addition and subtraction require matching dimensions. A quantity may be scaled
+by a scalar; multiplication and division combine dimensions; `^` accepts a
+small integer exponent. Compatible targets can be written with `to`, including
+compound units such as `km/h`; in a slash unit, a following power applies to
+the denominator (`m/s^2` means `m/s²`). Existing catalog categories such as energy,
+torque, angle, and data remain distinct when their dimensions might otherwise
+look alike. Linear catalog compounds such as `MB/s` may be used in expressions;
+nonlinear temperature and fuel-economy units remain conversion-only. Month and
+year approximation metadata is retained when units cancel or are raised to a
+power.
+
+Unit aliases are contextual: a name such as `m` can still be assigned and used
+as a variable in scalar expressions. Once a reference resolves to a physical
+quantity, arithmetic uses its dimensional value instead of converting it to a
+scalar.
 
 ## Exact integer bases
 

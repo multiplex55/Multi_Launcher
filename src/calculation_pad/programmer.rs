@@ -883,7 +883,9 @@ fn evaluate_as(
                     Err(ProgrammerError::Integer(IntegerError::ModeMismatch))
                 }
             }
-            Some(CalculationValue::Scalar(_)) | Some(CalculationValue::PhysicalQuantity { .. }) => {
+            Some(CalculationValue::Scalar(_))
+            | Some(CalculationValue::PhysicalQuantity { .. })
+            | Some(CalculationValue::DimensionalQuantity(_)) => {
                 Err(ProgrammerError::ExpectedInteger)
             }
             None if scalar_constant(name).is_some() => Err(ProgrammerError::ExpectedInteger),
@@ -1003,7 +1005,8 @@ fn evaluate_constructor(
                     .map_err(ProgrammerError::Integer);
             }
             Some(CalculationValue::Scalar(value)) => return scalar_to_integer(*value, target_mode),
-            Some(CalculationValue::PhysicalQuantity { .. }) => {
+            Some(CalculationValue::PhysicalQuantity { .. })
+            | Some(CalculationValue::DimensionalQuantity(_)) => {
                 return Err(ProgrammerError::ExpectedInteger);
             }
             None => {

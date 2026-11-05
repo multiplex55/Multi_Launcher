@@ -967,6 +967,15 @@ mod tests {
         }
     }
 
+    fn formatted(session: &mut CalculationPadSession, line_index: usize) -> String {
+        match &session.evaluation().unwrap().lines[line_index].outcome {
+            LineOutcome::Value(value) => value
+                .formatted_result()
+                .expect("numeric result should have a display form"),
+            other => panic!("expected a formatted result on line {line_index}, got {other:?}"),
+        }
+    }
+
     fn saved_path(session: &CalculationPadSession, id: DocumentId) -> PathBuf {
         session
             .store
@@ -1117,6 +1126,39 @@ mod tests {
         assert!(session.redo());
         assert_eq!(integer(&mut session, 1), edited);
         assert_eq!(session.line_ids().unwrap().to_vec(), ids);
+        assert_eq!(session.evaluation_count(), 4);
+    }
+
+    #[test]
+    fn dimensional_quantities_survive_session_cache_edit_undo_and_redo() {
+        let (_directory, _root, mut session) = fixture();
+        session
+            .replace_source("area = (2 m)*(3 m)\narea to cm^2")
+            .unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+
+        assert_eq!(formatted(&mut session, 0), "6 m²");
+        assert_eq!(formatted(&mut session, 1), "60000 cm²");
+        assert_eq!(session.evaluation_count(), 1);
+        assert_eq!(formatted(&mut session, 1), "60000 cm²");
+        assert_eq!(session.evaluation_count(), 1);
+
+        session.replace_line(ids[0], "area = (3 m)*(3 m)").unwrap();
+        assert_eq!(formatted(&mut session, 0), "9 m²");
+        assert_eq!(formatted(&mut session, 1), "90000 cm²");
+        assert_eq!(session.line_ids().unwrap(), ids);
+        assert_eq!(session.evaluation_count(), 2);
+
+        assert!(session.undo());
+        assert_eq!(formatted(&mut session, 0), "6 m²");
+        assert_eq!(formatted(&mut session, 1), "60000 cm²");
+        assert_eq!(session.line_ids().unwrap(), ids);
+        assert_eq!(session.evaluation_count(), 3);
+
+        assert!(session.redo());
+        assert_eq!(formatted(&mut session, 0), "9 m²");
+        assert_eq!(formatted(&mut session, 1), "90000 cm²");
+        assert_eq!(session.line_ids().unwrap(), ids);
         assert_eq!(session.evaluation_count(), 4);
     }
 
