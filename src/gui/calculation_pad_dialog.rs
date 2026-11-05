@@ -1288,7 +1288,7 @@ impl CalculationPadDialog {
             "One expression or name = expression per physical line; # starts a full-line comment.",
         );
         ui.label(
-            "Results are finite f64 scalars, physical quantities, or exact unsigned base values.",
+            "Results can be finite f64 scalars, exact fixed-width integers, dimensional quantities, or exact base conversions.",
         );
 
         ui.collapsing("Operator and function reference", |ui| {
@@ -1297,11 +1297,25 @@ impl CalculationPadDialog {
             ui.label("Functions: abs, signum, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, floor, round, ceil, trunc, fract, exp, sqrt, cbrt, ln, log, log2, log10, atan2, min, and max.");
             ui.label("Constants: PI, π, E, e, TAU, and τ. Trigonometric functions use radians.");
         });
+        ui.collapsing("Exact integer and bit operations", |ui| {
+            ui.label("Programmer operators, helpers, typed constructors, and exact-integer references select fixed-width integer arithmetic. Untyped programmer expressions default to u64; signed and unsigned widths from 8 to 128 bits are available.");
+            ui.label("Checked arithmetic includes +, -, *, ^, idiv, rem, and %. Bitwise operators are &, |, ~, and word aliases and/or/xor/not; shifts use << and >>. / remains scalar division and is unavailable in typed integer expressions.");
+            ui.label("Precedence (tight to loose): calls/grouping, ^, unary + - ~ not, * idiv rem %, + -, shifts, &/and, xor, |/or. Binary operators associate left except right-associative ^.");
+            ui.label("Left shifts discard bits above the width, signed right shifts extend the sign, and shift counts are 0 through width-1. Nonnegative rotl/rotr counts reduce modulo width; popcount, mask, and extract operate on exact bit patterns.");
+            ui.label("Integer overflow, division by zero, invalid shifts, and mixed modes are errors. Decimal and 0x/0o/0b integer tokens are parsed exactly; explicit constructors are required to convert scalar references safely.");
+        });
+        ui.collapsing("Dimensional unit arithmetic", |ui| {
+            ui.label("Catalog units support compatible sums and differences, scalar scaling, linear products and quotients, and small integer powers. Examples: 10 m + 20 cm, (2 m) * (3 m), and (5 m) / (2 s).");
+            ui.label("Targets use 'to', for example area = (2 m) * (3 m) followed by area to cm^2. Dimensions and month/year approximation metadata survive named and rN references and compatible conversions.");
+            ui.label("Addition and subtraction require matching dimensions; scalars can combine with dimensionless quantities but not dimensioned quantities. Nonlinear temperature and fuel-economy units remain conversion-only; semantic catalog categories such as energy/torque and angle/data stay distinct.");
+            ui.label("Quantity expressions are limited to 256 tokens, nesting depth 32, and unit powers from -8 through 8. The source expression limit is 2,048 bytes.");
+        });
         ui.collapsing("Names, lines, units, and limits", |ui| {
             ui.label("Use earlier assignments by name. Braced names may contain spaces and Unicode.");
             ui.label("rN refers to the one-based physical source line N; blank and comment lines count.");
-            ui.label("Unit conversions use the shared catalog. Quantities cannot be combined with scalar arithmetic.");
+            ui.label("Physical quantities retain their dimensions: addition and subtraction require matching dimensions, with scalars treated as dimensionless.");
             ui.label("0x, 0b, and 0o are scalar integer prefixes, accepted only through 2^53. Exact base conversion remains a separate u128 path.");
+            ui.label("Programmer integer literals are exact and are separate from scalar numeric literals.");
             ui.label("Finite f64 operands and intermediate results are required; source expressions are limited to 2,048 bytes, normalized expressions to 8 KiB, and nesting to 32 parentheses.");
             ui.label("Documents are limited to 64 KiB and 256 physical lines; names to 128 UTF-8 bytes; identifiers to 64 per line and 512 per document.");
         });

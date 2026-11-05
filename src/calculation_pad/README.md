@@ -148,12 +148,13 @@ Addition and subtraction require matching dimensions. A quantity may be scaled
 by a scalar; multiplication and division combine dimensions; `^` accepts a
 small integer exponent. Compatible targets can be written with `to`, including
 compound units such as `km/h`; in a slash unit, a following power applies to
-the denominator (`m/s^2` means `m/s²`). Existing catalog categories such as energy,
-torque, angle, and data remain distinct when their dimensions might otherwise
-look alike. Linear catalog compounds such as `MB/s` may be used in expressions;
-nonlinear temperature and fuel-economy units remain conversion-only. Month and
-year approximation metadata is retained when units cancel or are raised to a
-power.
+the denominator (`m/s^2` means `m/s²`). Existing catalog categories such as
+energy, torque, angle, and data remain distinct when their dimensions might
+otherwise look alike. Linear catalog compounds such as `MB/s` may be used in
+expressions; nonlinear temperature and fuel-economy units remain
+conversion-only. Month and year approximation metadata is retained when units
+cancel or are raised to a power. Unit and product powers are bounded to a
+magnitude of eight, and intermediate and displayed results must remain finite.
 
 Unit aliases are contextual: a name such as `m` can still be assigned and used
 as a variable in scalar expressions. Once a reference resolves to a physical
@@ -195,7 +196,8 @@ The evaluator checks these bounds before invoking expression or unit parsers:
 | Expression or conversion line | 2,048 UTF-8 bytes |
 | Normalized scalar expression | 8 KiB |
 | Parenthesis nesting | 32 levels |
-| Programmer expression tokens | 256 tokens |
+| Programmer or quantity expression tokens | 256 tokens |
+| Unit and product exponent magnitude | 8 |
 | Identifier occurrences per line | 64 |
 | Identifier occurrences per document | 512 |
 | Name | 128 UTF-8 bytes |

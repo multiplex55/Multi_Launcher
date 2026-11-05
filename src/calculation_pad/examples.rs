@@ -17,8 +17,19 @@ pub(crate) struct CalculationExampleGroup {
 #[derive(Clone, Copy, Debug)]
 enum ExampleExpectation {
     Scalar(f64),
-    Physical { value: f64, unit: Unit },
+    Physical {
+        value: f64,
+        unit: Unit,
+    },
     ExactBase(&'static str),
+    ExactInteger {
+        mode: &'static str,
+        value: &'static str,
+    },
+    Dimensional {
+        formatted_result: &'static str,
+        approximate: bool,
+    },
     ErrorContains(&'static str),
 }
 
@@ -156,6 +167,121 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
             },
         ],
     },
+    CalculationExampleGroup {
+        title: "Exact programmer arithmetic",
+        examples: &[
+            CalculationExample {
+                title: "Default unsigned shift",
+                source: "0xFF << 8",
+                explanation: "Programmer operators select exact u64 arithmetic when no typed value selects another width.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u64",
+                    value: "65280",
+                },
+            },
+            CalculationExample {
+                title: "Width-limited left shift",
+                source: "u8(255) << 1",
+                explanation: "The left shift keeps the low eight bits, so 510 becomes 254.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u8",
+                    value: "254",
+                },
+            },
+            CalculationExample {
+                title: "Signed right shift",
+                source: "i8(-1) >> 1",
+                explanation: "A signed right shift extends the sign bit.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "i8",
+                    value: "-1",
+                },
+            },
+            CalculationExample {
+                title: "Named and row references stay exact",
+                source: "wide = u64(9007199254740993)\nr1 + wide",
+                explanation: "The name and physical-row reference reuse the exact value above the f64 integer-precision limit.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u64",
+                    value: "18014398509481986",
+                },
+            },
+            CalculationExample {
+                title: "Checked integer quotient",
+                source: "u32(100) idiv 6",
+                explanation: "idiv divides exact integer operands and keeps the selected u32 mode.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u32",
+                    value: "16",
+                },
+            },
+            CalculationExample {
+                title: "Extract a bit field",
+                source: "extract(u8(0xb5), 2, 4)",
+                explanation: "The field begins at bit 2 and contains four bits; extraction returns u8.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u8",
+                    value: "13",
+                },
+            },
+            CalculationExample {
+                title: "Overflow is diagnosed",
+                source: "u8(255) + 1",
+                explanation: "Checked arithmetic reports overflow instead of wrapping.",
+                expected: ExampleExpectation::ErrorContains("integer arithmetic overflowed"),
+            },
+        ],
+    },
+    CalculationExampleGroup {
+        title: "Dimensional unit arithmetic",
+        examples: &[
+            CalculationExample {
+                title: "Add compatible lengths",
+                source: "10 m + 20 cm",
+                explanation: "Compatible length units combine and the result keeps its length unit.",
+                expected: ExampleExpectation::Dimensional {
+                    formatted_result: "10.2 m",
+                    approximate: false,
+                },
+            },
+            CalculationExample {
+                title: "Multiply lengths into area",
+                source: "(2 m) * (3 m)",
+                explanation: "Length multiplied by length produces an area result.",
+                expected: ExampleExpectation::Dimensional {
+                    formatted_result: "6 m²",
+                    approximate: false,
+                },
+            },
+            CalculationExample {
+                title: "Divide distance by duration",
+                source: "(5 m) / (2 s)",
+                explanation: "Length divided by duration produces a speed result.",
+                expected: ExampleExpectation::Dimensional {
+                    formatted_result: "2.5 m/s",
+                    approximate: false,
+                },
+            },
+            CalculationExample {
+                title: "Convert a named area",
+                source: "area = (2 m) * (3 m)\narea to cm^2",
+                explanation: "A compatible target converts the referenced area while retaining its dimension.",
+                expected: ExampleExpectation::Dimensional {
+                    formatted_result: "60000 cm²",
+                    approximate: false,
+                },
+            },
+            CalculationExample {
+                title: "Keep month approximation through cancellation",
+                source: "ratio = 1 month/month\nratio",
+                explanation: "The dimension cancels to a scalar display while the month approximation remains attached.",
+                expected: ExampleExpectation::Dimensional {
+                    formatted_result: "1",
+                    approximate: true,
+                },
+            },
+        ],
+    },
 ];
 
 pub(crate) const EXAMPLE_GROUPS: &[CalculationExampleGroup] = EXAMPLES;
@@ -207,6 +333,46 @@ mod tests {
                         assert_eq!(digits, expected, "{}", example.title);
                     }
                     (
+                        ExampleExpectation::ExactInteger {
+                            mode: expected_mode,
+                            value: expected_value,
+                        },
+                        LineOutcome::Value(CalculationValue::Integer(actual)),
+                    ) => {
+                        assert_eq!(
+                            actual.mode().type_name(),
+                            expected_mode,
+                            "{}",
+                            example.title
+                        );
+                        assert_eq!(
+                            actual.formatted_decimal(),
+                            expected_value,
+                            "{}",
+                            example.title
+                        );
+                    }
+                    (
+                        ExampleExpectation::Dimensional {
+                            formatted_result: expected_result,
+                            approximate: expected_approximation,
+                        },
+                        LineOutcome::Value(actual @ CalculationValue::DimensionalQuantity(_)),
+                    ) => {
+                        assert_eq!(
+                            actual.formatted_result().as_deref(),
+                            Some(expected_result),
+                            "{}",
+                            example.title
+                        );
+                        assert_eq!(
+                            actual.is_approximate(),
+                            expected_approximation,
+                            "{}",
+                            example.title
+                        );
+                    }
+                    (
                         ExampleExpectation::ErrorContains(expected),
                         LineOutcome::Error(diagnostic),
                     ) => {
@@ -224,6 +390,6 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 18);
+        assert_eq!(checked, 30);
     }
 }
