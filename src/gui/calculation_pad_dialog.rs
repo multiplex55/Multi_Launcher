@@ -1,3 +1,7 @@
+use super::utility_host::{
+    HostIdentity as PadHostIdentity, UtilityHostState, UtilityPresentation as PadHost,
+    ViewportPassProvenance,
+};
 use crate::calculation_pad::{
     CalculationPadSession, DocumentId, EXAMPLE_GROUPS, LineId, LineOutcome, PadDocumentSummary,
     PadRecoverySnapshot, PadRecoveryStore, PadRecoveryWriteFailure, PadRecoveryWriter,
@@ -30,12 +34,7 @@ pub(crate) struct CalculationPadDialog {
     remember_source: bool,
     recovery_attempted: bool,
     last_recovery_identity: Option<(DocumentId, u64)>,
-    host: PadHost,
-    host_generation: u64,
-    viewport_bootstrap_pending: bool,
-    focus_viewport_pending: bool,
-    embedded_root_layer: Option<egui::LayerId>,
-    embedded_root_focused_id: Option<egui::Id>,
+    host_state: UtilityHostState,
     deferred_source_focus: Option<(egui::ViewportId, egui::Id)>,
     open_chooser: bool,
     saved_documents: Vec<PadDocumentSummary>,
@@ -87,30 +86,10 @@ pub(crate) enum CalculationPadDialogEffect {
 }
 
 struct RootEffects {
-    frame_nr: u64,
-    pass_nr: u64,
+    pass: ViewportPassProvenance,
     root_effect: Option<CalculationPadDialogEffect>,
     close_examples_requested: bool,
     host: Option<HostEffects>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PadHost {
-    Docked,
-    Popout,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PadHostIdentity {
-    host: PadHost,
-    generation: u64,
-}
-
-#[derive(Clone, Copy)]
-struct ViewportPassProvenance {
-    viewport_id: egui::ViewportId,
-    frame_nr: u64,
-    pass_nr: u64,
 }
 
 struct HostEffects {
@@ -173,10 +152,7 @@ impl CalculationPadDialog {
     }
 
     fn host_identity(&self) -> PadHostIdentity {
-        PadHostIdentity {
-            host: self.host,
-            generation: self.host_generation,
-        }
+        self.host_state.identity()
     }
 
     fn empty_host_effects(&self, viewport_id: egui::ViewportId) -> HostEffects {
@@ -205,24 +181,26 @@ impl CalculationPadDialog {
         if !self.open {
             return None;
         }
-        match self.host {
+        match self.host_state.presentation() {
             PadHost::Docked => Some(Self::root_host_layer_id()),
-            PadHost::Popout => self.embedded_root_layer,
+            PadHost::Popout => self.host_state.embedded_root_layer(),
         }
     }
 
     pub(super) fn embedded_host_owns_root_input(&self, ctx: &egui::Context) -> bool {
-        if !self.open || self.host != PadHost::Popout || ctx.viewport_id() != egui::ViewportId::ROOT
+        if !self.open
+            || self.host_state.presentation() != PadHost::Popout
+            || ctx.viewport_id() != egui::ViewportId::ROOT
         {
             return false;
         }
-        let Some(focused_id) = self.embedded_root_focused_id else {
+        let Some(focused_id) = self.host_state.embedded_root_focused_id() else {
             return false;
         };
         let Some(response) = ctx.read_response(focused_id) else {
             return false;
         };
-        let Some(layer) = self.embedded_root_layer else {
+        let Some(layer) = self.host_state.embedded_root_layer() else {
             return false;
         };
         if response.layer_id != layer
@@ -257,12 +235,7 @@ impl CalculationPadDialog {
             remember_source: false,
             recovery_attempted: false,
             last_recovery_identity: None,
-            host: PadHost::Docked,
-            host_generation: 0,
-            viewport_bootstrap_pending: false,
-            focus_viewport_pending: false,
-            embedded_root_layer: None,
-            embedded_root_focused_id: None,
+            host_state: UtilityHostState::docked(),
             deferred_source_focus: None,
             open_chooser: false,
             saved_documents: Vec::new(),
@@ -332,27 +305,18 @@ impl CalculationPadDialog {
 
     fn request_source_focus(&mut self) {
         self.focus_source = true;
-        if self.host == PadHost::Popout {
-            self.focus_viewport_pending = true;
-        }
+        self.host_state.request_focus();
     }
 
     fn reset_host_to_docked(&mut self) {
-        if self.host != PadHost::Docked {
-            self.host_generation = self.host_generation.wrapping_add(1);
-        }
-        self.host = PadHost::Docked;
-        self.viewport_bootstrap_pending = false;
-        self.focus_viewport_pending = false;
-        self.embedded_root_layer = None;
-        self.embedded_root_focused_id = None;
+        self.host_state.retire_to_docked();
         self.deferred_source_focus = None;
     }
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
-        self.viewport_bootstrap_pending
+        self.host_state.bootstrap_pending()
             || self.examples_open
-            || (self.open && self.host == PadHost::Popout)
+            || (self.open && self.host_state.presentation() == PadHost::Popout)
     }
 
     fn ensure_session_open(&mut self) {
@@ -591,10 +555,9 @@ impl CalculationPadDialog {
             return;
         }
 
-        let frame_nr = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
-        let pass_nr = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+        let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let mut host_effects = None;
-        match self.host {
+        match self.host_state.presentation() {
             PadHost::Docked => {
                 let identity = self.host_identity();
                 let mut effects = self.empty_host_effects(egui::ViewportId::ROOT);
@@ -641,11 +604,7 @@ impl CalculationPadDialog {
                     && self.session.pending_transition().is_none()
                     && (self.host_close_requested || !window_open);
                 effects.pass_accepted = lifecycle_authorized;
-                effects.pass = lifecycle_authorized.then_some(ViewportPassProvenance {
-                    viewport_id: egui::ViewportId::ROOT,
-                    frame_nr,
-                    pass_nr,
-                });
+                effects.pass = lifecycle_authorized.then_some(root_pass);
                 if body_authorized || effects.close_requested {
                     host_effects = Some(effects);
                 }
@@ -702,13 +661,11 @@ impl CalculationPadDialog {
                                 || self.host_close_requested);
                         effects.pass_accepted =
                             pass_authorized && !ctx.will_discard() && !child.will_discard();
-                        effects.pass = effects.pass_accepted.then_some(ViewportPassProvenance {
-                            viewport_id,
-                            frame_nr: child.cumulative_frame_nr(),
-                            pass_nr: child.cumulative_pass_nr(),
-                        });
+                        effects.pass = effects
+                            .pass_accepted
+                            .then_some(ViewportPassProvenance::current(&child_ctx, viewport_id));
                         effects.focus_viewport = independent
-                            && self.focus_viewport_pending
+                            && self.host_state.focus_pending()
                             && pass_authorized
                             && application_input_allowed
                             && !modal_open;
@@ -760,7 +717,8 @@ impl CalculationPadDialog {
                                     } else if pointer_active {
                                         None
                                     } else {
-                                        self.embedded_root_focused_id
+                                        self.host_state
+                                            .embedded_root_focused_id()
                                             .filter(|id| focused_id == Some(*id))
                                     };
                             }
@@ -845,8 +803,7 @@ impl CalculationPadDialog {
         let has_root_frame_effect = root_effect.is_some() || close_examples_requested;
         if first_ui_pass && (has_host_frame || has_root_frame_effect || examples_authorized) {
             self.pending_root_effects = Some(RootEffects {
-                frame_nr,
-                pass_nr,
+                pass: root_pass,
                 root_effect,
                 close_examples_requested,
                 host: host_effects,
@@ -914,10 +871,7 @@ impl CalculationPadDialog {
         let Some(effects) = self.pending_root_effects.take() else {
             return Vec::new();
         };
-        let root_retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
-            == effects.frame_nr.saturating_add(1)
-            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
-                == effects.pass_nr.saturating_add(1);
+        let root_retained = effects.pass.was_retained(ctx);
         if !root_retained {
             if effects
                 .host
@@ -943,9 +897,9 @@ impl CalculationPadDialog {
         let host_pass_retained = host.pass_accepted
             && host.identity == self.host_identity()
             && self.open
-            && host.pass.is_some_and(|pass| {
-                pass.viewport_id == host.viewport_id && viewport_pass_completed(ctx, pass)
-            });
+            && host
+                .pass
+                .is_some_and(|pass| pass.viewport_id == host.viewport_id && pass.was_retained(ctx));
         if !host_pass_retained {
             if host.native_close_requested {
                 ctx.send_viewport_cmd_to(pad_viewport_id(), egui::ViewportCommand::CancelClose);
@@ -962,7 +916,7 @@ impl CalculationPadDialog {
             || host.result_copy.is_some()
             || host.close_requested
             || host.focus_viewport
-            || self.viewport_bootstrap_pending;
+            || self.host_state.bootstrap_pending();
         let host_request_requested = host.host_request.is_some();
         let accepted_source_or_history =
             host.edited_source.is_some() || host.editor_history_action.is_some();
@@ -1083,7 +1037,7 @@ impl CalculationPadDialog {
         }
 
         if host.source_focus_requested {
-            if self.host == host.identity.host && self.host_generation == host.identity.generation {
+            if self.host_state.identity() == host.identity {
                 if host.viewport_id == egui::ViewportId::ROOT {
                     if let Some(editor_id) = host.source_editor_id {
                         ctx.memory_mut(|memory| memory.request_focus(editor_id));
@@ -1097,18 +1051,17 @@ impl CalculationPadDialog {
             }
         }
 
-        if host.focus_viewport
-            && self.host == host.identity.host
-            && self.host_generation == host.identity.generation
-        {
+        if host.focus_viewport && self.host_state.identity() == host.identity {
             ctx.send_viewport_cmd_to(pad_viewport_id(), egui::ViewportCommand::Focus);
-            self.focus_viewport_pending = false;
+            self.host_state.complete_focus(host.identity);
         }
 
         if host.identity == self.host_identity() {
-            self.viewport_bootstrap_pending = false;
-            self.embedded_root_layer = host.embedded_root_layer;
-            self.embedded_root_focused_id = host.embedded_root_focused_id;
+            self.host_state.complete_bootstrap(
+                host.identity,
+                host.embedded_root_layer,
+                host.embedded_root_focused_id,
+            );
         }
 
         if let Some(copy) = host.result_copy.take()
@@ -1138,31 +1091,24 @@ impl CalculationPadDialog {
         if !self.open {
             self.recovery_attempted = false;
         }
-        if self.viewport_bootstrap_pending || host_request_requested {
+        if self.host_state.bootstrap_pending() || host_request_requested {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         delivered
     }
 
     fn apply_host_request(&mut self, ctx: &egui::Context, requested_host: PadHost) -> bool {
-        if self.host == requested_host {
+        if self.host_state.presentation() == requested_host {
             return false;
         }
-        self.host_generation = self.host_generation.wrapping_add(1);
-        self.host = requested_host;
-        self.embedded_root_layer = None;
-        self.embedded_root_focused_id = None;
+        self.host_state.transition(requested_host);
         self.deferred_source_focus = None;
         match requested_host {
             PadHost::Docked => {
-                self.viewport_bootstrap_pending = false;
-                self.focus_viewport_pending = false;
                 self.focus_source = true;
                 ctx.send_viewport_cmd_to(pad_viewport_id(), egui::ViewportCommand::Close);
             }
             PadHost::Popout => {
-                self.viewport_bootstrap_pending = true;
-                self.focus_viewport_pending = true;
                 self.focus_source = true;
             }
         }
@@ -1921,11 +1867,6 @@ fn copy_all_results(evaluation: &crate::calculation_pad::SessionEvaluation) -> S
     output
 }
 
-fn viewport_pass_completed(ctx: &egui::Context, pass: ViewportPassProvenance) -> bool {
-    ctx.cumulative_frame_nr_for(pass.viewport_id) == pass.frame_nr.saturating_add(1)
-        && ctx.cumulative_pass_nr_for(pass.viewport_id) == pass.pass_nr.saturating_add(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{CalculationPadDialog, CalculationPadDialogEffect, DialogIntent, copy_all_results};
@@ -1985,22 +1926,19 @@ mod tests {
         ctx: &egui::Context,
         mut host: super::HostEffects,
     ) -> Vec<CalculationPadDialogEffect> {
-        let root_frame_nr = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
-        let root_pass_nr = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+        let root_pass = super::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         host.pass = if host.pass_accepted {
-            Some(super::ViewportPassProvenance {
-                viewport_id: host.viewport_id,
-                frame_nr: ctx.cumulative_frame_nr_for(host.viewport_id),
-                pass_nr: ctx.cumulative_pass_nr_for(host.viewport_id),
-            })
+            Some(super::ViewportPassProvenance::current(
+                ctx,
+                host.viewport_id,
+            ))
         } else {
             None
         };
 
         let output = ctx.run_ui(input(egui::vec2(1200.0, 900.0), Vec::new()), |_| {});
         dialog.pending_root_effects = Some(super::RootEffects {
-            frame_nr: root_frame_nr,
-            pass_nr: root_pass_nr,
+            pass: root_pass,
             root_effect: None,
             close_examples_requested: false,
             host: Some(host),
@@ -2633,7 +2571,7 @@ mod tests {
         stale_dock.identity = retired_docked_identity;
         stale_dock.host_request = Some(super::PadHost::Docked);
         assert!(complete_host_effects(&mut dialog, &ctx, stale_dock).is_empty());
-        assert_eq!(dialog.host, super::PadHost::Popout);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Popout);
 
         let mut dock = dialog.empty_host_effects(egui::ViewportId::ROOT);
         dock.pass_accepted = true;
@@ -2642,7 +2580,7 @@ mod tests {
             complete_host_effects(&mut dialog, &ctx, dock),
             vec![CalculationPadDialogEffect::ShowRoot]
         );
-        assert_eq!(dialog.host, super::PadHost::Docked);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Docked);
 
         dialog.examples_open = false;
         let mut stale_examples = dialog.empty_host_effects(egui::ViewportId::ROOT);
@@ -2759,7 +2697,7 @@ mod tests {
             .test_host_button_rect
             .expect("the docked host offers Pop out");
         click(&mut dialog, &ctx, initial_size, popout_button.center());
-        assert_eq!(dialog.host, super::PadHost::Popout);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Popout);
         assert!(dialog.needs_root_ui_when_hidden());
 
         for _ in 0..3 {
@@ -2769,8 +2707,8 @@ mod tests {
             dialog.test_callback_viewport_id,
             Some(egui::ViewportId::ROOT)
         );
-        assert!(dialog.embedded_root_layer.is_some());
-        assert!(!dialog.viewport_bootstrap_pending);
+        assert!(dialog.host_state.embedded_root_layer().is_some());
+        assert!(!dialog.host_state.bootstrap_pending());
         assert!(dialog.needs_root_ui_when_hidden());
         let dock_button = dialog
             .test_host_button_rect
@@ -2779,7 +2717,7 @@ mod tests {
             click(&mut dialog, &ctx, initial_size, dock_button.center()),
             Some(CalculationPadDialogEffect::ShowRoot)
         );
-        assert_eq!(dialog.host, super::PadHost::Docked);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Docked);
         assert!(!dialog.needs_root_ui_when_hidden());
 
         for _ in 0..2 {
@@ -2816,7 +2754,7 @@ mod tests {
             .test_host_button_rect
             .expect("the docked pad offers a popout action");
         click(&mut dialog, &ctx, size, popout_button.center());
-        assert_eq!(dialog.host, super::PadHost::Popout);
+        assert_eq!(dialog.host_state.presentation(), super::PadHost::Popout);
         for _ in 0..3 {
             immediate_viewport_frame(&mut dialog, &ctx, Vec::new());
         }
@@ -2824,7 +2762,7 @@ mod tests {
             dialog.test_callback_viewport_id,
             Some(super::pad_viewport_id())
         );
-        assert!(!dialog.viewport_bootstrap_pending);
+        assert!(!dialog.host_state.bootstrap_pending());
         assert!(dialog.needs_root_ui_when_hidden());
         let editor_id = dialog
             .test_editor_id
@@ -3114,21 +3052,15 @@ mod tests {
 
         let ctx = egui::Context::default();
         let size = egui::vec2(960.0, 720.0);
-        let frame_nr = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
-        let pass_nr = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+        let pass = super::ViewportPassProvenance::current(&ctx, egui::ViewportId::ROOT);
         let mut host_effects = dialog.empty_host_effects(egui::ViewportId::ROOT);
-        host_effects.pass = Some(super::ViewportPassProvenance {
-            viewport_id: egui::ViewportId::ROOT,
-            frame_nr,
-            pass_nr,
-        });
+        host_effects.pass = Some(pass);
         host_effects.pass_accepted = true;
         host_effects.edited_source = Some("x".repeat(MAX_DOCUMENT_BYTES + 1));
         host_effects.intent = Some(DialogIntent::Save);
         host_effects.close_requested = true;
         dialog.pending_root_effects = Some(super::RootEffects {
-            frame_nr,
-            pass_nr,
+            pass,
             root_effect: None,
             close_examples_requested: false,
             host: Some(host_effects),

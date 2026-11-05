@@ -1,5 +1,6 @@
 #[cfg(windows)]
 use super::native_keyboard::reserve_windows_system_menu_alt_space;
+use super::utility_host::ViewportPassProvenance;
 use crate::diagram::{
     DiagramDocument, DiagramDocumentController, DiagramDocumentError, DiagramExportFormat,
     DiagramImageSnapshot, DiagramRenderOutput, DiagramRenderedImageSnapshot, DiagramScene,
@@ -499,16 +500,8 @@ struct DrawBodyEffects {
     active_menu_scope: Option<MenuFocusScope>,
 }
 
-#[derive(Clone, Copy)]
-struct ViewportPassProvenance {
-    viewport_id: egui::ViewportId,
-    frame_nr: u64,
-    pass_nr: u64,
-}
-
 struct PendingRootEffects {
-    root_frame_nr: u64,
-    root_pass_nr: u64,
+    root_pass: ViewportPassProvenance,
     owner_generation: u64,
     owner_viewport_id: egui::ViewportId,
     owner_pass: Option<ViewportPassProvenance>,
@@ -531,8 +524,7 @@ struct PendingRootEffects {
 }
 
 struct PendingViewerEffects {
-    root_frame_nr: u64,
-    root_pass_nr: u64,
+    root_pass: ViewportPassProvenance,
     owner_generation: u64,
     viewer_generation: u64,
     callback_viewport_id: egui::ViewportId,
@@ -1297,8 +1289,7 @@ impl DiagramStudioDialog {
             let viewport_callback_observed = child_viewport_id.is_some();
             let owner_effects_accepted = child_pass_accepted && !ctx.will_discard();
             self.pending_root_effects = Some(PendingRootEffects {
-                root_frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
-                root_pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
                 owner_generation,
                 owner_viewport_id,
                 owner_pass,
@@ -1498,8 +1489,7 @@ impl DiagramStudioDialog {
         if first_ui_pass {
             self.pending_viewer_effects =
                 callback_viewport_id.map(|callback_viewport_id| PendingViewerEffects {
-                    root_frame_nr: ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT),
-                    root_pass_nr: ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT),
+                    root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
                     owner_generation,
                     viewer_generation,
                     callback_viewport_id,
@@ -1728,10 +1718,7 @@ impl DiagramStudioDialog {
             }
             return false;
         };
-        let retained_pass = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
-            == effects.root_frame_nr.saturating_add(1)
-            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
-                == effects.root_pass_nr.saturating_add(1);
+        let retained_pass = effects.root_pass.was_retained(ctx);
         if !retained_pass {
             if effects.os_close_requested {
                 ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::CancelClose);
@@ -1817,7 +1804,7 @@ impl DiagramStudioDialog {
                 Some(pass) => {
                     effects.owner_viewport_id == pass.viewport_id
                         && pass.viewport_id == viewport_id()
-                        && viewport_pass_completed(ctx, pass)
+                        && pass.was_retained(ctx)
                 }
                 None => effects.owner_viewport_id == egui::ViewportId::ROOT,
             });
@@ -1839,12 +1826,11 @@ impl DiagramStudioDialog {
         if owner_closed_viewer {
             ctx.send_viewport_cmd_to(viewer_viewport_id(), egui::ViewportCommand::Close);
         } else if let Some(viewer_effects) = viewer_effects {
-            let same_root_pass = viewer_effects.root_frame_nr == effects.root_frame_nr
-                && viewer_effects.root_pass_nr == effects.root_pass_nr;
+            let same_root_pass = viewer_effects.root_pass == effects.root_pass;
             let viewer_pass_current = if viewer_effects.callback_viewport_id == viewer_viewport_id()
             {
                 viewer_effects.callback_pass.is_some_and(|pass| {
-                    pass.viewport_id == viewer_viewport_id() && viewport_pass_completed(ctx, pass)
+                    pass.viewport_id == viewer_viewport_id() && pass.was_retained(ctx)
                 })
             } else {
                 viewer_effects.callback_viewport_id == egui::ViewportId::ROOT
@@ -4584,11 +4570,6 @@ fn canvas_scope_builder() -> egui::UiBuilder {
     egui::UiBuilder::new()
         .id(egui::Id::new("diagram-studio-canvas-scope"))
         .layout(egui::Layout::top_down(egui::Align::Min))
-}
-
-fn viewport_pass_completed(ctx: &egui::Context, pass: ViewportPassProvenance) -> bool {
-    ctx.cumulative_frame_nr_for(pass.viewport_id) == pass.frame_nr.saturating_add(1)
-        && ctx.cumulative_pass_nr_for(pass.viewport_id) == pass.pass_nr.saturating_add(1)
 }
 
 fn viewer_canvas_scope_builder() -> egui::UiBuilder {

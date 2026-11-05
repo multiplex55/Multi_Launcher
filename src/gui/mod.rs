@@ -115,6 +115,7 @@ pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod utility_dialog_size;
+mod utility_host;
 pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
