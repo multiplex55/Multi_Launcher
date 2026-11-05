@@ -41,11 +41,17 @@ pub use visual::{
     VisualTransactionOutcome, VisualTransform,
 };
 pub use visual_canvas::{
-    CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping, VisualTransformMode,
-    hit_test as visual_canvas_hit_test, marquee_selection as visual_canvas_marquee_selection,
+    CanvasAnchor, CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit,
+    CanvasMapping, CanvasMinimap, SnappedTranslation, VISUAL_GUIDE_TOLERANCE_SCREEN_POINTS,
+    VISUAL_LAYOUT_GRID_SPACING, VisualAlign, VisualDistribution, VisualTransformMode,
+    align_selection as visual_canvas_align_selection,
+    distribute_selection as visual_canvas_distribute_selection, hit_test as visual_canvas_hit_test,
+    marquee_selection as visual_canvas_marquee_selection,
+    minimap_layout as visual_canvas_minimap_layout,
     preview_transforms as preview_visual_transforms,
     selection_bounds as visual_canvas_selection_bounds,
     selection_handles as visual_canvas_selection_handles,
+    snap_translation_delta as visual_canvas_snap_translation_delta,
 };
 pub use visual_scene::{
     MAX_VISUAL_DASH_SEGMENTS_PER_ITEM, MAX_VISUAL_DASH_SEGMENTS_PER_SCENE,
