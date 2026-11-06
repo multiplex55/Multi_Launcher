@@ -2134,7 +2134,7 @@ impl LauncherApp {
             Panel::ScreenshotEditor => middle(egui::Id::new("Screenshot Editor")),
             Panel::TodoDialog => Some(crate::gui::jump_mode::ui::todo_dialog_layer_id()),
             Panel::TodoViewDialog => middle(egui::Id::new(Some("View Todos"))),
-            Panel::ClipboardDialog => NavigationDialogKind::ClipboardHistory.layer_id(),
+            Panel::ClipboardDialog => self.clipboard_history_host.root_layer(),
             Panel::ClipboardModifyDialog => middle(egui::Id::new("clipboard_modify_dialog_window")),
             Panel::JsonUtilityDialog => NavigationDialogKind::JsonUtility.layer_id(),
             Panel::ZipExtractorDialog => NavigationDialogKind::ZipExtractor.layer_id(),
@@ -4373,6 +4373,7 @@ impl LauncherApp {
         self.poll_crop_screenshot(ctx);
         self.poll_screen_draw_region_picker(ctx);
         self.xml_toolkit_dialog.poll_closed_background(ctx);
+        self.clipboard_dialog.observe_clipboard_version();
         self.poll_batch_rename_runtime(ctx);
         self.poll_search_replace_runtime(ctx);
         self.poll_macro_launcher_query(ctx);
@@ -4833,7 +4834,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 22] {
+    fn viewport_bootstrap_state(&self) -> [bool; 23] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4855,6 +4856,7 @@ impl LauncherApp {
             self.diff_dialog.needs_root_ui_when_hidden(),
             self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open),
             self.search_replace_needs_root_ui_when_hidden(),
+            self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open),
             self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
             self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
@@ -4870,7 +4872,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 22],
+        previously_pending: [bool; 23],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5429,7 +5431,7 @@ impl LauncherApp {
             ctx,
             &mut self.batch_rename_dialog,
             &batch_rename_runtime,
-            super::file_operation_window_host::HostInput {
+            super::utility_window_host::HostInput {
                 first,
                 root_visible,
                 root_input,
@@ -5438,6 +5440,7 @@ impl LauncherApp {
                 parent_owner: batch_rename_native_owner,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !self.pinned_panels.contains(&super::Panel::BatchRenameDialog),
+                allow_os_close: true,
                 confirmation_owner: batch_rename_confirmation_native_owner,
                 parent_instance: batch_rename_parent_instance.unwrap_or_default(),
                 root_scopes: (batch_rename_scope.as_ref(), batch_rename_confirmation_scope.as_ref()),
@@ -5530,14 +5533,115 @@ impl LauncherApp {
         self.search_replace_host.configure_jump(&self.jump_mode_ui, jump_enabled);
         self.search_replace_host.show(
             ctx, &mut self.search_replace_dialog, &self.replace_worker_snapshot,
-            super::file_operation_window_host::HostInput {
+            super::utility_window_host::HostInput {
                 first, root_visible, root_input, native_input,
                 root_owner: search_replace_owner,
                 parent_owner: parent_input,
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !self.pinned_panels.contains(&super::Panel::SearchReplaceDialog),
+                allow_os_close: true,
                 confirmation_owner, parent_instance,
                 root_scopes: (search_replace_scope.as_ref(), search_replace_confirmation_scope.as_ref()),
+            },
+        );
+    }
+
+    fn show_clipboard_history_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let clipboard_owner = if root_visible {
+            self.resolve_jump_mode_navigation_owner(ctx, true)
+        } else {
+            NavigationOwner::Blocked
+        };
+        let clipboard_native_owner =
+            self.clipboard_history_native_ui_owner_current(ctx, root_visible);
+        let clipboard_scope = match clipboard_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
+                instance,
+            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("clipboard-history", instance),
+                    self.clipboard_dialog.jump_mode_target_generation(),
+                    "clipboard-history",
+                    ctx.viewport_id(),
+                    clipboard_owner,
+                    false,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval {
+                parent_instance,
+                confirmation_instance,
+            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => self
+                .clipboard_dialog
+                .jump_mode_pending_removal_identity()
+                .filter(|(current_confirmation, _)| *current_confirmation == confirmation_instance)
+                .and_then(|(_, entry_token)| {
+                    let generation = self.clipboard_dialog.jump_mode_target_generation();
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::popup(
+                            "clipboard-removal",
+                            confirmation_instance,
+                            crate::gui::jump_mode::SurfaceId::dialog(
+                                "clipboard-history",
+                                parent_instance,
+                            ),
+                        ),
+                        generation,
+                        format!(
+                            "clipboard-removal/{}/{}/{}",
+                            generation.0, confirmation_instance, entry_token
+                        ),
+                        ctx.viewport_id(),
+                        clipboard_owner,
+                        false,
+                    )
+                }),
+            _ => None,
+        };
+
+        let parent_instance = self.jump_mode_ui
+            .dialog_instance(NavigationDialogKind::ClipboardHistory)
+            .unwrap_or_default();
+        let confirmation_owner = if clipboard_native_owner && !egui::Popup::is_any_open(ctx) {
+            self.clipboard_dialog.jump_mode_pending_removal_identity().map_or(
+                NavigationOwner::Blocked,
+                |(confirmation_instance, _)| NavigationOwner::ClipboardRemoval {
+                    parent_instance,
+                    confirmation_instance,
+                },
+            )
+        } else {
+            NavigationOwner::Blocked
+        };
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        if !clipboard_native_owner
+            && let Some(layer) = self.clipboard_history_host.root_layer()
+            && let Some(focused) = ctx.memory(|memory| memory.focused())
+            && ctx.read_response(focused).is_some_and(|response| response.layer_id == layer)
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        let jump_enabled = self.jump_mode_enabled();
+        self.clipboard_history_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        let pinned = self.pinned_panels.contains(&super::Panel::ClipboardDialog);
+        let pending = self.clipboard_dialog.jump_mode_pending_removal_identity().is_some();
+        let scopes = if pending { (None, clipboard_scope.as_ref()) }
+            else { (clipboard_scope.as_ref(), None) };
+        self.clipboard_history_host.show(
+            ctx, &mut self.clipboard_dialog, &pinned,
+            super::utility_window_host::HostInput {
+                first, root_visible, root_input, native_input,
+                root_owner: clipboard_owner,
+                parent_owner: clipboard_native_owner && !pending,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned, allow_os_close: !pinned,
+                confirmation_owner, parent_instance, root_scopes: scopes,
             },
         );
     }
@@ -6913,17 +7017,20 @@ impl LauncherApp {
     }
 
     fn clipboard_history_native_ui_owner_current(
-        &self,
-        ctx: &egui::Context,
-        root_visible: bool,
+        &self, ctx: &egui::Context, root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
-
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+        let Some(layer) = self.clipboard_history_host.root_layer() else {
+            return false;
+        };
+        let popup = self.clipboard_dialog.owned_popup_layer(ctx, layer);
         self.clipboard_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && NavigationDialogKind::ClipboardHistory
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && (!egui::Popup::is_any_open(ctx) || popup.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background || Some(focus) == popup
+            })
     }
 
     pub(super) fn mouse_form_root_close_allowed(&self, ctx: &egui::Context, panel: super::Panel) -> bool {
@@ -7410,6 +7517,7 @@ impl LauncherApp {
                 .clipboard_dialog
                 .jump_mode_pending_removal_identity()
                 .is_some()
+                && self.clipboard_history_host.root_layer().is_some()
     }
 
     fn query_focus_mouse_session_has_keyboard_authority(
@@ -7557,7 +7665,7 @@ impl LauncherApp {
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
-                self.clipboard_dialog.open,
+                self.clipboard_dialog.open && self.clipboard_history_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
@@ -7678,7 +7786,12 @@ impl LauncherApp {
                     .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
                 dashboard_editor_layer: self.dashboard_editor.host_layer_if_root(),
                 file_search_layer: self.file_search_host.root_layer(),
-                file_operation_layers: [self.batch_rename_host.root_layer(), self.search_replace_host.root_layer()],
+                hosted_utility_layers: NavigationDialogKind::ALL.map(|kind| match kind {
+                    NavigationDialogKind::BatchRename => self.batch_rename_host.root_layer(),
+                    NavigationDialogKind::SearchReplace => self.search_replace_host.root_layer(),
+                    NavigationDialogKind::ClipboardHistory => self.clipboard_history_host.root_layer(),
+                    _ => None,
+                }),
                 mouse_form_layers: [
                     self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS),
                     self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS),
@@ -7698,6 +7811,8 @@ impl LauncherApp {
                         self.batch_rename_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::SearchReplace {
                         self.search_replace_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::ClipboardHistory {
+                        self.clipboard_history_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MouseSettings {
                         self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS).and(current)
                     } else if kind == NavigationDialogKind::MouseGestureSettings {
@@ -8381,6 +8496,7 @@ impl LauncherApp {
             self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_batch_rename_host(&ctx, first_ui_pass, false);
             self.show_search_replace_host(&ctx, first_ui_pass, false);
+            self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             if first_ui_pass {
                 self.run_background_after_menu();
@@ -9339,6 +9455,7 @@ impl LauncherApp {
                     && !self.diff_dialog.owns_root_input(&ctx)
                     && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
+                    && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -9421,6 +9538,7 @@ impl LauncherApp {
                     && !self.diff_dialog.owns_root_input(&ctx)
                     && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
+                    && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -10296,6 +10414,7 @@ impl LauncherApp {
             self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_batch_rename_host(&ctx, first_ui_pass, false);
             self.show_search_replace_host(&ctx, first_ui_pass, false);
+            self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
@@ -10832,91 +10951,7 @@ impl LauncherApp {
         let mut todo_view = std::mem::take(&mut self.todo_view_dialog);
         todo_view.ui(&ctx, self);
         self.todo_view_dialog = todo_view;
-        self.clipboard_dialog.observe_clipboard_version();
-        let clipboard_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let clipboard_native_owner =
-            self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let clipboard_scope = match clipboard_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory,
-                instance,
-            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("clipboard-history", instance),
-                    self.clipboard_dialog.jump_mode_target_generation(),
-                    "clipboard-history",
-                    ctx.viewport_id(),
-                    clipboard_owner,
-                    false,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval {
-                parent_instance,
-                confirmation_instance,
-            } if clipboard_native_owner && !egui::Popup::is_any_open(&ctx) => self
-                .clipboard_dialog
-                .jump_mode_pending_removal_identity()
-                .filter(|(current_confirmation, _)| *current_confirmation == confirmation_instance)
-                .and_then(|(_, entry_token)| {
-                    let generation = self.clipboard_dialog.jump_mode_target_generation();
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        crate::gui::jump_mode::SurfaceId::popup(
-                            "clipboard-removal",
-                            confirmation_instance,
-                            crate::gui::jump_mode::SurfaceId::dialog(
-                                "clipboard-history",
-                                parent_instance,
-                            ),
-                        ),
-                        generation,
-                        format!(
-                            "clipboard-removal/{}/{}/{}",
-                            generation.0, confirmation_instance, entry_token
-                        ),
-                        ctx.viewport_id(),
-                        clipboard_owner,
-                        false,
-                    )
-                }),
-            crate::gui::jump_mode::ui::NavigationOwner::Root
-            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-        };
-        if !clipboard_native_owner
-            && let Some(focused) = ctx.memory(|memory| memory.focused())
-            && ctx.read_response(focused).is_some_and(|response| {
-                Some(response.layer_id)
-                    == crate::gui::jump_mode::ui::NavigationDialogKind::ClipboardHistory.layer_id()
-            })
-        {
-            ctx.memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
-        cb_dlg.ui_with_jump_mode(
-            &ctx,
-            self,
-            clipboard_scope.as_ref(),
-            clipboard_native_owner,
-            first_ui_pass,
-        );
-        self.clipboard_dialog = cb_dlg;
+        self.show_clipboard_history_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         if self.clipboard_modify_dialog.open {
             let mut cm_dlg = std::mem::take(&mut self.clipboard_modify_dialog);
             let legacy_window_size =
@@ -11806,6 +11841,30 @@ impl LauncherApp {
         if !self.search_replace_host.has_deferred_close() {
             self.submit_ready_search_replace_confirmation();
         }
+        if let Some(completion) = self.clipboard_history_host.complete(ctx, &mut self.clipboard_dialog) {
+            use super::utility_window_host::ClipboardHostCommand;
+            for command in completion.commands {
+                match command {
+                    ClipboardHostCommand::Closed => self.close_clipboard_history_session(),
+                    ClipboardHostCommand::Apply(actions) => {
+                        let mut dialog = std::mem::take(&mut self.clipboard_dialog);
+                        let generation = dialog.jump_mode_target_generation();
+                        dialog.apply_host_effects(
+                            actions,
+                            self,
+                            completion.owner_viewport == egui::ViewportId::ROOT,
+                        );
+                        if dialog.jump_mode_target_generation() != generation {
+                            ctx.request_repaint_of(completion.owner_viewport);
+                        }
+                        self.clipboard_dialog = dialog;
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
         if self.diff_dialog.on_host_frame_complete(ctx) {
             effects.push(RootDialogEffect::ShowRoot);
         }
@@ -12189,6 +12248,7 @@ impl eframe::App for LauncherApp {
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open)
             || self.search_replace_needs_root_ui_when_hidden()
+            || self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open)
             || self
                 .recording_dialog
                 .needs_root_ui_when_hidden(&self.recording_controller)
@@ -12517,6 +12577,7 @@ thread_local! {
     static IMMEDIATE_VIEWPORT_TEST_DISCARD: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_SIZE: std::cell::Cell<Option<(egui::ViewportId, egui::Vec2)>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID: std::cell::RefCell<Option<(egui::ViewportId, Option<egui::Id>)>> = const { std::cell::RefCell::new(None) };
+    static IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -12625,6 +12686,15 @@ pub(super) fn with_immediate_viewport_renderer<R>(
                     *focused.borrow_mut() =
                         Some((viewport_id, ui.ctx().memory(|memory| memory.focused())));
                 });
+            });
+            IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| {
+                if target.get() == Some(viewport_id) {
+                    assert!(
+                        !output.platform_output.commands.iter()
+                            .any(|command| matches!(command, egui::OutputCommand::CopyText(_))),
+                        "hosted clipboard output must be staged before the native platform sees it",
+                    );
+                }
             });
             output.drop_without_applying_deltas();
             assert_eq!(ctx.viewport_id(), parent_id);
@@ -36797,6 +36867,176 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clipboard_history_detached_save_and_copy_require_retained_passes() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let original = "clipboard fixture λ";
+        prepare_actual_clipboard_history_dialog(&ctx, &mut app, &[original]);
+        let fake =
+            Arc::new(crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::default());
+        app.clipboard_dialog.set_test_clipboard_backend(fake.clone());
+        let root_frame = |app: &mut LauncherApp, events, discard| {
+            run_tool_dialog_frame(&ctx, app, events, discard).drop_without_applying_deltas();
+        };
+        let edit = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Edit clipboard entry").unwrap().rect();
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(edit, pressed), false);
+        }
+        assert!(app.clipboard_dialog.test_is_editing());
+        root_frame(&mut app, Vec::new(), false);
+        let widget = app.clipboard_dialog.test_edit_text_widget_id().unwrap();
+        let mut state = egui::text_edit::TextEditState::load(&ctx, widget).unwrap();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(original.chars().count()),
+        )));
+        state.store(&ctx, widget);
+        ctx.memory_mut(|memory| memory.request_focus(widget));
+        root_frame(&mut app, vec![egui::Event::Text(" edited".into())], false);
+        let draft = app.clipboard_dialog.test_text().to_owned();
+        assert_eq!(draft, format!("{original} edited"));
+        let session = app.clipboard_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.clipboard_history_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(popout, pressed), false);
+        }
+        assert!(app.clipboard_history_host.root_layer().is_none());
+        root_frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::ClipboardHistoryWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| {
+                    target.set(Some(viewport));
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                        .0.drop_without_applying_deltas();
+                    target.set(None);
+                });
+            });
+        };
+        for _ in 0..4 {
+            detached(&mut app, Vec::new(), false);
+        }
+        assert_eq!(app.clipboard_dialog.test_text(), draft);
+        let text = app.clipboard_history_host.test_native_target("Clipboard text").unwrap();
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(text, pressed), false);
+        }
+        detached(
+            &mut app,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+        );
+        detached(&mut app, vec![egui::Event::Copy], false);
+        assert_eq!(fake.writes(), [draft.clone()]);
+        detached(&mut app, vec![egui::Event::Cut], true);
+        assert_eq!(app.clipboard_dialog.test_text(), draft);
+        assert_eq!(fake.writes(), [draft.clone()]);
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let history = crate::plugins::clipboard::CLIPBOARD_FILE;
+        let original_bytes = std::fs::read(history).unwrap();
+        let save = app.clipboard_history_host.test_native_target("Save clipboard entry").unwrap();
+        detached(&mut app, tool_dialog_pointer_events(save, true), false);
+        detached(&mut app, tool_dialog_pointer_events(save, false), true);
+        assert_eq!(std::fs::read(history).unwrap(), original_bytes);
+        assert_eq!(app.clipboard_dialog.test_text(), draft);
+        assert!(app.clipboard_dialog.test_is_editing());
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let save = app.clipboard_history_host.test_native_target("Save clipboard entry").unwrap();
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(save, pressed), false);
+        }
+        assert!(!app.clipboard_dialog.test_is_editing());
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            crate::plugins::clipboard::load_history(history).unwrap().front(),
+            Some(&draft),
+        );
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let copy = app.clipboard_history_host.test_native_target("Copy clipboard entry").unwrap();
+        detached(&mut app, tool_dialog_pointer_events(copy, true), false);
+        detached(&mut app, tool_dialog_pointer_events(copy, false), true);
+        assert_eq!(fake.writes(), [draft.clone()]);
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let copy = app.clipboard_history_host.test_native_target("Copy clipboard entry").unwrap();
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(copy, pressed), false);
+        }
+        assert_eq!(fake.writes(), [draft.clone(), draft]);
+        let anchor = app.clipboard_history_host.test_native_target("Clipboard entry").unwrap().center();
+        for pressed in [true, false] {
+            detached(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(anchor),
+                    egui::Event::PointerButton {
+                        pos: anchor,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+            );
+        }
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let (remove, enabled) = app.clipboard_dialog.test_menu_remove_button.expect("row context menu");
+        assert!(enabled);
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(remove, pressed), false);
+        }
+        let removal = app.clipboard_dialog.jump_mode_pending_removal_identity().unwrap();
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        assert!(
+            app.clipboard_history_host
+                .test_native_target("Confirm clipboard entry removal").is_some()
+        );
+        assert!(app.clipboard_history_host.test_native_target("Copy clipboard entry").is_none());
+        let (dock, clip, enabled) = app.clipboard_history_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.clipboard_history_host.root_layer().is_some());
+        assert_eq!(app.clipboard_dialog.host_session_epoch(), session);
+        assert_eq!(app.clipboard_dialog.jump_mode_pending_removal_identity(), Some(removal));
+        for _ in 0..3 {
+            root_frame(&mut app, Vec::new(), false);
+        }
+        let cancel = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Cancel clipboard entry removal")
+            .unwrap().rect();
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(cancel, pressed), false);
+        }
+        assert!(app.clipboard_dialog.jump_mode_pending_removal_identity().is_none());
+        assert_eq!(crate::plugins::clipboard::load_history(history).unwrap().len(), 1);
+    }
+
     fn clipboard_target_ids(
         app: &LauncherApp,
         label: &str,
@@ -44379,7 +44619,7 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    file_operation_layers: [None; 2],
+                    hosted_utility_layers: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 },
             ),
@@ -44528,7 +44768,7 @@ mod tests {
             false,
         );
         assert!(!app.visible_flag.load(Ordering::Relaxed));
-        let viewport = crate::gui::file_operation_window_host::BatchRenameWindowHost::test_viewport(session);
+        let viewport = crate::gui::utility_window_host::BatchRenameWindowHost::test_viewport(session);
         let detached_frame = |app: &mut LauncherApp, events| {
             super::with_immediate_viewport_test_events_for(viewport, events, || {
                 let output = app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0;
@@ -44583,7 +44823,7 @@ mod tests {
         );
         assert!(!app.visible_flag.load(Ordering::Relaxed));
 
-        let viewport = crate::gui::file_operation_window_host::BatchRenameWindowHost::test_viewport(session);
+        let viewport = crate::gui::utility_window_host::BatchRenameWindowHost::test_viewport(session);
         let frame = |app: &mut LauncherApp, events, discard| {
             super::with_immediate_viewport_test_events_for(viewport, events, || {
                 app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
@@ -45486,7 +45726,7 @@ mod tests {
         );
         assert!(!app.visible_flag.load(Ordering::Relaxed));
 
-        let viewport = crate::gui::file_operation_window_host::SearchReplaceWindowHost::test_viewport(session);
+        let viewport = crate::gui::utility_window_host::SearchReplaceWindowHost::test_viewport(session);
         let frame = |app: &mut LauncherApp, events, discard| {
             super::with_immediate_viewport_test_events_for(viewport, events, || {
                 app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
@@ -46404,7 +46644,7 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    file_operation_layers: [None; 2],
+                    hosted_utility_layers: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
@@ -48973,7 +49213,7 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
-                    file_operation_layers: [None; 2],
+                    hosted_utility_layers: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),

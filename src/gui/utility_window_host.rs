@@ -1,6 +1,9 @@
 use eframe::egui;
 
 use super::batch_rename_dialog::{BatchRenameHostActions, BatchRenameInteractionCheckpoint};
+use super::clipboard_dialog::{
+    ClipboardDialogEffects, ClipboardHostActions, ClipboardInteractionCheckpoint,
+};
 use super::jump_mode::ui::{
     JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
     batch_rename_confirmation_layer_id,
@@ -15,11 +18,12 @@ use super::utility_host::{
 };
 use super::utility_window_geometry::NativeViewportIdentity;
 use super::{
-    BatchRenameDialogState, BatchRenameUiCommand, SearchReplaceDialogState, SearchReplaceUiCommand,
+    BatchRenameDialogState, BatchRenameUiCommand, ClipboardDialog, SearchReplaceDialogState,
+    SearchReplaceUiCommand,
 };
 use crate::file_operations::RenameRuntimeSnapshot;
 
-pub(super) trait FileOperationDialog: Sized {
+pub(super) trait HostedUtilityDialog: Sized {
     const KIND: NavigationDialogKind;
     const KEY: &'static str;
     const TITLE: &'static str;
@@ -29,18 +33,33 @@ pub(super) trait FileOperationDialog: Sized {
     type Runtime;
     type Actions;
     type Checkpoint;
-    type Command: PartialEq;
+    type Command;
 
     fn is_open(&self) -> bool;
     fn session(&self) -> u64;
+    fn target_generation(&self) -> TargetGeneration {
+        TargetGeneration(self.session())
+    }
     fn parent_targets_allowed(&self, runtime: &Self::Runtime) -> bool;
     fn parent_input_allowed(&self) -> bool;
+    fn confirmation_can_close() -> bool {
+        false
+    }
     fn popup_layer(&self, ctx: &egui::Context, parent: egui::LayerId) -> Option<egui::LayerId>;
     fn confirmation_binding(
         &self,
         viewport: egui::ViewportId,
         instance: u64,
     ) -> Option<NavigationViewportBinding>;
+    fn confirmation_scope(
+        &self,
+        jump: &JumpModeUi,
+        owner: NavigationOwner,
+        binding: NavigationViewportBinding,
+        parent: SurfaceId,
+    ) -> Option<JumpModeScope> {
+        file_confirmation_scope(jump, owner, binding, parent)
+    }
     fn capture(&self) -> Self::Checkpoint;
     fn restore(&mut self, checkpoint: Self::Checkpoint);
     fn render_host(
@@ -58,6 +77,7 @@ pub(super) trait FileOperationDialog: Sized {
     ) -> Self::Actions;
     fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation>;
     fn closed_command() -> Self::Command;
+    fn command_closes(command: &Self::Command) -> bool;
     fn complete_actions(
         &mut self,
         actions: Self::Actions,
@@ -67,27 +87,35 @@ pub(super) trait FileOperationDialog: Sized {
     fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)>;
 }
 
-pub(super) type BatchRenameWindowHost = FileOperationWindowHost<BatchRenameDialogState>;
-pub(super) type SearchReplaceWindowHost = FileOperationWindowHost<SearchReplaceDialogState>;
+pub(super) type BatchRenameWindowHost = UtilityWindowHost<BatchRenameDialogState>;
+pub(super) type SearchReplaceWindowHost = UtilityWindowHost<SearchReplaceDialogState>;
+pub(super) type ClipboardHistoryWindowHost = UtilityWindowHost<ClipboardDialog>;
 
-pub(super) struct FileOperationWindowHost<D: FileOperationDialog> {
+pub(super) enum ClipboardHostCommand {
+    Closed,
+    Apply(ClipboardDialogEffects),
+}
+
+pub(super) struct UtilityWindowHost<D: HostedUtilityDialog> {
     state: UtilityHostState,
     native_session: Option<u64>,
     pending: Option<HostFrame<D>>,
     deferred_close: Option<(u64, HostIdentity)>,
+    docked_focus_pending: bool,
     native_jump: JumpModeUi,
     native_jump_frame: Option<u64>,
     #[cfg(test)]
     pub(super) test_button: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
-impl<D: FileOperationDialog> Default for FileOperationWindowHost<D> {
+impl<D: HostedUtilityDialog> Default for UtilityWindowHost<D> {
     fn default() -> Self {
         Self {
             state: UtilityHostState::default(),
             native_session: None,
             pending: None,
             deferred_close: None,
+            docked_focus_pending: false,
             native_jump: JumpModeUi::default(),
             native_jump_frame: None,
             #[cfg(test)]
@@ -96,7 +124,7 @@ impl<D: FileOperationDialog> Default for FileOperationWindowHost<D> {
     }
 }
 
-struct HostFrame<D: FileOperationDialog> {
+struct HostFrame<D: HostedUtilityDialog> {
     root: ViewportPassProvenance,
     owner: ViewportPassProvenance,
     host: HostIdentity,
@@ -121,6 +149,7 @@ pub(super) struct HostInput<'a> {
     pub parent_owner: bool,
     pub root_jump_active: bool,
     pub close_shortcut: bool,
+    pub allow_os_close: bool,
     pub confirmation_owner: NavigationOwner,
     pub parent_instance: u64,
     pub root_scopes: (Option<&'a JumpModeScope>, Option<&'a JumpModeScope>),
@@ -129,11 +158,12 @@ pub(super) struct HostInput<'a> {
 pub(super) struct HostCompletion<C> {
     pub commands: Vec<C>,
     pub show_root: bool,
+    pub owner_viewport: egui::ViewportId,
 }
 
-impl<D: FileOperationDialog> FileOperationWindowHost<D> {
+impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     fn docked_layer() -> egui::LayerId {
-        D::KIND.layer_id().expect("file-operation layer")
+        D::KIND.layer_id().expect("utility window layer")
     }
 
     fn viewport(session: u64) -> egui::ViewportId {
@@ -147,7 +177,7 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
     fn geometry_identity(session: u64, host: HostIdentity) -> NativeViewportIdentity {
         NativeViewportIdentity {
             key: crate::settings::UtilityToolKey::parse(D::KEY)
-                .expect("file-operation geometry key"),
+                .expect("utility window geometry key"),
             viewport_id: Self::viewport(session),
             owner_generation: session,
             host_generation: host.generation,
@@ -184,7 +214,11 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
     }
 
     pub(super) fn request_focus(&mut self) {
-        self.state.request_focus();
+        if self.state.presentation() == UtilityPresentation::Docked {
+            self.docked_focus_pending = true;
+        } else {
+            self.state.request_focus();
+        }
     }
 
     pub(super) fn has_deferred_close(&self) -> bool {
@@ -201,6 +235,7 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
         self.close_viewport(ctx);
         self.pending = None;
         self.deferred_close = None;
+        self.docked_focus_pending = false;
         self.state.retire_to_docked();
         self.cancel_jump();
     }
@@ -245,6 +280,7 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
             }
             os_close |= previous.os_close;
         }
+        os_close &= input.allow_os_close;
         let popped_out = host.host == UtilityPresentation::Popout;
         if !input.root_visible && !popped_out {
             return;
@@ -267,12 +303,15 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
         };
         let root_close = first
             && input.close_shortcut
-            && input.parent_owner
+            && (input.parent_owner
+                || (D::confirmation_can_close()
+                    && input.confirmation_owner != NavigationOwner::Blocked))
             && !input.root_jump_active
             && !egui::Popup::is_any_open(ctx)
             && consume_close(ctx);
         if !popped_out {
             frame.close = root_close;
+            frame.focus = input.root_input && self.docked_focus_pending;
             draw(
                 ctx,
                 dialog,
@@ -310,7 +349,13 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
                 frame.actions = None;
                 if native {
                     let info = child.input(|input| input.viewport().clone());
-                    frame.os_close |= info.close_requested();
+                    if info.close_requested() {
+                        if input.allow_os_close {
+                            frame.os_close = true;
+                        } else {
+                            child_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                        }
+                    }
                     frame.native_info = Some(info);
                     frame.focus = self.state.focus_pending() && input.native_input;
                     self.draw_native(
@@ -406,20 +451,21 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
                 .then(|| {
                     self.native_jump.scope_for_viewport_binding(
                         surface.clone(),
-                        TargetGeneration(instance),
+                        dialog.target_generation(),
                         format!("{}/form", D::KEY),
                         binding,
                     )
                 })
                 .flatten();
         let child_scope = if jump_current {
-            confirmation_scope(&self.native_jump, owner, binding, surface)
+            dialog.confirmation_scope(&self.native_jump, owner, binding, surface)
         } else {
             None
         };
         if frame.first
             && close_shortcut
-            && parent_current
+            && (parent_current
+                || (D::confirmation_can_close() && confirmation_owner != NavigationOwner::Blocked))
             && !frame.os_close
             && self.native_jump.active_session().is_none()
             && !egui::Popup::is_any_open(ctx)
@@ -508,6 +554,7 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
             return Some(HostCompletion {
                 commands: vec![D::closed_command()],
                 show_root: false,
+                owner_viewport: frame.owner.viewport_id,
             });
         }
         self.state
@@ -534,6 +581,9 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
                 ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
             } else if let Some(layer) = frame.embedded_layer {
                 ctx.move_to_top(layer);
+            } else if frame.host.host == UtilityPresentation::Docked {
+                ctx.move_to_top(Self::docked_layer());
+                self.docked_focus_pending = false;
             }
             self.state.complete_focus(frame.host);
         }
@@ -545,7 +595,7 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
         let hwnd = None;
         let commands = dialog.complete_actions(actions, hwnd);
         let mut show_root = false;
-        if commands.contains(&D::closed_command()) {
+        if commands.iter().any(D::command_closes) {
             self.retire(ctx);
         } else if let Some(presentation) = presentation
             && presentation != frame.host.host
@@ -562,11 +612,12 @@ impl<D: FileOperationDialog> FileOperationWindowHost<D> {
         Some(HostCompletion {
             commands,
             show_root,
+            owner_viewport: frame.owner.viewport_id,
         })
     }
 }
 
-fn confirmation_scope(
+fn file_confirmation_scope(
     jump: &JumpModeUi,
     owner: NavigationOwner,
     binding: NavigationViewportBinding,
@@ -613,7 +664,7 @@ fn consume_close(ctx: &egui::Context) -> bool {
     })
 }
 
-fn draw<D: FileOperationDialog>(
+fn draw<D: HostedUtilityDialog>(
     ctx: &egui::Context,
     dialog: &mut D,
     runtime: &D::Runtime,
@@ -664,7 +715,7 @@ fn draw<D: FileOperationDialog>(
     ));
 }
 
-impl FileOperationDialog for BatchRenameDialogState {
+impl HostedUtilityDialog for BatchRenameDialogState {
     const KIND: NavigationDialogKind = NavigationDialogKind::BatchRename;
     const KEY: &'static str = "batch-rename";
     const TITLE: &'static str = "Batch Renamer";
@@ -756,6 +807,10 @@ impl FileOperationDialog for BatchRenameDialogState {
     fn closed_command() -> Self::Command {
         BatchRenameUiCommand::Closed
     }
+
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, BatchRenameUiCommand::Closed)
+    }
     fn complete_actions(
         &mut self,
         actions: Self::Actions,
@@ -769,7 +824,7 @@ impl FileOperationDialog for BatchRenameDialogState {
     }
 }
 
-impl FileOperationDialog for SearchReplaceDialogState {
+impl HostedUtilityDialog for SearchReplaceDialogState {
     const KIND: NavigationDialogKind = NavigationDialogKind::SearchReplace;
     const KEY: &'static str = "search-replace";
     const TITLE: &'static str = "Search and Replace";
@@ -871,12 +926,160 @@ impl FileOperationDialog for SearchReplaceDialogState {
         SearchReplaceUiCommand::Closed
     }
 
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, SearchReplaceUiCommand::Closed)
+    }
+
     fn complete_actions(
         &mut self,
         actions: Self::Actions,
         hwnd: Option<usize>,
     ) -> Vec<Self::Command> {
         self.complete_host_actions(actions, hwnd)
+    }
+
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
+}
+
+impl HostedUtilityDialog for ClipboardDialog {
+    const KIND: NavigationDialogKind = NavigationDialogKind::ClipboardHistory;
+    const KEY: &'static str = "clipboard-history";
+    const TITLE: &'static str = "Clipboard History";
+    const SIZE: egui::Vec2 = egui::vec2(360.0, 240.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(100.0, 100.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = bool;
+    type Actions = ClipboardHostActions;
+    type Checkpoint = ClipboardInteractionCheckpoint;
+    type Command = ClipboardHostCommand;
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+
+    fn session(&self) -> u64 {
+        self.host_session_epoch()
+    }
+
+    fn target_generation(&self) -> TargetGeneration {
+        self.jump_mode_target_generation()
+    }
+
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        self.parent_input_allowed()
+    }
+
+    fn parent_input_allowed(&self) -> bool {
+        self.jump_mode_pending_removal_identity().is_none()
+    }
+
+    fn confirmation_can_close() -> bool {
+        true
+    }
+
+    fn popup_layer(&self, ctx: &egui::Context, parent: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_popup_layer(ctx, parent)
+    }
+
+    fn confirmation_binding(
+        &self,
+        viewport: egui::ViewportId,
+        instance: u64,
+    ) -> Option<NavigationViewportBinding> {
+        let (confirmation_instance, _) = self.jump_mode_pending_removal_identity()?;
+        Some(NavigationViewportBinding {
+            viewport,
+            base_layer: Self::KIND.layer_id()?,
+            owner: NavigationOwner::ClipboardRemoval {
+                parent_instance: instance,
+                confirmation_instance,
+            },
+        })
+    }
+
+    fn confirmation_scope(
+        &self,
+        jump: &JumpModeUi,
+        owner: NavigationOwner,
+        binding: NavigationViewportBinding,
+        parent: SurfaceId,
+    ) -> Option<JumpModeScope> {
+        let (instance, entry_token) = self.jump_mode_pending_removal_identity()?;
+        if !matches!(owner, NavigationOwner::ClipboardRemoval { confirmation_instance, .. }
+            if confirmation_instance == instance)
+        {
+            return None;
+        }
+        let generation = self.jump_mode_target_generation();
+        jump.scope_for_viewport_binding(
+            SurfaceId::popup("clipboard-removal", instance, parent),
+            generation,
+            format!(
+                "clipboard-removal/{}/{instance}/{entry_token}",
+                generation.0
+            ),
+            binding,
+        )
+    }
+
+    fn capture(&self) -> Self::Checkpoint {
+        ClipboardInteractionCheckpoint::capture(self)
+    }
+
+    fn restore(&mut self, checkpoint: Self::Checkpoint) {
+        checkpoint.restore(self);
+    }
+
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent_input: bool,
+        child_owner: NavigationOwner,
+        first: bool,
+        instance: u64,
+        pinned: &bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        let child_is_current = self
+            .confirmation_binding(ctx.viewport_id(), instance)
+            .is_some_and(|binding| binding.owner == child_owner);
+        self.render_host(
+            ctx,
+            scopes.0.or(scopes.1),
+            parent_input || child_is_current,
+            first,
+            *pinned,
+            child_ui,
+            presentation,
+        )
+    }
+
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+
+    fn closed_command() -> Self::Command {
+        ClipboardHostCommand::Closed
+    }
+
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, ClipboardHostCommand::Closed)
+    }
+
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![ClipboardHostCommand::Closed]
+        } else if actions.effects.needs_completion() {
+            vec![ClipboardHostCommand::Apply(actions.effects)]
+        } else {
+            Vec::new()
+        }
     }
 
     #[cfg(test)]

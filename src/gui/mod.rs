@@ -5,7 +5,7 @@ mod add_action_dialog;
 mod add_bookmark_dialog;
 mod alias_dialog;
 mod batch_rename_dialog;
-mod file_operation_window_host;
+mod utility_window_host;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calculation_pad_dialog;
@@ -1251,10 +1251,10 @@ pub struct LauncherApp {
     pub diff_dialog: DiffDialogState,
     file_search_coordinator: SearchCoordinator,
     batch_rename_dialog: BatchRenameDialogState,
-    batch_rename_host: file_operation_window_host::BatchRenameWindowHost,
+    batch_rename_host: utility_window_host::BatchRenameWindowHost,
     batch_rename_coordinator: Option<crate::file_operations::RenameScanCoordinator>,
     search_replace_dialog: SearchReplaceDialogState,
-    search_replace_host: file_operation_window_host::SearchReplaceWindowHost,
+    search_replace_host: utility_window_host::SearchReplaceWindowHost,
     replace_search_coordinator: Option<crate::search_replace::SearchCoordinator>,
     replace_preview_worker: Option<ReplacementPreviewWorker>,
     replace_executor_worker: Option<crate::replace_executor::ReplaceExecutorWorker>,
@@ -1289,6 +1289,7 @@ pub struct LauncherApp {
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
+    clipboard_history_host: utility_window_host::ClipboardHistoryWindowHost,
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub json_utility_dialog: JsonUtilityDialogState,
@@ -3936,6 +3937,7 @@ impl LauncherApp {
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
+            clipboard_history_host: Default::default(),
             clipboard_modify_runtime,
             clipboard_modify_dialog: ClipboardModifyDialogState::default(),
             json_utility_dialog: JsonUtilityDialogState::default(),
@@ -4836,6 +4838,7 @@ impl LauncherApp {
         match panel {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
+            Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer().is_some(),
             Panel::SearchReplaceDialog => self.search_replace_host.root_layer().is_some(),
             Panel::MouseGesturesDialog => self.mouse_gestures_host
@@ -4896,12 +4899,19 @@ impl LauncherApp {
         self.screenshot_use_editor
     }
 
+    fn close_clipboard_history_session(&mut self) {
+        self.clipboard_history_host.retire(&self.egui_ctx);
+        self.clipboard_dialog.open = false;
+        self.panel_states.clipboard_dialog = false;
+        self.panel_stack.retain(|panel| *panel != Panel::ClipboardDialog);
+    }
+
     fn close_front_dialog_from_root_input(&mut self) -> bool {
         if !self.pin_list_open
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5166,8 +5176,7 @@ impl LauncherApp {
                 self.panel_states.todo_view_dialog = false;
             }
             Panel::ClipboardDialog => {
-                self.clipboard_dialog.open = false;
-                self.panel_states.clipboard_dialog = false;
+                self.close_clipboard_history_session();
             }
             Panel::ClipboardModifyDialog => {
                 self.clipboard_modify_dialog.open = false;
@@ -5482,8 +5491,7 @@ impl LauncherApp {
                 self.panel_states.todo_view_dialog = false;
             }
             Panel::ClipboardDialog => {
-                self.clipboard_dialog.open = false;
-                self.panel_states.clipboard_dialog = false;
+                self.close_clipboard_history_session();
             }
             Panel::ClipboardModifyDialog => {
                 self.clipboard_modify_dialog.open = false;
@@ -5789,6 +5797,9 @@ impl LauncherApp {
                 self.file_search_dialog.open();
             }
             self.file_search_host.request_focus();
+        } else if panel == Panel::ClipboardDialog {
+            self.clipboard_dialog.ensure_open();
+            self.clipboard_history_host.request_focus();
         } else if panel == Panel::BatchRenameDialog {
             self.batch_rename_dialog.open();
             self.batch_rename_host.request_focus();

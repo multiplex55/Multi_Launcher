@@ -433,6 +433,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::FileSearch
                     | NavigationDialogKind::BatchRename
                     | NavigationDialogKind::SearchReplace
+                    | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::ImageCompare
@@ -449,6 +450,7 @@ impl NavigationViewportBinding {
                 | NavigationOwner::XmlOverwriteConfirmation { .. }
                 | NavigationOwner::BatchRenameConfirmation { .. }
                 | NavigationOwner::SearchReplaceConfirmation { .. }
+                | NavigationOwner::ClipboardRemoval { .. }
                 | NavigationOwner::DashboardEditorConfirmation { .. }
                 | NavigationOwner::MouseGestureBinding { .. }
                 | NavigationOwner::MouseGestureDelete { .. }
@@ -462,7 +464,8 @@ impl NavigationViewportBinding {
             NavigationOwner::Dialog {
                 kind: kind @ (NavigationDialogKind::FileSearch
                     | NavigationDialogKind::BatchRename
-                    | NavigationDialogKind::SearchReplace),
+                    | NavigationDialogKind::SearchReplace
+                    | NavigationDialogKind::ClipboardHistory),
                 ..
             } => {
                 Some(self.base_layer) == kind.layer_id() && visible_layer == Some(self.base_layer)
@@ -474,6 +477,10 @@ impl NavigationViewportBinding {
             } => {
                 self.base_layer
                     == batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind)
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::ClipboardRemoval { .. } => {
+                Some(self.base_layer) == NavigationDialogKind::ClipboardHistory.layer_id()
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::SearchReplaceConfirmation { kind, .. } => {
@@ -1078,7 +1085,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
     pub(crate) mouse_form_layers: [Option<egui::LayerId>; 3],
     pub(crate) file_search_layer: Option<egui::LayerId>,
-    pub(crate) file_operation_layers: [Option<egui::LayerId>; 2],
+    pub(crate) hosted_utility_layers: [Option<egui::LayerId>; NavigationDialogKind::ALL.len()],
     pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
 }
 
@@ -1173,10 +1180,10 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             Some(NavigationDialogKind::DashboardEditor)
         } else if windows.file_search_layer == Some(layer) {
             Some(NavigationDialogKind::FileSearch)
-        } else if windows.file_operation_layers[0] == Some(layer) {
-            Some(NavigationDialogKind::BatchRename)
-        } else if windows.file_operation_layers[1] == Some(layer) {
-            Some(NavigationDialogKind::SearchReplace)
+        } else if let Some(kind) = NavigationDialogKind::ALL
+            .into_iter().find(|kind| windows.hosted_utility_layers[kind.index()] == Some(layer))
+        {
+            Some(kind)
         } else if windows.mouse_form_layers[0] == Some(layer) {
             Some(NavigationDialogKind::MouseSettings)
         } else if windows.mouse_form_layers[1] == Some(layer) {
@@ -4375,7 +4382,7 @@ mod tests {
             dashboard_editor_layer: None,
             mouse_form_layers: [None; 3],
             file_search_layer: None,
-            file_operation_layers: [None; 2],
+            hosted_utility_layers: [None; NavigationDialogKind::ALL.len()],
             dialogs: [None; NavigationDialogKind::ALL.len()],
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);

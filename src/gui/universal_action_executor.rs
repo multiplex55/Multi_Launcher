@@ -627,7 +627,8 @@ impl LauncherApp {
                 }
             },
             UniversalUiIntent::EditClipboardEntry { index } => {
-                self.clipboard_dialog.open_edit(index)
+                self.clipboard_dialog.open_edit(index);
+                self.clipboard_history_host.request_focus();
             }
             UniversalUiIntent::RemoveClipboardEntry { index, label } => {
                 match crate::plugins::clipboard::remove_entry(

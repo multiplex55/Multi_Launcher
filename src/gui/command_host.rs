@@ -435,7 +435,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_clipboard_dialog(&mut self) {
-        self.clipboard_dialog.open();
+        self.focus_panel(super::Panel::ClipboardDialog);
     }
 
     fn open_convert_dialog(&mut self) {
