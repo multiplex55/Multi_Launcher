@@ -24,6 +24,42 @@ const SETTINGS_NAVIGATION_OBSERVER_ID: &str = "settings_navigation_frame_observe
 const SETTINGS_NAVIGATION_HIGHLIGHT_DURATION: std::time::Duration =
     std::time::Duration::from_millis(1800);
 
+/// Effects from a visible Settings host pass. The launcher owns the host and
+/// publishes these only after that pass and its originating ROOT pass survive.
+#[derive(Clone, Default)]
+pub(crate) struct SettingsUiActions {
+    pub(crate) host_request: Option<bool>,
+    accept_actions: bool,
+    actions: Vec<SettingsHostAction>,
+    #[cfg(test)]
+    pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    cancel_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
+impl SettingsUiActions {
+    pub(crate) fn request_close(&mut self) {
+        self.actions.push(SettingsHostAction::Close);
+    }
+}
+
+#[derive(Clone)]
+enum SettingsHostAction {
+    Save,
+    Cancel,
+    Close,
+    Navigate(SettingsCatalogEntry, Option<u64>),
+    HotkeyDirectory,
+    RadialEditor(bool),
+    RestoreRadialSubmenus,
+    ThemeSettings,
+    DashboardEditor,
+    MouseGestureSettings,
+    ClipboardModify(ClipboardModifySettingsCommand),
+    ResetUtilitySize(UtilityToolKey),
+    RetryUtilitySize,
+}
+
 #[derive(Clone, Copy)]
 struct UtilitySizeChoice {
     key: &'static str,
@@ -1223,6 +1259,125 @@ pub(crate) fn settings_destination_owner_open(
 }
 
 impl SettingsEditor {
+    fn settings_action(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        action: SettingsHostAction,
+    ) {
+        if let Some(actions) = &mut self.hosted_actions {
+            if actions.accept_actions {
+                actions.actions.push(action);
+            }
+        } else {
+            self.complete_settings_action(ctx, app, action);
+        }
+    }
+
+    fn complete_settings_action(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        action: SettingsHostAction,
+    ) -> bool {
+        match action {
+            SettingsHostAction::Save => self.save_settings(ctx, app),
+            SettingsHostAction::Cancel => {
+                *self = Self::new_with_plugins(&self.baseline_settings);
+                app.show_settings = false;
+            }
+            SettingsHostAction::Close => {
+                self.clear_closed_settings_navigation();
+                app.show_settings = false;
+            }
+            SettingsHostAction::Navigate(entry, instance) => {
+                self.activate_settings_search_result(app, instance, entry);
+                return self
+                    .pending_settings_navigation
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.stage == SettingsNavigationStage::DedicatedOwner
+                            && settings_destination_owner_open(app, &pending.section)
+                    });
+            }
+            SettingsHostAction::HotkeyDirectory => {
+                app.request_hotkey_directory_open();
+                return true;
+            }
+            SettingsHostAction::RadialEditor(skins) => {
+                crate::commands::RadialCommandHost::open_radial_editor(app, skins);
+                return true;
+            }
+            SettingsHostAction::RestoreRadialSubmenus => {
+                app.request_radial_submenu_migration_restore()
+            }
+            SettingsHostAction::ThemeSettings => {
+                app.open_theme_settings_dialog();
+                return true;
+            }
+            SettingsHostAction::DashboardEditor => {
+                app.open_dashboard_editor();
+                return app.dashboard_editor.host_layer_if_root().is_some();
+            }
+            SettingsHostAction::MouseGestureSettings => {
+                app.open_mouse_gesture_settings_dialog();
+                return true;
+            }
+            SettingsHostAction::ClipboardModify(command) => match command {
+                ClipboardModifySettingsCommand::OpenDialog => {
+                    app.open_clipboard_modify_dialog();
+                    return true;
+                }
+                ClipboardModifySettingsCommand::OpenConfigFile => {
+                    app.open_clipboard_modify_config_file()
+                }
+                ClipboardModifySettingsCommand::ReloadConfig => {
+                    app.reload_clipboard_modify_config()
+                }
+                ClipboardModifySettingsCommand::ResetFactoryDefaults => {
+                    app.reset_clipboard_modify_config_to_factory_defaults()
+                }
+            },
+            SettingsHostAction::ResetUtilitySize(key) => {
+                let sizes =
+                    crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
+                if let Err(error) = sizes.reset(key) {
+                    app.report_error_message(
+                        "settings.utility_size",
+                        format!("Could not reset this window size: {error}"),
+                    );
+                } else {
+                    ctx.request_repaint();
+                    ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                }
+            }
+            SettingsHostAction::RetryUtilitySize => {
+                let sizes =
+                    crate::gui::utility_dialog_size::UtilityDialogSizeManager::for_context(ctx);
+                if let Err(error) = sizes.retry_failed(ctx) {
+                    app.report_error_message(
+                        "settings.utility_size",
+                        format!("Could not retry utility size save: {error}"),
+                    );
+                }
+            }
+        }
+        false
+    }
+
+    pub(crate) fn complete_host_actions(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        actions: SettingsUiActions,
+    ) -> bool {
+        let mut show_root = false;
+        for action in actions.actions {
+            show_root |= self.complete_settings_action(ctx, app, action);
+        }
+        show_root
+    }
+
     pub(crate) fn request_control_navigation(
         &mut self,
         control_id: &str,
@@ -1652,6 +1807,65 @@ impl SettingsEditor {
         jump_mode_active: bool,
         first_ui_pass: bool,
     ) {
+        self.ui_inner(
+            ctx,
+            app,
+            jump_mode_scope,
+            settings_owner_instance,
+            jump_mode_active,
+            first_ui_pass,
+            None,
+            true,
+            None,
+            None,
+        );
+    }
+
+    pub(crate) fn ui_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump_mode_scope: Option<JumpModeScope>,
+        settings_owner_instance: Option<u64>,
+        jump_mode_active: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        body_input_allowed: bool,
+        owner_input_allowed: bool,
+        is_popout: bool,
+    ) -> SettingsUiActions {
+        self.hosted_actions = Some(SettingsUiActions {
+            accept_actions: first_ui_pass && owner_input_allowed,
+            ..SettingsUiActions::default()
+        });
+        self.ui_inner(
+            ctx,
+            app,
+            jump_mode_scope,
+            settings_owner_instance,
+            jump_mode_active,
+            first_ui_pass,
+            child_ui,
+            body_input_allowed,
+            Some(owner_input_allowed),
+            Some(is_popout),
+        );
+        self.hosted_actions.take().unwrap_or_default()
+    }
+
+    fn ui_inner(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        jump_mode_scope: Option<JumpModeScope>,
+        settings_owner_instance: Option<u64>,
+        jump_mode_active: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        body_input_allowed: bool,
+        host_owner_allowed: Option<bool>,
+        host_presentation: Option<bool>,
+    ) {
         let now = ctx.input(|input| input.time);
         self.expire_settings_navigation_highlight(now);
         if let Some(highlight) = self.settings_navigation_highlight.as_ref() {
@@ -1722,7 +1936,8 @@ impl SettingsEditor {
                     &highlight.section,
                     SettingsSection::Main(_) | SettingsSection::Notes
                 ) && (settings_owner_instance != highlight.settings_instance
-                    || !app.settings_native_ui_owner_current(ctx, true))
+                    || !host_owner_allowed
+                        .unwrap_or_else(|| app.settings_native_ui_owner_current(ctx, true)))
             });
         if main_or_notes_highlight_lost_owner {
             self.settings_navigation_highlight = None;
@@ -1787,24 +2002,8 @@ impl SettingsEditor {
                     && pending.stage != SettingsNavigationStage::DedicatedOwner
             })
             .map(|pending| pending.section.clone());
-        egui::Window::new("Settings")
-            .resizable(true)
-            .default_size(Self::settings_window_default_size(ctx))
-            .min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT)
-            .show_utility(
-                ctx,
-                "settings",
-                egui::Id::new("Settings"),
-                Some(&mut open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from(Self::settings_window_default_size(ctx)),
-                    ),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT),
-                |ui| {
+        let mut draw_body = |ui: &mut egui::Ui| {
+            let mut contents = |ui: &mut egui::Ui| {
                     #[cfg(test)]
                     {
                         test_window_state =
@@ -1831,10 +2030,10 @@ impl SettingsEditor {
                                 && let Some(entry) = self.search_catalog.entry(&control_id).cloned()
                             {
                                 reveal_section = Some(entry.section.clone());
-                                self.activate_settings_search_result(
+                                self.settings_action(
+                                    ctx,
                                     app,
-                                    settings_owner_instance,
-                                    entry,
+                                    SettingsHostAction::Navigate(entry, settings_owner_instance),
                                 );
                             }
                             if let Some(observer) = jump_targets.navigation_observer.as_ref()
@@ -1990,9 +2189,14 @@ impl SettingsEditor {
                             TargetKind::Button,
                         );
                         if jump_targets.clicked(&save) {
-                            self.save_settings(ctx, app);
+                            self.settings_action(ctx, app, SettingsHostAction::Save);
                         }
                         let cancel_button = ui.add_enabled(!pending, egui::Button::new("Cancel"));
+                        #[cfg(test)]
+                        if let Some(actions) = &mut self.hosted_actions {
+                            actions.cancel_button =
+                                Some((cancel_button.rect, ui.clip_rect(), cancel_button.enabled()));
+                        }
                         jump_targets.register(
                             ui,
                             &cancel_button,
@@ -2003,14 +2207,70 @@ impl SettingsEditor {
                         if jump_targets.clicked(&cancel_button) {
                             cancel = true;
                         }
+                        if let Some(is_popout) = host_presentation {
+                            let label = if is_popout { "Dock" } else { "Pop Out" };
+                            let host_button = ui.button(label);
+                            #[cfg(test)]
+                            if let Some(actions) = &mut self.hosted_actions {
+                                actions.host_button =
+                                    Some((host_button.rect, ui.clip_rect(), host_button.enabled()));
+                            }
+                            if host_button.clicked() && first_ui_pass && !ctx.will_discard()
+                                && let Some(actions) = &mut self.hosted_actions
+                                && actions.accept_actions
+                            {
+                                actions.host_request = Some(!is_popout);
+                            }
+                        }
                         if app.settings_save_reconciliation_required() {
                             ui.label("Hotkey state needs reconciliation; saving is disabled.");
                         } else if pending {
                             ui.label("Saving settings…");
                         }
                     });
+
+            };
+            if body_input_allowed {
+                contents(ui);
+            } else {
+                ui.add_enabled_ui(false, contents);
+            }
+        };
+        if let Some(ui) = child_ui {
+            ui.scope_builder(
+                egui::UiBuilder::new().id(egui::Id::new("settings_host_body")),
+                |ui| draw_body(ui),
+            );
+        } else {
+            let window = egui::Window::new("Settings")
+                .resizable(true)
+                .default_size(Self::settings_window_default_size(ctx))
+                .min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT);
+            window.show_utility(
+                ctx,
+                "settings",
+                egui::Id::new("Settings"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        egui::Vec2::from(Self::settings_window_default_size(ctx)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT),
+                |ui| {
+                    if host_presentation.is_some() {
+                        ui.scope_builder(
+                            egui::UiBuilder::new().id(egui::Id::new("settings_host_body")),
+                            |ui| draw_body(ui),
+                        );
+                    } else {
+                        draw_body(ui);
+                    }
                 },
             );
+        }
         #[cfg(test)]
         let navigation_outcome = jump_targets
             .navigation_observer
@@ -2030,7 +2290,8 @@ impl SettingsEditor {
             .map(|pending| pending.control_id.clone());
         if let Some(observer) = jump_targets.navigation_observer.as_ref() {
             let owner_current = settings_owner_instance.is_some()
-                && app.settings_native_ui_owner_current(ctx, true);
+                && host_owner_allowed
+                    .unwrap_or_else(|| app.settings_native_ui_owner_current(ctx, true));
             let observer_request = observer.request();
             let observer_is_authoritative =
                 self.settings_navigation_observer_is_authoritative(observer);
@@ -2160,23 +2421,24 @@ impl SettingsEditor {
             }
         }
         if cancel {
-            *self = Self::new_with_plugins(&self.baseline_settings);
-            open = false;
+            self.settings_action(ctx, app, SettingsHostAction::Cancel);
+        } else if !open {
+            self.settings_action(ctx, app, SettingsHostAction::Close);
         }
-        if !open {
-            self.pending_settings_navigation = None;
-            self.settings_navigation_highlight = None;
-            self.settings_search_query.clear();
-            self.settings_search_match_query.clear();
-            self.settings_search_match_revision = None;
-            self.settings_search_match_ids.clear();
-            self.settings_search_selected_id = None;
-            self.settings_search_page = 0;
-            self.settings_search_response_owner_instance = None;
-            self.settings_search_query_response_id = None;
-            self.settings_search_result_response_ids.clear();
-        }
-        app.show_settings = open;
+    }
+
+    fn clear_closed_settings_navigation(&mut self) {
+        self.pending_settings_navigation = None;
+        self.settings_navigation_highlight = None;
+        self.settings_search_query.clear();
+        self.settings_search_match_query.clear();
+        self.settings_search_match_revision = None;
+        self.settings_search_match_ids.clear();
+        self.settings_search_selected_id = None;
+        self.settings_search_page = 0;
+        self.settings_search_response_owner_instance = None;
+        self.settings_search_query_response_id = None;
+        self.settings_search_result_response_ids.clear();
     }
 
     pub(crate) fn handle_search_escape_before_container_close(
@@ -3126,7 +3388,7 @@ impl SettingsEditor {
             "Search configured shortcuts, see reported status and conflicts, and open the current owning editor.",
         );
         if targets.clicked(&directory) {
-            app.request_hotkey_directory_open();
+            self.settings_action(ui.ctx(), app, SettingsHostAction::HotkeyDirectory);
         }
     }
 
@@ -3136,7 +3398,6 @@ impl SettingsEditor {
         app: &mut LauncherApp,
         targets: &mut SettingsJumpTargets,
     ) {
-        use crate::commands::RadialCommandHost;
         use crate::radial::model::{
             InteractionMode, RadialSafetyPolicy, SubmenuPresentation, TooltipScope, TriggerScope,
         };
@@ -3432,11 +3693,11 @@ impl SettingsEditor {
         ui.horizontal(|ui| {
             let edit_menus = targets.button(ui, setting_ids::RADIAL_EDIT_MENUS, "Edit menus...");
             if targets.clicked(&edit_menus) {
-                RadialCommandHost::open_radial_editor(app, false);
+                self.settings_action(ui.ctx(), app, SettingsHostAction::RadialEditor(false));
             }
             let edit_skins = targets.button(ui, setting_ids::RADIAL_EDIT_SKINS, "Edit skins...");
             if targets.clicked(&edit_skins) {
-                RadialCommandHost::open_radial_editor(app, true);
+                self.settings_action(ui.ctx(), app, SettingsHostAction::RadialEditor(true));
             }
         });
         if let Some(receipt) = app.radial_migration_receipt.as_ref() {
@@ -3452,7 +3713,11 @@ impl SettingsEditor {
                         "Restore previous submenu presentation",
                     );
                     if targets.clicked(&restore) {
-                        app.request_radial_submenu_migration_restore();
+                        self.settings_action(
+                            ui.ctx(),
+                            app,
+                            SettingsHostAction::RestoreRadialSubmenus,
+                        );
                     }
                 }
                 crate::settings::SubmenuMigrationState::Prepared
@@ -3882,7 +4147,7 @@ impl SettingsEditor {
             "Open Theme Settings...",
         );
         if targets.clicked(&theme_settings) {
-            app.open_theme_settings_dialog();
+            self.settings_action(ui.ctx(), app, SettingsHostAction::ThemeSettings);
         }
 
         ui.add_space(8.0);
@@ -4003,17 +4268,21 @@ impl SettingsEditor {
                 && !ui.is_sizing_pass()
                 && !ui.ctx().will_discard();
             if reset.clicked() && authorized_action {
-                match size_access.reset(key) {
-                    Ok(_) => {
-                        ui.ctx().request_repaint();
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(16));
-                    }
-                    Err(error) => {
-                        ui.colored_label(
-                            ui.visuals().error_fg_color,
-                            format!("Could not reset this window size: {error}"),
-                        );
+                if self.hosted_actions.is_some() {
+                    self.settings_action(ui.ctx(), app, SettingsHostAction::ResetUtilitySize(key));
+                } else {
+                    match size_access.reset(key) {
+                        Ok(_) => {
+                            ui.ctx().request_repaint();
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(16));
+                        }
+                        Err(error) => {
+                            ui.colored_label(
+                                ui.visuals().error_fg_color,
+                                format!("Could not reset this window size: {error}"),
+                            );
+                        }
                     }
                 }
             }
@@ -4027,14 +4296,15 @@ impl SettingsEditor {
                     "Retry saving utility window size",
                     TargetKind::Button,
                 );
-                if retry.clicked()
-                    && authorized_action
-                    && let Err(error) = size_access.retry_failed(ui.ctx())
-                {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        format!("Could not retry utility size save: {error}"),
-                    );
+                if retry.clicked() && authorized_action {
+                    if self.hosted_actions.is_some() {
+                        self.settings_action(ui.ctx(), app, SettingsHostAction::RetryUtilitySize);
+                    } else if let Err(error) = size_access.retry_failed(ui.ctx()) {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            format!("Could not retry utility size save: {error}"),
+                        );
+                    }
                 }
             }
         }
@@ -4209,7 +4479,7 @@ impl SettingsEditor {
             "Customize Dashboard...",
         );
         if targets.clicked(&customize) {
-            app.open_dashboard_editor();
+            self.settings_action(ui.ctx(), app, SettingsHostAction::DashboardEditor);
         }
     }
 
@@ -4304,21 +4574,10 @@ impl SettingsEditor {
         }
 
         if open_mg_settings_dialog {
-            app.open_mouse_gesture_settings_dialog();
+            self.settings_action(ui.ctx(), app, SettingsHostAction::MouseGestureSettings);
         }
         if let Some(command) = clipboard_modify_command {
-            match command {
-                ClipboardModifySettingsCommand::OpenDialog => app.open_clipboard_modify_dialog(),
-                ClipboardModifySettingsCommand::OpenConfigFile => {
-                    app.open_clipboard_modify_config_file()
-                }
-                ClipboardModifySettingsCommand::ReloadConfig => {
-                    app.reload_clipboard_modify_config()
-                }
-                ClipboardModifySettingsCommand::ResetFactoryDefaults => {
-                    app.reset_clipboard_modify_config_to_factory_defaults()
-                }
-            }
+            self.settings_action(ui.ctx(), app, SettingsHostAction::ClipboardModify(command));
         }
         self.render_note_section(
             ui,
@@ -4965,6 +5224,90 @@ mod settings_shell_tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn hosted_settings_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) -> SettingsUiActions {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 900.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let mut actions = None;
+        let output = ctx.run_ui(input, |ui| {
+            let mut editor = std::mem::take(&mut app.settings_editor);
+            actions = Some(editor.ui_with_host(
+                ui.ctx(),
+                app,
+                None,
+                Some(1),
+                false,
+                ui.current_pass_index() == 0,
+                None,
+                true,
+                true,
+                false,
+            ));
+            app.settings_editor = editor;
+        });
+        output.drop_without_applying_deltas();
+        actions.expect("Settings rendered")
+    }
+
+    #[test]
+    fn settings_host_buttons_stage_presentation_and_cancel_until_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let mut app = settings_test_app(&ctx, &directory, crate::settings::Settings::default());
+        app.show_settings = true;
+        let baseline = app.settings_editor.show_launcher_title;
+        app.settings_editor.show_launcher_title = !baseline;
+
+        let mut last = SettingsUiActions::default();
+        for _ in 0..3 {
+            last = hosted_settings_frame(&ctx, &mut app, Vec::new());
+        }
+        for is_cancel in [false, true] {
+            let (rect, clip, enabled) = if is_cancel {
+                last.cancel_button.expect("Cancel button")
+            } else {
+                last.host_button.expect("Pop Out button")
+            };
+            assert!(enabled && clip.contains_rect(rect));
+            for pressed in [true, false] {
+                last = hosted_settings_frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        egui::Event::PointerMoved(rect.center()),
+                        egui::Event::PointerButton {
+                            pos: rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert!(app.show_settings);
+            assert_eq!(app.settings_editor.show_launcher_title, !baseline);
+            if !is_cancel {
+                assert_eq!(last.host_request, Some(true));
+            }
+        }
+        let mut editor = std::mem::take(&mut app.settings_editor);
+        assert!(!editor.complete_host_actions(&ctx, &mut app, last));
+        app.settings_editor = editor;
+        assert!(!app.show_settings);
+        assert_eq!(app.settings_editor.show_launcher_title, baseline);
     }
 
     fn settings_search_frame(

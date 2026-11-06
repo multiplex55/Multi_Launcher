@@ -96,6 +96,7 @@ pub(crate) mod screenshot_countdown;
 mod screenshot_editor;
 mod search;
 mod search_replace_dialog;
+mod settings_window_host;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod snippet_prompt_dialog;
@@ -1089,6 +1090,7 @@ pub struct LauncherApp {
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
     pub show_settings: bool,
+    settings_window_host: settings_window_host::SettingsWindowHost,
     pub show_plugins: bool,
     pub actions_path: String,
     pub editor: ActionsEditor,
@@ -2013,6 +2015,9 @@ impl LauncherApp {
     }
 
     fn open_settings_dialog(&mut self) {
+        if self.show_settings {
+            self.settings_window_host.request_focus();
+        }
         if !self.show_settings && !self.settings_save_pending() {
             match Settings::load(&self.settings_path) {
                 Ok(settings) => {
@@ -3721,6 +3726,7 @@ impl LauncherApp {
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
             show_settings: false,
+            settings_window_host: Default::default(),
             show_plugins: false,
             actions_path,
             editor: ActionsEditor::default(),
@@ -4797,6 +4803,7 @@ impl LauncherApp {
 
     fn panel_has_root_presentation(&self, panel: Panel) -> bool {
         match panel {
+            Panel::Settings => self.settings_window_host.root_layer().is_some(),
             Panel::NotesDialog => !self.notes_dialog.is_popped_out(),
             Panel::MarkdownStudioDialog => !self.markdown_studio_dialog.is_popped_out(),
             Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root().is_some(),
@@ -4876,6 +4883,11 @@ impl LauncherApp {
         if self.pinned_panels.contains(&panel) {
             return false;
         }
+        if panel == Panel::Settings
+            && !self.settings_native_ui_owner_current(&self.egui_ctx, true)
+        {
+            return false;
+        }
         self.panel_stack.remove(panel_index);
         if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.request_close();
@@ -4932,7 +4944,9 @@ impl LauncherApp {
             }
             return true;
         }
-        self.retire_settings_navigation_for_panel(panel);
+        if panel != Panel::Settings {
+            self.retire_settings_navigation_for_panel(panel);
+        }
         match panel {
             Panel::AliasDialog => {
                 self.alias_dialog.open = false;
@@ -5207,8 +5221,9 @@ impl LauncherApp {
                 self.panel_states.editor = false;
             }
             Panel::Settings => {
-                self.show_settings = false;
-                self.panel_states.settings = false;
+                self.settings_window_host.request_close(&self.egui_ctx);
+                self.panel_stack.insert(panel_index, Panel::Settings);
+                self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
             Panel::Plugins => {
                 self.show_plugins = false;
@@ -5514,6 +5529,7 @@ impl LauncherApp {
                 self.panel_states.editor = false;
             }
             Panel::Settings => {
+                self.settings_window_host.retire(&self.egui_ctx);
                 self.show_settings = false;
                 self.panel_states.settings = false;
             }
@@ -5664,7 +5680,11 @@ impl LauncherApp {
             Panel::CalendarEventEditor => self.calendar_editor_open = true,
             Panel::CalendarEventDetails => self.calendar_details_open = true,
             Panel::Editor => self.show_editor = true,
-            Panel::Settings => self.open_settings_dialog(),
+            Panel::Settings => {
+                if !self.show_settings {
+                    self.open_settings_dialog();
+                }
+            }
             Panel::Plugins => self.show_plugins = true,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open = true,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open = true,
@@ -5692,6 +5712,8 @@ impl LauncherApp {
             self.date_time_studio_dialog.open();
         } else if panel == Panel::NotesDialog {
             self.notes_dialog.open();
+        } else if panel == Panel::Settings {
+            self.open_settings_dialog();
         } else if panel == Panel::MkMacroDialog {
             self.mkmacro_dialog.open();
         } else if panel == Panel::DiagramStudioDialog {

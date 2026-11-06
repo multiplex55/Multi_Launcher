@@ -1946,7 +1946,10 @@ impl LauncherApp {
                     egui::Id::new("App Editor"),
                 )))
             || (self.show_settings
-                && !ordinary_layer_is_allowed(crate::gui::jump_mode::ui::settings_layer_id()))
+                && self
+                    .settings_window_host
+                    .root_layer()
+                    .is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || (self.file_search_dialog.open
                 && !ordinary_layer_is_allowed(
                     crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch
@@ -2156,7 +2159,7 @@ impl LauncherApp {
             Panel::CalendarEventEditor => middle(egui::Id::new(Some("Calendar Event"))),
             Panel::CalendarEventDetails => middle(egui::Id::new(Some("Event Details"))),
             Panel::Editor => middle(egui::Id::new("App Editor")),
-            Panel::Settings => Some(crate::gui::jump_mode::ui::settings_layer_id()),
+            Panel::Settings => self.settings_window_host.root_layer(),
             Panel::Plugins => middle(egui::Id::new("Plugin Settings")),
             Panel::MultiManagerDialog => middle(egui::Id::new("MultiManager")),
             Panel::MultiManagerSettingsDialog => middle(egui::Id::new("MultiManager Settings")),
@@ -4822,7 +4825,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 14] {
+    fn viewport_bootstrap_state(&self) -> [bool; 15] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4838,6 +4841,7 @@ impl LauncherApp {
             self.notes_dialog.needs_root_ui_when_hidden(),
             self.mkmacro_dialog.needs_root_ui_when_hidden(),
             self.dashboard_editor.needs_root_ui_when_hidden(),
+            self.settings_window_host.needs_root_ui_when_hidden(self.show_settings),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
         ]
     }
@@ -4851,7 +4855,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 14],
+        previously_pending: [bool; 15],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5189,6 +5193,66 @@ impl LauncherApp {
         }
         self.show_dashboard_editor = dlg.open;
         self.dashboard_editor = dlg;
+    }
+
+    fn show_main_settings_host(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+        root_jump_escape_preempted: bool,
+    ) {
+        if !self.show_settings {
+            if self.settings_window_host.needs_root_ui_when_hidden(false)
+                || self.settings_window_host.is_popped_out()
+            {
+                self.settings_window_host.retire(ctx);
+            }
+            return;
+        }
+        if !root_visible && !self.settings_window_host.needs_root_ui_when_hidden(true) {
+            return;
+        }
+        let root_scope = if root_visible {
+            let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+            if let crate::gui::jump_mode::ui::NavigationOwner::Settings { instance } = owner {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::Settings { instance },
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "settings",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let instance = self.jump_mode_ui.settings_instance();
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let root_owner = self.settings_native_ui_owner_current(ctx, root_visible);
+        let root_jump_active =
+            self.jump_mode_ui.active_session().is_some() || root_jump_escape_preempted;
+        let application_input =
+            self.native_ui_application_input_allowed(ctx) && !self.ocr_surface_visible();
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let mut host = std::mem::take(&mut self.settings_window_host);
+        host.show(
+            ctx,
+            self,
+            root_scope,
+            instance,
+            first,
+            root_input,
+            root_owner,
+            root_jump_active,
+            application_input,
+            jump_enabled,
+        );
+        self.settings_window_host = host;
     }
 
     fn show_mkmacro_editor(
@@ -6010,8 +6074,11 @@ impl LauncherApp {
         self.show_settings
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
-            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
-                == Some(crate::gui::jump_mode::ui::settings_layer_id())
+            && self.settings_window_host.root_layer().is_some_and(|layer| {
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx)
+                        .is_none_or(|focus| focus == layer || focus.order != egui::Order::Middle)
+            })
     }
 
     fn dedicated_settings_native_ui_owner_current(
@@ -6669,7 +6736,13 @@ impl LauncherApp {
             let windows = crate::gui::jump_mode::ui::NavigationWindows {
                 settings: self
                     .show_settings
-                    .then_some(self.jump_mode_ui.settings_instance()),
+                    .then(|| {
+                        self.settings_window_host
+                            .root_layer()
+                            .map(|_| self.jump_mode_ui.settings_instance())
+                    })
+                    .flatten(),
+                settings_layer: self.settings_window_host.root_layer(),
                 notes: self
                     .notes_dialog
                     .open
@@ -7372,6 +7445,7 @@ impl LauncherApp {
             self.show_note_panels(&ctx, first_ui_pass, false, None);
             self.show_mkmacro_editor(&ctx, first_ui_pass, false);
             self.show_dashboard_editor_host(&ctx, first_ui_pass, false);
+            self.show_main_settings_host(&ctx, first_ui_pass, false, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -7554,7 +7628,11 @@ impl LauncherApp {
                 );
                 ui.menu_button("Settings", |ui| {
                     if ui.button("Edit Settings").clicked() && first_ui_pass {
-                        self.show_settings = !self.show_settings;
+                        if self.show_settings {
+                            self.settings_window_host.request_close(&ctx);
+                        } else {
+                            self.open_settings_dialog();
+                        }
                     }
                 });
                 ui.menu_button("Help", |ui| {
@@ -8367,20 +8445,14 @@ impl LauncherApp {
                             !self.settings_editor.settings_search_query.trim().is_empty(),
                         ));
                     }
-                    let search_escape_handled = !owner_transition_pending
+                    let settings_owns_escape = !owner_transition_pending
                         && !jump_session_escape_preempted
                         && self.jump_mode_ui.active_session().is_none()
                         && self.settings_native_ui_owner_current(
                             &ctx,
                             frame_logic.should_be_visible,
-                        )
-                        && self
-                            .settings_editor
-                            .handle_search_escape_before_container_close(
-                                &ctx,
-                                self.jump_mode_ui.settings_instance(),
-                            );
-                    if !search_escape_handled && !jump_session_escape_preempted {
+                        );
+                    if !settings_owns_escape && !jump_session_escape_preempted {
                         if self.any_root_panel_open() {
                             if self.close_front_dialog() {
                                 ctx.input_mut(|i| {
@@ -9274,6 +9346,9 @@ impl LauncherApp {
         if ocr_blocks_launcher_input {
             self.enforce_pinned();
             self.update_panel_stack();
+            if self.settings_window_host.is_popped_out() {
+                self.show_main_settings_host(&ctx, first_ui_pass, false, false);
+            }
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -9297,60 +9372,12 @@ impl LauncherApp {
             editor.ui(&ctx, self);
             self.editor = editor;
         }
-        let show_settings = self.show_settings;
-        if show_settings {
-            let navigation_owner =
-                self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-            let settings_owner_instance = self
-                .settings_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
-                .then(|| self.jump_mode_ui.settings_instance());
-            let settings_scope = match navigation_owner {
-                crate::gui::jump_mode::ui::NavigationOwner::Settings { instance } => {
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        crate::gui::jump_mode::SurfaceId::Settings { instance },
-                        crate::gui::jump_mode::TargetGeneration(instance),
-                        "settings",
-                        ctx.viewport_id(),
-                        navigation_owner,
-                        false,
-                    )
-                }
-                crate::gui::jump_mode::ui::NavigationOwner::Root
-                | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
-                    ..
-                }
-                | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
-                    ..
-                }
-                | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-                | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-            };
-            let mut ed = std::mem::take(&mut self.settings_editor);
-            let jump_mode_active =
-                self.jump_mode_ui.active_session().is_some() || jump_session_escape_preempted;
-            ed.ui(
-                &ctx,
-                self,
-                settings_scope,
-                settings_owner_instance,
-                jump_mode_active,
-                first_ui_pass,
-            );
-            self.settings_editor = ed;
-        }
+        self.show_main_settings_host(
+            &ctx,
+            first_ui_pass,
+            frame_logic.should_be_visible,
+            jump_session_escape_preempted,
+        );
         if self.hotkey_directory_dialog.take_open_request() {
             self.focus_panel(super::Panel::HotkeyDirectoryDialog);
             self.hotkey_directory_dialog.clear_message();
@@ -11239,6 +11266,9 @@ impl LauncherApp {
     }
 
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
+        let mut host = std::mem::take(&mut self.settings_window_host);
+        host.complete(ctx, self);
+        self.settings_window_host = host;
         let mut effects = Vec::new();
         if self.show_dashboard_editor || self.dashboard_editor.needs_root_ui_when_hidden() {
             let completion = self.dashboard_editor.on_host_frame_complete(
@@ -11938,6 +11968,7 @@ thread_local! {
     static IMMEDIATE_VIEWPORT_TEST_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
     static IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS: std::cell::RefCell<Option<(egui::ViewportId, Vec<egui::Event>)>> = const { std::cell::RefCell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
+    static IMMEDIATE_VIEWPORT_TEST_DISCARD: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_SIZE: std::cell::Cell<Option<(egui::ViewportId, egui::Vec2)>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID: std::cell::RefCell<Option<(egui::ViewportId, Option<egui::Id>)>> = const { std::cell::RefCell::new(None) };
 }
@@ -12037,6 +12068,13 @@ pub(super) fn with_immediate_viewport_renderer<R>(
                 assert_eq!(ui.ctx().viewport_id(), viewport_id);
                 assert_eq!(ui.ctx().parent_viewport_id(), parent_id);
                 (viewport.viewport_ui_cb)(ui);
+                IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| {
+                    if request.get() == Some(viewport_id) {
+                        request.set(None);
+                        ui.ctx()
+                            .request_discard("forced child replay for Settings host test");
+                    }
+                });
                 IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID.with(|focused| {
                     *focused.borrow_mut() =
                         Some((viewport_id, ui.ctx().memory(|memory| memory.focused())));
@@ -43408,6 +43446,7 @@ mod tests {
                     settings: app
                         .show_settings
                         .then_some(app.jump_mode_ui.settings_instance()),
+                    settings_layer: None,
                     notes: None,
                     todo: None,
                     timer: None,
@@ -45185,6 +45224,7 @@ mod tests {
                     settings: app
                         .show_settings
                         .then_some(app.jump_mode_ui.settings_instance()),
+                    settings_layer: None,
                     notes: None,
                     todo: None,
                     timer: None,
@@ -45268,6 +45308,21 @@ mod tests {
         .drop_without_applying_deltas();
         assert_eq!(app.settings_editor.settings_search_query, "fuzzy weight");
         assert!(!app.settings_editor.settings_search_match_ids.is_empty());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            true,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(app.show_settings);
+        assert_eq!(app.settings_editor.settings_search_query, "fuzzy weight");
+        release_escape(&mut app);
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
 
         app.run_root_frame_for_test(
             &ctx,
@@ -47735,6 +47790,7 @@ mod tests {
                     settings: app
                         .show_settings
                         .then_some(app.jump_mode_ui.settings_instance()),
+                    settings_layer: None,
                     notes: None,
                     todo: None,
                     timer: None,
@@ -56627,6 +56683,140 @@ mod tests {
         );
         drop(app);
         drop(workspace);
+    }
+
+    #[test]
+    fn main_settings_popout_preserves_draft_with_launcher_hidden_and_docks_back() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.open_settings_dialog();
+        let original = app
+            .settings_editor
+            .paste_sequence
+            .keep_dialog_visible_during_playback;
+        app.settings_editor
+            .paste_sequence
+            .keep_dialog_visible_during_playback = !original;
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (popout, clip, enabled) = app.settings_window_host.test_host_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(popout, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.settings_window_host.is_popped_out());
+        let viewport = app.settings_window_host.test_viewport_id();
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            let output = app
+                .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                .0;
+            assert!(output.viewport_output.contains_key(&viewport));
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.show_settings);
+        assert_eq!(
+            app.settings_editor
+                .paste_sequence
+                .keep_dialog_visible_during_playback,
+            !original
+        );
+        let (_, query) = app
+            .settings_editor
+            .test_search_query_response
+            .expect("detached Settings search");
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(query, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        super::with_immediate_viewport_test_events_for(
+            viewport,
+            vec![egui::Event::Text("fuzzy".into())],
+            || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            },
+        );
+        assert_eq!(app.settings_editor.settings_search_query, "fuzzy");
+        super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+        super::with_immediate_viewport_test_events_for(
+            viewport,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            },
+        );
+        assert!(super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.get().is_none()));
+        assert_eq!(app.settings_editor.settings_search_query, "fuzzy");
+        assert!(app.show_settings);
+        let child_frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        child_frame(&mut app, vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)]);
+        let (_, query) = app.settings_editor.test_search_query_response.expect("detached Settings search after replay");
+        for pressed in [true, false] {
+            child_frame(&mut app, tool_dialog_pointer_events(query, pressed));
+        }
+        child_frame(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.show_settings, "accepted Escape dismisses search before close");
+        assert!(app.settings_editor.settings_search_query.is_empty());
+        child_frame(&mut app, vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)]);
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
+        let (dock, clip, enabled) = app.settings_window_host.test_host_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(dock, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.show_settings && !app.settings_window_host.is_popped_out());
+        assert_eq!(
+            app.settings_editor
+                .paste_sequence
+                .keep_dialog_visible_during_playback,
+            !original
+        );
     }
 
     #[test]

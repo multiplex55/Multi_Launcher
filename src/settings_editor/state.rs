@@ -127,8 +127,9 @@ pub(crate) struct TestNotesControlResponse {
     pub(crate) has_focus: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SettingsEditor {
+    pub(super) hosted_actions: Option<super::render::SettingsUiActions>,
     pub(crate) search_catalog: super::catalog::SettingsCatalog,
     pub(super) catalog_plugin_revision: Option<u64>,
     pub(crate) settings_search_query: String,

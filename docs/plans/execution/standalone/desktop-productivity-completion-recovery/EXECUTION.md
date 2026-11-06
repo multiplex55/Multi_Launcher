@@ -308,3 +308,21 @@ The exact selectors are in `r02-m2-b1-filter-01.txt` and `r02-m2-b1-filter-03.tx
 | Dashboard Editor | One draft, owned confirmations and current combo focus across hosts, retained save and close, hidden launcher support, Dock restores launcher | Real host buttons, failed Save preserving the draft, hidden-launcher routing, exact confirmation binding, retained root effects, and production build | IMPLEMENTED_USER_VALIDATION_PENDING (N3) |
 
 Next is R02/M2-B.2 Main Settings on the same branch.
+
+### R02/M2-B.2 — Main Settings
+
+The Main Settings portion of original IDs 16–18/C01 M3-A starts from pushed Dashboard checkpoint `a7139ea15f694c2149492e4cb10d2af2c254f11b`. The launcher owns presentation and viewport lifecycle outside the replaceable editor draft. The existing settings save worker remains app-owned. Docked, Immediate, and embedded presentations share the editor body. Save, Cancel, Close, host moves, and cross-owner activation publish only after the current ROOT and owner passes are retained.
+
+The initial exact list matched five and the initial run passed 5/5, with 7448 skipped. It covered real host buttons and hidden launcher routing, staged Cancel, search Escape, and settings worker completion after hiding. Run SHA-256 7CC4D3332DF274FD02E51125158FFFAA5014922B4F8588AC3D64AC4AA83EB698. Review then identified native Jump Mode configuration, ROOT Escape, child-pass rollback, pinned focus, OCR continuity, and shortcut ownership corrections. The first correction list stopped at compile time after partial formatter alignment moved a test button assignment and removed the host module declaration. Log SHA-256 42382687F8F1FFAACEB7962C2ABC456C6348640DA5DB4A2589C6781F610515B3. Both splices were corrected. The three-case correction selector is `r02-m2-b2-filter-02.txt` in the ignored recovery evidence directory.
+
+The corrected three-case run passed 3/3, with 7450 skipped. It includes real Escape input on discarded ROOT and Immediate passes. Run SHA-256 D2D3F3D8CB71223CC9F7D362B9CA5A79C07E6E9C8384327181FF72EBCAE19077. The production check exited 0. A final review found a raised Settings window could still accept a launcher shortcut when another Middle layer retained keyboard focus. The owner guard now requires the raised layer and compatible focus. The child replay test also checks that a subsequent accepted Escape clears the search while keeping Settings open. Final two-case verification uses `r02-m2-b2-filter-04.txt`.
+
+For verification, `$f` is the trimmed contents of the exact selector in the ignored recovery evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched five initially, three for the correction, and two for the final owner change. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed the final set 2/2, with 7451 skipped. Final run SHA-256 701BA4091CDD23D3E3D6AE7C60075478A19123FD8E147E7A148A9517C1E3A96C. Independent review confirmed the final owner guard and the accepted child Escape control.
+
+`cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 on the final source. Log SHA-256 B128108F67C9C135F2551F9AF854597FAC561A01119F3AD1835A59F6726EE7A4. Scoped formatting and `git diff --check` passed. Source scope is `src/gui/{settings_window_host,mod,render}.rs`, `src/gui/jump_mode/ui.rs`, and `src/settings_editor/{mapping,render,state}.rs`.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Main Settings | One draft and save worker across Dock and Pop Out, current-owner navigation, hidden-launcher operation, retained Save and Cancel | Visible host and Cancel clicks, discarded and accepted launcher and child Escape, hidden save-worker completion, production build | IMPLEMENTED_USER_VALIDATION_PENDING (N3) |
+
+Next is R02/M2-B.3 Mouse Settings and Gesture Settings on the same branch.

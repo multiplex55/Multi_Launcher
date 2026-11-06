@@ -59,6 +59,7 @@ impl SettingsEditor {
             settings.static_size.unwrap_or((400, 220)),
         );
         let mut s = Self {
+            hosted_actions: None,
             search_catalog: super::catalog::SettingsCatalog::default(),
             catalog_plugin_revision: None,
             settings_search_query: String::new(),

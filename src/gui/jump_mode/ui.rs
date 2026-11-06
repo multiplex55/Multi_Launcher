@@ -439,6 +439,7 @@ impl NavigationViewportBinding {
                 ..
             } | NavigationOwner::Notes { .. }
                 | NavigationOwner::MkMacro { .. }
+                | NavigationOwner::Settings { .. }
                 | NavigationOwner::XmlOverwriteConfirmation { .. }
                 | NavigationOwner::DashboardEditorConfirmation { .. }
                 | NavigationOwner::RadialDesignerChild { .. }
@@ -1006,6 +1007,7 @@ pub(crate) fn resolve_snippet_prompt_navigation_owner(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NavigationWindows {
     pub(crate) settings: Option<u64>,
+    pub(crate) settings_layer: Option<egui::LayerId>,
     pub(crate) notes: Option<u64>,
     pub(crate) todo: Option<u64>,
     pub(crate) timer: Option<u64>,
@@ -1080,7 +1082,7 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
     let top_window = visible_top_middle_layer(ctx);
     let focused_layer = focused_response_layer(ctx);
     if let Some(layer) = top_window {
-        let owner = if layer == settings_layer_id() {
+        let owner = if layer == windows.settings_layer.unwrap_or_else(settings_layer_id) {
             windows
                 .settings
                 .map(|instance| NavigationOwner::Settings { instance })
@@ -4280,6 +4282,7 @@ mod tests {
         let ctx = egui::Context::default();
         let windows = NavigationWindows {
             settings: Some(11),
+            settings_layer: None,
             notes: Some(22),
             todo: Some(33),
             timer: None,
