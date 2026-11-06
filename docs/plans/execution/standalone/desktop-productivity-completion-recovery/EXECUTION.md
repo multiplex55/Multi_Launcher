@@ -214,3 +214,11 @@ The shared utility size manager owns acknowledged geometry writes and per-viewpo
 | Diagram Viewer | Same owner and independent camera, Dock/Pop Out, focused layer, native geometry | Real harness click, focus, return and camera checks; native and embedded fallback coverage | IMPLEMENTED_USER_VALIDATION_PENDING (host subset of N6/N7) |
 
 R01 closes after this checkpoint and its normal push attempt. R02 starts from the actual committed R01 tip. Remaining shared behavior for individual utility surfaces is tracked under R02 and later categories. The exact committed tip and push are recorded in the ignored receipt.
+
+## R02/M0-A — named utility host migrations
+
+R02 starts from the clean, pushed R01 final tip b8c3f259cbd55d483fb1346b262026ed42d5d820. The branch is feat/productivity-host-migrations. The existing source snapshot includes the verified Diagram click paths, shared reference geometry and focus routing, and accepted-host picker binding. R01's final tip and upstream were identical at transition. No new worktree or intermediate merge was used.
+
+- M2-A starts with Markdown Studio, the smallest document consumer, then Quick Notes and independent note editors, then MkMacro. Reuse retained pass and presentation identity with one live owner per logical instance. Preserve source-before-intent ordering, focus and Unicode selection, note history and prompts, and exactly-once macro execution.
+- M2-B follows for Main, Dashboard, Mouse, Gestures and Gesture Settings. Preserve drafts and recording ownership. M2-C follows in small file, clipboard, developer and time/image slices. M2-D closes reference and new utility host wiring. Surface-level requirements are in the baseline matrix above.
+- Host moves are presentation changes. Each surface retains its own document/worker owner and explicit close or save decisions. Test state and actual visible actions per host and keep native evidence separate.

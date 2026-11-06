@@ -1,5 +1,5 @@
 # Desktop Productivity Completion and Acceptance Recovery
 
-R01 host core passed the focused checks. Both historical Diagram clicks pass. The final M1-A subset passed 13/13 and M1-B passed 14/14. Windows production library and executable checks passed at both checkpoints. Full native N1/N6/N7 remain pending. The exact M17-B predecessor is 1852f264dae69056f79bc0c3b593c70331fa620f.
+R01 passed both restored Diagram clicks, 13/13 M1-A cases and 14/14 M1-B cases. Both production checks passed. The clean, pushed R01 final tip is b8c3f259cbd55d483fb1346b262026ed42d5d820.
 
-R02 starts from R01's actual reporting tip. The [execution ledger](EXECUTION.md) tracks the original requirements, 38 milestones, hosts and native gates.
+R02 begins directly from that tip on feat/productivity-host-migrations. M2-A starts with the document and macro hosts. The [execution ledger](EXECUTION.md) tracks the original requirements, 38 milestones, all hosts and native gates.
