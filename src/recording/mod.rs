@@ -1,5 +1,7 @@
 mod gif;
 mod model;
+#[cfg(windows)]
+mod mp4_windows;
 mod output;
 mod session;
 mod windows;

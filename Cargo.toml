@@ -151,6 +151,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_Shell_Common",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
+    "Win32_Media_MediaFoundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Direct3D",
