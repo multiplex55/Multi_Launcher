@@ -1100,18 +1100,34 @@ impl std::error::Error for Mp4RecordingError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::{
+        ActivityCenter, ActivityIncarnation, ActivityLifecycle, ActivityOperation, ActivityOutcome,
+        ActivityOwner, ActivityRetirement,
+    };
     use crate::mkmacro::ScreenRect;
+    use crate::platform::windows_capture_test_support::{OwnedSourceFixture, SourceReady};
     use crate::recording::{
         CapturePoll, CaptureSource, CaptureStopToken, CaptureTarget, FrameRate, RecordingBackend,
-        RecordingOptions, RecordingRequest, RgbaFrame, SystemRecorderClock,
+        RecordingController, RecordingControllerOutcome, RecordingControllerSnapshot,
+        RecordingEndReason, RecordingOptions, RecordingRequest, RgbaFrame, SystemRecorderClock,
+        WindowsRecordingBackend,
     };
+    use std::io::Write as _;
+    use std::ops::{Deref, DerefMut};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows::Win32::Media::MediaFoundation::{
-        IMF2DBuffer, MF_E_INVALIDSTREAMNUMBER, MF_PD_DURATION, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-        MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM,
+        IMF2DBuffer, MF_E_ATTRIBUTENOTFOUND, MF_E_INVALIDSTREAMNUMBER,
+        MF_MT_MINIMUM_DISPLAY_APERTURE, MF_PD_DURATION, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+        MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED,
+        MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
+        MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED, MFVideoArea,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
 
     fn canvas(width: u32, height: u32) -> CanvasSize {
         CanvasSize::new(width, height).unwrap()
@@ -1460,6 +1476,496 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture and Media Foundation H.264 support"]
+    fn native_owned_hwnd_controller_mp4_save_and_discard_retire()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CAPTURE_TIMEOUT: Duration = Duration::from_secs(12);
+        const BACKGROUND_LUMA_TOLERANCE: u8 = 12;
+
+        let nonce = format!(
+            "{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        );
+        let mut fixture = OwnedSourceFixture::spawn(&nonce)
+            .unwrap_or_else(|error| panic!("could not launch owned HWND fixture: {error}"));
+        let ready = fixture
+            .wait_ready(&nonce)
+            .unwrap_or_else(|error| panic!("owned HWND fixture was not ready: {error}"));
+        verify_owned_fixture_identity(&ready, &fixture);
+        fixture
+            .command("PAINT A")
+            .unwrap_or_else(|error| panic!("could not paint owned fixture phase A: {error}"));
+
+        let frame_rate = FrameRate::new(30)?;
+        let options = RecordingOptions::new(
+            RecordingFormat::Mp4,
+            frame_rate,
+            Duration::from_secs(30),
+            false,
+        )?;
+        let target =
+            CaptureTarget::window(ready.hwnd, ready.process_id, ready.thread_id, ready.bounds)?;
+        let request = RecordingRequest::new(target, ready.bounds, options)?;
+        assert_eq!(request.encoded_dimensions(), (360, 240));
+
+        let output_directory = tempfile::tempdir()?;
+        assert!(output_directory.path().is_absolute());
+        let destination = output_directory.path().join("owned-controller-save.mp4");
+        let discarded_destination = output_directory.path().join("owned-controller-discard.mp4");
+        let activity = ActivityCenter::new();
+        let mut controller = ControllerShutdownGuard::new(RecordingController::new(
+            Arc::new(WindowsRecordingBackend),
+            || {},
+        ));
+
+        let generation = controller
+            .prepare(request.clone(), destination.clone(), &activity)
+            .unwrap_or_else(|error| panic!("could not prepare WGC-to-MP4 recording: {error}"));
+        let phase_a_ack = wait_controller_until(&mut controller, CAPTURE_TIMEOUT, |snapshot| {
+            matches!(snapshot.session.state(), RecorderState::Recording { .. })
+                && snapshot.session.frames_written() > 0
+        });
+        assert_eq!(phase_a_ack.active_generation, Some(generation));
+
+        // The first writer acknowledgement establishes the recording cadence
+        // before the fixture changes its background paint.
+        let cadence_boundary = Instant::now() + frame_rate.interval();
+        while Instant::now() < cadence_boundary {
+            controller.poll();
+            let remaining = cadence_boundary.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                thread::sleep(remaining.min(Duration::from_millis(5)));
+            }
+        }
+        let frames_before_b = controller.snapshot().session.frames_written();
+        fixture
+            .command("PAINT B")
+            .unwrap_or_else(|error| panic!("could not paint owned fixture phase B: {error}"));
+        let phase_b_ack =
+            wait_controller_until(&mut controller, Duration::from_secs(6), |snapshot| {
+                matches!(snapshot.session.state(), RecorderState::Recording { .. })
+                    && snapshot.session.frames_written() > frames_before_b
+            });
+        assert_eq!(phase_b_ack.active_generation, Some(generation));
+        let last_ack = phase_b_ack.session.frames_written();
+
+        // Keep B on screen for a positive frame tail before terminal Stop.
+        let positive_tail = Instant::now() + frame_rate.interval();
+        while Instant::now() < positive_tail {
+            controller.poll();
+            let remaining = positive_tail.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                thread::sleep(remaining.min(Duration::from_millis(5)));
+            }
+        }
+        assert!(
+            controller
+                .stop_generation(generation)
+                .unwrap_or_else(|error| panic!("could not stop saved generation: {error}"))
+        );
+
+        let saved = wait_controller_until(&mut controller, Duration::from_secs(10), |snapshot| {
+            snapshot.active_generation.is_none() && snapshot.result.is_some()
+        });
+        assert_eq!(
+            saved.result,
+            Some(RecordingControllerOutcome::Saved(destination.clone()))
+        );
+        assert!(saved.writer_retired);
+        assert!(!saved.session.worker_busy());
+        let summary = match saved.session.state() {
+            RecorderState::Completed(summary) => summary,
+            state => panic!("saved controller ended in an unexpected state: {state:?}"),
+        };
+        assert_eq!(summary.reason, RecordingEndReason::UserStopped);
+        assert!(summary.elapsed > Duration::ZERO);
+        assert!(summary.frames_written >= last_ack);
+        assert!(destination.is_file());
+        let saved_length = std::fs::metadata(&destination)?.len();
+        assert!(saved_length > 0);
+        assert_eq!(
+            paths_in_directory(output_directory.path()),
+            vec![destination.clone()]
+        );
+        assert_recording_activity_terminal(&activity, generation, ActivityOutcome::Completed);
+
+        // Read the published artifact independently of the controller writer.
+        let expected_duration = u64::try_from(summary.elapsed.as_nanos() / 100)?;
+        let expected_frames = usize::try_from(summary.frames_written)?;
+        // These are independently calculated BT.709 limited-range luma values
+        // for the fixture's known RGB backgrounds, not the production converter.
+        let expected_background_a: u8 = 49;
+        let expected_background_b: u8 = 81;
+        assert!(
+            expected_background_a.abs_diff(expected_background_b) > BACKGROUND_LUMA_TOLERANCE * 2
+        );
+
+        let apartment = MtaGuard::initialize()?;
+        let mut runtime = MfRuntime::start()?;
+        let reader = runtime.create_source_reader(&destination)?;
+        let native_type = unsafe { reader.GetNativeMediaType(0, 0) }?;
+        assert_eq!(
+            unsafe { native_type.GetGUID(&MF_MT_MAJOR_TYPE)? },
+            MFMediaType_Video
+        );
+        assert_eq!(
+            unsafe { native_type.GetGUID(&MF_MT_SUBTYPE)? },
+            MFVideoFormat_H264
+        );
+        let dimensions = unsafe { native_type.GetUINT64(&MF_MT_FRAME_SIZE)? };
+        assert_eq!((dimensions >> 32, dimensions as u32), (360, 240));
+        match unsafe { reader.GetNativeMediaType(1, 0) } {
+            Err(error) => assert_eq!(error.code(), MF_E_INVALIDSTREAMNUMBER),
+            Ok(_) => panic!("the controller MP4 unexpectedly contains a second stream"),
+        }
+
+        let duration = unsafe {
+            reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+        }?;
+        let duration_ticks = u64::try_from(&duration)?;
+        assert!(duration_ticks > 0);
+        assert!(duration_ticks.abs_diff(expected_duration) <= frame_interval_ticks(frame_rate)?);
+
+        let output_type = runtime.create_media_type()?;
+        unsafe {
+            output_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+            output_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+            reader.SetCurrentMediaType(
+                MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                None,
+                &output_type,
+            )?;
+        }
+        let mut decoded_type =
+            unsafe { reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32) }?;
+        let mut decoded_surface = controller_decoded_video_type(&decoded_type)?;
+
+        let mut decoded = Vec::new();
+        let mut previous_timestamp = None;
+        let mut saw_end_of_stream = false;
+        let rejected_reader_flags =
+            MF_SOURCE_READERF_ERROR.0 as u32 | MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED.0 as u32;
+        let current_type_changed_flag = MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32;
+        for _ in 0..expected_frames.saturating_add(8) {
+            let mut actual_stream = 0;
+            let mut flags = 0;
+            let mut timestamp = 0_i64;
+            let mut sample = None;
+            unsafe {
+                reader.ReadSample(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    0,
+                    Some(&mut actual_stream),
+                    Some(&mut flags),
+                    Some(&mut timestamp),
+                    Some(&mut sample),
+                )?;
+            }
+            assert_eq!(
+                flags & rejected_reader_flags,
+                0,
+                "Media Foundation source reader reported an error or native media type change (flags={:#010x})",
+                flags,
+            );
+            if flags & current_type_changed_flag != 0 {
+                assert_eq!(
+                    actual_stream, 0,
+                    "Media Foundation reported an output type change for an unexpected stream"
+                );
+                let current_type = unsafe {
+                    reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
+                }?;
+                decoded_surface = controller_decoded_video_type(&current_type)?;
+                decoded_type = current_type;
+            }
+            if let Some(sample) = sample {
+                if let Some(previous) = previous_timestamp {
+                    assert!(
+                        timestamp > previous,
+                        "controller MP4 timestamps are not increasing"
+                    );
+                }
+                assert_eq!(actual_stream, 0);
+                let buffer = unsafe { sample.GetBufferByIndex(0)? };
+                let background = decoded_nv12_luma_pair(
+                    &buffer,
+                    &decoded_type,
+                    decoded_surface.0,
+                    decoded_surface.1,
+                )?;
+                decoded.push((timestamp, background.0, background.1));
+                previous_timestamp = Some(timestamp);
+            }
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                saw_end_of_stream = true;
+                break;
+            }
+        }
+        assert!(saw_end_of_stream, "controller MP4 reader did not reach EOS");
+        assert!(
+            decoded.len() >= 2,
+            "controller MP4 decoded fewer than two frames"
+        );
+        assert!(
+            decoded.len() <= expected_frames,
+            "controller MP4 decoded more frames than the writer acknowledged"
+        );
+
+        let classify_background = |luma: u8| {
+            let matches_a = luma.abs_diff(expected_background_a) <= BACKGROUND_LUMA_TOLERANCE;
+            let matches_b = luma.abs_diff(expected_background_b) <= BACKGROUND_LUMA_TOLERANCE;
+            match (matches_a, matches_b) {
+                (true, false) => Some('A'),
+                (false, true) => Some('B'),
+                _ => None,
+            }
+        };
+        let mut phases = Vec::with_capacity(decoded.len());
+        for (_, first, second) in &decoded {
+            let first_phase = classify_background(*first)
+                .unwrap_or_else(|| panic!("unexpected decoded fixture background luma {first}"));
+            let second_phase = classify_background(*second)
+                .unwrap_or_else(|| panic!("unexpected decoded fixture background luma {second}"));
+            assert_eq!(first_phase, second_phase);
+            phases.push(first_phase);
+        }
+        assert_eq!(phases.first(), Some(&'A'));
+        let first_b = phases
+            .iter()
+            .position(|phase| *phase == 'B')
+            .expect("independent MP4 decode did not contain fixture phase B");
+        assert!(first_b > 0, "fixture phase B appeared before phase A");
+        assert!(phases[first_b..].iter().all(|phase| *phase == 'B'));
+
+        drop(duration);
+        drop(decoded_type);
+        drop(output_type);
+        drop(native_type);
+        drop(reader);
+        runtime.shutdown()?;
+        drop(runtime);
+        drop(apartment);
+
+        let second_generation = controller
+            .prepare(request, discarded_destination.clone(), &activity)
+            .unwrap_or_else(|error| {
+                panic!("could not prepare second controller generation: {error}")
+            });
+        assert_ne!(second_generation, generation);
+        let second_recording =
+            wait_controller_until(&mut controller, CAPTURE_TIMEOUT, |snapshot| {
+                matches!(snapshot.session.state(), RecorderState::Recording { .. })
+                    && snapshot.session.frames_written() > 0
+            });
+        assert_eq!(second_recording.active_generation, Some(second_generation));
+        assert!(controller.stop_generation(generation).is_err());
+        assert!(controller.discard(generation).is_err());
+        assert!(matches!(
+            controller.snapshot().session.state(),
+            RecorderState::Recording { .. }
+        ));
+        assert!(
+            controller
+                .discard(second_generation)
+                .unwrap_or_else(|error| {
+                    panic!("could not discard active second generation: {error}")
+                })
+        );
+
+        let discarded =
+            wait_controller_until(&mut controller, Duration::from_secs(8), |snapshot| {
+                snapshot.active_generation.is_none()
+                    && snapshot.result == Some(RecordingControllerOutcome::Discarded)
+            });
+        assert!(discarded.writer_retired);
+        assert!(!discarded.session.worker_busy());
+        assert!(matches!(
+            discarded.session.state(),
+            RecorderState::Cancelled
+        ));
+        assert!(!discarded_destination.exists());
+        assert_eq!(std::fs::metadata(&destination)?.len(), saved_length);
+        assert_eq!(
+            paths_in_directory(output_directory.path()),
+            vec![destination.clone()]
+        );
+        assert_recording_activity_terminal(
+            &activity,
+            second_generation,
+            ActivityOutcome::Cancelled,
+        );
+
+        verify_owned_fixture_identity(&ready, &fixture);
+        fixture
+            .command("PAINT A")
+            .unwrap_or_else(|error| panic!("owned fixture did not survive discard: {error}"));
+        assert!(
+            controller.shutdown_and_wait(Duration::from_secs(8)),
+            "recording controller did not retire during explicit shutdown"
+        );
+        fixture
+            .finish()
+            .unwrap_or_else(|error| panic!("could not reap owned HWND fixture: {error}"));
+        assert!(
+            !unsafe { IsWindow(HWND(ready.hwnd as *mut std::ffi::c_void)) }.as_bool(),
+            "owned HWND remained after its fixture process exited"
+        );
+        output_directory.close()?;
+        println!(
+            "M16-B native success: dimensions=360x240 decoder_surface={}x{} decoded_samples={} phases=A->B video=H.264 audio=none expected_duration_100ns={} measured_duration_100ns={} saved=true active_discard=retired source_worker=retired owned_child=exited staging=clean temp_output=removed",
+            decoded_surface.0,
+            decoded_surface.1,
+            decoded.len(),
+            expected_duration,
+            duration_ticks,
+        );
+        Ok(())
+    }
+
+    fn verify_owned_fixture_identity(ready: &SourceReady, fixture: &OwnedSourceFixture) {
+        let hwnd = HWND(ready.hwnd as *mut std::ffi::c_void);
+        assert_eq!(ready.process_id, fixture.process_id());
+        assert_ne!(ready.process_id, std::process::id());
+        assert_eq!((ready.bounds.width, ready.bounds.height), (360, 240));
+        assert!(ready.bounds.validate_capture().is_ok());
+        assert!(unsafe { IsWindow(hwnd) }.as_bool());
+        let mut process_id = 0;
+        let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+        assert_eq!(process_id, ready.process_id);
+        assert_eq!(thread_id, ready.thread_id);
+        let mut bounds = RECT::default();
+        unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut bounds as *mut RECT).cast(),
+                std::mem::size_of::<RECT>() as u32,
+            )
+        }
+        .expect("could not revalidate owned fixture physical bounds");
+        assert_eq!(
+            ready.bounds,
+            ScreenRect::new(
+                bounds.left,
+                bounds.top,
+                u32::try_from(i64::from(bounds.right) - i64::from(bounds.left)).unwrap(),
+                u32::try_from(i64::from(bounds.bottom) - i64::from(bounds.top)).unwrap(),
+            )
+        );
+    }
+
+    fn assert_recording_activity_terminal(
+        activity: &ActivityCenter,
+        generation: u64,
+        outcome: ActivityOutcome,
+    ) {
+        let row = activity
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| {
+                row.key.owner() == ActivityOwner::Recording
+                    && row.key.incarnation() == ActivityIncarnation::new(generation)
+                    && row.operation == ActivityOperation::RecordScreenClip
+            })
+            .expect("recording activity did not retain its terminal generation");
+        assert_eq!(row.lifecycle, ActivityLifecycle::Terminal(outcome));
+        assert_eq!(row.retirement, ActivityRetirement::Confirmed);
+    }
+
+    fn paths_in_directory(directory: &Path) -> Vec<PathBuf> {
+        let mut paths = std::fs::read_dir(directory)
+            .expect("could not inspect the owned MP4 output directory")
+            .map(|entry| entry.expect("could not read owned MP4 output entry").path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    struct ControllerShutdownGuard {
+        controller: RecordingController,
+    }
+
+    impl ControllerShutdownGuard {
+        fn new(controller: RecordingController) -> Self {
+            Self { controller }
+        }
+
+        fn shutdown_and_wait(&mut self, timeout: Duration) -> bool {
+            self.controller.request_shutdown();
+            let deadline = Instant::now() + timeout;
+            loop {
+                self.controller.poll();
+                if self.controller.shutdown_ready() {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    impl Deref for ControllerShutdownGuard {
+        type Target = RecordingController;
+
+        fn deref(&self) -> &Self::Target {
+            &self.controller
+        }
+    }
+
+    impl DerefMut for ControllerShutdownGuard {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.controller
+        }
+    }
+
+    impl Drop for ControllerShutdownGuard {
+        fn drop(&mut self) {
+            match catch_unwind(AssertUnwindSafe(|| {
+                self.shutdown_and_wait(Duration::from_secs(8))
+            })) {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "recording controller cleanup timed out before the output directory was dropped"
+                    );
+                }
+                Err(_) => {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "recording controller cleanup panicked before the output directory was dropped"
+                    );
+                }
+            }
+        }
+    }
+
+    fn wait_controller_until(
+        controller: &mut RecordingController,
+        timeout: Duration,
+        predicate: impl Fn(&RecordingControllerSnapshot) -> bool,
+    ) -> RecordingControllerSnapshot {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let snapshot = controller.snapshot();
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+            controller.poll();
+            assert!(
+                Instant::now() < deadline,
+                "controller did not settle: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn wait_until(
         timeout: Duration,
         mut ready: impl FnMut() -> bool,
@@ -1472,6 +1978,59 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         Err("timed out waiting for the isolated MP4 fixture".into())
+    }
+
+    fn controller_decoded_video_type(
+        media_type: &MediaType,
+    ) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+        assert_eq!(
+            unsafe { media_type.GetGUID(&MF_MT_MAJOR_TYPE)? },
+            MFMediaType_Video
+        );
+        assert_eq!(
+            unsafe { media_type.GetGUID(&MF_MT_SUBTYPE)? },
+            MFVideoFormat_NV12
+        );
+        let dimensions = unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE)? };
+        let surface = ((dimensions >> 32) as u32, dimensions as u32);
+        let aligned_visible = (360_u32.div_ceil(16) * 16, 240_u32.div_ceil(16) * 16);
+        assert!(
+            surface == (360, 240) || surface == aligned_visible,
+            "Media Foundation decoder surface {surface:?} is neither the visible 360×240 size nor its 16-pixel-aligned size {aligned_visible:?}"
+        );
+        verify_minimum_display_aperture_if_present(media_type)?;
+        Ok(surface)
+    }
+
+    fn verify_minimum_display_aperture_if_present(
+        media_type: &MediaType,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let blob_size = match unsafe { media_type.GetBlobSize(&MF_MT_MINIMUM_DISPLAY_APERTURE) } {
+            Ok(size) => size as usize,
+            Err(error) if error.code() == MF_E_ATTRIBUTENOTFOUND => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        assert_eq!(
+            blob_size,
+            std::mem::size_of::<MFVideoArea>(),
+            "Media Foundation minimum display aperture has an unexpected size"
+        );
+        let mut bytes = vec![0_u8; blob_size];
+        let mut actual_size = 0_u32;
+        unsafe {
+            media_type.GetBlob(
+                &MF_MT_MINIMUM_DISPLAY_APERTURE,
+                &mut bytes,
+                Some(&mut actual_size),
+            )?;
+        }
+        assert_eq!(actual_size as usize, blob_size);
+        // MFVideoArea is a C-layout attribute blob and may not be aligned in
+        // the byte vector, so read it unaligned after checking the exact size.
+        let aperture = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<MFVideoArea>()) };
+        assert_eq!(aperture.Area.cx, 360);
+        assert_eq!(aperture.Area.cy, 240);
+        Ok(())
     }
 
     fn decoded_nv12_luma_pair(

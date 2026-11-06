@@ -430,7 +430,8 @@ impl RecordingDialogState {
         let preview = self.preview_request(&draft, window_catalog);
         let mut commands = Vec::new();
         let mut keep_open = true;
-        let has_job = controller.has_active_job();
+        let snapshot = controller.snapshot();
+        let has_job = snapshot.active_generation.is_some();
         egui::Window::new("Screen Recorder")
             .id(egui::Id::new("recording-setup-window"))
             .default_size([480.0, 470.0])
@@ -633,6 +634,32 @@ impl RecordingDialogState {
                             ui.label(error);
                         }
                     });
+                    if let Some(result) = snapshot.result.as_ref() {
+                        match result {
+                            crate::recording::RecordingControllerOutcome::Saved(path) => {
+                                let target_was_lost = matches!(
+                                    snapshot.session.state(),
+                                    crate::recording::RecorderState::Completed(summary)
+                                        if summary.reason == crate::recording::RecordingEndReason::TargetLost
+                                );
+                                let label = if target_was_lost {
+                                    format!("Saved early after the capture target was lost: {}", path.display())
+                                } else {
+                                    format!("Saved: {}", path.display())
+                                };
+                                ui.label(label);
+                            }
+                            crate::recording::RecordingControllerOutcome::Discarded => {
+                                ui.label("Output discarded");
+                            }
+                            crate::recording::RecordingControllerOutcome::Failed(error) => {
+                                ui.colored_label(
+                                    ui.visuals().error_fg_color,
+                                    format!("Output failed: {error}"),
+                                );
+                            }
+                        }
+                    }
                 },
             );
         if !keep_open {
