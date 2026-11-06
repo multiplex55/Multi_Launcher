@@ -29,6 +29,19 @@ pub fn preview_line_id_source(
     ("file_search_preview_line", path.into(), line_number)
 }
 
+enum PreviewAction {
+    Open,
+    Copy(String),
+    MissingMatch,
+}
+
+pub(crate) struct FileSearchPreviewHostActions {
+    request: Option<PreviewRequest>,
+    close: bool,
+    consumed_auto_scroll: bool,
+    actions: Vec<PreviewAction>,
+}
+
 pub struct FileSearchPreviewDialogState {
     pub open: bool,
     pub current_request: Option<PreviewRequest>,
@@ -215,14 +228,27 @@ impl FileSearchPreviewDialogState {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, settings: &FileSearchSettings) {
+        if let Some(actions) = self.ui_in_host(ctx, settings, true) {
+            self.complete_host_actions(actions, Some(ctx));
+        }
+    }
+
+    pub(crate) fn ui_in_host(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &FileSearchSettings,
+        input_allowed: bool,
+    ) -> Option<FileSearchPreviewHostActions> {
         if !self.open {
-            return;
+            return None;
         }
         self.poll_preview_result();
         if self.load_state.is_loading() {
             ctx.request_repaint();
         }
         let mut open = self.open;
+        let pending_auto_scroll = self.pending_auto_scroll;
+        let mut actions = Vec::new();
         let key = crate::settings::UtilityToolKey::parse("file-preview")
             .expect("file-preview is a stable utility size key");
         let window_id = egui::Id::new(preview_window_id_source());
@@ -231,7 +257,7 @@ impl FileSearchPreviewDialogState {
         let window = egui::Window::new("File preview")
             .id(window_id)
             .resizable(true);
-        let _response = size_access.show_window(
+        size_access.show_window(
             ctx,
             key,
             window_id,
@@ -240,17 +266,67 @@ impl FileSearchPreviewDialogState {
             egui::Vec2::splat(64.0),
             window,
             |ui| {
-                self.render_contents(ui, settings);
+                self.render_contents(ui, settings, &mut actions);
             },
         );
-        self.open = open;
+        let consumed_auto_scroll = pending_auto_scroll && !self.pending_auto_scroll;
+        self.pending_auto_scroll = pending_auto_scroll;
+        input_allowed.then(|| FileSearchPreviewHostActions {
+            request: self.current_request.clone(),
+            close: !open,
+            consumed_auto_scroll,
+            actions,
+        })
     }
 
-    fn render_contents(&mut self, ui: &mut egui::Ui, settings: &FileSearchSettings) {
+    pub(crate) fn complete_host_actions(
+        &mut self,
+        pending: FileSearchPreviewHostActions,
+        immediate_ctx: Option<&egui::Context>,
+    ) {
+        if !self.open || self.current_request != pending.request {
+            return;
+        }
+        self.open = !pending.close;
+        if pending.consumed_auto_scroll {
+            self.pending_auto_scroll = false;
+        }
+        let Some(request) = pending.request else {
+            return;
+        };
+        for action in pending.actions {
+            self.action_error_message = match action {
+                PreviewAction::Open => resolve_explorer_action(&request.path)
+                    .and_then(execute_explorer_action)
+                    .err()
+                    .map(|error| error.to_string()),
+                PreviewAction::Copy(text) => {
+                    if let Some(ctx) = immediate_ctx {
+                        ctx.copy_text(text);
+                        None
+                    } else {
+                        crate::file_search::export::set_clipboard_text(&text)
+                            .err()
+                            .map(|error| error.to_string())
+                    }
+                }
+                PreviewAction::MissingMatch => {
+                    Some("No matching-line text is available to copy.".to_string())
+                }
+            };
+        }
+    }
+
+    fn render_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &FileSearchSettings,
+        actions: &mut Vec<PreviewAction>,
+    ) {
         let Some(request) = self.current_request.clone() else {
             return;
         };
-        self.render_header(ui, &request, settings);
+        self.render_header(ui, &request, settings, actions);
         ui.separator();
         if self.loading {
             ui.horizontal(|ui| {
@@ -286,6 +362,7 @@ impl FileSearchPreviewDialogState {
         ui: &mut egui::Ui,
         request: &PreviewRequest,
         _settings: &FileSearchSettings,
+        actions: &mut Vec<PreviewAction>,
     ) {
         ui.vertical(|ui| {
             widgets::compact_section_heading(ui, "Preview", None);
@@ -313,29 +390,16 @@ impl FileSearchPreviewDialogState {
             ui.horizontal_wrapped(|ui| {
                 let open = ui.button("Open in Explorer");
                 if widgets::with_button_emphasis(ui, open, ButtonEmphasis::Primary).clicked() {
-                    match resolve_explorer_action(&request.path).and_then(execute_explorer_action) {
-                        Ok(()) => self.action_error_message = None,
-                        Err(error) => self.action_error_message = Some(error.to_string()),
-                    }
+                    actions.push(PreviewAction::Open);
                 }
                 if ui.button("Copy Full Path").clicked() {
-                    ui.ctx().output_mut(|output| {
-                        output.commands.push(egui::OutputCommand::CopyText(
-                            request.path.display().to_string(),
-                        ));
-                    });
-                    self.action_error_message = None;
+                    actions.push(PreviewAction::Copy(request.path.display().to_string()));
                 }
                 if ui.button("Copy Matching Line").clicked() {
-                    if let Some(line) = self.selected_match.as_ref().map(|m| m.line.clone()) {
-                        ui.ctx().output_mut(|output| {
-                            output.commands.push(egui::OutputCommand::CopyText(line));
-                        });
-                        self.action_error_message = None;
-                    } else {
-                        self.action_error_message =
-                            Some("No matching-line text is available to copy.".to_string());
-                    }
+                    actions.push(match self.selected_match.as_ref() {
+                        Some(found) => PreviewAction::Copy(found.line.clone()),
+                        None => PreviewAction::MissingMatch,
+                    });
                 }
             });
         });
@@ -689,7 +753,12 @@ mod tests {
                         [first.rect, second.rect]
                     })
                     .inner;
-                state.render_header(ui, &request, &FileSearchSettings::default());
+                state.render_header(
+                    ui,
+                    &request,
+                    &FileSearchSettings::default(),
+                    &mut Vec::new(),
+                );
                 ui.separator();
                 let scroll = state.render_text_preview(ui, &preview);
                 rendered = Some((

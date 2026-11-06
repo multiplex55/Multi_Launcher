@@ -1,12 +1,10 @@
 //! Keyboard handling helpers for the file-search dialog.
 use super::{
-    FileSearchDialogState, FileSearchEscapeAction, FileSearchRowPayload,
+    FileSearchContextMenuAction, FileSearchDialogState, FileSearchEscapeAction,
+    FileSearchHostAction, FileSearchRowAction, FileSearchRowPayload,
     SelectedFileSearchResultPayload,
 };
-use crate::file_search::actions::{
-    InvocationTarget, containing_directory, execute_explorer_action, open_in_configured_editor,
-    open_path, resolve_explorer_action,
-};
+use crate::file_search::actions::{containing_directory, open_path};
 use crate::file_search::coordinator::SearchCoordinator;
 use crate::file_search::export;
 use crate::file_search::model::SearchResult;
@@ -69,17 +67,32 @@ impl FileSearchDialogState {
 
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !menu_or_combo_active {
             if search_submit_field_focused {
-                self.start_search(coordinator);
+                if !self.stage_host_action(FileSearchHostAction::Start) {
+                    self.start_search(coordinator);
+                }
                 ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                 ctx.request_repaint();
             } else if !text_field_focused {
                 if self.selection_is_valid() {
                     if modifiers.ctrl {
-                        self.open_selected_in_editor();
+                        self.request_selected_row_action(
+                            FileSearchRowAction::Menu(
+                                FileSearchContextMenuAction::OpenInConfiguredEditor,
+                            ),
+                            coordinator,
+                        );
                     } else if modifiers.alt {
-                        self.reveal_selected_in_explorer();
+                        self.request_selected_row_action(
+                            FileSearchRowAction::Menu(
+                                FileSearchContextMenuAction::RevealInExplorer,
+                            ),
+                            coordinator,
+                        );
                     } else {
-                        self.open_selected_result();
+                        self.request_selected_row_action(
+                            FileSearchRowAction::Activate,
+                            coordinator,
+                        );
                     }
                     ctx.input_mut(|input| {
                         input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
@@ -89,10 +102,15 @@ impl FileSearchDialogState {
             }
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
-            && self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel
-        {
-            ctx.request_repaint();
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            let staged =
+                self.stage_host_action(FileSearchHostAction::Escape(self.active_search_id));
+            if staged || self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel {
+                ctx.request_repaint();
+            }
+            if staged {
+                ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            }
         }
 
         if modifiers.ctrl
@@ -145,43 +163,6 @@ impl FileSearchDialogState {
 
     pub(super) fn select_previous_visible_result(&mut self, ctx: &egui::Context) {
         self.move_selection(SelectionMove::Previous, ctx);
-    }
-
-    pub(super) fn open_selected_in_editor(&mut self) {
-        let Some(selected) = self.selected_result.clone() else {
-            return;
-        };
-        let (path, line, column) = match selected.payload {
-            SelectedFileSearchResultPayload::Filename { path, .. } => (path, None, None),
-            SelectedFileSearchResultPayload::Content {
-                path,
-                content_match,
-            } => (
-                path,
-                Some(content_match.line_number),
-                content_match.column.map(|c| c.saturating_add(1)),
-            ),
-        };
-        let settings = self.settings.clone();
-        self.run_result_action("open in configured editor", || {
-            open_in_configured_editor(
-                &settings,
-                InvocationTarget {
-                    file: &path,
-                    line,
-                    column,
-                },
-            )
-        });
-    }
-
-    pub(super) fn reveal_selected_in_explorer(&mut self) {
-        let Some(path) = self.selected_path() else {
-            return;
-        };
-        self.run_result_action("reveal", || {
-            execute_explorer_action(resolve_explorer_action(&path)?)
-        });
     }
 
     pub(super) fn copy_selected_path(&mut self) {
@@ -281,11 +262,20 @@ impl FileSearchDialogState {
     }
 
     pub(super) fn export_visible_results_to_file(&mut self) {
+        if !self.stage_host_action(FileSearchHostAction::Export(
+            self.active_search_id,
+            self.jump_mode_results_revision,
+        )) {
+            self.export_visible_results_with_picker(rfd::FileDialog::new());
+        }
+    }
+
+    pub(super) fn export_visible_results_with_picker(&mut self, picker: rfd::FileDialog) {
         let default_name = match self.selected_mode {
             super::FileSearchMode::Filename => "filename-results.tsv",
             super::FileSearchMode::Content => "content-results.tsv",
         };
-        let Some(path) = rfd::FileDialog::new()
+        let Some(path) = picker
             .add_filter("TSV", &["tsv"])
             .set_file_name(default_name)
             .save_file()
@@ -305,7 +295,16 @@ impl FileSearchDialogState {
         });
     }
 
-    pub(super) fn copy_text_payload(&mut self, label: &str, payload: String) {
+    pub(super) fn copy_text_payload(&mut self, label: &'static str, payload: String) {
+        if let Some(actions) = &mut self.host_actions {
+            actions.push(FileSearchHostAction::Copy {
+                search: self.active_search_id,
+                revision: self.jump_mode_results_revision,
+                label,
+                payload,
+            });
+            return;
+        }
         self.run_result_action(label, || {
             export::set_clipboard_text(&payload)?;
             Ok(())

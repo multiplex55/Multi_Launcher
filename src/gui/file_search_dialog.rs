@@ -343,6 +343,44 @@ pub enum FileSearchContextMenuAction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+enum FileSearchRowAction {
+    Menu(FileSearchContextMenuAction),
+    Activate,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PendingFileSearchRowAction {
+    row: FileSearchResultRowId,
+    action: FileSearchRowAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum FileSearchHostAction {
+    Row(PendingFileSearchRowAction),
+    Start,
+    Cancel(Option<SearchId>),
+    Sort(Option<SearchId>),
+    Escape(Option<SearchId>),
+    Copy {
+        search: Option<SearchId>,
+        revision: u64,
+        label: &'static str,
+        payload: String,
+    },
+    Export(Option<SearchId>, u64),
+    PickRoot,
+    PickRipgrep,
+}
+
+pub(crate) struct FileSearchHostActions {
+    pub(crate) host_request: Option<bool>,
+    #[cfg(test)]
+    pub(crate) host_button: (egui::Rect, egui::Rect, bool),
+    actions: Vec<FileSearchHostAction>,
+    commands: Vec<FileSearchUiCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum FileSearchUiCommand {
     OpenHash(PathBuf),
     OpenFolderSize(PathBuf),
@@ -353,6 +391,7 @@ pub enum FileSearchUiCommand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileSearchDialogState {
+    host_actions: Option<Vec<FileSearchHostAction>>,
     pub open: bool,
     pub selected_mode: FileSearchMode,
     pub selected_scope: FileSearchScopeMode,
@@ -394,6 +433,88 @@ pub struct FileSearchDialogState {
         std::collections::HashMap<FileSearchTestPopupControl, egui::Rect>,
 }
 
+/// Reversible presentation state only. The search coordinator and preview receiver
+/// remain owned by the live dialog across speculative UI passes.
+#[derive(Clone)]
+pub(crate) struct FileSearchHostCheckpoint {
+    open: bool,
+    selected_mode: FileSearchMode,
+    selected_scope: FileSearchScopeMode,
+    search_text: String,
+    custom_roots: Vec<String>,
+    case_sensitive: bool,
+    include_hidden: bool,
+    selected_result: Option<SelectedFileSearchResult>,
+    refinement_text: String,
+    refinement_restore_selection: Option<SelectedFileSearchResult>,
+    ui_preferences: FileSearchUiPreferences,
+    ui_preferences_dirty: bool,
+    excluded_directory_names_overridden: bool,
+    request_search_focus: bool,
+    request_root_focus: bool,
+    pending_sort_change: bool,
+    jump_mode_form_generation: u64,
+    jump_mode_results_revision: u64,
+    selected_result_focus_owner: Option<SelectedResultFocusOwner>,
+    warning_error_message: Option<String>,
+    show_ripgrep_missing_prompt: bool,
+    ripgrep_missing_prompt_dismissed: bool,
+}
+
+impl FileSearchHostCheckpoint {
+    pub(crate) fn capture(state: &FileSearchDialogState) -> Self {
+        Self {
+            open: state.open,
+            selected_mode: state.selected_mode,
+            selected_scope: state.selected_scope,
+            search_text: state.search_text.clone(),
+            custom_roots: state.custom_roots.clone(),
+            case_sensitive: state.case_sensitive,
+            include_hidden: state.include_hidden,
+            selected_result: state.selected_result.clone(),
+            refinement_text: state.refinement_text.clone(),
+            refinement_restore_selection: state.refinement_restore_selection.clone(),
+            ui_preferences: state.ui_preferences.clone(),
+            ui_preferences_dirty: state.ui_preferences_dirty,
+            excluded_directory_names_overridden: state.excluded_directory_names_overridden,
+            request_search_focus: state.request_search_focus,
+            request_root_focus: state.request_root_focus,
+            pending_sort_change: state.pending_sort_change,
+            jump_mode_form_generation: state.jump_mode_form_generation,
+            jump_mode_results_revision: state.jump_mode_results_revision,
+            selected_result_focus_owner: state.selected_result_focus_owner.clone(),
+            warning_error_message: state.warning_error_message.clone(),
+            show_ripgrep_missing_prompt: state.show_ripgrep_missing_prompt,
+            ripgrep_missing_prompt_dismissed: state.ripgrep_missing_prompt_dismissed,
+        }
+    }
+
+    pub(crate) fn restore(self, state: &mut FileSearchDialogState) {
+        state.open = self.open;
+        state.selected_mode = self.selected_mode;
+        state.selected_scope = self.selected_scope;
+        state.search_text = self.search_text;
+        state.custom_roots = self.custom_roots;
+        state.case_sensitive = self.case_sensitive;
+        state.include_hidden = self.include_hidden;
+        state.selected_result = self.selected_result;
+        state.refinement_text = self.refinement_text;
+        state.refinement_restore_selection = self.refinement_restore_selection;
+        state.ui_preferences = self.ui_preferences;
+        state.ui_preferences_dirty = self.ui_preferences_dirty;
+        state.excluded_directory_names_overridden = self.excluded_directory_names_overridden;
+        state.request_search_focus = self.request_search_focus;
+        state.request_root_focus = self.request_root_focus;
+        state.pending_sort_change = self.pending_sort_change;
+        state.jump_mode_form_generation = self.jump_mode_form_generation;
+        state.jump_mode_results_revision = self.jump_mode_results_revision;
+        state.selected_result_focus_owner = self.selected_result_focus_owner;
+        state.warning_error_message = self.warning_error_message;
+        state.show_ripgrep_missing_prompt = self.show_ripgrep_missing_prompt;
+        state.ripgrep_missing_prompt_dismissed = self.ripgrep_missing_prompt_dismissed;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SelectedResultFocusOwner {
     row_id: FileSearchResultRowId,
@@ -403,6 +524,9 @@ struct SelectedResultFocusOwner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileSearchNativePopupAnchorOwner {
+    Export {
+        form_generation: u64,
+    },
     Columns {
         form_generation: u64,
     },
@@ -436,6 +560,7 @@ pub(crate) enum FileSearchTestPopupControl {
 impl Default for FileSearchDialogState {
     fn default() -> Self {
         Self {
+            host_actions: None,
             open: false,
             selected_mode: FileSearchMode::Filename,
             selected_scope: FileSearchScopeMode::Global,
@@ -568,6 +693,9 @@ impl FileSearchDialogState {
 
         self.native_popup_anchors.iter().find_map(|anchor| {
             let owner_is_current = match anchor.owner {
+                FileSearchNativePopupAnchorOwner::Export { form_generation } => {
+                    self.jump_mode_form_generation == form_generation
+                }
                 FileSearchNativePopupAnchorOwner::Columns { form_generation } => {
                     self.selected_mode == FileSearchMode::Filename
                         && self.jump_mode_form_generation == form_generation
@@ -962,6 +1090,9 @@ impl FileSearchDialogState {
     pub fn handle_sort_changed(&mut self) {
         self.mark_ui_preferences_dirty();
         self.invalidate_jump_mode_results();
+        if self.stage_host_action(FileSearchHostAction::Sort(self.active_search_id)) {
+            return;
+        }
         if self.current_status == SearchStatus::Running {
             self.pending_sort_change = true;
         } else if self.current_status == SearchStatus::Completed {
@@ -1418,6 +1549,182 @@ impl FileSearchDialogState {
         commands
     }
 
+    /// Draw the existing contents into a viewport supplied by a host.
+    /// Callers must retain the pass before applying the returned commands.
+    pub(crate) fn contents_in_host(
+        &mut self,
+        ui: &mut egui::Ui,
+        coordinator: &mut SearchCoordinator,
+        mut form_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        mut results_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        first_ui_pass: bool,
+        navigation_owner: bool,
+        is_popout: bool,
+    ) -> FileSearchHostActions {
+        debug_assert!(self.host_actions.is_none());
+        self.host_actions = Some(Vec::new());
+        if !first_ui_pass || !navigation_owner {
+            form_scope = None;
+            results_scope = None;
+        }
+        let mut request = None;
+        let presentation = if is_popout {
+            super::utility_host::UtilityPresentation::Popout
+        } else {
+            super::utility_host::UtilityPresentation::Docked
+        };
+        let (response, desired) = super::utility_host::presentation_button(
+            ui,
+            presentation,
+            first_ui_pass && navigation_owner,
+        );
+        let mut order = 0;
+        register_jump_mode_target(
+            form_scope.as_ref(),
+            ui,
+            &response,
+            "form/actions/host",
+            if is_popout { "Dock" } else { "Pop Out" },
+            crate::gui::jump_mode::TargetKind::Button,
+            &mut order,
+        );
+        if response.clicked() && first_ui_pass && navigation_owner && !ui.ctx().will_discard() {
+            request = Some(desired == super::utility_host::UtilityPresentation::Popout);
+        }
+        let commands = self.contents(
+            ui,
+            coordinator,
+            &mut form_scope,
+            &mut results_scope,
+            first_ui_pass,
+            navigation_owner,
+        );
+        let actions = self.host_actions.take().unwrap_or_default();
+        FileSearchHostActions {
+            host_request: request,
+            #[cfg(test)]
+            host_button: (response.rect, ui.clip_rect(), response.enabled()),
+            actions: if first_ui_pass && navigation_owner {
+                actions
+            } else {
+                Vec::new()
+            },
+            commands: if first_ui_pass && navigation_owner {
+                commands
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    pub(crate) fn complete_host_actions(
+        &mut self,
+        coordinator: &mut SearchCoordinator,
+        actions: FileSearchHostActions,
+        owner_hwnd: Option<usize>,
+    ) -> Vec<FileSearchUiCommand> {
+        let mut commands = actions.commands;
+        for action in actions.actions {
+            self.execute_host_action(action, coordinator, &mut commands, Some(owner_hwnd));
+        }
+        commands
+    }
+
+    fn stage_host_action(&mut self, action: FileSearchHostAction) -> bool {
+        let Some(actions) = &mut self.host_actions else {
+            return false;
+        };
+        actions.push(action);
+        true
+    }
+
+    fn execute_host_action(
+        &mut self,
+        action: FileSearchHostAction,
+        coordinator: &mut SearchCoordinator,
+        commands: &mut Vec<FileSearchUiCommand>,
+        picker_owner: Option<Option<usize>>,
+    ) {
+        match action {
+            FileSearchHostAction::Row(pending) => {
+                self.execute_row_action(pending, coordinator, commands)
+            }
+            FileSearchHostAction::Start => {
+                self.start_search(coordinator);
+            }
+            FileSearchHostAction::Cancel(search) if self.active_search_id == search => {
+                self.cancel_search(coordinator)
+            }
+            FileSearchHostAction::Sort(search) if self.active_search_id == search => {
+                self.handle_sort_changed()
+            }
+            FileSearchHostAction::Escape(search) if self.active_search_id == search => {
+                self.handle_escape(coordinator);
+            }
+            FileSearchHostAction::Copy {
+                search,
+                revision,
+                label,
+                payload,
+            } if self.active_search_id == search && self.jump_mode_results_revision == revision => {
+                self.copy_text_payload(label, payload);
+            }
+            FileSearchHostAction::Export(search, revision)
+                if self.active_search_id == search
+                    && self.jump_mode_results_revision == revision =>
+            {
+                if let Some(picker) = self.host_picker(picker_owner) {
+                    self.export_visible_results_with_picker(picker);
+                }
+            }
+            FileSearchHostAction::PickRoot
+                if self.selected_scope == FileSearchScopeMode::Directory =>
+            {
+                if let Some(path) = self
+                    .host_picker(picker_owner)
+                    .and_then(rfd::FileDialog::pick_folder)
+                {
+                    self.custom_roots.push(path.display().to_string());
+                    self.jump_mode_form_generation = self.jump_mode_form_generation.wrapping_add(1);
+                }
+            }
+            FileSearchHostAction::PickRipgrep
+                if self.show_ripgrep_missing_prompt && !self.ripgrep_missing_prompt_dismissed =>
+            {
+                if let Some(path) = self
+                    .host_picker(picker_owner)
+                    .and_then(|picker| picker.add_filter("Executable", &["exe", ""]).pick_file())
+                {
+                    match self.configure_ripgrep_path_for_future_searches(path) {
+                        Ok(command) => {
+                            commands.push(command);
+                            self.jump_mode_form_generation =
+                                self.jump_mode_form_generation.wrapping_add(1);
+                        }
+                        Err(error) => self.warning_error_message = Some(error),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn host_picker(&mut self, picker_owner: Option<Option<usize>>) -> Option<rfd::FileDialog> {
+        let picker = rfd::FileDialog::new();
+        #[cfg(windows)]
+        if let Some(hwnd) = picker_owner {
+            let Some(hwnd) = hwnd.and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize))
+            else {
+                self.warning_error_message = Some("File Search could not verify the file picker owner. Try again once the window is focused.".into());
+                return None;
+            };
+            return Some(picker.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)));
+        }
+        #[cfg(not(windows))]
+        let _ = picker_owner;
+        Some(picker)
+    }
+
     pub fn set_ui_preferences(&mut self, preferences: FileSearchUiPreferences) {
         self.ui_preferences = preferences;
         self.ui_preferences_dirty = false;
@@ -1628,6 +1935,7 @@ impl FileSearchDialogState {
                         if add_folder.clicked()
                             && first_ui_pass
                             && navigation_owner
+                            && !self.stage_host_action(FileSearchHostAction::PickRoot)
                             && let Some(path) = rfd::FileDialog::new().pick_folder()
                         {
                             self.custom_roots.push(path.display().to_string());
@@ -1736,12 +2044,12 @@ impl FileSearchDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 &mut visual_order,
             );
-            if search.clicked()
-                && first_ui_pass
-                && navigation_owner
-                && self.start_search(coordinator).is_some()
-            {
-                ui.ctx().request_repaint();
+            if search.clicked() && first_ui_pass && navigation_owner {
+                if self.stage_host_action(FileSearchHostAction::Start)
+                    || self.start_search(coordinator).is_some()
+                {
+                    ui.ctx().request_repaint();
+                }
             }
             let cancel = ui.button("Cancel");
             register_jump_mode_target(
@@ -1754,7 +2062,9 @@ impl FileSearchDialogState {
                 &mut visual_order,
             );
             if cancel.clicked() && first_ui_pass && navigation_owner {
-                self.cancel_search(coordinator);
+                if !self.stage_host_action(FileSearchHostAction::Cancel(self.active_search_id)) {
+                    self.cancel_search(coordinator);
+                }
                 ui.ctx().request_repaint();
             }
             let open = ui.add_enabled(self.can_open_selected_result(), egui::Button::new("Open"));
@@ -1769,7 +2079,7 @@ impl FileSearchDialogState {
                 &mut visual_order,
             );
             if open.clicked() && first_ui_pass && navigation_owner {
-                self.open_selected_result();
+                self.request_selected_row_action(FileSearchRowAction::Activate, coordinator);
                 ui.ctx().request_repaint();
             }
             let export_button = ui.button("Export");
@@ -1777,6 +2087,13 @@ impl FileSearchDialogState {
             self.record_test_native_popup_control(
                 FileSearchTestPopupControl::ExportAnchor,
                 &export_button,
+            );
+            self.record_native_popup_anchor(
+                ui,
+                &export_button,
+                FileSearchNativePopupAnchorOwner::Export {
+                    form_generation: self.jump_mode_form_generation,
+                },
             );
             let export_popup_id = egui::Popup::default_response_id(&export_button);
             let export_popup_layer = egui::LayerId::new(egui::Order::Foreground, export_popup_id);
@@ -1978,6 +2295,7 @@ impl FileSearchDialogState {
                                 &mut commands,
                                 jump_mode_results_scope.as_ref(),
                                 &mut results_visual_order,
+                                committed_owner_pass,
                             );
                         }
                         FileSearchMode::Content => self.content_results(
@@ -1986,6 +2304,7 @@ impl FileSearchDialogState {
                             &mut commands,
                             jump_mode_results_scope.as_ref(),
                             &mut results_visual_order,
+                            committed_owner_pass,
                         ),
                     });
             });
@@ -2056,6 +2375,7 @@ impl FileSearchDialogState {
             if locate_rg.clicked()
                 && first_ui_pass
                 && navigation_owner
+                && !self.stage_host_action(FileSearchHostAction::PickRipgrep)
                 && let Some(path) = rfd::FileDialog::new()
                     .add_filter("Executable", &["exe", ""])
                     .pick_file()
@@ -2143,6 +2463,7 @@ impl FileSearchDialogState {
         commands: &mut Vec<FileSearchUiCommand>,
         jump_mode_results_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         results_visual_order: &mut u64,
+        row_input_allowed: bool,
     ) -> FilenameTableGeometry {
         let previous_columns = self.ui_preferences.visible_columns.clone();
         results::ensure_filename_columns_visible(&mut self.ui_preferences);
@@ -2290,14 +2611,13 @@ impl FileSearchDialogState {
                         {
                             button_rect = Some(response.rect);
                         }
-                        if response.clicked()
+                        if row_input_allowed && response.clicked()
                             && let Some(sort) = results::filename_sort_after_header_click(
                                 self.ui_preferences.filename_sort,
                                 *column,
                             ) {
                                 self.ui_preferences.filename_sort = sort;
-                                self.ui_preferences_dirty = true;
-                                self.pending_sort_change = true;
+                                self.handle_sort_changed();
                         }
                     });
                     #[cfg(test)]
@@ -2396,7 +2716,7 @@ impl FileSearchDialogState {
                                     if is_selected {
                                         response.scroll_to_me(Some(egui::Align::Center));
                                     }
-                                    if response.clicked() {
+                                    if row_input_allowed && response.clicked() {
                                         self.select_result(&row_payload);
                                         ui.ctx()
                                             .memory_mut(|memory| memory.request_focus(response.id));
@@ -2406,15 +2726,15 @@ impl FileSearchDialogState {
                                     response.context_menu(|ui| {
                                         self.result_context_menu(
                                             ui,
-                                            &path,
+                                            &row_id,
                                             kind,
-                                            None,
+                                            false,
                                             coordinator,
                                             commands,
                                         )
                                     });
                                     if double_clicked {
-                                        self.open_result_row(&row_payload);
+                                        self.request_row_action(&row_id, FileSearchRowAction::Activate, coordinator, commands);
                                     }
                                 });
                             });
@@ -2449,6 +2769,7 @@ impl FileSearchDialogState {
         commands: &mut Vec<FileSearchUiCommand>,
         jump_mode_results_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         results_visual_order: &mut u64,
+        row_input_allowed: bool,
     ) {
         let rows = self.visible_result_rows();
         for display_row in rows {
@@ -2464,9 +2785,9 @@ impl FileSearchDialogState {
                         response.context_menu(|ui| {
                             self.result_context_menu(
                                 ui,
-                                &path,
+                                &display_row.id,
                                 FileKind::File,
-                                None,
+                                false,
                                 coordinator,
                                 commands,
                             )
@@ -2522,51 +2843,34 @@ impl FileSearchDialogState {
                         if is_selected {
                             response.scroll_to_me(Some(egui::Align::Center));
                         }
-                        if response.clicked() {
+                        if row_input_allowed && response.clicked() {
                             self.select_result(&row_payload);
                             response.request_focus();
                             self.set_selected_result_focus_owner(&row_id, response.id);
                         }
                         response.context_menu(|ui| {
-                            self.content_result_context_menu(
+                            self.result_context_menu(
                                 ui,
-                                &path,
-                                content_match.clone(),
+                                &row_id,
+                                FileKind::File,
+                                true,
                                 coordinator,
                                 commands,
                             )
                         });
                         if double_clicked {
-                            self.open_result_row(&row_payload);
+                            self.request_row_action(
+                                &row_id,
+                                FileSearchRowAction::Activate,
+                                coordinator,
+                                commands,
+                            );
                         }
                     });
                 }
                 FileSearchRowPayload::Filename { .. } => {}
             }
         }
-    }
-
-    fn content_result_context_menu(
-        &mut self,
-        ui: &mut egui::Ui,
-        path: &std::path::Path,
-        content_match: ContentMatch,
-        coordinator: &mut SearchCoordinator,
-        commands: &mut Vec<FileSearchUiCommand>,
-    ) {
-        if ui.button("Show all matches in this file").clicked() {
-            self.start_file_content_search(path, coordinator);
-            ui.ctx().request_repaint();
-            ui.close();
-        }
-        self.result_context_menu(
-            ui,
-            path,
-            FileKind::File,
-            Some(content_match),
-            coordinator,
-            commands,
-        );
     }
 
     pub fn can_open_selected_result(&self) -> bool {
@@ -2783,155 +3087,252 @@ impl FileSearchDialogState {
     fn result_context_menu(
         &mut self,
         ui: &mut egui::Ui,
-        path: &std::path::Path,
+        row: &FileSearchResultRowId,
         kind: FileKind,
-        first_match: Option<ContentMatch>,
+        has_content_match: bool,
         coordinator: &mut SearchCoordinator,
         commands: &mut Vec<FileSearchUiCommand>,
     ) {
-        let is_directory = kind == FileKind::Directory;
-        let can_inspect_file_users = kind == FileKind::File;
-        if ui.button("Open in configured editor").clicked() {
-            let settings = self.settings.clone();
-            self.run_result_action("open in configured editor", || {
-                open_in_configured_editor(
-                    &settings,
-                    InvocationTarget {
-                        file: path,
-                        line: first_match.as_ref().map(|m| m.line_number),
-                        column: first_match
-                            .as_ref()
-                            .and_then(|m| m.column.map(|c| c.saturating_add(1))),
-                    },
-                )
-            });
-            ui.close();
-        }
-        if ui.button("Preview").clicked() {
-            self.request_preview(path, first_match.as_ref());
-            ui.close();
-        }
-        if ui.button("Open file or directory").clicked() {
-            self.run_result_action("open", || {
-                execute_explorer_action(resolve_explorer_action(path)?)
-            });
-            ui.close();
-        }
-        if ui.button("Reveal in Explorer").clicked() {
-            self.run_result_action("reveal", || {
-                execute_explorer_action(resolve_explorer_action(path)?)
-            });
-            ui.close();
-        }
-        if can_inspect_file_users {
-            let inspect_file_users = ui.button("Inspect file users…");
+        use FileSearchContextMenuAction as Action;
+        let directory = kind == FileKind::Directory;
+        for (label, action, show) in [
+            (
+                "Show all matches in this file",
+                Action::ShowAllMatchesInThisFile,
+                has_content_match,
+            ),
+            (
+                "Open in configured editor",
+                Action::OpenInConfiguredEditor,
+                true,
+            ),
+            ("Preview", Action::Preview, true),
+            ("Open file or directory", Action::OpenFileOrDirectory, true),
+            ("Reveal in Explorer", Action::RevealInExplorer, true),
+            (
+                "Inspect file users…",
+                Action::InspectFileUsers,
+                kind == FileKind::File,
+            ),
+            (
+                "Open containing directory",
+                Action::OpenContainingDirectory,
+                true,
+            ),
+            ("Analyze folder size…", Action::AnalyzeFolderSize, directory),
+            ("Copy full path", Action::CopyFullPath, true),
+            ("Copy filename", Action::CopyFilename, true),
+            ("Calculate hash", Action::CalculateHash, !directory),
+            (
+                "Copy matching line",
+                Action::CopyMatchingLine,
+                has_content_match,
+            ),
+            (
+                "Open terminal in containing directory",
+                Action::OpenTerminal,
+                true,
+            ),
+            (
+                "Start filename search beneath this directory",
+                Action::NestedFilenameSearch,
+                true,
+            ),
+            (
+                "Start content search beneath this directory",
+                Action::NestedContentSearch,
+                true,
+            ),
+        ] {
+            if !show {
+                continue;
+            }
+            let response = ui.button(label);
             #[cfg(test)]
-            if inspect_file_users
-                .rect
+            if response
+                .interact_rect
                 .intersect(ui.clip_rect())
                 .is_positive()
             {
-                self.test_native_popup_control_rects.insert(
-                    FileSearchTestPopupControl::InspectFileUsers,
-                    inspect_file_users.interact_rect.intersect(ui.clip_rect()),
-                );
+                let control = match action {
+                    Action::InspectFileUsers => Some(FileSearchTestPopupControl::InspectFileUsers),
+                    Action::AnalyzeFolderSize => {
+                        Some(FileSearchTestPopupControl::AnalyzeFolderSize)
+                    }
+                    Action::NestedContentSearch => {
+                        Some(FileSearchTestPopupControl::NestedContentSearch)
+                    }
+                    _ => None,
+                };
+                if let Some(control) = control {
+                    self.test_native_popup_control_rects
+                        .insert(control, response.interact_rect.intersect(ui.clip_rect()));
+                }
             }
-            if inspect_file_users.clicked() {
-                commands.push(FileSearchUiCommand::InspectFileUsers(path.to_path_buf()));
+            if response.clicked() {
+                self.request_row_action(
+                    row,
+                    FileSearchRowAction::Menu(action),
+                    coordinator,
+                    commands,
+                );
+                ui.ctx().request_repaint();
                 ui.close();
             }
         }
-        if ui.button("Open containing directory").clicked() {
-            self.run_result_action("open containing directory", || {
-                let dir = containing_directory(path).ok_or_else(|| {
-                    anyhow::anyhow!("{} has no containing directory", path.display())
-                })?;
-                open_path(&dir)
-            });
-            ui.close();
+    }
+
+    fn request_selected_row_action(
+        &mut self,
+        action: FileSearchRowAction,
+        coordinator: &mut SearchCoordinator,
+    ) {
+        if let Some(row) = self
+            .selected_result
+            .as_ref()
+            .map(|selected| selected.row_id.clone())
+        {
+            self.request_row_action(&row, action, coordinator, &mut Vec::new());
         }
-        if is_directory {
-            let analyze_folder_size = ui.button("Analyze folder size…");
-            #[cfg(test)]
-            if analyze_folder_size
-                .rect
-                .intersect(ui.clip_rect())
-                .is_positive()
-            {
-                self.test_native_popup_control_rects.insert(
-                    FileSearchTestPopupControl::AnalyzeFolderSize,
-                    analyze_folder_size.interact_rect.intersect(ui.clip_rect()),
-                );
+    }
+
+    fn request_row_action(
+        &mut self,
+        row: &FileSearchResultRowId,
+        action: FileSearchRowAction,
+        coordinator: &mut SearchCoordinator,
+        commands: &mut Vec<FileSearchUiCommand>,
+    ) {
+        let pending = PendingFileSearchRowAction {
+            row: row.clone(),
+            action,
+        };
+        if let Some(actions) = &mut self.host_actions {
+            actions.push(FileSearchHostAction::Row(pending));
+        } else {
+            self.execute_row_action(pending, coordinator, commands);
+        }
+    }
+
+    fn execute_row_action(
+        &mut self,
+        pending: PendingFileSearchRowAction,
+        coordinator: &mut SearchCoordinator,
+        commands: &mut Vec<FileSearchUiCommand>,
+    ) {
+        if self.active_search_id != Some(pending.row.search_id) {
+            return;
+        }
+        let Some(row) = self
+            .visible_result_rows()
+            .into_iter()
+            .find(|row| row.id == pending.row)
+        else {
+            return;
+        };
+        let action = match pending.action {
+            FileSearchRowAction::Activate => {
+                self.open_result_row(&row);
+                return;
             }
-            if analyze_folder_size.clicked() {
-                commands.push(FileSearchUiCommand::OpenFolderSize(path.to_path_buf()));
-                ui.close();
+            FileSearchRowAction::Menu(action) => action,
+        };
+        let Some(intent) = Self::context_menu_intents_for_row(&row)
+            .into_iter()
+            .find(|intent| intent.action == action)
+        else {
+            return;
+        };
+        self.execute_menu_intent(intent, coordinator, commands);
+    }
+
+    fn execute_menu_intent(
+        &mut self,
+        intent: FileSearchContextMenuIntent,
+        coordinator: &mut SearchCoordinator,
+        commands: &mut Vec<FileSearchUiCommand>,
+    ) {
+        use FileSearchContextMenuAction as Action;
+        let FileSearchContextMenuIntent {
+            action,
+            path,
+            content_match,
+            is_directory,
+        } = intent;
+        match action {
+            Action::OpenInConfiguredEditor => {
+                let settings = self.settings.clone();
+                self.run_result_action("open in configured editor", || {
+                    open_in_configured_editor(
+                        &settings,
+                        InvocationTarget {
+                            file: &path,
+                            line: content_match.as_ref().map(|m| m.line_number),
+                            column: content_match
+                                .as_ref()
+                                .and_then(|m| m.column.map(|c| c.saturating_add(1))),
+                        },
+                    )
+                });
             }
-        }
-        if ui.button("Copy full path").clicked() {
-            self.run_result_action("copy full path", || {
-                clipboard::set_text(&path.display().to_string())?;
-                Ok(())
-            });
-            ui.close();
-        }
-        if ui.button("Copy filename").clicked() {
-            self.run_result_action("copy filename", || {
-                let name = copied_filename(path)
-                    .ok_or_else(|| anyhow::anyhow!("{} has no filename", path.display()))?;
-                clipboard::set_text(&name)?;
-                Ok(())
-            });
-            ui.close();
-        }
-        if !is_directory && ui.button("Calculate hash").clicked() {
-            commands.push(FileSearchUiCommand::OpenHash(path.to_path_buf()));
-            ui.close();
-        }
-        if let Some(content_match) = first_match.as_ref()
-            && ui.button("Copy matching line").clicked()
-        {
-            let line = content_match.line.clone();
-            self.run_result_action("copy matching line", || {
-                clipboard::set_text(&line)?;
-                Ok(())
-            });
-            ui.close();
-        }
-        if ui.button("Open terminal in containing directory").clicked() {
-            let settings = self.settings.clone();
-            self.run_result_action("open terminal", || {
-                let dir = containing_directory(path).ok_or_else(|| {
-                    anyhow::anyhow!("{} has no containing directory", path.display())
-                })?;
-                open_configured_terminal_in_directory(&settings, &dir)
-            });
-            ui.close();
-        }
-        if ui
-            .button("Start filename search beneath this directory")
-            .clicked()
-        {
-            self.start_nested_search(path, is_directory, FileSearchMode::Filename, coordinator);
-            ui.ctx().request_repaint();
-            ui.close();
-        }
-        let nested_content_search = ui.button("Start content search beneath this directory");
-        #[cfg(test)]
-        if nested_content_search
-            .rect
-            .intersect(ui.clip_rect())
-            .is_positive()
-        {
-            self.record_test_native_popup_control(
-                FileSearchTestPopupControl::NestedContentSearch,
-                &nested_content_search,
-            );
-        }
-        if nested_content_search.clicked() {
-            self.start_nested_search(path, is_directory, FileSearchMode::Content, coordinator);
-            ui.ctx().request_repaint();
-            ui.close();
+            Action::Preview => {
+                self.request_preview(&path, content_match.as_ref());
+            }
+            Action::OpenFileOrDirectory | Action::RevealInExplorer => {
+                let label = if action == Action::OpenFileOrDirectory {
+                    "open"
+                } else {
+                    "reveal"
+                };
+                self.run_result_action(label, || {
+                    execute_explorer_action(resolve_explorer_action(&path)?)
+                });
+            }
+            Action::InspectFileUsers => commands.push(FileSearchUiCommand::InspectFileUsers(path)),
+            Action::AnalyzeFolderSize => commands.push(FileSearchUiCommand::OpenFolderSize(path)),
+            Action::CalculateHash => commands.push(FileSearchUiCommand::OpenHash(path)),
+            Action::OpenContainingDirectory => {
+                self.run_result_action("open containing directory", || {
+                    let dir = containing_directory(&path).ok_or_else(|| {
+                        anyhow::anyhow!("{} has no containing directory", path.display())
+                    })?;
+                    open_path(&dir)
+                });
+            }
+            Action::CopyFullPath => {
+                self.copy_text_payload("copy full path", path.display().to_string())
+            }
+            Action::CopyFilename => {
+                self.run_result_action("copy filename", || {
+                    let name = copied_filename(&path)
+                        .ok_or_else(|| anyhow::anyhow!("{} has no filename", path.display()))?;
+                    clipboard::set_text(&name)?;
+                    Ok(())
+                });
+            }
+            Action::CopyMatchingLine => {
+                if let Some(content_match) = content_match {
+                    self.copy_text_payload("copy matching line", content_match.line);
+                }
+            }
+            Action::OpenTerminal => {
+                let settings = self.settings.clone();
+                self.run_result_action("open terminal", || {
+                    let dir = containing_directory(&path).ok_or_else(|| {
+                        anyhow::anyhow!("{} has no containing directory", path.display())
+                    })?;
+                    open_configured_terminal_in_directory(&settings, &dir)
+                });
+            }
+            Action::NestedFilenameSearch | Action::NestedContentSearch => {
+                let mode = if action == Action::NestedFilenameSearch {
+                    FileSearchMode::Filename
+                } else {
+                    FileSearchMode::Content
+                };
+                self.start_nested_search(&path, is_directory, mode, coordinator);
+            }
+            Action::ShowAllMatchesInThisFile => self.start_file_content_search(&path, coordinator),
         }
     }
 
@@ -4323,6 +4724,40 @@ mod tests {
         assert_eq!(state.custom_roots, vec!["/tmp/project/src".to_string()]);
         assert_eq!(state.selected_mode, FileSearchMode::Content);
     }
+    #[test]
+    fn hosted_file_search_row_action_only_dispatches_for_its_current_search() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(42)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(42),
+            result: filename_search_result("/tmp/current.txt"),
+        });
+        let row = state.result_rows[0].id.clone();
+        let mut coordinator = SearchCoordinator::new();
+        let mut commands = Vec::new();
+
+        state.host_actions = Some(Vec::new());
+        state.request_row_action(
+            &row,
+            FileSearchRowAction::Menu(FileSearchContextMenuAction::CalculateHash),
+            &mut coordinator,
+            &mut commands,
+        );
+        assert!(commands.is_empty());
+        let pending = state.host_actions.take().unwrap().pop().unwrap();
+
+        state.active_search_id = Some(SearchId(43));
+        state.execute_host_action(pending.clone(), &mut coordinator, &mut commands, None);
+        assert!(commands.is_empty());
+
+        state.active_search_id = Some(SearchId(42));
+        state.execute_host_action(pending, &mut coordinator, &mut commands, None);
+        assert_eq!(commands, vec![FileSearchUiCommand::OpenHash(row.path)]);
+    }
+
     fn filename_search_result(path: &str) -> SearchResult {
         filename_search_result_with_kind(path, FileKind::File)
     }
@@ -4457,6 +4892,7 @@ mod tests {
                                                 &mut commands,
                                                 None,
                                                 &mut visual_order,
+                                                true,
                                             ));
                                         });
                                 });
@@ -4551,6 +4987,7 @@ mod tests {
                                                 commands,
                                                 None,
                                                 &mut visual_order,
+                                                true,
                                             ));
                                         });
                                 });

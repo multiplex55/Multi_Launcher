@@ -1952,11 +1952,7 @@ impl LauncherApp {
                     .root_layer()
                     .is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || (self.file_search_dialog.open
-                && !ordinary_layer_is_allowed(
-                    crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch
-                        .layer_id()
-                        .expect("File Search has a root window layer"),
-                ))
+                && self.file_search_host.root_layer().is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || self.confirm_modal.is_open()
             || self.action_sheet.is_open()
             || self.snippet_prompt_dialog.is_open()
@@ -2128,7 +2124,7 @@ impl LauncherApp {
             Panel::ThemeSettingsDialog => middle(egui::Id::new("Theme settings")),
             Panel::HotkeyDirectoryDialog => NavigationDialogKind::HotkeyDirectory.layer_id(),
             Panel::FavDialog => middle(egui::Id::new(Some("Favorites"))),
-            Panel::FileSearchDialog => NavigationDialogKind::FileSearch.layer_id(),
+            Panel::FileSearchDialog => self.file_search_host.root_layer(),
             Panel::NotesDialog => self.notes_dialog.host_layer_if_root(),
             Panel::NoteGraphDialog => middle(egui::Id::new(Some("Note Graph"))),
             Panel::UnusedAssetsDialog => middle(egui::Id::new(Some("Unused Note Assets"))),
@@ -3220,8 +3216,8 @@ impl LauncherApp {
         let query_has_focus = ctx.memory(|memory| memory.has_focus(query_input_id));
         let shortcut_enabled = Self::launcher_action_sheet_shortcut_enabled(
             query_has_focus,
-            self.file_search_dialog.open,
-            self.any_panel_open(),
+            self.file_search_has_root_presentation(),
+            self.any_root_panel_open(),
         );
         if shortcut_enabled
             && ctx.input_mut(action_sheet::ActionSheetState::consume_open_shortcut)
@@ -4834,7 +4830,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 18] {
+    fn viewport_bootstrap_state(&self) -> [bool; 19] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4852,6 +4848,7 @@ impl LauncherApp {
             self.dashboard_editor.needs_root_ui_when_hidden(),
             self.settings_window_host.needs_root_ui_when_hidden(self.show_settings),
             self.mouse_gestures_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.open),
+            self.file_search_host.needs_root_ui_when_hidden(self.file_search_dialog.open),
             self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
             self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
@@ -4867,7 +4864,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 18],
+        previously_pending: [bool; 19],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5330,6 +5327,127 @@ impl LauncherApp {
             observer,
             ctx.input(|input| input.time),
         )
+    }
+
+    fn file_search_has_root_presentation(&self) -> bool {
+        self.file_search_dialog.open && self.file_search_host.root_layer().is_some()
+    }
+
+    fn show_file_search_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::{
+            SurfaceId,
+            ui::{NavigationDialogKind, NavigationOwner},
+        };
+        let os_close = self.file_search_host.begin_pass(
+            ctx,
+            &mut self.file_search_dialog,
+            &mut self.file_search_coordinator,
+            first,
+        );
+        let owner = if root_visible && self.file_search_has_root_presentation() {
+            self.resolve_jump_mode_navigation_owner(ctx, root_visible)
+        } else {
+            NavigationOwner::Blocked
+        };
+        let kind = NavigationDialogKind::FileSearch;
+        let root_scopes = if let NavigationOwner::Dialog {
+            kind: owner_kind,
+            instance,
+        } = owner
+            && owner_kind == kind
+            && self.jump_mode_enabled()
+        {
+            let surface = SurfaceId::dialog("file-search", instance);
+            (
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    surface.clone(),
+                    self.file_search_dialog.jump_mode_target_generation(),
+                    "file-search-dialog",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                ),
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    surface,
+                    self.file_search_dialog
+                        .jump_mode_results_target_generation(instance),
+                    "file-search-results",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                ),
+            )
+        } else {
+            (None, None)
+        };
+        let root_owner = self.file_search_native_ui_owner_current(ctx, root_visible);
+        let input = super::file_search_window_host::HostInput {
+            first,
+            root_visible,
+            root_input: self.native_ui_host_input_allowed(ctx, root_visible),
+            root_owner,
+            native_input: self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.pin_list_open
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open(),
+            close_shortcut: !self.pinned_panels.contains(&super::Panel::FileSearchDialog),
+        };
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        self.file_search_host
+            .configure_jump(&self.jump_mode_ui, jump_enabled);
+        self.file_search_host.show(
+            ctx,
+            &mut self.file_search_dialog,
+            &mut self.file_search_coordinator,
+            input,
+            self.jump_mode_ui.dialog_instance(kind).unwrap_or(0),
+            root_scopes,
+            os_close,
+        );
+    }
+
+    fn complete_file_search_host(&mut self, ctx: &egui::Context) {
+        let Some(completion) = self.file_search_host.complete(
+            ctx,
+            &mut self.file_search_dialog,
+            &mut self.file_search_coordinator,
+        ) else {
+            return;
+        };
+        let mut show_root = completion.show_root;
+        for command in completion.commands {
+            match command {
+                super::FileSearchUiCommand::OpenFolderSize(path) => {
+                    self.folder_size_dialog
+                        .stage_file_search_prefill(completion.root_pass, path);
+                    show_root = true;
+                }
+                super::FileSearchUiCommand::InspectFileUsers(path) => {
+                    self.file_lock_dialog
+                        .stage_file_search_prefill(completion.root_pass, path);
+                    show_root = true;
+                }
+                super::FileSearchUiCommand::OpenHash(path) => {
+                    self.handle_file_search_ui_command(
+                        super::FileSearchUiCommand::OpenHash(path),
+                        ctx,
+                    );
+                    show_root = true;
+                }
+                command => self.handle_file_search_ui_command(command, ctx),
+            }
+        }
+        if completion.closed {
+            self.panel_states.file_search_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::FileSearchDialog);
+            self.save_file_search_ui_preferences_if_dirty(ctx);
+        }
+        if show_root {
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn show_mouse_gestures_host(
@@ -6496,13 +6614,13 @@ impl LauncherApp {
                 .is_none_or(|layer| layer.order != egui::Order::Middle || known_layer(layer))
     }
 
-    fn file_search_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+    pub(super) fn file_search_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::visible_top_middle_layer;
 
         if !self.file_search_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
             return false;
         }
-        let Some(file_search_layer) = NavigationDialogKind::FileSearch.layer_id() else {
+        let Some(file_search_layer) = self.file_search_host.root_layer() else {
             return false;
         };
         if visible_top_middle_layer(ctx) != Some(file_search_layer) {
@@ -7320,6 +7438,7 @@ impl LauncherApp {
                     .host_layer_if_root()
                     .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
                 dashboard_editor_layer: self.dashboard_editor.host_layer_if_root(),
+                file_search_layer: self.file_search_host.root_layer(),
                 mouse_form_layers: [
                     self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS),
                     self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS),
@@ -7333,6 +7452,8 @@ impl LauncherApp {
                         self.xml_toolkit_dialog.root_navigation_instance(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
+                    } else if kind == NavigationDialogKind::FileSearch {
+                        self.file_search_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MouseSettings {
                         self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS).and(current)
                     } else if kind == NavigationDialogKind::MouseGestureSettings {
@@ -8018,6 +8139,7 @@ impl LauncherApp {
             self.show_dashboard_editor_host(&ctx, first_ui_pass, false);
             self.show_main_settings_host(&ctx, first_ui_pass, false, false);
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
+            self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             if first_ui_pass {
                 self.run_background_after_menu();
@@ -8625,7 +8747,7 @@ impl LauncherApp {
                     && Self::launcher_query_focus_should_be_requested(
                         false,
                         self.focus_query,
-                        self.file_search_dialog.open,
+                        self.file_search_has_root_presentation(),
                     )
                     && !action_sheet_blocks_launcher_input
                     && query_navigation_allowed
@@ -8970,7 +9092,7 @@ impl LauncherApp {
                     && first_ui_pass
                     && !action_sheet_blocks_launcher_input
                     && Self::launcher_escape_handling_enabled(
-                        self.file_search_dialog.open,
+                        self.file_search_has_root_presentation(),
                         egui::Popup::is_any_open(&ctx),
                     )
                     && !self
@@ -9923,6 +10045,7 @@ impl LauncherApp {
                 self.show_main_settings_host(&ctx, first_ui_pass, false, false);
             }
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
+            self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
@@ -10336,58 +10459,7 @@ impl LauncherApp {
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(&ctx, self);
         self.fav_dialog = fav_dlg;
-        let file_search_was_open = self.file_search_dialog.open;
-        let file_search_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let (file_search_scope, file_search_results_scope) = match file_search_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::FileSearch,
-                instance,
-            } if self.jump_mode_enabled() => {
-                let surface = crate::gui::jump_mode::SurfaceId::dialog("file-search", instance);
-                (
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        surface.clone(),
-                        self.file_search_dialog.jump_mode_target_generation(),
-                        "file-search-dialog",
-                        ctx.viewport_id(),
-                        file_search_owner,
-                        false,
-                    ),
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        surface,
-                        self.file_search_dialog
-                            .jump_mode_results_target_generation(instance),
-                        "file-search-results",
-                        ctx.viewport_id(),
-                        file_search_owner,
-                        false,
-                    ),
-                )
-            }
-            _ => (None, None),
-        };
-        let file_search_is_current_owner =
-            self.file_search_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let file_search_commands = self.file_search_dialog.ui_with_jump_mode_scope(
-            &ctx,
-            &mut self.file_search_coordinator,
-            file_search_scope,
-            file_search_results_scope,
-            first_ui_pass,
-            file_search_is_current_owner,
-        );
-        if first_ui_pass && file_search_is_current_owner {
-            for command in file_search_commands {
-                self.handle_file_search_ui_command(command, &ctx);
-            }
-        }
-        if first_ui_pass && file_search_was_open && !self.file_search_dialog.open {
-            self.save_file_search_ui_preferences_if_dirty(&ctx);
-        }
-        self.file_search_dialog
-            .preview_dialog
-            .ui(&ctx, &self.file_search_dialog.settings);
+        self.show_file_search_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let batch_rename_runtime = self.batch_rename_runtime_snapshot();
         let batch_rename_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
@@ -11249,7 +11321,7 @@ impl LauncherApp {
             && !self.action_sheet.is_open()
             && !self.snippet_prompt_dialog.is_open()
             && !self.confirm_modal.is_open()
-            && !self.file_search_dialog.open
+            && !self.file_search_has_root_presentation()
             && !self.any_panel_open()
             && !self.should_show_dashboard(self.query.as_str());
         let frame_eligible = painted_root_surface
@@ -11384,7 +11456,7 @@ impl LauncherApp {
                 && !self.action_sheet.is_open()
                 && !self.snippet_prompt_dialog.is_open()
                 && !self.confirm_modal.is_open()
-                && !self.file_search_dialog.open
+                && !self.file_search_has_root_presentation()
                 && !self.any_panel_open()
                 && !self.should_show_dashboard(self.query.as_str());
             let query_matches = self.query == query;
@@ -11650,6 +11722,7 @@ impl LauncherApp {
             });
         }
         self.complete_mouse_settings_hosts(ctx);
+        self.complete_file_search_host(ctx);
         if self.show_dashboard_editor || self.dashboard_editor.needs_root_ui_when_hidden() {
             let completion = self.dashboard_editor.on_host_frame_complete(
                 ctx,
@@ -36734,6 +36807,139 @@ mod tests {
         state.store(ctx);
     }
 
+    #[test]
+    fn file_search_moves_the_same_running_search_and_edits_while_root_is_hidden() {
+        use crate::file_search::coordinator::{
+            CancellationToken, SearchCoordinator, SearchEventSender, SearchExecutor,
+        };
+        use crate::file_search::model::{
+            SearchBackend, SearchEvent, SearchId, SearchRequest, SearchStatus,
+        };
+
+        struct HeldSearch {
+            begun: std::sync::mpsc::Sender<SearchId>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl SearchExecutor for HeldSearch {
+            fn execute(
+                &self,
+                id: SearchId,
+                _: SearchRequest,
+                cancellation: CancellationToken,
+                events: SearchEventSender,
+            ) {
+                let _ = events.send(SearchEvent::Started {
+                    id,
+                    backend: SearchBackend::WalkDir,
+                });
+                let _ = self.begun.send(id);
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(8));
+                let _ = events.send(if cancellation.is_cancelled() {
+                    SearchEvent::Cancelled { id }
+                } else {
+                    SearchEvent::Completed { id }
+                });
+            }
+        }
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        prepare_actual_file_search_dialog(&ctx, &mut app, workspace.root());
+        let (begun, observe) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        app.file_search_coordinator =
+            SearchCoordinator::with_executor(std::sync::Arc::new(HeldSearch {
+                begun,
+                release: std::sync::Mutex::new(wait),
+            }));
+        app.file_search_dialog.search_text = "fixture".to_owned();
+        let id = app
+            .file_search_dialog
+            .start_search(&mut app.file_search_coordinator)
+            .unwrap();
+        assert_eq!(
+            observe
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            id
+        );
+        app.file_search_dialog.update_ui_preferences(|preferences| {
+            preferences.filename_sort =
+                crate::file_search::settings::FileSearchFilenameSort::FilenameDescending;
+        });
+        run_dialog_frame(&ctx, &mut app);
+        let (popout, clip, enabled) = app.file_search_host.test_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(popout, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.file_search_host.is_popped_out());
+        let viewport = app.file_search_host.test_viewport();
+        let mut hide = actual_query_input(true);
+        hide.events
+            .push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, hide, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let child_frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                let output = app
+                    .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0;
+                assert!(
+                    output.viewport_output.contains_key(&viewport)
+                        || !app.file_search_host.is_popped_out()
+                );
+                output.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            child_frame(&mut app, Vec::new());
+        }
+        let filter = app.file_search_host.test_target("Filter current results");
+        for pressed in [true, false] {
+            child_frame(&mut app, tool_dialog_pointer_events(filter, pressed));
+        }
+        child_frame(&mut app, vec![egui::Event::Text("during run".into())]);
+        assert_eq!(app.file_search_dialog.refinement_text, "during run");
+        assert_eq!(app.file_search_dialog.search_text, "fixture");
+        assert_eq!(app.file_search_dialog.active_search_id, Some(id));
+        assert_eq!(app.file_search_dialog.current_status, SearchStatus::Running);
+        assert_eq!(app.file_search_coordinator.diagnostics().started, 1);
+        let (dock, clip, enabled) = app.file_search_host.test_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            child_frame(&mut app, tool_dialog_pointer_events(dock, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.file_search_dialog.open && !app.file_search_host.is_popped_out());
+        assert_eq!(app.file_search_dialog.active_search_id, Some(id));
+        assert_eq!(app.file_search_coordinator.diagnostics().started, 1);
+        assert_eq!(app.file_search_coordinator.active_search_id(), Some(id));
+        assert!(matches!(
+            observe.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+    }
+
     fn prepare_actual_file_search_dialog(
         ctx: &egui::Context,
         app: &mut LauncherApp,
@@ -44015,6 +44221,7 @@ mod tests {
                     mkmacro: None,
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
+                    file_search_layer: None,
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 },
             ),
@@ -45794,6 +46001,7 @@ mod tests {
                     mkmacro: None,
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
+                    file_search_layer: None,
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
@@ -48361,6 +48569,7 @@ mod tests {
                     mkmacro: None,
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
+                    file_search_layer: None,
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),

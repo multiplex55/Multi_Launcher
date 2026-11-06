@@ -160,6 +160,14 @@ impl FileLockDialogState {
         }
     }
 
+    pub(super) fn stage_file_search_prefill(
+        &mut self,
+        pass: ViewportPassProvenance,
+        path: PathBuf,
+    ) {
+        self.stage_with_provenance(pass, vec![FileLockAction::Prefill(path)]);
+    }
+
     pub(crate) fn stage_prefill(&mut self, ctx: &egui::Context, path: PathBuf) {
         if ctx.viewport_id() == egui::ViewportId::ROOT {
             self.stage(ctx, vec![FileLockAction::Prefill(path)]);

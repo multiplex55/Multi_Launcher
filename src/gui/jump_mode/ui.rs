@@ -430,6 +430,7 @@ impl NavigationViewportBinding {
             self.owner,
             NavigationOwner::Dialog {
                 kind: NavigationDialogKind::RegexTester
+                    | NavigationDialogKind::FileSearch
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::ImageCompare
@@ -454,6 +455,13 @@ impl NavigationViewportBinding {
     pub(crate) fn base_is_current(self, ctx: &egui::Context) -> bool {
         let visible_layer = visible_top_middle_layer(ctx);
         let layer_is_current = match self.owner {
+            NavigationOwner::Dialog {
+                kind: NavigationDialogKind::FileSearch,
+                ..
+            } => {
+                Some(self.base_layer) == NavigationDialogKind::FileSearch.layer_id()
+                    && visible_layer == Some(self.base_layer)
+            }
             NavigationOwner::XmlOverwriteConfirmation {
                 parent_instance,
                 confirmation_instance,
@@ -1035,6 +1043,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) mkmacro: Option<(u64, egui::LayerId)>,
     pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
     pub(crate) mouse_form_layers: [Option<egui::LayerId>; 3],
+    pub(crate) file_search_layer: Option<egui::LayerId>,
     pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
 }
 
@@ -1127,6 +1136,8 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             Some(NavigationOwner::MkMacro { instance })
         } else if let Some(kind) = if windows.dashboard_editor_layer == Some(layer) {
             Some(NavigationDialogKind::DashboardEditor)
+        } else if windows.file_search_layer == Some(layer) {
+            Some(NavigationDialogKind::FileSearch)
         } else if windows.mouse_form_layers[0] == Some(layer) {
             Some(NavigationDialogKind::MouseSettings)
         } else if windows.mouse_form_layers[1] == Some(layer) {
@@ -4324,6 +4335,7 @@ mod tests {
             mkmacro: None,
             dashboard_editor_layer: None,
             mouse_form_layers: [None; 3],
+            file_search_layer: None,
             dialogs: [None; NavigationDialogKind::ALL.len()],
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);

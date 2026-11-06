@@ -32,6 +32,7 @@ mod event_channel;
 mod fav_dialog;
 mod file_lock_dialog;
 mod file_search_dialog;
+mod file_search_window_host;
 pub mod file_search_preview_dialog;
 mod folder_size_dialog;
 mod font_revision;
@@ -1245,6 +1246,7 @@ pub struct LauncherApp {
     theme_settings_dialog: ThemeSettingsDialogState,
     fav_dialog: FavDialog,
     file_search_dialog: FileSearchDialogState,
+    file_search_host: file_search_window_host::FileSearchWindowHost,
     pub diff_dialog: DiffDialogState,
     file_search_coordinator: SearchCoordinator,
     batch_rename_dialog: BatchRenameDialogState,
@@ -2677,10 +2679,14 @@ impl LauncherApp {
                 }) {
                     Ok(settings) => {
                         if let Some(value) = settings.plugin_settings.get("file_search").cloned() {
-                            match serde_json::from_value(value.clone()) {
+                            match serde_json::from_value::<crate::file_search::settings::FileSearchSettings>(value.clone()) {
                                 Ok(committed) => {
-                                    self.file_search_dialog.ui_preferences_dirty = false;
-                                    self.apply_file_search_settings(committed);
+                                    // View preferences must not replace the executor
+                                    // or cancel its current search.
+                                    self.file_search_dialog.settings.ui_preferences =
+                                        committed.ui_preferences.clone();
+                                    self.file_search_dialog
+                                        .set_ui_preferences(committed.ui_preferences);
                                     self.settings_editor
                                         .set_plugin_setting_value("file_search", value);
                                 }
@@ -3883,6 +3889,7 @@ impl LauncherApp {
             theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
             file_search_dialog: FileSearchDialogState::from_settings(file_search_settings.clone()),
+            file_search_host: Default::default(),
             file_search_coordinator: SearchCoordinator::from_settings(file_search_settings),
             batch_rename_dialog: BatchRenameDialogState::default(),
             batch_rename_coordinator: None,
@@ -4821,6 +4828,7 @@ impl LauncherApp {
     fn panel_has_root_presentation(&self, panel: Panel) -> bool {
         match panel {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
+            Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::MouseGesturesDialog => self.mouse_gestures_host
                 .root_layer(mouse_form_host::MOUSE_GESTURES).is_some(),
             Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(mouse_form_host::MOUSE_SETTINGS).is_some(),
@@ -4910,6 +4918,9 @@ impl LauncherApp {
                 && !self.mouse_form_root_close_allowed(&self.egui_ctx, panel))
             || (panel == Panel::MouseGesturesDialog
                 && !self.mouse_gestures_root_close_allowed(&self.egui_ctx))
+            || (panel == Panel::FileSearchDialog
+                && (!self.file_search_native_ui_owner_current(&self.egui_ctx, true)
+                    || egui::Popup::is_any_open(&self.egui_ctx)))
         {
             return false;
         }
@@ -5062,8 +5073,8 @@ impl LauncherApp {
                 self.panel_states.fav_dialog = false;
             }
             Panel::FileSearchDialog => {
-                self.file_search_dialog.open = false;
-                self.panel_states.file_search_dialog = false;
+                self.file_search_host.request_close(&self.egui_ctx);
+                self.panel_stack.insert(panel_index, panel);
             }
             Panel::BatchRenameDialog => {
                 self.end_batch_rename_session();
@@ -5391,6 +5402,7 @@ impl LauncherApp {
             }
             Panel::FileSearchDialog => {
                 self.file_search_dialog.open = false;
+                self.file_search_host.retire(&self.egui_ctx);
                 self.panel_states.file_search_dialog = false;
             }
             Panel::BatchRenameDialog => {
@@ -5749,6 +5761,11 @@ impl LauncherApp {
             self.open_settings_dialog();
         } else if panel == Panel::MkMacroDialog {
             self.mkmacro_dialog.open();
+        } else if panel == Panel::FileSearchDialog {
+            if !self.file_search_dialog.open {
+                self.file_search_dialog.open();
+            }
+            self.file_search_host.request_focus();
         } else if panel == Panel::MouseGesturesDialog {
             self.mouse_gestures_dialog.open();
             self.mouse_gestures_host.request_focus();

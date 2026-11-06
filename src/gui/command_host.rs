@@ -952,6 +952,7 @@ impl crate::commands::HotFolderCommandHost for LauncherApp {
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
+        self.file_search_host.request_focus();
     }
 
     fn cancel_file_search(&mut self) {
@@ -965,6 +966,7 @@ impl FileSearchCommandHost for LauncherApp {
     ) {
         self.file_search_dialog
             .open_with_mode(file_search_mode(payload.search_kind()));
+        self.file_search_host.request_focus();
     }
 
     fn start_file_search(&mut self, payload: &crate::file_search::actions::FileSearchStartPayload) {
@@ -974,6 +976,7 @@ impl FileSearchCommandHost for LauncherApp {
             payload.text.clone(),
             &mut self.file_search_coordinator,
         );
+        self.file_search_host.request_focus();
     }
 
     fn report_file_search_action_error(&mut self, message: String) {
