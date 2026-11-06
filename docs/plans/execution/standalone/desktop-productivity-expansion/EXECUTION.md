@@ -1218,3 +1218,203 @@ M17-A initial cumulative list m17-focused-list.log exited101 after 333.152s buil
 M17-A corrected cumulative list m17-focused-list-02.log exit0,430.077s, exact444 names independently set-checked (no missing/extra/duplicate). Same selector m17-focused-run.log initial exit100, Nextest c1d1b734-28d5-487a-8842-a628ce090871, 444 across two binaries,443 passed/1 failed/7048 skipped,11.175s runtime/14.738s command. Both new remediation tests and directly affected retained Studio Save As passed. Only visual_canvas_layout_snaps_group_to_grid_and_nearby_guide_with_zoom_scaled_ties failed bounded prefix assertion (37 vs35). Comparison with accepted M9-A.2 and M9-B.1 shows the later connector work intentionally filters selected objects outside the painted prefix. Older fixture adds a selected object after the guide, so its prefix before the guide also hides that selected object (anchor changes from -30 to +3). Approved correction1 fixture-only: insert both selected shapes before both guides, assert actual prefix contains selected and omits candidates, preserve grid/tie/zoom assertions, re-list/recheck exact one only. Passing443 not repeated; no native.
 
 M17-A scoped verification accepted. Exact snap correction list m17-focused-snap-recheck-01-list.log exit0 matched1,101.907s; exact run m17-focused-snap-recheck-01.log exit0 1/1, Nextest f0e65241-1cd2-430d-8223-32dc73089292,0.037s tests/2.716s wall. All444 distinct passed across initial443 and exact corrected fixture; no repeat of passing443, no whole-suite run, no new native replay. Final production Clippy exits0 after bounded lint batch (20 lib +3 bin classified) and cumulative scoped formatting/diff clean; final two fixture-only changes formatted with production evidence unchanged. Configured cumulative review covered frozen C01–C06 and current recorder/late Save As/scalar min boundaries, corrections addressed; original frozen omissions and native limits remain. Toolchain rustc1.99.1 (58cf8f9c3), Nextest0.9.135, Windows x86_64-pc-windows-msvc, locked/offline fast-dev. Parent commits and pushes M17-A, then final M17-B documentation only.
+
+M17-A actual checkpoint b12a469dafe1afbda3cafdd1f132dd1813fad27c, one ordinary push exit0 (m17-a-push.log), exact clean HEAD/upstream before M17-B.
+
+## M17-B — final delivery and continuation boundary
+
+**Overall: Partial / Blocked.** Independent source, bounded verification and final review are complete for the retained subset. Required hosting, programmer inspector, Diagram, Explorer and interactive native flows remain incomplete or unverified. See [bounded stop report](stalls/20261106T135856Z.md).
+
+### Category results
+
+| Category | Retained implementation and review | Mandatory gaps |
+| --- | --- | --- |
+| C01 — Utility hosts | Reference Calculation Pad session/accepted-pass wiring and shared geometry storage; 12 + 22 focused, reviewed | M1-B.2 archived after 52/54 and two unresolved docked Diagram clicks. Remaining ordinary hosts, focus/return/picker/geometry wiring, M2–M4, IDs 13–23; partial 24–26; N1–N4 |
+| C02 — Calculation | Exact integers, legacy scalar source, unit algebra and executable 30-example catalog; 18/46/69/3 checkpoint tests, reviewed; M17 scalar/minute overlap fixture passed | Separate inspector/bitfields/copy/insert/comparison, IDs 5–6, 8, 11; partial 12; N5 |
+| C03 — Diagram | Legacy Mermaid and bounded visual authority; basic transforms, snapping, anchors, assets/presets, recents/copy; reviewed ungrouped draw.io and internal rich PNG/SVG encoder; M17 direct/pending late Save As collision fixture passed | Archived group/container/swimlane, visual starter and rich Studio PNG/SVG publication increments; grouped conversion/interchange, independent reader, common hosts, N6/N7. Partial selected groups traced in ID audit |
+| C04 — Explorer tabs | Ordered operation and guarded read-only Windows observations, saved-list store; 21 + 9 focused, reviewed | Windows 10 build 19045 lacks supported tab observation. No verified mutation, editor/launcher/progress/cancel/typed route or common host; ID 61 partial and N8 unverified |
+| C05 — Folder sizes | Read-only, bounded logical per-entry metrics, docked controls, File Search handoff and exact Activity; 15/10/9 focused and disposable-tree/hard-link native evidence, reviewed | Shared detach/return/focus/geometry, ID 88 partial and full N9 unverified |
+| C06 — File locks | Read-only Restart Manager and exact process identity, docked controls, safe File Search prefill; 15/14 focused including exact held/released owned helper native evidence, reviewed | Shared detach/return/focus/geometry, ID 89 partial and full N10 unverified |
+| C07 — Recorder | Exact recorder session and WGC source; independently decoded owned-window GIF and video-only H.264 MP4; docked setup/retained compact controls, actual shortcut/admission and lifecycle tests, verified repeated active discard and exact resource cleanup; configured review | Full N11/N12: actual launcher hidden-root stop, global chord and pointer/still capture/live Pinboard coexistence, monitor/DPI; ordinary setup common host remains docked |
+
+Primary owners: existing launcher/utility host state; calculation_pad exact scalar/programmer/quantity boundary; diagram document/persistence/visual projection and draw.io; explorer_tabs read-only operation and store; folder_size/file_lock adapters and their docked GUI actions; recording session/controller/encoders and existing hotkey runtime.
+
+### Selected requirements
+
+Scope is 50 IDs from Goal E.4. Native N1–N12 remain separate from automated checks and isolated adapter/artifact evidence.
+
+| Category / IDs | Retained implementation and prior evidence | Incomplete or unverified |
+| --- | --- | --- |
+| C01: 13, 14, 15 | Existing owners traced; no new M2 source | Notes/each editor, Markdown Studio, MkMacro common host migration and native N2 |
+| C01: 16, 17, 18 | Existing owners traced; no new M3 source | Main/Dashboard and Mouse/Gesture Settings/common host, native N3 |
+| C01: 19, 20, 21, 22, 23 | Each existing utility owner traced; no new M4 source | All named file, clipboard, developer, time and file/image migrations; N4 |
+| C01: 24, 25, 26 | M1-A accepted reference lifecycle and shared provenance, 12/12; M1-B.1 geometry model and persistence, 22/22 | M1-B.2 52/54 with two unresolved docked Diagram click paths, full increment archived/inactive; shared wiring, geometry/focus/return, parentage, N1 |
+| C02: 1, 2, 3, 4, 7, 10 | M5-A/B exact integer model, grammar, operations and scalar compatibility 18/18 and 46/46 | Native N5 complete end-to-end path unavailable |
+| C02: 5, 6, 8, 11 | None | M6 separate inspector, working-copy bitfields, labels/copy, revision-fenced insert/undo, comparison absent due C01 dependency |
+| C02: 9 | Unit algebra M7-A all69 distinct; M17 verified legacy scalar minimum and signed operands coexist with minutes and dimension diagnostics | No claim of broad native workflow |
+| C02: 12 | M7-B retained reference and executable 30-example catalog; three exact tests | Missing M6 tools and corresponding interactive/reference completion |
+| C03: 27, 28, 34, 35 | M8 retained dual authoring, legacy v1/v2 and rich bounded v3, styles/layers/projected editor and viewer, 38/38/16 distinct; M17 verified late-collision-safe native Save As | N6/N7, common host transitions |
+| C03: 29, 30, 31, 32, 33, 36, 37, 39, 40, 41 | M9 retained transforms, snapping, navigation/minimap, anchored connectors, local embedded raster/presets (19/11/20/18 distinct) | Group/container/swimlane membership and descendant transform M9-B.2 inactive at 15/16; grouped conversion and interchange unavailable; full N7 |
+| C03: 38, 42, 43, 45, 46 | M10 retained Mermaid assistance, ungrouped visual-copy, exact duplicate, recents, internal visual PNG/SVG encoder (11/17/7 distinct) | Visual template UI 14/15 and Studio visual PNG/SVG controls/publication 15/16 inactive; native N6/N7 and grouped conversion |
+| C03: 44 | M11 bounded uncompressed single-page ungrouped draw.io, reviewable isolated import/native copy and current committed scene export, no clobber; 9/8/6 across adapter/Studio/docs | Grouped interchange depends on M9-B.2; compressed optional not attempted; independent external reader unavailable |
+| C04: 61 | Ordered operation, guarded read-only Explorer Shell observations and saved-list store, 21/9 distinct | Windows 10 lacks supported Explorer tabs; no positive tab/path attribution, native mutation, editor, launcher route, progress/cancel or ordinary host; N8 |
+| C05: 88 | Bounded metadata-only scan, docked UI, sorted rows/File Search and exact activity, 15/10/9 distinct; disposable Windows tree accounting | Shared detach/return unavailable, full N9 unverified |
+| C06: 89 | Read-only Restart Manager, exact process identity and docked actions, 15/14 distinct incl exact owned held-file adapter | Shared detach/return unavailable, full N10 unverified |
+| C07: 119 | M15 bounded WGC and silent GIF/H.264 MP4; M16 typed discovery, exact setup/controller, user result, capture interlocks and optional Stop; 15 + 15 launcher/shortcut focused cases, owned-window GIF and MP4 independently decoded and repeated active discard/retirement proven | Full N11/N12 (interactive launcher, actual global chord/pointer/still capture/live Pinboard, monitor/DPI); ordinary setup common detach/return absent under C.2 |
+
+Optional: 128-bit arithmetic and compressed draw.io import were not claimed or counted against required behavior. Audio is outside scope.
+
+### Common host acceptance audit
+
+Scope: Goal C.2. Existing owners and routes are listed in the baseline inventory in [EXECUTION.md](EXECUTION.md). M1-B.1 verified the shared geometry storage and recovery behavior in isolation; it did not wire native geometry and Dock/Pop Out controls into each surface. Baseline behavior and focused domain tests are not counted as common-host migration evidence.
+
+| Surface | Implementation | Host state test | Native status |
+| --- | --- | --- | --- |
+| Quick Notes | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Each note editor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Markdown Studio | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| MkMacro | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Main Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Dashboard Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Mouse Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Mouse Gestures | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Gesture Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| File Search | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Diff | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Batch Rename | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Search & Replace | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Clipboard History | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Snippets | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Clipboard Modify | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Paste Sequences | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| JSON | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| XML | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Regex | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Table | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Timer/alarm authoring | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar root | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar event editor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar event details | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Date & Time Studio | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Image Compare | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Duplicate Finder | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| ZIP Extractor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calculation Pad | Reference migration retains the existing dock/pop-out session via M1-A; shared geometry/focus integration from B.2 is inactive | M1-A accepted-pass, identity, dirty/history and pending decision coverage; full B.2 wiring unverified | Unverified N1 |
+| Diagram Studio | Existing native editor; shares M1-A pass provenance; B.2 docked click paths, ordinary detachment and picker parentage unaccepted | M1-A exact provenance passed; B.2 failures retained in stop report, inactive | Unverified N6/N7 |
+| Diagram viewer | Existing separate native/embedded view of the same owner; M1-A pass provenance only | M1-A close/reopen generation and embedded fallback passed; no common Dock/Pop Out wiring | Unverified N6/N7 |
+| Programmer inspector | M6 owner/UI absent | Unrun; no implementation | Unverified N5 |
+| Explorer saved-list editor/launcher | Ordered operation and saved-list store only; editor/launcher absent | Domain tests passed; no UI host state | Unverified N8 |
+| Folder Size Analyzer | Docked owner/actions delivered; common detach/return absent | Docked generation/picker/selection/cancellation state tested; no migration test | Unverified full N9; narrower disposable Windows tree metadata passed |
+| File Lock Inspector | Docked owner/actions delivered; common detach/return absent | Docked generation/prefill/action safety tested; no migration test | Unverified full N10; narrower held-file adapter with owned PID/creation time passed |
+| Silent recorder setup / compact controller | Docked setup and dedicated retained compact controller, including hidden root, live Stop/Discard, and retained output result; ordinary setup detach/return absent | Exact hidden and stale Watch/retained Stop, reciprocal capture guards, and exit wait for exact retirement passed; optional shortcut both routing modes tested | Full N11/N12 unverified; owned HWND WGC→GIF and WGC→MP4 independently decoded, repeated active discard and exact owned cleanup passed |
+
+File Search is still docked; retained folder-size and file-lock prefill/reveal interactions are separate, covered workflows. A recorder rectangle selector is a specialized overlay excluded from ordinary Dock/Pop Out under C.2.
+
+### Exact category ancestry and checkpoint commits
+
+| Category | Branch | parent_branch | parent_tip_sha | baseline_sha | final_tip_sha | Push | Checkout at handoff |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| C01 | feat/utility-dock-popout | fix/studio-usability-root-jump-recovery | 7c49f083474afcdc0eb57eb3e88bbd32561165a8 | bc3d6f8f7ef67886402ad90a327198ba5ca1f09f | 754ba93929fc0021e50e24343707a7f2878a4142 | Pushed; upstream matches | clean; active source equals accepted M1-B.1 |
+| C02 | feat/calculation-programmer-tools | feat/utility-dock-popout | 754ba93929fc0021e50e24343707a7f2878a4142 | 5504e066d7539fae781e1da190b70b79f90ad0ee | 18632f794e7134c1633e13f377bd9e8c53d4f375 | Pushed; upstream matches | clean checkout/index; no unaccepted active source |
+| C03 | feat/diagram-visual-canvas | feat/calculation-programmer-tools | 18632f794e7134c1633e13f377bd9e8c53d4f375 | 63746e39ac9b86d8c155d17eaafd39dbb8b82b0d | 6f094175500591648a6074894f300a0274544184 | Pushed; upstream matches | clean index and worktree |
+| C04 | feat/explorer-folder-tabs | feat/diagram-visual-canvas | 6f094175500591648a6074894f300a0274544184 | 808f76d8fcc2309441b5774c1873fe59673ffef8 | 064955b4262036b398b3ff27fe737f6d6b82b1f1 | Pushed; upstream matches | clean index and worktree |
+| C05 | feat/folder-size-analyzer | feat/explorer-folder-tabs | 064955b4262036b398b3ff27fe737f6d6b82b1f1 | f80fd32ba16bbb20d03a8b7d21e89e7051c22578 | bb9b0d88fb936eab936e8600ff7924d21de2055a | Pushed; upstream matches | clean, index empty, no in-progress git operation |
+| C06 | feat/file-lock-inspector | feat/folder-size-analyzer | bb9b0d88fb936eab936e8600ff7924d21de2055a | f23c3297b34aeb5bdd33055fae4cf62a853222f6 | a8ad570e8646bf445e651a20a62739a99522f600 | Pushed; upstream matches | clean, index empty, no in-progress git operation |
+| C07 | feat/silent-screen-recorder | feat/file-lock-inspector | a8ad570e8646bf445e651a20a62739a99522f600 | f0268a19e2cd803d511a686d31f193a8fdb192ab | See external C07 final receipt | M17-A pushed; final push recorded after M17-B | Clean at M17-A; actual final status in receipt |
+
+Each checkpoint and reporting commit is listed below in ancestry order.
+
+#### C01
+
+- bc3d6f8f7ef67886402ad90a327198ba5ca1f09f chore(productivity): [C01/M0-A] establish utility-host branch baseline
+- 4ed1434c6195346832ea9a4323aa926d2fb03f59 docs(productivity): [M0-B] map approved scope and bounded verification
+- 9790d46dffd2be64c614cf06aa3698a62d1885cb refactor(gui): [M1-A] share accepted single-session utility hosting
+- f04ff2ed4f3b547662b7c87d7a31bceec38a428d feat(gui): [M1-B.1] preserve independent utility host geometry
+- 4de372d5480a0f5b8b155e6e1cd9e0cfda7bb0d4 docs(queue): record blocked desktop-productivity-expansion/M1-B2
+- 754ba93929fc0021e50e24343707a7f2878a4142 docs(productivity): [C01/HANDOFF] freeze blocked hosting for independent work
+
+#### C02
+
+- 5504e066d7539fae781e1da190b70b79f90ad0ee chore(productivity): [C02/M0-A] establish independent calculation baseline
+- 7bae0af206dfda3b357a8804ddd73d5d321fdd9a feat(calc): [M5-A] add exact width-aware integer operations
+- 92a7dfad68a48f8e1c480894a4db7cea4d5fe9f4 feat(calc): [M5-B] integrate programmer syntax without scalar regressions
+- 55e14c34ab51e424ac45808fcf867616fa2bf999 feat(calc): [M7-A] add bounded unit-aware arithmetic
+- 18632f794e7134c1633e13f377bd9e8c53d4f375 docs(calc): [M7-B partial] document delivered programmer and unit arithmetic
+
+#### C03
+
+- 63746e39ac9b86d8c155d17eaafd39dbb8b82b0d chore(productivity): [C03/M0-A] establish Diagram Visual Canvas baseline
+- 5b522ab2cf04536dd5fcc4595853cf6fbf4e53e4 feat(diagram): [M8-A] separate visual authoring and versioned documents
+- 7529105cd84b277475a97adeb04ae5a5668cb682 feat(diagram): [M8-B.1] model and persist bounded visual scene history
+- c4e709988b38c5dc949fcb5a93ffa16b3c76ef3f feat(diagram): [M8-B.2] render shared visual scene and edit properties
+- 70551f22d9f323a92752aba9f84bfdad47d95711 feat(diagram): [M9-A.1] add visual canvas selection transforms and navigation
+- dfe10c3fc1a0d7526e9d0a740187cfdf641e973e feat(diagram): [M9-A.2] add visual canvas snapping layout tools and minimap
+- c5b34da2909f6f46562a6ab068d09d8390d2b3f2 feat(diagram): [M9-B.1] add anchored visual connectors and bounded routing
+- 60ceb51417f73666f4130c9dff9d78344b9b14b1 docs(queue): record blocked desktop-productivity-expansion/M9-B2
+- b284e38456234797cf5135d68cec32faea506bb6 feat(diagram): [M9-B.3] persist local visual raster assets and reusable components
+- e306e6c1531efd37488350392f3a6370ea9afb30 docs(queue): record blocked desktop-productivity-expansion/M10-A.1
+- 5b3b71bd0fd0af8133585ba063774acb97edd516 feat(diagram): [M10-A.1 partial] retain Mermaid source assistance
+- 5134db6914548f16eed394466b0a5d0a544bd66b feat(diagram): [M10-A.2] add visual copies and recent documents
+- b44521ad55d435e836047da6f19ceb7a4d16bdfb feat(diagram): [M10-B.1] encode current visual scenes as SVG and PNG
+- 102eed855519d25990e8a93b1843c36c7a45d15c docs(queue): record blocked desktop-productivity-expansion/M10-B.2
+- 2398f3942363636f58a9d02879754daa3b7b491b feat(diagram): [M11-A.1 partial] add bounded ungrouped draw.io interchange
+- 5dd26d8d542ac01fcf37c9bf895c9209a47c1a39 feat(diagram): [M11-A.2 partial] publish reviewed draw.io copies in Studio
+- 6f094175500591648a6074894f300a0274544184 docs(diagram): [M11-B partial] verify and document dual authoring workflows
+
+#### C04
+
+- 808f76d8fcc2309441b5774c1873fe59673ffef8 chore(productivity): [C04/M0-A] establish Explorer folder tabs baseline
+- 7f908e3fea6667022507d658433fae772b88f531 feat(explorer): [M12-A.1 partial] model verified folder tab operations and shell identity
+- 4063ca11e10f1d769a6d271b755c0b5175fd8145 docs(queue): record blocked desktop-productivity-expansion/M12-A.2
+- 064955b4262036b398b3ff27fe737f6d6b82b1f1 feat(explorer): [M12-B partial] persist bounded ordered folder lists
+
+#### C05
+
+- f80fd32ba16bbb20d03a8b7d21e89e7051c22578 chore(productivity): [C05/M0-A] establish folder size analyzer baseline
+- 0b7b31a44442199aaa30abcb143093b688a177e6 feat(files): [M13-A] scan folder sizes with bounded truthful accounting
+- d1571dd02c0461b311af549bf44cec41df886f72 feat(files): [M13-B.1 partial] expose docked folder size analysis
+- 1e75ac514ba92aa90b0013b3b929dd649244029d feat(files): [M13-B.2 partial] connect folder size to File Search and activity
+- bb9b0d88fb936eab936e8600ff7924d21de2055a docs(productivity): [C05] record folder size evidence and handoff
+
+#### C06
+
+- f23c3297b34aeb5bdd33055fae4cf62a853222f6 docs(productivity): [C06/M0-A] record file lock inspector baseline
+- fb1c8c26bb36c9cfc7b24ffa04fa30274617f5f7 feat(files): [M14-A] inspect reported file users without unlocking
+- bc1dbb7f8db5ee086da84cff9b160de15e438d7b feat(files): [M14-B partial] expose file lock inspection in launcher
+- a8ad570e8646bf445e651a20a62739a99522f600 docs(productivity): [C06] record file lock evidence and handoff
+
+#### C07
+
+- f0268a19e2cd803d511a686d31f193a8fdb192ab docs(productivity): [C07/M0-A] record silent screen recorder baseline
+- 58ac810a6d1156c2f753b43033c92931aa93d46e feat(recording): [M15-A.1] establish bounded recorder session and timed frames
+- aa59b7f608459518e2c2218c76c786d794ea7c30 feat(recording): [M15-A.2] connect bounded Windows capture source
+- 5b9b775fb923182a1a38e04d80662a46ef85815d feat(recording): [M15-B] encode bounded animated gif clips
+- a164a8cfed52f9a9e44875b2e9531a4e5fe1558f feat(recording): [M15-C] encode finalized video-only mp4 clips
+- a4b5b8115c5a0f6b6de681f4b48eb9f711ee00a7 feat(recording): [M16-A.1] expose silent recorder and retained controls
+- b0524907f1599ab9de440776cd23e692a1b0064d feat(recording): [M16-A.2] add optional exact-generation Stop shortcut
+- 428c5dba023bf1e7712743a935b6fda8ee7de05b fix(recording): [M16-B] retain outcomes and verify owned-window cleanup
+- b12a469dafe1afbda3cafdd1f132dd1813fad27c chore(productivity): [M17-A] verify cumulative desktop productivity features
+
+M17-B is the final reporting commit. Its actual SHA, push and clean/dirty state are in the external C07 handoff and final Git-chain receipt; the report does not contain its own hash.
+
+### Remaining implementation and verification
+
+- C01/M1-B.2 stopped at two unresolved docked Diagram click paths. The unaccepted increment is archived/inactive; a new authorized budget or materially new evidence is needed to repair it before broader ordinary host migration. M2–M4 are absent. C02/M6 and the common host controls for later ordinary tools depend on that boundary.
+- C03 group/container/swimlane transforms, visual starters and Studio rich PNG/SVG publication remain archived and inactive. Preserve the separately retained editor, source/visual authority and ungrouped interchange. Work on those increments only from their documented exact preserved source and a renewed authorized budget/evidence.
+- C04 needs supported Explorer tabs and an exact selected owning-view observation before native mutation. The active read-only operation model and saved-list store do not launch or target tabs. Keep one writer for the saved-list store if later exposing it to a GUI; existing-file updates use optimistic digest/replace and do not provide cross-process compare-and-swap. This store has no launcher consumer at delivery.
+- Existing Diagram ordinary Save compares the disk digest before intentional replacement. An outside writer can race that check; true cross-process compare-and-swap was outside the scoped Save As correction. The preexisting legacy export uses an occupancy preflight and replacement; do not describe it as an atomic no-clobber move. The retained draw.io and native/visual copy publication paths use no-clobber.
+- N1–N12 interactive gates are unverified. Prior native screenshot observer failed and its one allowed supported recovery was exhausted. Do not reprobe an unchanged environment. Narrow positive Windows proofs are independent: disposable filesystem accounting, exact held/released file user, owned HWND capture and decoded GIF, real synthetic-frame MF encode/decode, and owned HWND controller MP4 and repeated active discard. The final exact automated union does not replay these native probes.
+- Optional 128-bit arithmetic and compressed draw.io import were not counted as required. No audio path was requested or added. No intermediate merge, auxiliary checkout, clone, or worktree was used for this seven-category chain.
+
+### Final manual review checklist
+
+The complete N1–N12 interactive flows remain unverified. The prior observer failed and its allowed recovery was exhausted; no further observer probe was performed. The original Goal's H.4 records each exact flow. When a supported setup and the missing implementation are available, use an isolated app profile and disposable data:
+
+- N1–N4: Confirm every requested host can detach and return while retaining session identity, draft/history, worker state, prompt parentage, focus and appropriate shortcuts. Include the calculator, document/macro, Settings/mouse and representative remaining utility families.
+- N5: Verify exact large integer through inspector, bit edit, copy, explicit insert/undo and comparison, while scalar documents remain usable.
+- N6–N7: Open and edit a legacy Mermaid document; test stale/invalid preview and current export. Exercise rich shapes/assets, connectors, layers/grouping, undo, reopen, PNG/SVG and supported draw.io interchange.
+- N8: On a Windows Explorer build that supports tabs, launch five ordered disposable folders in one newly identified window while another Explorer window remains open; verify folder/tab order and stop safely on cancel or foreground loss.
+- N9–N10: Verify temporary-tree totals, incomplete state, sort/cancel/refresh and docking; hold then release a disposable file from a known helper, verify process identity, refresh and truthful status.
+- N11–N12: Start both silent formats from the actual launcher, hide the root and stop through the compact control and configured shortcut. Independently play/inspect size, timing and video-only streams, with non-primary/DPI geometry where available. Cancel selection/countdown/recording, close the source, repeat and exit; verify normal still screenshot, live Pinboard and keyboard/mouse behavior and task-owned cleanup.
+
+Next task: **Create a fresh child branch directly from this exact final_tip_sha, not master/main; create M0-A, attempt push, use one checkout, no Git worktrees and no intermediate branch merging.** Obtain final_tip_sha from the external receipt written after this reporting commit.
