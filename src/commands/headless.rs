@@ -410,6 +410,9 @@ fn execute_with_external(
         Command::Dialog(DialogCommand::DuplicateFinder) => {
             anyhow::bail!("Duplicate Finder requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::FolderSize) => {
+            anyhow::bail!("Folder Size requires the launcher interface")
+        }
         Command::Dialog(DialogCommand::Activity) => {
             anyhow::bail!("Activity requires the launcher interface")
         }
@@ -1405,6 +1408,36 @@ mod calculation_pad_headless_tests {
             "Calculation Pad requires the launcher interface"
         );
         assert_eq!(calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod folder_size_headless_tests {
+    use super::*;
+
+    #[test]
+    fn folder_size_command_requires_the_launcher_interface() {
+        let original = Action {
+            label: "Open Folder Size".into(),
+            desc: String::new(),
+            action: "foldersize:open".into(),
+            args: None,
+        };
+        let mut external_calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::FolderSize),
+            &original,
+            &mut |_, _| {
+                external_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Folder Size requires the launcher interface"
+        );
+        assert_eq!(external_calls, 0);
     }
 }
 

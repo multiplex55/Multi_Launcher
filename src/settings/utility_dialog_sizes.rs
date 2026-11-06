@@ -49,6 +49,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "file-preview",
     "file-search",
     "folder-alias",
+    "folder-size",
     "gesture-binding-editor",
     "gesture-ignore-window-picker",
     "gesture-settings",

@@ -32,6 +32,7 @@ mod event_channel;
 mod fav_dialog;
 mod file_search_dialog;
 pub mod file_search_preview_dialog;
+mod folder_size_dialog;
 mod font_revision;
 mod hash_generator_dialog;
 pub(crate) mod hotfolder_dialog;
@@ -172,6 +173,7 @@ pub use file_search_dialog::{
     FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand,
 };
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
+pub(crate) use folder_size_dialog::{FolderSizeDialogEffect, FolderSizeDialogState};
 pub use hash_generator_dialog::HashGeneratorDialogState;
 pub use image_compare_dialog::ImageCompareDialogState;
 pub use image_panel::ImagePanel;
@@ -779,6 +781,7 @@ pub enum Panel {
     TableUtilityDialog,
     ImageCompareDialog,
     DuplicateFinderDialog,
+    FolderSizeDialog,
     ActivityDialog,
 }
 
@@ -832,6 +835,7 @@ impl Panel {
             Self::TableUtilityDialog => "Table Utility",
             Self::ImageCompareDialog => "Image Comparison",
             Self::DuplicateFinderDialog => "Duplicate Finder",
+            Self::FolderSizeDialog => "Folder Size",
             Self::ActivityDialog => "Activity",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
@@ -902,6 +906,7 @@ struct PanelStates {
     table_utility_dialog: bool,
     image_compare_dialog: bool,
     duplicate_finder_dialog: bool,
+    folder_size_dialog: bool,
     activity_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
@@ -1274,6 +1279,7 @@ pub struct LauncherApp {
     pub table_utility_dialog: TableUtilityDialogState,
     pub image_compare_dialog: ImageCompareDialogState,
     pub(crate) duplicate_finder_dialog: DuplicateFinderDialogState,
+    pub(crate) folder_size_dialog: FolderSizeDialogState,
     pub qr_dialog: QrDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
@@ -3872,6 +3878,7 @@ impl LauncherApp {
             ),
             image_compare_dialog: ImageCompareDialogState::new(ctx),
             duplicate_finder_dialog: DuplicateFinderDialogState::new(ctx),
+            folder_size_dialog: FolderSizeDialogState::new(ctx),
             activity_center: activity_center.clone(),
             activity_dialog: activity_dialog::ActivityDialogState::default(),
             qr_dialog: QrDialogState::default(),
@@ -4578,7 +4585,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 64] = [
+    const TRACKED_PANELS: [Panel; 65] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4642,6 +4649,7 @@ impl LauncherApp {
         Panel::RadialEditor,
         Panel::ImageCompareDialog,
         Panel::DuplicateFinderDialog,
+        Panel::FolderSizeDialog,
         Panel::ActivityDialog,
     ];
 
@@ -4694,6 +4702,7 @@ impl LauncherApp {
             Panel::TableUtilityDialog => self.table_utility_dialog.open,
             Panel::ImageCompareDialog => self.image_compare_dialog.open,
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open,
+            Panel::FolderSizeDialog => self.folder_size_dialog.open,
             Panel::ActivityDialog => self.activity_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
@@ -4818,6 +4827,14 @@ impl LauncherApp {
         if panel == Panel::MarkdownStudioDialog {
             self.markdown_studio_dialog.request_close();
             if self.markdown_studio_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if panel == Panel::FolderSizeDialog {
+            self.folder_size_dialog.request_close(&self.egui_ctx);
+            self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
+            if self.folder_size_dialog.open && !self.panel_stack.contains(&panel) {
                 self.panel_stack.push(panel);
             }
             return true;
@@ -5020,6 +5037,10 @@ impl LauncherApp {
             Panel::DuplicateFinderDialog => {
                 self.duplicate_finder_dialog.close();
                 self.panel_states.duplicate_finder_dialog = false;
+            }
+            Panel::FolderSizeDialog => {
+                self.folder_size_dialog.request_close(&self.egui_ctx);
+                self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
             }
             Panel::ActivityDialog => {
                 self.activity_dialog.close();
@@ -5320,6 +5341,10 @@ impl LauncherApp {
                 self.duplicate_finder_dialog.close();
                 self.panel_states.duplicate_finder_dialog = false;
             }
+            Panel::FolderSizeDialog => {
+                self.folder_size_dialog.request_close(&self.egui_ctx);
+                self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
+            }
             Panel::ActivityDialog => {
                 self.activity_dialog.close();
                 self.panel_states.activity_dialog = false;
@@ -5416,6 +5441,10 @@ impl LauncherApp {
             if !self.panel_stack.contains(&panel) {
                 self.panel_stack.push(panel);
             }
+        } else if panel == Panel::FolderSizeDialog && self.folder_size_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
         } else {
             self.panel_stack.retain(|p| *p != panel);
         }
@@ -5491,6 +5520,7 @@ impl LauncherApp {
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open(),
+            Panel::FolderSizeDialog => self.folder_size_dialog.open(),
             Panel::ActivityDialog => self.activity_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
@@ -5665,6 +5695,7 @@ impl LauncherApp {
         check!(table_utility_dialog, Panel::TableUtilityDialog);
         check!(image_compare_dialog, Panel::ImageCompareDialog);
         check!(duplicate_finder_dialog, Panel::DuplicateFinderDialog);
+        check!(folder_size_dialog, Panel::FolderSizeDialog);
         check!(activity_dialog, Panel::ActivityDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
@@ -6370,6 +6401,7 @@ mod tests {
             (Panel::CpuListDialog, "CPU Usage"),
             (Panel::CalculationPadDialog, "Calculation Pad"),
             (Panel::DateTimeStudioDialog, "Date & Time Studio"),
+            (Panel::FolderSizeDialog, "Folder Size"),
         ] {
             assert_eq!(panel.display_label(), expected);
         }

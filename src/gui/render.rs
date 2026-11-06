@@ -21,6 +21,7 @@ enum DialogCopyOwner {
     CalculationPad,
     Converter,
     DateTimeStudio,
+    FolderSize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +31,7 @@ enum RootDialogEffect {
         owner: DialogCopyOwner,
         text: String,
     },
+    OpenPath(std::path::PathBuf),
     SaveConverterPreferences,
     PrepareCalendar {
         instant_utc: chrono::DateTime<chrono::Utc>,
@@ -2157,6 +2159,7 @@ impl LauncherApp {
             Panel::MultiManagerSettingsDialog => middle(egui::Id::new("MultiManager Settings")),
             Panel::ImageCompareDialog => NavigationDialogKind::ImageCompare.layer_id(),
             Panel::DuplicateFinderDialog => NavigationDialogKind::DuplicateFinder.layer_id(),
+            Panel::FolderSizeDialog => middle(egui::Id::new(Some("Folder Size"))),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
             Panel::DiagramStudioDialog | Panel::RadialEditor => None,
             Panel::NotePanel | Panel::ImagePanel => None,
@@ -5072,6 +5075,21 @@ impl LauncherApp {
         );
     }
 
+    fn show_folder_size(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first_ui_pass: bool,
+        owner_transition_pending: bool,
+    ) {
+        self.folder_size_dialog.show(
+            ctx,
+            root_visible,
+            !owner_transition_pending && self.native_ui_host_input_allowed(ctx, root_visible),
+            first_ui_pass,
+        );
+    }
+
     fn jump_mode_host_input_allowed(&self, ctx: &egui::Context, root_visible: bool) -> bool {
         self.jump_mode_enabled()
             && self.native_ui_host_input_allowed(ctx, root_visible)
@@ -6050,6 +6068,7 @@ impl LauncherApp {
                         | super::Panel::TableUtilityDialog
                         | super::Panel::ImageCompareDialog
                         | super::Panel::DuplicateFinderDialog
+                        | super::Panel::FolderSizeDialog
                         | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
@@ -10200,6 +10219,12 @@ impl LauncherApp {
             first_ui_pass,
             owner_transition_pending,
         );
+        self.show_folder_size(
+            &ctx,
+            frame_logic.should_be_visible,
+            first_ui_pass,
+            owner_transition_pending,
+        );
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         for action in self.activity_dialog.show(
             &ctx,
@@ -10949,6 +10974,20 @@ impl LauncherApp {
             None => {}
         }
 
+        for folder_effect in self.folder_size_dialog.on_ui_frame_complete(ctx) {
+            match folder_effect {
+                super::FolderSizeDialogEffect::CopyPath(text) => {
+                    effects.push(RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::FolderSize,
+                        text,
+                    });
+                }
+                super::FolderSizeDialogEffect::OpenPath(path) => {
+                    effects.push(RootDialogEffect::OpenPath(path));
+                }
+            }
+        }
+
         if !self.calculation_pad_dialog.open {
             self.panel_states.calculation_pad_dialog = false;
             self.panel_stack
@@ -10963,6 +11002,11 @@ impl LauncherApp {
             self.panel_states.convert_panel = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::ConvertPanel);
+        }
+        if !self.folder_size_dialog.open {
+            self.panel_states.folder_size_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::FolderSizeDialog);
         }
         effects
     }
@@ -11006,7 +11050,22 @@ impl LauncherApp {
                         DialogCopyOwner::DateTimeStudio => {
                             self.date_time_studio_dialog.copy_completed(result)
                         }
+                        DialogCopyOwner::FolderSize => {
+                            self.folder_size_dialog.copy_completed(result)
+                        }
                     }
+                }
+                RootDialogEffect::OpenPath(path) => {
+                    #[cfg(test)]
+                    let result = {
+                        let _ = path;
+                        Ok(())
+                    };
+                    #[cfg(not(test))]
+                    let result = crate::file_search::actions::resolve_explorer_action(&path)
+                        .and_then(crate::file_search::actions::execute_explorer_action)
+                        .map_err(|error| format!("Could not open the selected path: {error:#}"));
+                    self.folder_size_dialog.path_action_completed(result);
                 }
                 RootDialogEffect::SaveConverterPreferences => {
                     self.convert_panel.save_preferences();
@@ -11074,6 +11133,7 @@ impl eframe::App for LauncherApp {
         self.needs_viewport_bootstrap()
             || self.pin_windows_need_hidden_root_ui()
             || self.screenshot_countdown.is_busy()
+            || self.folder_size_dialog.needs_root_ui_when_hidden()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -11125,6 +11185,7 @@ impl eframe::App for LauncherApp {
         self.table_utility_dialog.shutdown();
         self.image_compare_dialog.shutdown();
         self.duplicate_finder_dialog.shutdown();
+        self.folder_size_dialog.shutdown();
         if let Err(failure) = self.brightness_dialog.shutdown() {
             self.report_error_message(
                 "brightness.shutdown",
@@ -14578,6 +14639,150 @@ mod tests {
                 .drop_without_applying_deltas();
         }
         let _ = LauncherApp::take_test_root_dialog_effects(ctx);
+    }
+
+    fn click_folder_size_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        name: &str,
+        discard_release: bool,
+    ) {
+        let (rect, clip) = app
+            .folder_size_dialog
+            .test_action_rect(name)
+            .unwrap_or_else(|| panic!("Folder Size action {name:?} was rendered"));
+        let visible_rect = rect.intersect(clip);
+        assert!(
+            visible_rect.is_positive() && rect.contains(visible_rect.center()),
+            "Folder Size action {name:?} is clipped: action={rect:?}, clip={clip:?}"
+        );
+        run_tool_dialog_frame(
+            ctx,
+            app,
+            tool_dialog_pointer_events(visible_rect, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            ctx,
+            app,
+            tool_dialog_pointer_events(visible_rect, false),
+            discard_release,
+        )
+        .drop_without_applying_deltas();
+    }
+
+    fn open_folder_size_through_plugin(app: &mut LauncherApp) {
+        let action = crate::plugins::folder_size::FolderSizePlugin
+            .search("foldersize")
+            .into_iter()
+            .next()
+            .expect("exact Folder Size plugin query returns one action");
+        let invocation =
+            crate::commands::parse_command(action, None, crate::commands::ActivationSource::Enter)
+                .expect("Folder Size plugin action parses");
+        app.dispatch_command_invocation(invocation);
+        assert!(app.folder_size_dialog.open);
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::Panel::FolderSizeDialog),
+            "the typed host focuses the docked Folder Size panel"
+        );
+    }
+
+    #[test]
+    fn folder_size_dialog_open_does_not_scan_and_retained_choose_starts_only_on_scan() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::write(scan_root.path().join("payload.bin"), b"verified bytes")
+            .expect("small disposable scan input");
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_folder_size_through_plugin(&mut app);
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        let idle = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(idle.generation(), 0, "opening the panel does not scan");
+        assert_eq!(
+            idle.status(),
+            crate::folder_size::FolderSizeSessionStatus::Idle
+        );
+        assert!(!idle.is_busy());
+
+        click_folder_size_action(&ctx, &mut app, "choose_folder", false);
+        assert_eq!(app.folder_size_dialog.folder_picker_calls_for_test(), 1);
+        assert_eq!(
+            app.folder_size_dialog
+                .selected_root_for_test()
+                .map(|root| root.as_path()),
+            Some(scan_root.path())
+        );
+        let chosen_but_unscanned = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(chosen_but_unscanned.generation(), 0);
+        assert_eq!(
+            chosen_but_unscanned.status(),
+            crate::folder_size::FolderSizeSessionStatus::Idle
+        );
+
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_folder_size_action(&ctx, &mut app, "scan", false);
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            1,
+            "only the accepted Scan action starts a session generation"
+        );
+
+        app.folder_size_dialog.shutdown();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.folder_size_dialog.session_view_for_test().is_busy() && Instant::now() < deadline
+        {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+            thread::yield_now();
+        }
+        assert!(
+            !app.folder_size_dialog.session_view_for_test().is_busy(),
+            "the small accepted scan settles after shutdown cancellation"
+        );
+        drop(app);
+        drop(scan_root);
+        drop(workspace);
+    }
+
+    #[test]
+    fn folder_size_dialog_discarded_choose_does_not_invoke_picker() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_folder_size_through_plugin(&mut app);
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+
+        click_folder_size_action(&ctx, &mut app, "choose_folder", true);
+        assert_eq!(
+            app.folder_size_dialog.folder_picker_calls_for_test(),
+            0,
+            "a discarded Choose pass has no picker authority"
+        );
+        assert!(app.folder_size_dialog.selected_root_for_test().is_none());
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            0
+        );
+        drop(app);
+        drop(scan_root);
+        drop(workspace);
     }
 
     fn tool_dialog_pointer_events(rect: egui::Rect, pressed: bool) -> Vec<egui::Event> {

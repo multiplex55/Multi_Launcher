@@ -464,6 +464,20 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         )
         .with_gui_failure_policy());
     }
+    if s.starts_with("foldersize:") {
+        if s == "foldersize:open" && action.args.is_none() {
+            return Ok(Command::Dialog(DialogCommand::FolderSize));
+        }
+        return Err(CommandError::new(
+            "folder_size",
+            if action.args.is_some() {
+                "Folder Size does not accept a path or content payload"
+            } else {
+                "unknown Folder Size command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
     if s.starts_with("activity:") {
         if s == "activity:open" && action.args.is_none() {
             return Ok(Command::Dialog(DialogCommand::Activity));

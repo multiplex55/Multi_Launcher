@@ -35,6 +35,7 @@ pub enum FolderSizeStatus {
 #[derive(Debug, Clone)]
 pub struct FolderSizeProgress {
     generation: u64,
+    publication_id: u64,
     entries_seen: usize,
     files_seen: usize,
     directories_seen: usize,
@@ -157,6 +158,12 @@ impl FolderSizeProgressRows {
 impl FolderSizeProgress {
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Monotonic within a scan generation, including directory subtotal
+    /// overlays that do not add rows.
+    pub fn publication_id(&self) -> u64 {
+        self.publication_id
     }
 
     pub fn entries_seen(&self) -> usize {
@@ -433,6 +440,7 @@ pub(crate) struct FolderSizeAccumulator<'a> {
     published_entries: usize,
     progress_directory_indices: Vec<usize>,
     progress_events_since_publish: usize,
+    progress_publication_id: u64,
 }
 
 impl<'a> FolderSizeAccumulator<'a> {
@@ -460,6 +468,7 @@ impl<'a> FolderSizeAccumulator<'a> {
             published_entries: 0,
             progress_directory_indices: Vec::new(),
             progress_events_since_publish: 0,
+            progress_publication_id: 0,
         }
     }
 
@@ -770,6 +779,7 @@ impl<'a> FolderSizeAccumulator<'a> {
     }
 
     fn update_progress(&mut self, summary: &crate::file_operations::RenameScanSummary) {
+        self.progress_publication_id = self.progress_publication_id.saturating_add(1);
         let first_index = self.published_entries;
         let added = self.entries[first_index..].to_vec();
         self.published_entries = self.entries.len();
@@ -808,6 +818,7 @@ impl<'a> FolderSizeAccumulator<'a> {
         directory_overlay.reverse();
         let progress = FolderSizeProgress {
             generation: self.generation,
+            publication_id: self.progress_publication_id,
             entries_seen: summary.entries_seen(),
             files_seen: summary.files_seen(),
             directories_seen: summary.directories_seen(),

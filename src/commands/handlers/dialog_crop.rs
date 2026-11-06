@@ -27,6 +27,7 @@ where
         Command::Dialog(DialogCommand::Theme) => host.open_theme_dialog(),
         Command::Dialog(DialogCommand::ImageCompare) => host.open_image_compare_dialog(),
         Command::Dialog(DialogCommand::DuplicateFinder) => host.open_duplicate_finder_dialog(),
+        Command::Dialog(DialogCommand::FolderSize) => host.open_folder_size_dialog(),
         Command::Dialog(DialogCommand::Activity) => host.open_activity_dialog(),
         Command::Timer(TimerCommand::TimerDialog) => host.open_timer_dialog(),
         Command::Timer(TimerCommand::AlarmDialog) => host.open_alarm_dialog(),
@@ -162,6 +163,9 @@ mod tests {
         fn open_image_compare_dialog(&mut self) {
             self.mark("image_compare");
         }
+        fn open_folder_size_dialog(&mut self) {
+            self.mark("folder_size");
+        }
         fn open_volume_dialog(&mut self) {
             self.mark("volume");
         }
@@ -256,6 +260,7 @@ mod tests {
                 Command::Dialog(DialogCommand::ImageCompare),
                 "image_compare",
             ),
+            (Command::Dialog(DialogCommand::FolderSize), "folder_size"),
             (Command::System(SystemCommand::VolumeDialog), "volume"),
             (
                 Command::System(SystemCommand::BrightnessDialog),

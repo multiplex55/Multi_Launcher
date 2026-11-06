@@ -265,6 +265,10 @@ impl DialogCommandHost for LauncherApp {
         self.focus_panel(super::Panel::DuplicateFinderDialog);
     }
 
+    fn open_folder_size_dialog(&mut self) {
+        self.focus_panel(super::Panel::FolderSizeDialog);
+    }
+
     fn open_activity_dialog(&mut self) {
         self.focus_panel(super::Panel::ActivityDialog);
     }
