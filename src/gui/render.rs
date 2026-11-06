@@ -2077,6 +2077,7 @@ impl LauncherApp {
                 egui::Id::new("Plugin Settings"),
             )))
             .chain(self.calculation_pad_dialog.examples_layer_if_root())
+            .chain(self.diagram_studio_dialog.docked_owner_layer())
             .chain(self.diagram_studio_dialog.embedded_viewer_layer_if_root())
             .collect::<std::collections::HashSet<_>>();
         (Self::TRACKED_PANELS
@@ -7954,6 +7955,9 @@ impl LauncherApp {
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
                     && !self
+                        .diagram_studio_dialog
+                        .docked_owner_owns_root_input(&ctx)
+                    && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
@@ -8028,6 +8032,9 @@ impl LauncherApp {
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
+                    && !self
+                        .diagram_studio_dialog
+                        .docked_owner_owns_root_input(&ctx)
                     && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
@@ -11312,6 +11319,12 @@ impl eframe::App for LauncherApp {
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
         }
+        if self
+            .diagram_studio_dialog
+            .take_show_root_after_host_change()
+        {
+            self.request_launcher_visibility(true);
+        }
         let (markdown_effect, markdown_closed) =
             self.markdown_studio_dialog.on_ui_frame_complete(_ctx);
         if markdown_closed {
@@ -11515,6 +11528,12 @@ impl LauncherApp {
             self.panel_states.diagram_studio_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::DiagramStudioDialog);
+        }
+        if self
+            .diagram_studio_dialog
+            .take_show_root_after_host_change()
+        {
+            self.request_launcher_visibility(true);
         }
         let (markdown_effect, markdown_closed) =
             self.markdown_studio_dialog.on_ui_frame_complete(ctx);

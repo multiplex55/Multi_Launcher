@@ -1,6 +1,9 @@
 #[cfg(windows)]
 use super::native_keyboard::reserve_windows_system_menu_alt_space;
-use super::utility_host::ViewportPassProvenance;
+use super::utility_dialog_size::{UtilityDialogSizeWindowExt, UtilityWindowSizeRecipe};
+use super::utility_host::{
+    HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+};
 use crate::diagram::{
     CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping,
     CanvasMinimap, DEFAULT_LAYER_ID, DecodedVisualAsset, DiagramDocument,
@@ -84,6 +87,110 @@ fn viewer_viewport_builder() -> egui::ViewportBuilder {
         .with_min_inner_size(MIN_VIEWER_VIEWPORT_SIZE)
         .with_resizable(true)
         .with_visible(true)
+}
+
+struct DiagramHost {
+    title: &'static str,
+    key: &'static str,
+    viewport: egui::ViewportId,
+    builder: egui::ViewportBuilder,
+    size: [f32; 2],
+    minimum: [f32; 2],
+}
+
+impl DiagramHost {
+    fn show(
+        self,
+        ctx: &egui::Context,
+        presentation: UtilityPresentation,
+        root_input_allowed: bool,
+        mut body: impl FnMut(&mut egui::Ui, egui::ViewportClass),
+    ) -> bool {
+        if presentation == UtilityPresentation::Popout {
+            ctx.show_viewport_immediate(self.viewport, self.builder, body);
+            return false;
+        }
+        let available = ctx.content_rect().size();
+        let minimum = egui::Vec2::from(self.minimum).min(available);
+        let default_size = egui::Vec2::from(self.size)
+            .min(available * 0.85)
+            .max(minimum);
+        let id = diagram_host_layer(self.key).id;
+        let mut open = true;
+        egui::Window::new(self.title)
+            .id(id)
+            .enabled(root_input_allowed)
+            .collapsible(false)
+            .resizable(true)
+            .min_size(minimum)
+            .max_size(available)
+            .show_utility(
+                ctx,
+                self.key,
+                id,
+                Some(&mut open),
+                UtilityWindowSizeRecipe::outer(default_size)
+                    .with_minimum(minimum)
+                    .with_maximum(available),
+                |ui| body(ui, egui::ViewportClass::Root),
+            );
+        !open
+    }
+}
+
+fn diagram_host_layer(key: &str) -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(key))
+}
+
+fn diagram_popout_host() -> UtilityHostState {
+    let mut host = UtilityHostState::docked();
+    host.transition(UtilityPresentation::Popout);
+    host
+}
+
+fn presentation_button(
+    ui: &mut egui::Ui,
+    presentation: UtilityPresentation,
+    allowed: bool,
+) -> egui::Response {
+    let label = match presentation {
+        UtilityPresentation::Docked => "Pop Out",
+        UtilityPresentation::Popout => "Dock",
+    };
+    ui.add_enabled(allowed, egui::Button::new(label))
+}
+
+fn transition_diagram_host(
+    ctx: &egui::Context,
+    host: &mut UtilityHostState,
+    viewport: egui::ViewportId,
+) -> bool {
+    let docked = host.presentation() == UtilityPresentation::Popout;
+    host.transition(if docked {
+        UtilityPresentation::Docked
+    } else {
+        UtilityPresentation::Popout
+    });
+    if docked {
+        ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Close);
+    }
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
+    docked
+}
+
+fn active_pointer_position(ctx: &egui::Context) -> Option<egui::Pos2> {
+    ctx.input(|input| {
+        (input.pointer.any_pressed() || input.pointer.any_released())
+            .then(|| input.pointer.interact_pos())
+            .flatten()
+    })
+}
+
+fn focused_on_layer(ctx: &egui::Context, layer: egui::LayerId) -> Option<egui::Id> {
+    ctx.memory(|memory| memory.focused()).filter(|id| {
+        ctx.read_response(*id)
+            .is_some_and(|response| response.layer_id == layer)
+    })
 }
 
 fn ensure_native_extension(mut path: PathBuf) -> PathBuf {
@@ -789,6 +896,8 @@ struct RecentPanelEffects {
 
 struct PendingRootEffects {
     root_pass: ViewportPassProvenance,
+    host: HostIdentity,
+    change_host: bool,
     owner_generation: u64,
     owner_viewport_id: egui::ViewportId,
     owner_pass: Option<ViewportPassProvenance>,
@@ -828,6 +937,8 @@ struct DocumentActionFence {
 
 struct PendingViewerEffects {
     root_pass: ViewportPassProvenance,
+    host: HostIdentity,
+    change_host: bool,
     owner_generation: u64,
     viewer_generation: u64,
     callback_viewport_id: egui::ViewportId,
@@ -843,6 +954,9 @@ struct PendingViewerEffects {
 
 pub(crate) struct DiagramStudioDialog {
     pub(crate) open: bool,
+    owner_host: UtilityHostState,
+    viewer_host: UtilityHostState,
+    show_root_after_host_change: bool,
     owner_generation: u64,
     viewport_bootstrap_pending: bool,
     focus_viewport: bool,
@@ -1028,6 +1142,9 @@ impl DiagramStudioDialog {
         Self {
             open: false,
             owner_generation: 0,
+            owner_host: diagram_popout_host(),
+            viewer_host: diagram_popout_host(),
+            show_root_after_host_change: false,
             viewport_bootstrap_pending: false,
             focus_viewport: false,
             focus_source: false,
@@ -1219,6 +1336,10 @@ impl DiagramStudioDialog {
         self.open = true;
     }
 
+    pub(super) fn take_show_root_after_host_change(&mut self) -> bool {
+        std::mem::take(&mut self.show_root_after_host_change)
+    }
+
     pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
         self.viewport_bootstrap_pending
     }
@@ -1230,6 +1351,21 @@ impl DiagramStudioDialog {
             || self.pending_viewer_effects.is_some()
             || self.drawio_work.is_some()
             || self.drawio_review.is_some()
+    }
+
+    pub(super) fn docked_owner_layer(&self) -> Option<egui::LayerId> {
+        (self.open && self.owner_host.presentation() == UtilityPresentation::Docked)
+            .then(|| diagram_host_layer("diagram-studio"))
+    }
+
+    pub(super) fn docked_owner_owns_root_input(&self, ctx: &egui::Context) -> bool {
+        self.docked_owner_layer().is_some_and(|layer| {
+            focused_on_layer(ctx, layer).is_some()
+                && !active_pointer_position(ctx).is_some_and(|position| {
+                    ctx.layer_id_at(position)
+                        .is_some_and(|hit_layer| hit_layer != layer)
+                })
+        })
     }
 
     pub(super) fn embedded_viewer_layer_if_root(&self) -> Option<egui::LayerId> {
@@ -1244,22 +1380,20 @@ impl DiagramStudioDialog {
         if !self.open || !self.viewer_open {
             return false;
         }
-        let (Some(layer), Some(focused_id)) = (
-            self.viewer_embedded_root_layer,
-            self.viewer_embedded_root_focused_id,
-        ) else {
+        let Some(layer) = self.viewer_embedded_root_layer else {
             return false;
         };
-        if ctx.memory(|memory| memory.focused()) != Some(focused_id) {
-            return false;
-        }
-        !ctx.input(|input| {
-            (input.pointer.any_pressed() || input.pointer.any_released())
-                && input.pointer.interact_pos().is_some_and(|position| {
-                    ctx.layer_id_at(position)
-                        .is_some_and(|hit_layer| hit_layer != layer)
-                })
-        })
+        let has_focus = if self.viewer_host.presentation() == UtilityPresentation::Docked {
+            focused_on_layer(ctx, layer).is_some()
+        } else {
+            self.viewer_embedded_root_focused_id
+                .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id))
+        };
+        has_focus
+            && !active_pointer_position(ctx).is_some_and(|position| {
+                ctx.layer_id_at(position)
+                    .is_some_and(|hit_layer| hit_layer != layer)
+            })
     }
 
     pub(crate) fn request_close(&mut self) {
@@ -1454,6 +1588,9 @@ impl DiagramStudioDialog {
         let mut owner_pass = None;
         let mut owner_pass_accepted = false;
         let owner_generation = self.owner_generation;
+        let owner_host = self.owner_host.identity();
+        let mut change_host = false;
+        let can_change_host = self.can_change_owner_host();
         let action_document = self.render_document.clone();
         let action_revision = self
             .documents
@@ -1462,7 +1599,15 @@ impl DiagramStudioDialog {
             .or_else(|| self.documents.visual_revision())
             .unwrap_or_default();
         self.test_begin_frame();
-        ctx.show_viewport_immediate(viewport_id(), viewport_builder(), |child, class| {
+        let host = DiagramHost {
+            title: "Diagram Studio",
+            key: "diagram-studio",
+            viewport: viewport_id(),
+            builder: viewport_builder(),
+            size: DEFAULT_VIEWPORT_SIZE,
+            minimum: MIN_VIEWPORT_SIZE,
+        };
+        let docked_close = host.show(ctx, owner_host.host, root_input_allowed, |child, class| {
             callback_class = class;
             let independent = class == egui::ViewportClass::Immediate;
             let child_context = child.ctx().clone();
@@ -1497,19 +1642,27 @@ impl DiagramStudioDialog {
             let embedded_viewer_focused = !independent
                 && child_context.viewport_id() == egui::ViewportId::ROOT
                 && self.embedded_viewer_owns_root_input(&child_context);
-            let child_input_allowed =
-                surface_input_allowed && focused && !modal_open && !embedded_viewer_focused;
-            let actions_allowed = pass_authorized && child_input_allowed;
+            let visible_body = independent || (child.is_visible() && !child.is_sizing_pass());
+            let child_input_allowed = surface_input_allowed
+                && focused
+                && !modal_open
+                && (class != egui::ViewportClass::EmbeddedWindow || !embedded_viewer_focused);
+            let actions_allowed = pass_authorized && child_input_allowed && visible_body;
+            let keyboard_actions_allowed = actions_allowed
+                && !embedded_viewer_focused
+                && (class != egui::ViewportClass::Root
+                    || focused_on_layer(&child_context, child.layer_id()).is_some());
             let source_focus_allowed =
                 pass_authorized && surface_input_allowed && !modal_open && !embedded_viewer_focused;
-            focus_requested = independent
-                && self.focus_viewport
+            focus_requested = self.focus_viewport
                 && pass_authorized
-                && application_input_allowed
-                && !modal_open;
+                && surface_input_allowed
+                && visible_body
+                && !modal_open
+                && (independent || class == egui::ViewportClass::Root);
 
             let popup_open = egui::Popup::is_any_open(child);
-            let keyboard_close = if actions_allowed {
+            let keyboard_close = if keyboard_actions_allowed {
                 let (escape_pressed, close_shortcut) = child.input_mut(|input| {
                     (
                         !popup_open && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
@@ -1528,7 +1681,7 @@ impl DiagramStudioDialog {
             } else {
                 false
             };
-            let keyboard_document_intent = if actions_allowed
+            let keyboard_document_intent = if keyboard_actions_allowed
                 && !popup_open
                 && self.documents.pending_transition().is_none()
             {
@@ -1576,9 +1729,17 @@ impl DiagramStudioDialog {
             if independent {
                 egui::CentralPanel::default().show(child, |ui| {
                     body_rendered = ui.is_visible() && !ui.is_sizing_pass();
+                    let control = presentation_button(
+                        ui,
+                        owner_host.host,
+                        actions_allowed && !close_requested && can_change_host,
+                    );
+                    self.record_host_action("owner_presentation", ui, &control);
+                    change_host = control.clicked();
                     let effects = self.draw_body(
                         ui,
                         actions_allowed,
+                        keyboard_actions_allowed,
                         close_requested,
                         &mut pending,
                         &mut document_intent,
@@ -1598,9 +1759,17 @@ impl DiagramStudioDialog {
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
+                let control = presentation_button(
+                    child,
+                    owner_host.host,
+                    actions_allowed && !close_requested && can_change_host,
+                );
+                self.record_host_action("owner_presentation", child, &control);
+                change_host = control.clicked();
                 let effects = self.draw_body(
                     child,
                     actions_allowed,
+                    keyboard_actions_allowed,
                     close_requested,
                     &mut pending,
                     &mut document_intent,
@@ -1730,6 +1899,13 @@ impl DiagramStudioDialog {
             }
         });
 
+        if docked_close && owner_pass_accepted {
+            close_requested = true;
+            document_intent = Some(DocumentIntent::Close);
+            document_intent_authorized = true;
+            pending = None;
+        }
+
         if first_ui_pass {
             let viewport_callback_observed = child_viewport_id.is_some();
             let owner_effects_accepted = child_pass_accepted && !ctx.will_discard();
@@ -1747,6 +1923,8 @@ impl DiagramStudioDialog {
                 });
             self.pending_root_effects = Some(PendingRootEffects {
                 root_pass,
+                host: owner_host,
+                change_host: owner_effects_accepted && !close_requested && change_host,
                 owner_generation,
                 owner_viewport_id,
                 owner_pass,
@@ -1832,6 +2010,8 @@ impl DiagramStudioDialog {
     ) {
         let owner_generation = self.owner_generation;
         let viewer_generation = self.viewer_generation;
+        let viewer_host = self.viewer_host.identity();
+        let mut change_host = false;
         let mut callback_viewport_id = None;
         let mut callback_pass = None;
         let mut callback_pass_accepted = false;
@@ -1851,115 +2031,134 @@ impl DiagramStudioDialog {
             self.test_viewer_memory_focused_id = None;
         }
 
-        ctx.show_viewport_immediate(
-            viewer_viewport_id(),
-            viewer_viewport_builder(),
-            |child, class| {
-                let child_context = child.ctx().clone();
-                let actual_viewport_id = child_context.viewport_id();
-                callback_viewport_id = Some(actual_viewport_id);
-                let independent = class == egui::ViewportClass::Immediate
-                    && actual_viewport_id == viewer_viewport_id();
-                let current_pass = child.current_pass_index() == 0;
-                let modal_open = child.memory(|memory| memory.top_modal_layer().is_some());
-                let (focused, close_requested_by_os) = child.input(|input| {
-                    (
-                        input.focused,
-                        independent && input.viewport().close_requested(),
-                    )
-                });
-                let pass_authorized =
-                    first_ui_pass && current_pass && !ctx.will_discard() && !child.will_discard();
-                let surface_input_allowed = if independent {
-                    application_input_allowed
-                } else {
-                    root_input_allowed
-                        && child_context.viewport_id() == ctx.viewport_id()
-                        && ctx.viewport_id() == egui::ViewportId::ROOT
-                };
-                let actions_allowed = pass_authorized
-                    && surface_input_allowed
-                    && !modal_open
-                    && !close_requested_by_os
-                    && (!independent || focused);
-                focus_requested = independent
-                    && self.viewer_focus_pending
-                    && pass_authorized
-                    && application_input_allowed
-                    && !modal_open;
-                native_close_requested = close_requested_by_os;
-                close_requested = close_requested_by_os;
+        let host = DiagramHost {
+            title: "Diagram Viewer",
+            key: "diagram-viewer",
+            viewport: viewer_viewport_id(),
+            builder: viewer_viewport_builder(),
+            size: VIEWER_VIEWPORT_SIZE,
+            minimum: MIN_VIEWER_VIEWPORT_SIZE,
+        };
+        let docked_close = host.show(ctx, viewer_host.host, root_input_allowed, |child, class| {
+            let child_context = child.ctx().clone();
+            let actual_viewport_id = child_context.viewport_id();
+            callback_viewport_id = Some(actual_viewport_id);
+            let independent = class == egui::ViewportClass::Immediate
+                && actual_viewport_id == viewer_viewport_id();
+            let current_pass = child.current_pass_index() == 0;
+            let modal_open = child.memory(|memory| memory.top_modal_layer().is_some());
+            let (focused, close_requested_by_os) = child.input(|input| {
+                (
+                    input.focused,
+                    independent && input.viewport().close_requested(),
+                )
+            });
+            let pass_authorized =
+                first_ui_pass && current_pass && !ctx.will_discard() && !child.will_discard();
+            let surface_input_allowed = if independent {
+                application_input_allowed
+            } else {
+                root_input_allowed
+                    && child_context.viewport_id() == ctx.viewport_id()
+                    && ctx.viewport_id() == egui::ViewportId::ROOT
+            };
+            let actions_allowed = pass_authorized
+                && surface_input_allowed
+                && !modal_open
+                && !close_requested_by_os
+                && (!independent || focused)
+                && (independent || (child.is_visible() && !child.is_sizing_pass()));
+            focus_requested = self.viewer_focus_pending
+                && pass_authorized
+                && surface_input_allowed
+                && !modal_open
+                && (independent
+                    || (class == egui::ViewportClass::Root
+                        && child.is_visible()
+                        && !child.is_sizing_pass()));
+            native_close_requested = close_requested_by_os;
+            close_requested = close_requested_by_os;
 
-                if independent {
-                    egui::CentralPanel::default().show(child, |ui| {
-                        body_rendered = ui.is_visible() && !ui.is_sizing_pass();
-                        close_requested |=
-                            self.draw_viewer_body(ui, actions_allowed, &mut canvas_focus_requested);
-                    });
-                } else {
-                    body_rendered = child.is_visible() && !child.is_sizing_pass();
-                    if actual_viewport_id == egui::ViewportId::ROOT {
-                        embedded_root_layer = Some(child.layer_id());
-                    }
+            if independent {
+                egui::CentralPanel::default().show(child, |ui| {
+                    body_rendered = ui.is_visible() && !ui.is_sizing_pass();
+                    let control = presentation_button(ui, viewer_host.host, actions_allowed);
+                    self.record_host_action("viewer_presentation", ui, &control);
+                    change_host = control.clicked();
                     close_requested |=
-                        self.draw_viewer_body(child, actions_allowed, &mut canvas_focus_requested);
-                }
-
-                if body_rendered
-                    && pass_authorized
-                    && surface_input_allowed
-                    && !modal_open
-                    && !close_requested
-                    && let Some((target_viewport, id)) = self.deferred_viewer_canvas_focus
-                    && target_viewport == actual_viewport_id
-                {
-                    self.deferred_viewer_canvas_focus = None;
-                    child.memory_mut(|memory| memory.request_focus(id));
-                }
-
-                if !independent && actual_viewport_id == egui::ViewportId::ROOT {
+                        self.draw_viewer_body(ui, actions_allowed, &mut canvas_focus_requested);
+                });
+            } else {
+                body_rendered = child.is_visible() && !child.is_sizing_pass();
+                if actual_viewport_id == egui::ViewportId::ROOT {
                     embedded_root_layer = Some(child.layer_id());
-                    let pointer_position = child.input(|input| input.pointer.interact_pos());
-                    let pointer_active = child
-                        .input(|input| input.pointer.any_pressed() || input.pointer.any_released());
-                    let pointer_over_viewer = pointer_position.is_some_and(|position| {
-                        child_context.layer_id_at(position) == Some(child.layer_id())
-                    });
-                    embedded_root_focused_id = if pointer_active && pointer_over_viewer {
-                        canvas_focus_requested.or_else(|| child.memory(|memory| memory.focused()))
-                    } else if pointer_active {
-                        None
-                    } else {
-                        let focused_id = child.memory(|memory| memory.focused());
-                        self.viewer_embedded_root_focused_id
-                            .filter(|viewer_id| focused_id == Some(*viewer_id))
-                    };
                 }
+                let control = presentation_button(child, viewer_host.host, actions_allowed);
+                self.record_host_action("viewer_presentation", child, &control);
+                change_host = control.clicked();
+                close_requested |=
+                    self.draw_viewer_body(child, actions_allowed, &mut canvas_focus_requested);
+                if focus_requested && canvas_focus_requested.is_none() {
+                    canvas_focus_requested = Some(control.id);
+                }
+            }
 
-                #[cfg(test)]
-                if std::mem::take(&mut self.test_request_viewer_discard) {
-                    child.request_discard("Diagram viewer test child pass discard");
-                    self.test_viewer_discard_requested = true;
-                }
+            if body_rendered
+                && pass_authorized
+                && surface_input_allowed
+                && !modal_open
+                && !close_requested
+                && let Some((target_viewport, id)) = self.deferred_viewer_canvas_focus
+                && target_viewport == actual_viewport_id
+            {
+                self.deferred_viewer_canvas_focus = None;
+                child.memory_mut(|memory| memory.request_focus(id));
+            }
 
-                callback_pass_accepted =
-                    pass_authorized && !child.will_discard() && !ctx.will_discard();
-                if independent && callback_pass_accepted {
-                    callback_pass = Some(ViewportPassProvenance {
-                        viewport_id: actual_viewport_id,
-                        frame_nr: child.cumulative_frame_nr(),
-                        pass_nr: child.cumulative_pass_nr(),
-                    });
-                }
-                #[cfg(test)]
-                {
-                    self.test_viewer_callback_id = Some(actual_viewport_id);
-                    self.test_viewer_callback_class = Some(class);
-                    self.test_viewer_body_rendered = body_rendered;
-                    self.test_viewer_memory_focused_id = child.memory(|memory| memory.focused());
-                }
-            },
-        );
+            if !independent && actual_viewport_id == egui::ViewportId::ROOT {
+                embedded_root_layer = Some(child.layer_id());
+                let pointer_position = child.input(|input| input.pointer.interact_pos());
+                let pointer_active = child
+                    .input(|input| input.pointer.any_pressed() || input.pointer.any_released());
+                let pointer_over_viewer = pointer_position.is_some_and(|position| {
+                    child_context.layer_id_at(position) == Some(child.layer_id())
+                });
+                embedded_root_focused_id = if pointer_active && pointer_over_viewer {
+                    canvas_focus_requested
+                        .or_else(|| focused_on_layer(&child_context, child.layer_id()))
+                } else if pointer_active {
+                    None
+                } else {
+                    let focused_id = child.memory(|memory| memory.focused());
+                    self.viewer_embedded_root_focused_id
+                        .filter(|viewer_id| focused_id == Some(*viewer_id))
+                };
+            }
+
+            #[cfg(test)]
+            if std::mem::take(&mut self.test_request_viewer_discard) {
+                child.request_discard("Diagram viewer test child pass discard");
+                self.test_viewer_discard_requested = true;
+            }
+
+            callback_pass_accepted =
+                pass_authorized && !child.will_discard() && !ctx.will_discard();
+            if independent && callback_pass_accepted {
+                callback_pass = Some(ViewportPassProvenance {
+                    viewport_id: actual_viewport_id,
+                    frame_nr: child.cumulative_frame_nr(),
+                    pass_nr: child.cumulative_pass_nr(),
+                });
+            }
+            #[cfg(test)]
+            {
+                self.test_viewer_callback_id = Some(actual_viewport_id);
+                self.test_viewer_callback_class = Some(class);
+                self.test_viewer_body_rendered = body_rendered;
+                self.test_viewer_memory_focused_id = child.memory(|memory| memory.focused());
+            }
+        });
+        close_requested |= docked_close;
 
         if first_ui_pass {
             self.pending_viewer_effects =
@@ -1967,6 +2166,8 @@ impl DiagramStudioDialog {
                     root_pass: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
                     owner_generation,
                     viewer_generation,
+                    host: viewer_host,
+                    change_host: callback_pass_accepted && !close_requested && change_host,
                     callback_viewport_id,
                     callback_pass,
                     callback_pass_accepted,
@@ -1980,6 +2181,20 @@ impl DiagramStudioDialog {
                     focus_viewer: focus_requested && callback_pass_accepted,
                 });
         }
+    }
+
+    fn record_host_action(&mut self, name: &str, ui: &egui::Ui, response: &egui::Response) {
+        #[cfg(test)]
+        {
+            self.test_action_rects
+                .push((name.into(), response.rect, ui.clip_rect()));
+            self.test_action_enabled.push((
+                name.into(),
+                response.enabled() && ui.is_visible() && !ui.is_sizing_pass(),
+            ));
+        }
+        #[cfg(not(test))]
+        let _ = (name, ui, response);
     }
 
     fn draw_viewer_body(
@@ -2405,6 +2620,15 @@ impl DiagramStudioDialog {
         close_requested
     }
 
+    fn can_change_owner_host(&self) -> bool {
+        // These workflows retain an owner-viewport picker or work fence.
+        self.documents.pending_transition().is_none()
+            && self.drawio_work.is_none()
+            && self.drawio_review.is_none()
+            && self.visual_asset_work.is_none()
+            && self.completed_visual_asset_import.is_none()
+    }
+
     pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> bool {
         let viewer_effects = self.pending_viewer_effects.take();
         let Some(effects) = self.pending_root_effects.take() else {
@@ -2532,8 +2756,12 @@ impl DiagramStudioDialog {
         if let Some(scale) = effects.export_scale_requested {
             self.export_scale = scale;
         }
-        if effects.focus_viewport {
-            ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
+        if effects.focus_viewport && owner_pass_current {
+            if let Some(layer) = self.docked_owner_layer() {
+                ctx.move_to_top(layer);
+            } else {
+                ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
+            }
             self.focus_viewport = false;
         }
         let source_mutation_requested = effects.mutation.is_some();
@@ -2633,6 +2861,25 @@ impl DiagramStudioDialog {
                 )
             });
         self.poll_drawio_work(ctx, accepted_owner_viewport_id, owner_pass_current);
+        if effects.change_host
+            && owner_pass_current
+            && self.open
+            && !accepted_close
+            && self.can_change_owner_host()
+        {
+            self.show_root_after_host_change |=
+                transition_diagram_host(ctx, &mut self.owner_host, viewport_id());
+            self.viewport_bootstrap_pending =
+                self.owner_host.presentation() == UtilityPresentation::Popout;
+            self.focus_viewport = true;
+            self.focus_source = true;
+            self.deferred_canvas_focus = None;
+            self.deferred_source_focus = None;
+            self.deferred_menu_focus = None;
+            self.active_menu_scope = None;
+            self.visual_gesture = None;
+            self.visual_canvas_press_authorized = None;
+        }
         let owner_closed_viewer = accepted_close && viewer_was_open;
         if self.open {
             let repaint_target = child_viewport_id.unwrap_or(egui::ViewportId::ROOT);
@@ -2680,6 +2927,7 @@ impl DiagramStudioDialog {
             let viewer_effects_accepted = same_root_pass
                 && viewer_effects.owner_generation == self.owner_generation
                 && viewer_effects.viewer_generation == self.viewer_generation
+                && viewer_effects.host == self.viewer_host.identity()
                 && self.open
                 && self.viewer_open
                 && viewer_effects.callback_pass_accepted
@@ -2703,14 +2951,34 @@ impl DiagramStudioDialog {
                     self.viewer_embedded_root_focused_id = None;
                     self.deferred_viewer_canvas_focus = None;
                     ctx.request_repaint_of(egui::ViewportId::ROOT);
+                } else if viewer_effects.change_host {
+                    self.show_root_after_host_change |=
+                        transition_diagram_host(ctx, &mut self.viewer_host, viewer_viewport_id());
+                    self.viewer_bootstrap_pending =
+                        self.viewer_host.presentation() == UtilityPresentation::Popout;
+                    self.viewer_focus_pending = true;
+                    self.viewer_embedded_root_layer = None;
+                    self.viewer_embedded_root_focused_id = None;
+                    self.deferred_viewer_canvas_focus = None;
                 } else if viewer_effects.focus_viewer
                     && viewer_effects.callback_viewport_id == viewer_viewport_id()
                 {
                     ctx.send_viewport_cmd_to(viewer_viewport_id(), egui::ViewportCommand::Focus);
                     self.viewer_focus_pending = false;
                 } else if viewer_effects.focus_viewer {
+                    if let Some(layer) = viewer_effects.embedded_root_layer {
+                        ctx.move_to_top(layer);
+                        self.viewer_embedded_root_focused_id =
+                            viewer_effects.canvas_focus_requested;
+                        if let Some(id) = viewer_effects.canvas_focus_requested {
+                            ctx.memory_mut(|memory| memory.request_focus(id));
+                        }
+                    }
                     self.viewer_focus_pending = false;
-                } else if viewer_effects.callback_viewport_id != viewer_viewport_id() {
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                } else if self.viewer_host.presentation() == UtilityPresentation::Popout
+                    && viewer_effects.callback_viewport_id != viewer_viewport_id()
+                {
                     self.viewer_focus_pending = false;
                 }
                 if viewer_effects.close_requested
@@ -2737,6 +3005,7 @@ impl DiagramStudioDialog {
 
     fn owner_pass_is_current(&self, effects: &PendingRootEffects, ctx: &egui::Context) -> bool {
         effects.owner_generation == self.owner_generation
+            && effects.host == self.owner_host.identity()
             && effects.owner_pass_accepted
             && effects.viewport_callback_observed
             && match effects.owner_pass {
@@ -5511,6 +5780,7 @@ impl DiagramStudioDialog {
         &mut self,
         ui: &mut egui::Ui,
         actions_allowed: bool,
+        keyboard_actions_allowed: bool,
         closing_requested: bool,
         pending: &mut Option<PendingMutation>,
         document_intent: &mut Option<DocumentIntent>,
@@ -5655,6 +5925,7 @@ impl DiagramStudioDialog {
         let base_editing_allowed =
             actions_allowed && !closing_requested && pending_transition.is_none();
         if base_editing_allowed
+            && keyboard_actions_allowed
             && !popup_open_at_start
             && pending.is_none()
             && let Some(action) = take_history_shortcut(ui)
@@ -5680,6 +5951,11 @@ impl DiagramStudioDialog {
                         "open_viewer".into(),
                         viewer_button.rect,
                         ui.clip_rect(),
+                    ));
+                    #[cfg(test)]
+                    test_action_enabled.push((
+                        "open_viewer".into(),
+                        viewer_button.enabled() && ui.is_visible() && !ui.is_sizing_pass(),
                     ));
                     if viewer_button.clicked() {
                         draw_effects.open_viewer_requested = true;
@@ -6779,6 +7055,8 @@ impl DiagramStudioDialog {
                         viewer.rect,
                         ui.clip_rect(),
                     ));
+                    #[cfg(test)]
+                    self.test_action_enabled.push(("open_viewer".into(), viewer.enabled() && ui.is_visible() && !ui.is_sizing_pass()));
                     if viewer.clicked() {
                         effects.open_viewer_requested = true;
                     }
@@ -11611,6 +11889,73 @@ mod tests {
         });
     }
 
+    fn frame_with_root_events(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        super::super::render::with_immediate_viewport_renderer(ctx, || {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        TEST_VIEWPORT_SIZE,
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| dialog.show(ui.ctx(), ui.current_pass_index() == 0, true, true),
+            );
+            output.drop_without_applying_deltas();
+            dialog.on_ui_frame_complete(ctx);
+        });
+    }
+
+    fn click_root_action(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        name: &str,
+        layer: egui::LayerId,
+    ) {
+        frame(dialog, ctx); // Mount the window, which may require an invisible sizing pass.
+        frame(dialog, ctx);
+        assert_eq!(
+            dialog.test_action_enabled(name),
+            Some(true),
+            "{name} must be visible and enabled"
+        );
+        let click = action_center(dialog, name);
+        assert_eq!(
+            ctx.layer_id_at(click),
+            Some(layer),
+            "{name} must hit its host"
+        );
+        click_root_position(dialog, ctx, click);
+    }
+
+    fn click_root_position(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        click: egui::Pos2,
+    ) {
+        for pressed in [true, false] {
+            frame_with_root_events(
+                dialog,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(click),
+                    egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
     fn frame_with_size(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, size: egui::Vec2) {
         super::super::render::with_immediate_viewport_renderer(ctx, || {
             let raw_input = egui::RawInput {
@@ -14215,6 +14560,7 @@ mod tests {
                 dialog.draw_body(
                     ui,
                     true,
+                    true,
                     false,
                     &mut pending,
                     &mut document_intent,
@@ -14492,6 +14838,7 @@ mod tests {
                 let mut source_focus = None;
                 dialog.draw_body(
                     ui,
+                    true,
                     true,
                     false,
                     &mut pending,
@@ -16159,6 +16506,145 @@ mod tests {
                 .expect("Save decision wrote the document")
                 .windows(b"Save closes owner".len())
                 .any(|window| window == b"Save closes owner")
+        );
+    }
+
+    #[test]
+    fn diagram_owner_dock_and_pop_out_keep_the_same_document_generation() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        let owner = dialog.owner_generation;
+        let source = dialog.test_session().draft().to_owned();
+        let revision = dialog.test_session().revision();
+
+        click_action(&mut dialog, &ctx, "owner_presentation");
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(dialog.take_show_root_after_host_change());
+        assert!(!dialog.take_show_root_after_host_change());
+
+        click_root_action(
+            &mut dialog,
+            &ctx,
+            "owner_presentation",
+            diagram_host_layer("diagram-studio"),
+        );
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert!(dialog.open);
+        assert_eq!(dialog.owner_generation, owner);
+        assert_eq!(dialog.test_session().draft(), source);
+        assert_eq!(dialog.test_session().revision(), revision);
+    }
+
+    #[test]
+    fn focused_docked_viewer_owns_root_close_shortcuts_from_docked_owner() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        click_action(&mut dialog, &ctx, "owner_presentation");
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Docked
+        );
+
+        click_root_action(
+            &mut dialog,
+            &ctx,
+            "open_viewer",
+            diagram_host_layer("diagram-studio"),
+        );
+        assert!(dialog.viewer_open);
+        click_viewer_action(&mut dialog, &ctx, "viewer_presentation");
+        assert_eq!(
+            dialog.viewer_host.presentation(),
+            UtilityPresentation::Docked
+        );
+
+        frame(&mut dialog, &ctx);
+        frame(&mut dialog, &ctx);
+        let viewer_canvas = dialog.test_viewer_canvas_id.expect("docked viewer canvas");
+        let click = dialog
+            .test_viewer_canvas_rect
+            .expect("docked canvas rect")
+            .center();
+        assert_eq!(
+            ctx.layer_id_at(click),
+            Some(diagram_host_layer("diagram-viewer"))
+        );
+        click_root_position(&mut dialog, &ctx, click);
+        frame(&mut dialog, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(viewer_canvas));
+        assert!(dialog.embedded_viewer_owns_root_input(&ctx));
+
+        for (key, modifiers) in [
+            (egui::Key::W, egui::Modifiers::COMMAND),
+            (egui::Key::Escape, egui::Modifiers::NONE),
+        ] {
+            for pressed in [true, false] {
+                let mut events = vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                    },
+                ];
+                if !pressed {
+                    events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+                }
+                frame_with_root_events(&mut dialog, &ctx, events);
+                assert!(dialog.open, "the docked viewer owns {key:?}");
+            }
+        }
+        assert!(dialog.viewer_open);
+        // Clicking away from the focused Viewer must release its root ownership.
+        click_root_position(&mut dialog, &ctx, egui::pos2(1196.0, 896.0));
+        assert!(!dialog.embedded_viewer_owns_root_input(&ctx));
+
+        let viewer_generation = dialog.viewer_generation;
+        let camera = dialog.viewer_camera;
+        click_root_action(
+            &mut dialog,
+            &ctx,
+            "viewer_presentation",
+            diagram_host_layer("diagram-viewer"),
+        );
+        assert_eq!(
+            dialog.viewer_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert_eq!(dialog.viewer_generation, viewer_generation);
+        assert_eq!(dialog.viewer_camera.center, camera.center);
+        assert_eq!(dialog.viewer_camera.zoom, camera.zoom);
+    }
+
+    #[test]
+    fn diagram_visual_host_discards_unretained_dock_click() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+
+        click_action_with_root_discard(&mut dialog, &ctx, "owner_presentation");
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert!(!dialog.take_show_root_after_host_change());
+
+        click_action(&mut dialog, &ctx, "owner_presentation");
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(dialog.take_show_root_after_host_change());
+        assert_eq!(
+            dialog.documents.authoring_kind(),
+            Some(crate::diagram::DiagramAuthoringKind::Visual),
         );
     }
 
