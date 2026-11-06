@@ -740,14 +740,17 @@ impl TodoCommandHost for LauncherApp {
 impl MouseGestureCommandHost for LauncherApp {
     fn open_mouse_gesture_dialog(&mut self) {
         self.mouse_gestures_dialog.open();
+        self.mouse_gestures_host.request_focus();
     }
 
     fn open_mouse_gesture_add_dialog(&mut self) {
         self.mouse_gestures_dialog.open_add();
+        self.mouse_gestures_host.request_focus();
     }
 
     fn open_mouse_gesture_binding_dialog(&mut self) {
         self.mouse_gestures_dialog.open_binding_editor();
+        self.mouse_gestures_host.request_focus();
     }
 
     fn open_mouse_gesture_focus(
@@ -756,6 +759,7 @@ impl MouseGestureCommandHost for LauncherApp {
     ) {
         self.mouse_gestures_dialog
             .open_focus(&args.label, &args.tokens, args.dir_mode);
+        self.mouse_gestures_host.request_focus();
     }
 
     fn open_mouse_gesture_settings_dialog(&mut self) {

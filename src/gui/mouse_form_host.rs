@@ -1,8 +1,11 @@
 use eframe::egui;
 
+use super::jump_mode::{SurfaceId, TargetGeneration};
+
 use super::jump_mode::ui::{
     JumpModeScope, JumpModeUi, NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
-    focused_response_layer, visible_top_middle_layer,
+    focused_response_layer, mouse_gesture_binding_layer_id, mouse_gesture_delete_layer_id,
+    visible_top_middle_layer,
 };
 use super::utility_host::{
     HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
@@ -17,6 +20,7 @@ pub(super) struct MouseFormSpec {
     pub title: &'static str,
     pub size: [f32; 2],
     pub minimum: [f32; 2],
+    pub maximum: Option<[f32; 2]>,
 }
 
 pub(super) const MOUSE_SETTINGS: MouseFormSpec = MouseFormSpec {
@@ -26,6 +30,7 @@ pub(super) const MOUSE_SETTINGS: MouseFormSpec = MouseFormSpec {
     title: "Mouse Settings",
     size: [420.0, 560.0],
     minimum: [240.0, 200.0],
+    maximum: None,
 };
 
 pub(super) const GESTURE_SETTINGS: MouseFormSpec = MouseFormSpec {
@@ -35,7 +40,122 @@ pub(super) const GESTURE_SETTINGS: MouseFormSpec = MouseFormSpec {
     title: "Mouse Gesture Settings",
     size: [520.0, 480.0],
     minimum: [360.0, 260.0],
+    maximum: None,
 };
+
+pub(super) const MOUSE_GESTURES: MouseFormSpec = MouseFormSpec {
+    kind: NavigationDialogKind::MouseGestures,
+    key: "mouse-gestures",
+    navigation_key: "mouse-gestures",
+    title: "Mouse Gestures",
+    size: [720.0, 420.0],
+    minimum: [520.0, 320.0],
+    maximum: Some([980.0, 760.0]),
+};
+
+pub(super) trait MouseFormDraft: Clone {
+    fn child_owner(&self, _instance: u64) -> Option<NavigationOwner> {
+        None
+    }
+
+    fn target_generation(&self, instance: u64) -> TargetGeneration {
+        TargetGeneration(instance)
+    }
+
+    fn owned_popup(&self, _ctx: &egui::Context, _owner: NavigationOwner) -> bool {
+        true
+    }
+
+    fn canvas_active(&self) -> bool {
+        false
+    }
+
+    fn reconcile_canvas(&mut self, _ctx: &egui::Context, _owner_has_input: bool) {}
+}
+
+impl MouseFormDraft for super::MouseSettingsDialog {}
+impl MouseFormDraft for super::MouseGestureSettingsDialog {}
+
+impl MouseFormDraft for super::MgGesturesDialog {
+    fn child_owner(&self, instance: u64) -> Option<NavigationOwner> {
+        self.jump_mode_child_owner(instance)
+    }
+
+    fn target_generation(&self, _instance: u64) -> TargetGeneration {
+        self.jump_mode_target_generation()
+    }
+
+    fn owned_popup(&self, ctx: &egui::Context, owner: NavigationOwner) -> bool {
+        match owner {
+            NavigationOwner::MouseGestureBinding { .. } => {
+                self.jump_mode_binding_popup_is_open(ctx)
+            }
+            NavigationOwner::MouseGestureDelete { .. } => false,
+            _ => self.jump_mode_main_popup_is_open(ctx),
+        }
+    }
+
+    fn canvas_active(&self) -> bool {
+        self.recorder_canvas_active()
+    }
+
+    fn reconcile_canvas(&mut self, ctx: &egui::Context, owner_has_input: bool) {
+        self.reconcile_canvas_drag_with_owner(ctx, owner_has_input);
+    }
+}
+
+pub(super) fn mouse_gestures_navigation_surface(
+    instance: u64,
+    owner: NavigationOwner,
+) -> (SurfaceId, &'static str) {
+    let parent = SurfaceId::dialog(MOUSE_GESTURES.navigation_key, instance);
+    match owner {
+        NavigationOwner::MouseGestureBinding {
+            binding_instance, ..
+        } => (
+            SurfaceId::popup("mouse-gesture-binding", binding_instance, parent),
+            "mouse-gestures/binding",
+        ),
+        NavigationOwner::MouseGestureDelete {
+            confirmation_instance,
+            ..
+        } => (
+            SurfaceId::popup("mouse-gesture-delete", confirmation_instance, parent),
+            "mouse-gestures/delete",
+        ),
+        _ => (parent, "mouse-gestures/form"),
+    }
+}
+
+fn binding_for<D: MouseFormDraft>(
+    draft: &D,
+    spec: MouseFormSpec,
+    viewport: egui::ViewportId,
+    instance: u64,
+) -> NavigationViewportBinding {
+    let owner = draft
+        .child_owner(instance)
+        .unwrap_or(NavigationOwner::Dialog {
+            kind: spec.kind,
+            instance,
+        });
+    let base_layer = match owner {
+        NavigationOwner::MouseGestureBinding {
+            parent_instance,
+            binding_instance,
+        } => mouse_gesture_binding_layer_id(parent_instance, binding_instance),
+        NavigationOwner::MouseGestureDelete {
+            parent_instance,
+            confirmation_instance,
+        } => mouse_gesture_delete_layer_id(parent_instance, confirmation_instance),
+        _ => egui::LayerId::background(),
+    };
+    NavigationViewportBinding {
+        viewport,
+        owner,
+        base_layer,
+    }
+}
 
 use crate::settings_editor::SettingsEditor;
 use crate::settings_editor::render::{SettingsNavigationFrameObserver, SettingsNavigationSnapshot};
@@ -91,6 +211,9 @@ pub(super) type GestureSettingsHost = MouseFormHost<
         Option<NavigationObservation>,
     ),
 >;
+
+pub(super) type MouseGesturesHost =
+    MouseFormHost<super::MgGesturesDialog, super::mouse_gestures_dialog::MouseGesturesUiActions>;
 
 impl MouseFormSpec {
     fn viewport(self, instance: u64) -> egui::ViewportId {
@@ -148,6 +271,7 @@ struct FormFrame<D, A> {
     os_close: bool,
     close: bool,
     focus: bool,
+    close_allowed: bool,
     viewport_info: Option<egui::ViewportInfo>,
     embedded_layer: Option<egui::LayerId>,
     embedded_focus: Option<egui::Id>,
@@ -170,10 +294,11 @@ pub(super) struct FormUi<'a> {
     pub input: bool,
     pub owner: bool,
     pub native: bool,
+    pub native_owner: Option<NavigationOwner>,
     pub popout: bool,
 }
 
-impl<D: Clone, A> MouseFormHost<D, A> {
+impl<D: MouseFormDraft, A> MouseFormHost<D, A> {
     #[cfg(test)]
     pub fn record_test_button(
         &mut self,
@@ -199,7 +324,19 @@ impl<D: Clone, A> MouseFormHost<D, A> {
             .targets()
             .iter()
             .find(|target| target.eligible() && target.metadata().label() == label)
-            .unwrap_or_else(|| panic!("missing native Mouse Settings target {label}"))
+            .unwrap_or_else(|| {
+                let owner = self.native_jump.frame_navigation_owner();
+                let targets: Vec<_> = self
+                    .native_jump
+                    .retained_registry()
+                    .targets()
+                    .iter()
+                    .map(|target| target.metadata().label())
+                    .collect();
+                panic!(
+                    "missing native target {label:?} for {owner:?}; retained targets: {targets:?}"
+                )
+            })
             .clipped_rect()
     }
 
@@ -294,6 +431,7 @@ impl<D: Clone, A> MouseFormHost<D, A> {
             os_close,
             close: self.close_pending.take() == Some(root),
             focus: false,
+            close_allowed: spec.kind != NavigationDialogKind::MouseGestures || input.close_shortcut,
             viewport_info: None,
             embedded_layer: None,
             embedded_focus: None,
@@ -303,7 +441,7 @@ impl<D: Clone, A> MouseFormHost<D, A> {
                 frame.close = close_shortcut(ctx, input.close_shortcut);
             }
             let body_input = root_first && input.root_input && !frame.close;
-            frame.checkpoint = snapshot(ctx, draft, body_input);
+            frame.checkpoint = snapshot(ctx, draft, body_input, root_scope);
             frame.actions = Some(show(
                 draft,
                 FormUi {
@@ -314,17 +452,21 @@ impl<D: Clone, A> MouseFormHost<D, A> {
                     input: body_input,
                     owner: body_input && input.root_owner,
                     native: false,
+                    native_owner: None,
                     popout: false,
                 },
             ));
         } else {
             let viewport = spec.viewport(instance);
-            let builder = egui::ViewportBuilder::default()
+            let mut builder = egui::ViewportBuilder::default()
                 .with_title(spec.title(instance))
                 .with_inner_size(spec.size)
                 .with_min_inner_size(spec.minimum)
                 .with_resizable(true)
                 .with_visible(true);
+            if let Some(maximum) = spec.maximum {
+                builder = builder.with_max_inner_size(maximum);
+            }
             let launcher_close = frame.close;
             ctx.show_viewport_immediate(viewport, builder, |child, class| {
                 let child_ctx = child.ctx().clone();
@@ -356,34 +498,45 @@ impl<D: Clone, A> MouseFormHost<D, A> {
                     } else {
                         input.root_input
                     };
-                frame.checkpoint = snapshot(&child_ctx, draft, body_input);
+                frame.checkpoint = snapshot(
+                    &child_ctx,
+                    draft,
+                    body_input,
+                    (!native).then_some(root_scope).flatten(),
+                );
+                let child_owner = draft.child_owner(instance);
+                if first {
+                    let canvas_owner = body_input
+                        && child_owner.is_none()
+                        && !popup
+                        && if native {
+                            visible_top_middle_layer(&child_ctx).is_none()
+                        } else {
+                            input.root_owner
+                        };
+                    draft.reconcile_canvas(&child_ctx, canvas_owner);
+                }
                 if native {
                     let info = child.input(|state| state.viewport().clone());
                     frame.os_close |= info.close_requested();
                     frame.viewport_info = Some(info);
                     frame.focus = self.state.focus_pending() && input.application_input && !modal;
-                    let binding = NavigationViewportBinding {
-                        viewport,
-                        owner: NavigationOwner::Dialog {
-                            kind: spec.kind,
-                            instance,
-                        },
-                        base_layer: egui::LayerId::background(),
-                    };
+                    let binding = binding_for(draft, spec, viewport, instance);
                     let frame_nr = child_ctx.cumulative_frame_nr();
                     if self.native_jump_frame != Some(frame_nr) {
                         self.native_jump.begin_frame();
                         self.native_jump_frame = Some(frame_nr);
                     }
                     let owner = body_input
-                        && visible_top_middle_layer(&child_ctx).is_none()
-                        && focused_response_layer(&child_ctx)
-                            .is_none_or(|layer| layer.order != egui::Order::Middle);
-                    let navigation_owner = self.native_jump.update_navigation_owner_for_viewport(
-                        &child_ctx,
-                        binding,
-                        input.application_input,
-                    );
+                        && binding.base_is_current(&child_ctx)
+                        && (!popup || draft.owned_popup(&child_ctx, binding.owner))
+                        && focused_response_layer(&child_ctx).is_none_or(|layer| {
+                            layer == binding.base_layer || layer.order != egui::Order::Middle
+                        });
+                    let jump_input = input.application_input && !draft.canvas_active();
+                    let navigation_owner = self
+                        .native_jump
+                        .update_navigation_owner_for_viewport(&child_ctx, binding, jump_input);
                     self.native_jump.handle_viewport_input(
                         &child_ctx,
                         self.native_jump.is_enabled() && navigation_owner == binding.owner,
@@ -391,21 +544,45 @@ impl<D: Clone, A> MouseFormHost<D, A> {
                         viewport,
                     );
                     let jump_active = self.native_jump.active_session().is_some();
-                    if owner && !popup && !jump_active && !frame.close && !frame.os_close {
+                    if owner
+                        && child_owner.is_none()
+                        && !draft.canvas_active()
+                        && !popup
+                        && !jump_active
+                        && !frame.close
+                        && !frame.os_close
+                    {
                         frame.close = close_shortcut(&child_ctx, input.close_shortcut);
                     }
                     self.native_jump.begin_ui_pass();
                     let enabled = !frame.close && !frame.os_close;
-                    let scope = (owner && enabled && navigation_owner == binding.owner)
-                        .then(|| {
-                            self.native_jump.scope_for_viewport_binding(
-                                super::jump_mode::SurfaceId::dialog(spec.navigation_key, instance),
-                                super::jump_mode::TargetGeneration(instance),
-                                spec.key,
-                                binding,
-                            )
-                        })
-                        .flatten();
+                    let scope = if owner
+                        && enabled
+                        && !draft.canvas_active()
+                        && navigation_owner == binding.owner
+                    {
+                        let (surface, namespace) =
+                            if spec.kind == NavigationDialogKind::MouseGestures {
+                                mouse_gestures_navigation_surface(instance, binding.owner)
+                            } else {
+                                (SurfaceId::dialog(spec.navigation_key, instance), spec.key)
+                            };
+                        self.native_jump.scope_for_viewport_binding(
+                            surface,
+                            draft.target_generation(instance),
+                            namespace,
+                            binding,
+                        )
+                    } else {
+                        None
+                    };
+                    if frame.checkpoint.is_none()
+                        && scope
+                            .as_ref()
+                            .is_some_and(JumpModeScope::has_pending_focus_intent)
+                    {
+                        frame.checkpoint = Some(draft.clone());
+                    }
                     egui::CentralPanel::default().show(child, |ui| {
                         frame.actions = Some(show(
                             draft,
@@ -417,37 +594,40 @@ impl<D: Clone, A> MouseFormHost<D, A> {
                                 input: body_input && enabled,
                                 owner: owner && enabled,
                                 native: true,
+                                native_owner: (owner && enabled).then_some(binding.owner),
                                 popout: true,
                             },
                         ));
                     });
                     self.native_jump.finish_ui_pass();
-                    let owner = self.native_jump.update_navigation_owner_for_viewport(
-                        &child_ctx,
-                        binding,
-                        input.application_input,
-                    );
-                    if self.native_jump.prepare_pass_for_viewport(
-                        &child_ctx,
-                        binding,
-                        owner,
-                        input.application_input,
-                    ) {
+                    let current_binding = binding_for(draft, spec, viewport, instance);
+                    if current_binding != binding {
+                        // The old layer can still be in the hit-test history.
+                        // Repaint until the newly selected owner is drawn live.
+                        child_ctx.request_repaint();
+                    }
+                    let binding = current_binding;
+                    let jump_input = input.application_input && !draft.canvas_active();
+                    let owner = self
+                        .native_jump
+                        .update_navigation_owner_for_viewport(&child_ctx, binding, jump_input);
+                    if self
+                        .native_jump
+                        .prepare_pass_for_viewport(&child_ctx, binding, owner, jump_input)
+                    {
                         super::jump_mode::paint::paint(&child_ctx, &self.native_jump);
                     }
                     if !child_ctx.will_discard() {
-                        self.native_jump.complete_frame_for_viewport(
-                            &child_ctx,
-                            binding,
-                            owner,
-                            input.application_input,
-                        );
+                        self.native_jump
+                            .complete_frame_for_viewport(&child_ctx, binding, owner, jump_input);
                     }
                 } else {
                     frame.embedded_layer = Some(child.layer_id());
                     frame.embedded_focus = child_ctx.memory(|memory| memory.focused());
                     frame.focus = self.state.focus_pending() && input.root_input && visible;
                     let close_owner = input.root_owner
+                        && child_owner.is_none()
+                        && !draft.canvas_active()
                         && !popup
                         && focused_response_layer(&child_ctx).is_none_or(|layer| {
                             layer == child.layer_id() || layer.order != egui::Order::Middle
@@ -465,6 +645,7 @@ impl<D: Clone, A> MouseFormHost<D, A> {
                             input: body_input && !frame.close,
                             owner: body_input && input.root_owner && !frame.close,
                             native: false,
+                            native_owner: None,
                             popout: true,
                         },
                     ));
@@ -498,11 +679,16 @@ impl<D: Clone, A> MouseFormHost<D, A> {
                 *draft = checkpoint;
             }
             self.clear_jump();
+            if current && let Some(owner) = frame.owner {
+                // A replay may have painted the controls disabled. Refresh
+                // hit testing before the next interaction in the same owner.
+                ctx.request_repaint_of(owner.viewport_id);
+            }
             return None;
         }
         self.state
             .complete_bootstrap(frame.host, frame.embedded_layer, frame.embedded_focus);
-        let close = frame.close || frame.os_close;
+        let close = frame.close || (frame.os_close && frame.close_allowed);
         if frame.focus && !close {
             if frame.viewport_info.is_some() {
                 ctx.send_viewport_cmd_to(
@@ -529,7 +715,7 @@ impl<D: Clone, A> MouseFormHost<D, A> {
                 info,
                 spec.size.into(),
                 Some(spec.minimum.into()),
-                None,
+                spec.maximum.map(Into::into),
             );
         }
         Some((frame.actions?, close))
@@ -556,19 +742,26 @@ impl<D: Clone, A> MouseFormHost<D, A> {
     }
 }
 
-fn snapshot<D: Clone>(ctx: &egui::Context, draft: &D, allowed: bool) -> Option<D> {
+fn snapshot<D: MouseFormDraft>(
+    ctx: &egui::Context,
+    draft: &D,
+    allowed: bool,
+    scope: Option<&JumpModeScope>,
+) -> Option<D> {
     (allowed
-        && ctx.input(|input| {
-            input.pointer.any_down()
-                || input.events.iter().any(|event| {
-                    !matches!(
-                        event,
-                        egui::Event::PointerMoved(_)
-                            | egui::Event::MouseMoved(_)
-                            | egui::Event::PointerGone
-                    )
-                })
-        }))
+        && (draft.canvas_active()
+            || scope.is_some_and(JumpModeScope::has_pending_focus_intent)
+            || ctx.input(|input| {
+                input.pointer.any_down()
+                    || input.events.iter().any(|event| {
+                        !matches!(
+                            event,
+                            egui::Event::PointerMoved(_)
+                                | egui::Event::MouseMoved(_)
+                                | egui::Event::PointerGone
+                        )
+                    })
+            })))
     .then(|| draft.clone())
 }
 

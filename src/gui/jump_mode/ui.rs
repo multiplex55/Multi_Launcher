@@ -435,6 +435,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ImageCompare
                     | NavigationDialogKind::DuplicateFinder
                     | NavigationDialogKind::DashboardEditor
+                    | NavigationDialogKind::MouseGestures
                     | NavigationDialogKind::MouseSettings
                     | NavigationDialogKind::MouseGestureSettings
                     | NavigationDialogKind::RadialDesigner,
@@ -444,6 +445,8 @@ impl NavigationViewportBinding {
                 | NavigationOwner::Settings { .. }
                 | NavigationOwner::XmlOverwriteConfirmation { .. }
                 | NavigationOwner::DashboardEditorConfirmation { .. }
+                | NavigationOwner::MouseGestureBinding { .. }
+                | NavigationOwner::MouseGestureDelete { .. }
                 | NavigationOwner::RadialDesignerChild { .. }
         )
     }
@@ -470,6 +473,21 @@ impl NavigationViewportBinding {
                         confirmation_instance,
                         kind,
                     )
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::MouseGestureBinding {
+                parent_instance,
+                binding_instance,
+            } => {
+                self.base_layer == mouse_gesture_binding_layer_id(parent_instance, binding_instance)
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::MouseGestureDelete {
+                parent_instance,
+                confirmation_instance,
+            } => {
+                self.base_layer
+                    == mouse_gesture_delete_layer_id(parent_instance, confirmation_instance)
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::RadialDesignerChild {
@@ -509,6 +527,8 @@ impl NavigationViewportBinding {
                     self.owner,
                     NavigationOwner::RadialDesignerChild { .. }
                         | NavigationOwner::DashboardEditorConfirmation { .. }
+                        | NavigationOwner::MouseGestureBinding { .. }
+                        | NavigationOwner::MouseGestureDelete { .. }
                 ) && layer == egui::LayerId::background())
         })
     }
@@ -903,6 +923,7 @@ pub(crate) fn mouse_gesture_delete_layer_id(
 pub(crate) fn resolve_mouse_gesture_child_navigation_owner(
     ctx: &egui::Context,
     owner: NavigationOwner,
+    parent_layer: egui::LayerId,
     combo_popup: Option<&ComboPopupOwner>,
 ) -> NavigationOwner {
     let child_layer = match owner {
@@ -915,9 +936,6 @@ pub(crate) fn resolve_mouse_gesture_child_navigation_owner(
             confirmation_instance,
         } => mouse_gesture_delete_layer_id(parent_instance, confirmation_instance),
         _ => return NavigationOwner::Blocked,
-    };
-    let Some(parent_layer) = NavigationDialogKind::MouseGestures.layer_id() else {
-        return NavigationOwner::Blocked;
     };
     let focused_layer = focused_response_layer(ctx);
     let base_is_current = ctx.viewport_id() == egui::ViewportId::ROOT
@@ -1016,7 +1034,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) paste_sequence: Option<u64>,
     pub(crate) mkmacro: Option<(u64, egui::LayerId)>,
     pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
-    pub(crate) mouse_form_layers: [Option<egui::LayerId>; 2],
+    pub(crate) mouse_form_layers: [Option<egui::LayerId>; 3],
     pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
 }
 
@@ -1113,6 +1131,8 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             Some(NavigationDialogKind::MouseSettings)
         } else if windows.mouse_form_layers[1] == Some(layer) {
             Some(NavigationDialogKind::MouseGestureSettings)
+        } else if windows.mouse_form_layers[2] == Some(layer) {
+            Some(NavigationDialogKind::MouseGestures)
         } else {
             NavigationDialogKind::for_layer(layer).filter(|kind| {
                 *kind != NavigationDialogKind::DashboardEditor
@@ -1700,6 +1720,13 @@ pub struct JumpModeScope {
 }
 
 impl JumpModeScope {
+    pub(crate) fn has_pending_focus_intent(&self) -> bool {
+        self.collector
+            .lock()
+            .ok()
+            .is_some_and(|collector| collector.pending_focus_intent.is_some())
+    }
+
     pub(crate) fn child_namespace(&self, child: impl AsRef<str>) -> Self {
         let child = child.as_ref();
         let mut identity_namespace = self.identity_namespace.clone();
@@ -4296,7 +4323,7 @@ mod tests {
             paste_sequence: None,
             mkmacro: None,
             dashboard_editor_layer: None,
-            mouse_form_layers: [None; 2],
+            mouse_form_layers: [None; 3],
             dialogs: [None; NavigationDialogKind::ALL.len()],
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);

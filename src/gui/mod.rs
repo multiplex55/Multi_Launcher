@@ -1238,6 +1238,7 @@ pub struct LauncherApp {
     macro_prompt_broker: Arc<crate::mkmacro::PromptBroker>,
     pub(crate) macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi,
     mouse_gestures_dialog: MgGesturesDialog,
+    mouse_gestures_host: mouse_form_host::MouseGesturesHost,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
     mouse_settings_dialog: MouseSettingsDialog,
     theme_settings_dialog_open: bool,
@@ -3875,6 +3876,7 @@ impl LauncherApp {
             macro_prompt_broker: crate::mkmacro::production_prompt_broker(),
             macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi::new(ctx),
             mouse_gestures_dialog: MgGesturesDialog::default(),
+            mouse_gestures_host: Default::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
             mouse_settings_dialog: MouseSettingsDialog::default(),
             theme_settings_dialog_open: false,
@@ -4819,6 +4821,8 @@ impl LauncherApp {
     fn panel_has_root_presentation(&self, panel: Panel) -> bool {
         match panel {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
+            Panel::MouseGesturesDialog => self.mouse_gestures_host
+                .root_layer(mouse_form_host::MOUSE_GESTURES).is_some(),
             Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(mouse_form_host::MOUSE_SETTINGS).is_some(),
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_host.root_layer(mouse_form_host::GESTURE_SETTINGS).is_some(),
             Panel::NotesDialog => !self.notes_dialog.is_popped_out(),
@@ -4904,6 +4908,8 @@ impl LauncherApp {
             && !self.settings_native_ui_owner_current(&self.egui_ctx, true))
             || (matches!(panel, Panel::MouseSettingsDialog | Panel::MouseGestureSettingsDialog)
                 && !self.mouse_form_root_close_allowed(&self.egui_ctx, panel))
+            || (panel == Panel::MouseGesturesDialog
+                && !self.mouse_gestures_root_close_allowed(&self.egui_ctx))
         {
             return false;
         }
@@ -5032,8 +5038,8 @@ impl LauncherApp {
                 self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
             Panel::MouseGesturesDialog => {
-                self.mouse_gestures_dialog.open = false;
-                self.panel_states.mouse_gestures_dialog = false;
+                self.mouse_gestures_host.request_close(&self.egui_ctx);
+                self.panel_stack.insert(panel_index, panel);
             }
             Panel::MouseGestureSettingsDialog => {
                 self.mouse_gesture_settings_host.request_close(&self.egui_ctx);
@@ -5357,6 +5363,8 @@ impl LauncherApp {
             }
             Panel::MouseGesturesDialog => {
                 self.mouse_gestures_dialog.open = false;
+                self.mouse_gestures_dialog.reconcile_canvas_drag_with_owner(&self.egui_ctx, false);
+                self.mouse_gestures_host.retire(&self.egui_ctx, mouse_form_host::MOUSE_GESTURES);
                 self.panel_states.mouse_gestures_dialog = false;
             }
             Panel::MouseGestureSettingsDialog => {
@@ -5631,7 +5639,7 @@ impl LauncherApp {
                     self.mkmacro_dialog.open();
                 }
             }
-            Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
+            Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open(),
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
             Panel::MouseSettingsDialog => {
                 if !self.mouse_settings_dialog.open {
@@ -5741,6 +5749,9 @@ impl LauncherApp {
             self.open_settings_dialog();
         } else if panel == Panel::MkMacroDialog {
             self.mkmacro_dialog.open();
+        } else if panel == Panel::MouseGesturesDialog {
+            self.mouse_gestures_dialog.open();
+            self.mouse_gestures_host.request_focus();
         } else if panel == Panel::MouseSettingsDialog {
             self.open_mouse_settings_dialog();
         } else if panel == Panel::MouseGestureSettingsDialog {
