@@ -42,7 +42,7 @@ pub(crate) fn copy_mapped_bgra_to_rgba(
 }
 
 fn copy_bgra_row_to_rgba(source: &[u8], target: &mut [u8]) -> Result<(), &'static str> {
-    if source.is_empty() || source.len() != target.len() || source.len() % 4 != 0 {
+    if source.is_empty() || source.len() != target.len() || !source.len().is_multiple_of(4) {
         return Err("captured crop row has an invalid byte length");
     }
     for (source, target) in source

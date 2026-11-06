@@ -6827,7 +6827,7 @@ impl DiagramStudioDialog {
                         _drawio_menu.response.rect,
                         ui.clip_rect(),
                     ));
-                    for (name, label, intent) in [
+                    for (_name, label, intent) in [
                         ("document_new", "New Mermaid", DocumentIntent::New),
                         ("document_new_visual", "New Visual", DocumentIntent::NewVisual),
                         ("document_open", "Open…", DocumentIntent::Open),
@@ -6841,7 +6841,7 @@ impl DiagramStudioDialog {
                         );
                         #[cfg(test)]
                         self.test_action_rects.push((
-                            name.to_owned(),
+                            _name.to_owned(),
                             response.rect,
                             ui.clip_rect(),
                         ));
@@ -7510,7 +7510,7 @@ impl DiagramStudioDialog {
                 let distribute_enabled = layout_actions_allowed && transformable_selection_count >= 3;
                 ui.horizontal_wrapped(|ui| {
                     ui.weak("Align");
-                    for (name, label, alignment) in [
+                    for (_name, label, alignment) in [
                         ("visual_align_left", "Left", VisualAlign::Left),
                         ("visual_align_center_x", "Center X", VisualAlign::HorizontalCenter),
                         ("visual_align_right", "Right", VisualAlign::Right),
@@ -7521,38 +7521,38 @@ impl DiagramStudioDialog {
                         let response = ui.add_enabled(align_enabled, egui::Button::new(label));
                         #[cfg(test)]
                         self.test_action_rects
-                            .push((name.into(), response.rect, ui.clip_rect()));
-                        if response.clicked() && pending.is_none() {
-                            if let (Some(scene), Some(projected)) =
+                            .push((_name.into(), response.rect, ui.clip_rect()));
+                        if response.clicked()
+                            && pending.is_none()
+                            && let (Some(scene), Some(projected)) =
                                 (scene_snapshot.as_deref(), base_projection)
-                            {
-                                match visual_canvas_align_selection(
-                                    scene,
-                                    projected,
-                                    &selection_state.objects,
-                                    projected.items.len(),
-                                    alignment,
-                                ) {
-                                    Some(operations) if operations.is_empty() => {}
-                                    Some(operations)
-                                        if operations.len()
-                                            <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
-                                    {
-                                        staged_operations = Some((operations, None));
-                                    }
-                                    _ => {
-                                        *pending = Some(PendingMutation::VisualLayoutFailure {
-                                            message: "Could not align the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
-                                            expected_document: visual_identity.clone(),
-                                            expected_revision: visual_revision,
-                                        });
-                                    }
+                        {
+                            match visual_canvas_align_selection(
+                                scene,
+                                projected,
+                                &selection_state.objects,
+                                projected.items.len(),
+                                alignment,
+                            ) {
+                                Some(operations) if operations.is_empty() => {}
+                                Some(operations)
+                                    if operations.len()
+                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
+                                {
+                                    staged_operations = Some((operations, None));
+                                }
+                                _ => {
+                                    *pending = Some(PendingMutation::VisualLayoutFailure {
+                                        message: "Could not align the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
+                                        expected_document: visual_identity.clone(),
+                                        expected_revision: visual_revision,
+                                    });
                                 }
                             }
                         }
                     }
                     ui.weak("Distribute");
-                    for (name, label, distribution) in [
+                    for (_name, label, distribution) in [
                         ("visual_distribute_horizontal", "Horizontal", VisualDistribution::Horizontal),
                         ("visual_distribute_vertical", "Vertical", VisualDistribution::Vertical),
                     ] {
@@ -7562,32 +7562,32 @@ impl DiagramStudioDialog {
                         );
                         #[cfg(test)]
                         self.test_action_rects
-                            .push((name.into(), response.rect, ui.clip_rect()));
-                        if response.clicked() && pending.is_none() {
-                            if let (Some(scene), Some(projected)) =
+                            .push((_name.into(), response.rect, ui.clip_rect()));
+                        if response.clicked()
+                            && pending.is_none()
+                            && let (Some(scene), Some(projected)) =
                                 (scene_snapshot.as_deref(), base_projection)
-                            {
-                                match visual_canvas_distribute_selection(
-                                    scene,
-                                    projected,
-                                    &selection_state.objects,
-                                    projected.items.len(),
-                                    distribution,
-                                ) {
-                                    Some(operations) if operations.is_empty() => {}
-                                    Some(operations)
-                                        if operations.len()
-                                            <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
-                                    {
-                                        staged_operations = Some((operations, None));
-                                    }
-                                    _ => {
-                                        *pending = Some(PendingMutation::VisualLayoutFailure {
-                                            message: "Could not distribute the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
-                                            expected_document: visual_identity.clone(),
-                                            expected_revision: visual_revision,
-                                        });
-                                    }
+                        {
+                            match visual_canvas_distribute_selection(
+                                scene,
+                                projected,
+                                &selection_state.objects,
+                                projected.items.len(),
+                                distribution,
+                            ) {
+                                Some(operations) if operations.is_empty() => {}
+                                Some(operations)
+                                    if operations.len()
+                                        <= MAX_VISUAL_TRANSACTION_OPERATIONS =>
+                                {
+                                    staged_operations = Some((operations, None));
+                                }
+                                _ => {
+                                    *pending = Some(PendingMutation::VisualLayoutFailure {
+                                        message: "Could not distribute the selected objects because their transformed outlines are unavailable or outside the supported range.".into(),
+                                        expected_document: visual_identity.clone(),
+                                        expected_revision: visual_revision,
+                                    });
                                 }
                             }
                         }
@@ -7606,7 +7606,7 @@ impl DiagramStudioDialog {
                         .show_ui(ui, |ui| {
                             if let Some(scene) = scene_snapshot.as_ref() {
                                 for object in &scene.objects {
-                                    let response = ui.selectable_value(
+                                    let _response = ui.selectable_value(
                                         &mut selected_object,
                                         Some(object.id),
                                         visual_object_label(object),
@@ -7614,7 +7614,7 @@ impl DiagramStudioDialog {
                                     #[cfg(test)]
                                     self.test_action_rects.push((
                                         format!("visual_object_option_{}", object.id.get()),
-                                        response.rect,
+                                        _response.rect,
                                         ui.clip_rect(),
                                     ));
                                 }
@@ -8135,7 +8135,7 @@ impl DiagramStudioDialog {
                                     ui.text_edit_singleline(&mut object.style.font_family);
                                 });
                                 ui.label("Connector label");
-                                let label_edit = ui.add(
+                                let _label_edit = ui.add(
                                     egui::TextEdit::multiline(&mut connector.label)
                                         .desired_rows(2)
                                         .char_limit(MAX_VISUAL_CONNECTOR_LABEL_BYTES / 4),
@@ -8143,7 +8143,7 @@ impl DiagramStudioDialog {
                                 #[cfg(test)]
                                 self.test_action_rects.push((
                                     "visual_connector_label".into(),
-                                    label_edit.rect,
+                                    _label_edit.rect,
                                     ui.clip_rect(),
                                 ));
                             }
@@ -8203,18 +8203,22 @@ impl DiagramStudioDialog {
                             let back = ui.add_enabled(structural_edits_allowed && back_target.is_some(), egui::Button::new("Send back"));
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_send_back".into(), back.rect, ui.clip_rect()));
-                            if back.clicked() && pending.is_none() && document_intent.is_none() {
-                                if let Some(to_index) = back_target {
-                                    staged_operations = Some((vec![VisualOperation::MoveObject { id: selected_id, to_index }], None));
-                                }
+                            if back.clicked()
+                                && pending.is_none()
+                                && document_intent.is_none()
+                                && let Some(to_index) = back_target
+                            {
+                                staged_operations = Some((vec![VisualOperation::MoveObject { id: selected_id, to_index }], None));
                             }
                             let forward = ui.add_enabled(structural_edits_allowed && forward_target.is_some(), egui::Button::new("Bring forward"));
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_bring_forward".into(), forward.rect, ui.clip_rect()));
-                            if forward.clicked() && pending.is_none() && document_intent.is_none() {
-                                if let Some(to_index) = forward_target {
-                                    staged_operations = Some((vec![VisualOperation::MoveObject { id: selected_id, to_index }], None));
-                                }
+                            if forward.clicked()
+                                && pending.is_none()
+                                && document_intent.is_none()
+                                && let Some(to_index) = forward_target
+                            {
+                                staged_operations = Some((vec![VisualOperation::MoveObject { id: selected_id, to_index }], None));
                             }
                             let remove = ui.add_enabled(structural_edits_allowed && selected_id != crate::diagram::TITLE_OBJECT_ID, egui::Button::new("Remove object"));
                             #[cfg(test)]
@@ -11496,14 +11500,19 @@ fn draw_recent_documents(
         .max_height(170.0)
         .id_salt("diagram-studio-recents")
         .show(ui, |ui| {
-            for (_row, path) in rows.iter().enumerate() {
+            for path in rows.iter() {
+                #[cfg(test)]
+                let row = rows
+                    .iter()
+                    .position(|candidate| candidate == path)
+                    .expect("rendered recent path must be in the displayed rows");
                 ui.push_id(path, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(path.to_string_lossy());
                         let open = ui.add_enabled(actions_allowed, egui::Button::new("Open"));
                         #[cfg(test)]
                         action_rects.push((
-                            format!("recent_open_{_row}"),
+                            format!("recent_open_{row}"),
                             open.rect,
                             ui.clip_rect(),
                         ));
@@ -11514,7 +11523,7 @@ fn draw_recent_documents(
                             ui.add_enabled(actions_allowed, egui::Button::new("Duplicate…"));
                         #[cfg(test)]
                         action_rects.push((
-                            format!("recent_duplicate_{_row}"),
+                            format!("recent_duplicate_{row}"),
                             duplicate.rect,
                             ui.clip_rect(),
                         ));

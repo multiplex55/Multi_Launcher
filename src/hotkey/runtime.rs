@@ -81,10 +81,10 @@ impl HotkeyTrigger {
     }
 
     fn clear_recording_stop_pending(&self) {
-        if let Some(generation_slot) = self.recording_stop_generation.as_ref() {
-            if let Ok(mut generation) = generation_slot.lock() {
-                *generation = None;
-            }
+        if let Some(generation_slot) = self.recording_stop_generation.as_ref()
+            && let Ok(mut generation) = generation_slot.lock()
+        {
+            *generation = None;
         }
     }
 
@@ -246,10 +246,8 @@ impl HotkeyTrigger {
                         let (next_triggered, fire) =
                             update_trigger_cycle(triggered[i], combo, suppress_new_press);
                         triggered[i] = next_triggered;
-                        if fire {
-                            if triggers_for_listener[i].fire() {
-                                let _ = event_tx.send(());
-                            }
+                        if fire && triggers_for_listener[i].fire() {
+                            let _ = event_tx.send(());
                         }
                     }
                     thread::sleep(Duration::from_millis(20));

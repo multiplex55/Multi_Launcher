@@ -388,7 +388,7 @@ fn inspect_with_api<A: RestartManagerApi>(
         session
             .api
             .register_file(session.id, path)
-            .map_err(|code| FileLockInspectionError::RegisterResourceFailed(code))?;
+            .map_err(FileLockInspectionError::RegisterResourceFailed)?;
 
         verify_file_identity(session.api, path, identity_before)?;
         let records = read_process_list(session.api, session.id)?;
@@ -489,9 +489,7 @@ mod native {
     use std::fs::File;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-    use windows::Win32::Foundation::{
-        CloseHandle, FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
-    };
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES,
@@ -708,7 +706,9 @@ mod native {
                 if buffer[..length].contains(&0) {
                     return Err("Windows returned a malformed final executable path".into());
                 }
-                return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length])));
+                return Ok(PathBuf::from(std::ffi::OsString::from_wide(
+                    &buffer[..length],
+                )));
             }
             if length >= MAX_FILE_LOCK_PATH_UTF16_UNITS {
                 return Err("the resolved executable path exceeds the supported limit".into());
@@ -772,9 +772,9 @@ mod native {
         let wide = encode_path(&current_path)
             .map_err(|error| format!("the executable path is no longer valid: {error}"))?;
         let mut api = NativeApi;
-        let (probe, _) = api
-            .probe_file(&wide)
-            .map_err(|error| format!("the reported executable is no longer a regular file: {error}"))?;
+        let (probe, _) = api.probe_file(&wide).map_err(|error| {
+            format!("the reported executable is no longer a regular file: {error}")
+        })?;
         let resolved_path = final_path_for_probe(&probe)?;
         require_local_drive(&resolved_path)?;
         drop(probe);
@@ -850,7 +850,13 @@ mod native {
                             .unwrap_or(1),
                     )
                 })?;
-            Ok((Probe { _file: file, handle }, identity))
+            Ok((
+                Probe {
+                    _file: file,
+                    handle,
+                },
+                identity,
+            ))
         }
 
         fn start_session(&mut self) -> Result<u32, u32> {
@@ -902,7 +908,7 @@ mod native {
                     reported_count: reported,
                 });
             }
-            for (destination, source) in output.iter_mut().zip(native.into_iter()).take(reported) {
+            for (destination, source) in output.iter_mut().zip(native).take(reported) {
                 let app_end = source
                     .strAppName
                     .iter()

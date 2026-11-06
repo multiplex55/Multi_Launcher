@@ -1387,15 +1387,16 @@ fn write_visual_filled_path(
     }
     let (fill, fill_opacity) = svg_color(color, opacity);
     let mut stroke_attributes = String::from("stroke=\"none\"");
-    if let Some((stroke_color, stroke_opacity, width)) = stroke {
-        if width.is_finite() && width > 0.0 {
-            let (stroke, stroke_alpha) = svg_color(stroke_color, stroke_opacity);
-            stroke_attributes = format!(
-                "stroke=\"{stroke}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"",
-                visual_svg_num(stroke_alpha),
-                visual_svg_num(width),
-            );
-        }
+    if let Some((stroke_color, stroke_opacity, width)) = stroke
+        && width.is_finite()
+        && width > 0.0
+    {
+        let (stroke, stroke_alpha) = svg_color(stroke_color, stroke_opacity);
+        stroke_attributes = format!(
+            "stroke=\"{stroke}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"",
+            visual_svg_num(stroke_alpha),
+            visual_svg_num(width),
+        );
     }
     svg_fmt(
         output,

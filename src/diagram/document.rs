@@ -530,9 +530,9 @@ impl DiagramDocumentController {
     }
 
     /// Save As refuses occupied paths and publishes the new path/digest and
-    /// saved-content acknowledgement only after the atomic write succeeds.
+    /// saved-content acknowledgement only after no-clobber publication succeeds.
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), DiagramDocumentError> {
-        self.save_as_with_writer(path.as_ref(), save_atomic)
+        self.save_as_with_hook(path.as_ref(), |_| Ok(()))
     }
 
     pub fn request_new(&mut self) -> Result<TransitionOutcome, DiagramDocumentError> {
@@ -674,19 +674,28 @@ impl DiagramDocumentController {
         &mut self,
         path: impl AsRef<Path>,
     ) -> Result<TransitionOutcome, DiagramDocumentError> {
-        self.resolve_pending_save_as_with_writer(path.as_ref(), save_atomic)
+        self.resolve_pending_save_as_with_hook(path.as_ref(), |_| Ok(()))
     }
 
-    fn resolve_pending_save_as_with_writer(
+    #[cfg(test)]
+    fn resolve_pending_save_as_after_stage_sync(
         &mut self,
         path: &Path,
-        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
+    ) -> Result<TransitionOutcome, DiagramDocumentError> {
+        self.resolve_pending_save_as_with_hook(path, after_stage_sync)
+    }
+
+    fn resolve_pending_save_as_with_hook(
+        &mut self,
+        path: &Path,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
     ) -> Result<TransitionOutcome, DiagramDocumentError> {
         let pending = self
             .pending
             .clone()
             .ok_or(DiagramDocumentError::NoPendingTransition)?;
-        self.save_as_with_writer(path, writer)?;
+        self.save_as_with_hook(path, after_stage_sync)?;
         self.apply_pending(pending)
     }
 
@@ -780,10 +789,19 @@ impl DiagramDocumentController {
         Ok(())
     }
 
-    fn save_as_with_writer(
+    #[cfg(test)]
+    fn save_as_after_stage_sync(
         &mut self,
         path: &Path,
-        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
+    ) -> Result<(), DiagramDocumentError> {
+        self.save_as_with_hook(path, after_stage_sync)
+    }
+
+    fn save_as_with_hook(
+        &mut self,
+        path: &Path,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
     ) -> Result<(), DiagramDocumentError> {
         let active = self
             .active
@@ -792,7 +810,7 @@ impl DiagramDocumentController {
         let saved = active.saved_baseline();
         let disk_digest =
             self.store
-                .save_document_as_with_writer(path, active.file_document(), writer)?;
+                .save_document_as(path, active.file_document(), after_stage_sync)?;
         let active = self
             .active
             .as_mut()
@@ -841,6 +859,8 @@ mod tests {
         VisualObjectKind, VisualOperation, VisualPrimitiveShape, VisualStyle, VisualTransform,
     };
     use std::fs;
+    use std::io::Write;
+    use std::path::Path;
 
     const SUPPORTED: &str = "flowchart LR\nA[\"Alpha\"]\nB[\"Beta\"]\nA --> B\n";
 
@@ -1002,9 +1022,9 @@ mod tests {
         ));
         let mut save_count = 0;
         save_then_close
-            .resolve_pending_save_as_with_writer(&saved_on_close, |path, bytes| {
+            .resolve_pending_save_as_after_stage_sync(&saved_on_close, |_path| {
                 save_count += 1;
-                crate::common::atomic_file::save_atomic(path, bytes)
+                Ok(())
             })
             .unwrap();
         assert_eq!(save_count, 1, "Save As plus Close must publish once");
@@ -1031,7 +1051,7 @@ mod tests {
         ));
         let mut no_pending_writes = 0;
         assert!(matches!(
-            controller.resolve_pending_save_as_with_writer(&intended, |_path, _bytes| {
+            controller.resolve_pending_save_as_after_stage_sync(&intended, |_path| {
                 no_pending_writes += 1;
                 Ok(())
             }),
@@ -1064,7 +1084,7 @@ mod tests {
         assert_eq!(controller.session().unwrap().draft(), draft);
         assert!(controller.is_dirty());
 
-        let failure = controller.resolve_pending_save_as_with_writer(&intended, |_path, _bytes| {
+        let failure = controller.resolve_pending_save_as_after_stage_sync(&intended, |_path| {
             anyhow::bail!("injected publication failure")
         });
         assert!(matches!(
@@ -1193,9 +1213,9 @@ mod tests {
         let mut save_count = 0;
         assert!(
             current
-                .resolve_pending_save_as_with_writer(&saved_as_current_path, |path, bytes| {
+                .resolve_pending_save_as_after_stage_sync(&saved_as_current_path, |_path| {
                     save_count += 1;
-                    crate::common::atomic_file::save_atomic(path, bytes)
+                    Ok(())
                 })
                 .is_err()
         );
@@ -1334,7 +1354,7 @@ mod tests {
         let pending = controller.pending_transition().cloned();
 
         assert!(matches!(
-            controller.resolve_pending_save_as_with_writer(&save_as_path, |_path, _bytes| {
+            controller.resolve_pending_save_as_after_stage_sync(&save_as_path, |_path| {
                 anyhow::bail!("injected Save As failure")
             }),
             Err(DiagramDocumentError::Persistence(
@@ -1647,7 +1667,7 @@ mod tests {
         fs::write(&import_path, reread_source.as_bytes()).unwrap();
 
         assert!(matches!(
-            controller.resolve_pending_save_as_with_writer(&save_as_path, |_path, _bytes| {
+            controller.resolve_pending_save_as_after_stage_sync(&save_as_path, |_path| {
                 anyhow::bail!("injected Save As failure")
             }),
             Err(DiagramDocumentError::Persistence(
@@ -1667,9 +1687,9 @@ mod tests {
         let mut writes = 0;
         assert_eq!(
             controller
-                .resolve_pending_save_as_with_writer(&save_as_path, |path, bytes| {
+                .resolve_pending_save_as_after_stage_sync(&save_as_path, |_path| {
                     writes += 1;
-                    crate::common::atomic_file::save_atomic(path, bytes)
+                    Ok(())
                 })
                 .unwrap(),
             TransitionOutcome::Applied
@@ -1827,6 +1847,123 @@ mod tests {
         assert_eq!(reopened.disk_digest(), digest);
         assert_eq!(reopened.visual_label(), Some("Unsaved visual edit"));
         assert!(reopened.is_dirty());
+    }
+
+    #[test]
+    fn diagram_document_visual_save_as_never_overwrites_late_destination() {
+        fn create_late_sentinel(path: &Path) -> anyhow::Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            file.write_all(b"late destination owner")?;
+            file.sync_all()?;
+            Ok(())
+        }
+
+        fn assert_no_stage_files(directory: &Path) {
+            assert!(fs::read_dir(directory).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".diagram-copy-")
+            }));
+        }
+
+        fn dirty_visual(path: &Path) -> DiagramDocumentController {
+            let mut controller = DiagramDocumentController::new();
+            assert_eq!(
+                controller.request_new_visual().unwrap(),
+                TransitionOutcome::Applied
+            );
+            controller.replace_visual_label("Saved baseline").unwrap();
+            controller.save_as(path).unwrap();
+            controller
+                .replace_visual_label("Unsaved visual edit")
+                .unwrap();
+            controller
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let direct_original = directory.path().join("direct-original.mld");
+        let direct_destination = directory.path().join("direct-late.mld");
+        let mut direct = dirty_visual(&direct_original);
+        let direct_original_bytes = fs::read(&direct_original).unwrap();
+        let direct_digest = direct.disk_digest();
+        let direct_scene = direct.visual_scene().unwrap().clone();
+        let direct_revision = direct.visual_revision();
+        let direct_can_undo = direct.can_undo();
+        let direct_can_redo = direct.can_redo();
+        assert!(direct.is_dirty());
+        assert!(direct_can_undo);
+
+        assert!(matches!(
+            direct.save_as_after_stage_sync(&direct_destination, create_late_sentinel),
+            Err(super::DiagramDocumentError::Persistence(
+                DiagramPersistenceError::OccupiedPath(path)
+            )) if path == direct_destination
+        ));
+        assert_eq!(fs::read(&direct_original).unwrap(), direct_original_bytes);
+        assert_eq!(
+            fs::read(&direct_destination).unwrap(),
+            b"late destination owner"
+        );
+        assert_eq!(direct.path(), Some(direct_original.as_path()));
+        assert_eq!(direct.disk_digest(), direct_digest);
+        assert_eq!(direct.visual_scene(), Some(&direct_scene));
+        assert_eq!(direct.visual_revision(), direct_revision);
+        assert!(direct.is_dirty());
+        assert_eq!(direct.can_undo(), direct_can_undo);
+        assert_eq!(direct.can_redo(), direct_can_redo);
+        assert_eq!(direct.pending_transition(), None);
+        assert_eq!(direct.authoring_kind(), Some(DiagramAuthoringKind::Visual));
+        assert_no_stage_files(directory.path());
+
+        let pending_original = directory.path().join("pending-original.mld");
+        let pending_destination = directory.path().join("pending-late.mld");
+        let mut pending = dirty_visual(&pending_original);
+        let pending_original_bytes = fs::read(&pending_original).unwrap();
+        let pending_digest = pending.disk_digest();
+        let pending_scene = pending.visual_scene().unwrap().clone();
+        let pending_revision = pending.visual_revision();
+        let pending_can_undo = pending.can_undo();
+        let pending_can_redo = pending.can_redo();
+        assert_eq!(
+            pending.request_close().unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+
+        assert!(matches!(
+            pending.resolve_pending_save_as_after_stage_sync(
+                &pending_destination,
+                create_late_sentinel
+            ),
+            Err(super::DiagramDocumentError::Persistence(
+                DiagramPersistenceError::OccupiedPath(path)
+            )) if path == pending_destination
+        ));
+        assert_eq!(fs::read(&pending_original).unwrap(), pending_original_bytes);
+        assert_eq!(
+            fs::read(&pending_destination).unwrap(),
+            b"late destination owner"
+        );
+        assert_eq!(pending.path(), Some(pending_original.as_path()));
+        assert_eq!(pending.disk_digest(), pending_digest);
+        assert_eq!(pending.visual_scene(), Some(&pending_scene));
+        assert_eq!(pending.visual_revision(), pending_revision);
+        assert!(pending.is_dirty());
+        assert_eq!(
+            pending.pending_transition(),
+            Some(&PendingDiagramTransition::Close)
+        );
+        assert_eq!(pending.authoring_kind(), Some(DiagramAuthoringKind::Visual));
+        assert_no_stage_files(directory.path());
+
+        pending.resolve_pending(TransitionDecision::Cancel).unwrap();
+        assert_eq!(pending.can_undo(), pending_can_undo);
+        assert_eq!(pending.can_redo(), pending_can_redo);
+        assert!(pending.is_dirty());
     }
 
     #[test]

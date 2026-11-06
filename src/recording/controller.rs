@@ -388,7 +388,7 @@ impl RecordingController {
             };
             status
                 .outcome
-                .get_or_insert_with(|| RecordingControllerOutcome::Failed(message));
+                .get_or_insert(RecordingControllerOutcome::Failed(message));
         }
         session = self.session.view();
         if capture_was_busy && !session.worker_busy() {
@@ -459,7 +459,7 @@ impl RecordingController {
         if session.worker_busy() || !writer.retired() {
             return;
         }
-        let Some(mut writer) = self.writer.take() else {
+        let Some(writer) = self.writer.take() else {
             return;
         };
         let status = writer.status.lock().ok();
@@ -664,10 +664,9 @@ impl From<Mp4RecordingError> for WriterError {
         let cleanup_failed = matches!(error, Mp4RecordingError::WithCleanup { .. });
         let cancellation_transition = match &error {
             Mp4RecordingError::Session(error) => is_cancellation_transition(error),
-            Mp4RecordingError::Publication(error) => match error {
-                RecordingOutputError::Session(error) => is_cancellation_transition(error),
-                _ => false,
-            },
+            Mp4RecordingError::Publication(RecordingOutputError::Session(error)) => {
+                is_cancellation_transition(error)
+            }
             _ => false,
         };
         let session_transition_race = match &error {
@@ -828,7 +827,7 @@ fn run_writer(
                     status.preparation = Some(RecordingWriterPreparation::Failed(
                         "writer setup was cancelled".into(),
                     ));
-                    status.outcome.get_or_insert_with(|| {
+                    status.outcome.get_or_insert({
                         if error.cancellation_transition && !error.cleanup_failed {
                             RecordingControllerOutcome::Discarded
                         } else {

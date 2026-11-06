@@ -554,7 +554,6 @@ fn selected_outline_bounds(
     selection
         .iter()
         .filter_map(|id| bounds_by_object.get(id).copied())
-        .into_iter()
         .reduce(union_rect)
 }
 
@@ -1721,19 +1720,6 @@ mod tests {
             ))])
             .unwrap()
             .created_objects[0];
-        let other_id = document
-            .apply_transaction(&[VisualOperation::AddObject(object(
-                VisualTransform {
-                    x: 50.0,
-                    y: 100.0,
-                    width: 10.0,
-                    height: 10.0,
-                    ..VisualTransform::default()
-                },
-                VisualPrimitiveShape::Ellipse,
-            ))])
-            .unwrap()
-            .created_objects[0];
         let second_selected = document
             .apply_transaction(&[VisualOperation::AddObject(object(
                 VisualTransform {
@@ -1744,6 +1730,19 @@ mod tests {
                     ..VisualTransform::default()
                 },
                 VisualPrimitiveShape::Rectangle,
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let other_id = document
+            .apply_transaction(&[VisualOperation::AddObject(object(
+                VisualTransform {
+                    x: 50.0,
+                    y: 100.0,
+                    width: 10.0,
+                    height: 10.0,
+                    ..VisualTransform::default()
+                },
+                VisualPrimitiveShape::Ellipse,
             ))])
             .unwrap()
             .created_objects[0];
@@ -1838,6 +1837,22 @@ mod tests {
             .iter()
             .position(|item| item.object_id == other_id)
             .unwrap();
+        let painted_prefix = &projection.items[..before_unpainted_candidate];
+        assert!(
+            painted_prefix
+                .iter()
+                .any(|item| item.object_id == selected_id)
+        );
+        assert!(
+            painted_prefix
+                .iter()
+                .any(|item| item.object_id == second_selected)
+        );
+        assert!(
+            !painted_prefix
+                .iter()
+                .any(|item| { item.object_id == other_id || item.object_id == tied_candidate })
+        );
         let bounded = snap_translation_delta(
             &projection,
             &selected,

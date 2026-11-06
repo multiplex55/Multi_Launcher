@@ -659,9 +659,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
         let object = match item {
             PendingVisualObject::Ready(object) => object,
             PendingVisualObject::Connector(pending_connector) => {
-                let connector =
-                    resolve_connector(pending_connector, &source_object_ids, &source_transforms)?;
-                connector
+                resolve_connector(pending_connector, &source_object_ids, &source_transforms)?
             }
         };
         if scene.objects.len() >= MAX_VISUAL_OBJECTS {
@@ -1985,7 +1983,7 @@ fn validate_xml_declaration(
     declaration: &BytesDecl<'_>,
     decoder: quick_xml::encoding::Decoder,
 ) -> Result<(), DrawioWireError> {
-    let raw = str::from_utf8(&*declaration).map_err(|_| DrawioWireError::MalformedXml)?;
+    let raw = str::from_utf8(declaration).map_err(|_| DrawioWireError::MalformedXml)?;
     let start = BytesStart::from_content(raw.to_owned(), 3);
     let mut seen = HashSet::new();
     let mut position = 0usize;

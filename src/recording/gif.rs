@@ -227,9 +227,9 @@ impl GifRecording {
                 RecordingSessionError::StaleGeneration,
             ));
         }
-        let request = view.request().ok_or_else(|| {
-            RecordingOutputError::Session(RecordingSessionError::MissingSelection)
-        })?;
+        let request = view.request().ok_or(RecordingOutputError::Session(
+            RecordingSessionError::MissingSelection,
+        ))?;
         if request.options().format() != RecordingFormat::Gif {
             return Err(RecordingOutputError::UnsupportedFormat);
         }

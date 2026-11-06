@@ -368,7 +368,26 @@ pub(crate) struct ParseAttempt {
     pub expression: Option<QuantityExpression>,
     pub error: Option<QuantityError>,
     pub references: Vec<String>,
-    pub has_unit: bool,
+    pub unit_evidence: UnitParseEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnitParseEvidence {
+    None,
+    PlainMinuteAlias,
+    Definitive,
+}
+
+impl UnitParseEvidence {
+    pub(crate) fn has_unit(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn include(&mut self, evidence: Self) {
+        if evidence == Self::Definitive || *self == Self::None {
+            *self = evidence;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -460,7 +479,7 @@ pub(crate) fn parse_expression(source: &str) -> ParseAttempt {
         expression,
         error,
         references: parser.references,
-        has_unit: parser.has_unit,
+        unit_evidence: parser.unit_evidence,
     }
 }
 
@@ -522,7 +541,7 @@ struct Parser<'a> {
     token_count: usize,
     recursion: usize,
     references: Vec<String>,
-    has_unit: bool,
+    unit_evidence: UnitParseEvidence,
 }
 
 impl<'a> Parser<'a> {
@@ -533,7 +552,7 @@ impl<'a> Parser<'a> {
             token_count: 0,
             recursion: 0,
             references: Vec::new(),
-            has_unit: false,
+            unit_evidence: UnitParseEvidence::None,
         }
     }
 
@@ -650,7 +669,6 @@ impl<'a> Parser<'a> {
         };
 
         if let Some(units) = self.parse_unit_suffix()? {
-            self.has_unit = true;
             primary = Expr::AttachUnit(Box::new(primary), units);
         }
         Ok(primary)
@@ -666,10 +684,18 @@ impl<'a> Parser<'a> {
             self.cursor = initial_cursor;
             return Ok(None);
         };
-        self.has_unit = true;
         self.bump_token()?;
         self.cursor += consumed;
         let alias = self.source[alias_start..self.cursor].trim();
+        let plain_minute_alias = unit == Unit::Minute && alias == "min";
+        self.unit_evidence.include(if plain_minute_alias {
+            UnitParseEvidence::PlainMinuteAlias
+        } else {
+            UnitParseEvidence::Definitive
+        });
+        if self.source[self.cursor..].starts_with('^') {
+            self.unit_evidence.include(UnitParseEvidence::Definitive);
+        }
         let power = self.parse_attached_unit_power()?.unwrap_or(1);
         let mut product = UnitProduct::from_catalog_alias(unit, alias, power)?;
 
@@ -687,6 +713,7 @@ impl<'a> Parser<'a> {
             else {
                 break;
             };
+            self.unit_evidence.include(UnitParseEvidence::Definitive);
             self.bump_token()?;
             self.cursor += 1;
             self.bump_token()?;

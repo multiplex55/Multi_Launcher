@@ -398,19 +398,24 @@ impl DiagramDocumentStore {
         })
     }
 
-    pub(super) fn save_document_as_with_writer(
+    pub(super) fn save_document_as(
         &self,
         path: &Path,
         document: DiagramFileDocumentRef<'_>,
-        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+        after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
     ) -> Result<[u8; 32], DiagramPersistenceError> {
         let bytes = encode_document_for_path(path, document)?;
         ensure_unoccupied(path)?;
-        writer(path, &bytes).map_err(|source| DiagramPersistenceError::AtomicWrite {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(|source| DiagramPersistenceError::Io {
+            operation: "create Save As parent directory",
             path: path.to_path_buf(),
             source,
         })?;
-        Ok(digest(&bytes))
+        publish_unoccupied_bytes_after_stage_sync(path, &bytes, after_stage_sync)
     }
 
     pub(super) fn save_document_existing_with_writer(
@@ -443,16 +448,15 @@ impl DiagramDocumentStore {
         Ok(digest(&bytes))
     }
 
-    /// Save As refuses a path that is already occupied at the preflight check.
-    /// The destination is then published using the durable shared atomic writer.
+    /// Save As refuses a path that is already occupied and publishes through
+    /// the same-directory durable no-clobber staging path.
     #[cfg(test)]
-    pub(super) fn save_as_with_writer(
+    pub(super) fn save_as(
         &self,
         path: &Path,
         session: &DiagramSession,
-        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
     ) -> Result<[u8; 32], DiagramPersistenceError> {
-        self.save_document_as_with_writer(path, DiagramFileDocumentRef::Mermaid(session), writer)
+        self.save_document_as(path, DiagramFileDocumentRef::Mermaid(session), |_| Ok(()))
     }
 
     #[cfg(test)]
@@ -616,20 +620,22 @@ fn ensure_mld_extension(path: &Path) -> Result<(), DiagramPersistenceError> {
 }
 
 fn has_extension(path: &Path, expected: &'static str) -> bool {
-    if path
-        .extension()
+    path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
-    {
-        true
-    } else {
-        false
-    }
 }
 
 fn publish_unoccupied_bytes(
     path: &Path,
     bytes: &[u8],
+) -> Result<[u8; 32], DiagramPersistenceError> {
+    publish_unoccupied_bytes_after_stage_sync(path, bytes, |_| Ok(()))
+}
+
+fn publish_unoccupied_bytes_after_stage_sync(
+    path: &Path,
+    bytes: &[u8],
+    after_stage_sync: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> Result<[u8; 32], DiagramPersistenceError> {
     ensure_unoccupied(path)?;
     let parent = path
@@ -652,12 +658,20 @@ fn publish_unoccupied_bytes(
             path: path.to_path_buf(),
             source,
         })?;
-    temporary
-        .persist_noclobber(path)
-        .map_err(|error| DiagramPersistenceError::AtomicWrite {
-            path: path.to_path_buf(),
-            source: anyhow::anyhow!(error.error),
-        })?;
+    after_stage_sync(path).map_err(|source| DiagramPersistenceError::AtomicWrite {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    temporary.persist_noclobber(path).map_err(|error| {
+        if error.error.kind() == io::ErrorKind::AlreadyExists {
+            DiagramPersistenceError::OccupiedPath(path.to_path_buf())
+        } else {
+            DiagramPersistenceError::AtomicWrite {
+                path: path.to_path_buf(),
+                source: anyhow::anyhow!(error.error),
+            }
+        }
+    })?;
     Ok(digest(bytes))
 }
 
@@ -798,13 +812,11 @@ mod tests {
         let store = DiagramDocumentStore;
         let path = directory.path().join("native.diagram");
         let session = DiagramSession::new();
-        let baseline = store
-            .save_as_with_writer(&path, &session, save_atomic)
-            .unwrap();
+        let baseline = store.save_as(&path, &session).unwrap();
 
         let occupied_bytes = fs::read(&path).unwrap();
         assert!(matches!(
-            store.save_as_with_writer(&path, &session, save_atomic),
+            store.save_as(&path, &session),
             Err(DiagramPersistenceError::OccupiedPath(_))
         ));
         assert_eq!(fs::read(&path).unwrap(), occupied_bytes);
@@ -924,9 +936,7 @@ mod tests {
         let store = DiagramDocumentStore;
         let path = directory.path().join("native.diagram");
         let session = DiagramSession::new();
-        let baseline = store
-            .save_as_with_writer(&path, &session, save_atomic)
-            .unwrap();
+        let baseline = store.save_as(&path, &session).unwrap();
         let original = fs::read(&path).unwrap();
 
         let result = store.save_existing_with_writer(&path, baseline, &session, |_path, _bytes| {

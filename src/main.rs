@@ -938,7 +938,6 @@ struct PreparedHotkeyRoute {
     launcher: Arc<HotkeyTrigger>,
     quit: Option<Arc<HotkeyTrigger>>,
     help: Option<Arc<HotkeyTrigger>>,
-    recording_stop_trigger: Option<Arc<HotkeyTrigger>>,
     recording_stop_bridge: Option<Arc<multi_launcher::recording::RecordingStopHotkeyBridge>>,
     screen_draw: Option<Arc<HotkeyTrigger>>,
     emergency: Option<Arc<HotkeyTrigger>>,
@@ -2787,6 +2786,7 @@ fn validate_paste_sequence_hotkey_routes(
     }
 }
 
+#[cfg(test)]
 fn prepare_legacy_hotkey_fallback(
     old_settings: &Settings,
     radial_document: &RadialDocument,
@@ -3178,6 +3178,7 @@ fn invocation_priority_owner(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn fail_closed_radial_route(
     settings: &mut Settings,
     control: &RadialControlMainEndpoint,
@@ -3354,6 +3355,7 @@ fn reconcile_screen_draw_cycle_notices(
     }
 }
 
+#[cfg(test)]
 fn prepare_hotkey_runtime_message(
     request: multi_launcher::hotkey::reconfiguration::HotkeyPreparationRequest,
     radial_document: &RadialDocument,
@@ -3486,7 +3488,6 @@ fn prepare_hotkey_runtime_message_with_recording_stop_bridge(
                 launcher,
                 quit,
                 help,
-                recording_stop_trigger,
                 recording_stop_bridge,
                 screen_draw,
                 emergency,
@@ -4981,7 +4982,6 @@ fn main() -> anyhow::Result<()> {
                     &event_tx,
                 );
                 settings.radial = startup_route_settings.radial.clone();
-                shared_invocation = false;
                 radial_resources.set_runtime_enabled(false);
                 radial_resources.reconcile(&mut radial_controller);
             }

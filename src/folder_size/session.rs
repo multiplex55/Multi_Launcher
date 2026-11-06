@@ -697,10 +697,10 @@ impl FolderSizeSession {
                                 state.accepted_result = Some(Arc::new(result));
                                 state.progress = None;
                                 state.error = None;
-                                if let Some(active) = state.active.as_mut() {
-                                    if active.generation == generation {
-                                        active.completion = Some(activity_completion);
-                                    }
+                                if let Some(active) = state.active.as_mut()
+                                    && active.generation == generation
+                                {
+                                    active.completion = Some(activity_completion);
                                 }
                             }
                             Ok(_) => {
@@ -719,10 +719,11 @@ impl FolderSizeSession {
                             }
                         }
                     }
-                    if let Some(active) = state.active.as_mut() {
-                        if active.generation == generation && active.completion.is_none() {
-                            active.completion = Some(activity_completion);
-                        }
+                    if let Some(active) = state.active.as_mut()
+                        && active.generation == generation
+                        && active.completion.is_none()
+                    {
+                        active.completion = Some(activity_completion);
                     }
                 }
                 drop(state);
@@ -764,10 +765,9 @@ impl FolderSizeSession {
                         .pending
                         .as_ref()
                         .is_some_and(|pending| pending.generation == generation)
+                        && let Some(pending) = state.pending.take()
                     {
-                        if let Some(pending) = state.pending.take() {
-                            pending.cancellation.cancel();
-                        }
+                        pending.cancellation.cancel();
                     }
                     state.error = Some(failure.clone());
                 }
@@ -878,10 +878,7 @@ impl Drop for FolderSizeSession {
                         diagnostic: None,
                     });
                 }
-                active
-                    .activity
-                    .clone()
-                    .and_then(|task| active.completion.map(|completion| (task, completion)))
+                active.activity.clone().zip(active.completion)
             });
             if let Some(pending) = state.pending.take() {
                 pending.cancellation.cancel();

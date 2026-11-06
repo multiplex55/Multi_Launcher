@@ -437,16 +437,15 @@ fn tokenize(source: &str) -> Tokenized {
 
 fn scan_number(source: &str, start: usize) -> usize {
     let bytes = source.as_bytes();
-    if bytes[start] == b'0' {
-        if let Some(prefix) = bytes.get(start + 1).copied() {
-            if matches!(prefix.to_ascii_lowercase(), b'x' | b'b' | b'o') {
-                let mut cursor = start + 2;
-                while bytes.get(cursor).is_some_and(u8::is_ascii_alphanumeric) {
-                    cursor += 1;
-                }
-                return cursor;
-            }
+    if bytes[start] == b'0'
+        && let Some(prefix) = bytes.get(start + 1).copied()
+        && matches!(prefix.to_ascii_lowercase(), b'x' | b'b' | b'o')
+    {
+        let mut cursor = start + 2;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_alphanumeric) {
+            cursor += 1;
         }
+        return cursor;
     }
 
     let mut cursor = start;
@@ -535,11 +534,8 @@ impl Parser {
         minimum_binding_power: u8,
     ) -> Result<Expr, ProgrammerError> {
         let mut left = self.parse_prefix()?;
-        loop {
-            let Some((operator, left_binding_power, right_binding_power)) = self.infix_operator()
-            else {
-                break;
-            };
+        while let Some((operator, left_binding_power, right_binding_power)) = self.infix_operator()
+        {
             if left_binding_power < minimum_binding_power {
                 break;
             }
@@ -820,14 +816,13 @@ fn infer_mode(
             if matches!(
                 name.as_str(),
                 "rotl" | "rotr" | "popcount" | "mask" | "extract"
-            ) {
-                if let Some(first) = arguments.first() {
-                    let mode = infer_mode(first, references)?;
-                    if name == "extract" {
-                        return Ok(mode.map(|mode| IntegerMode::unsigned(mode.width())));
-                    }
-                    return Ok(mode);
+            ) && let Some(first) = arguments.first()
+            {
+                let mode = infer_mode(first, references)?;
+                if name == "extract" {
+                    return Ok(mode.map(|mode| IntegerMode::unsigned(mode.width())));
                 }
+                return Ok(mode);
             }
             Ok(None)
         }
@@ -892,11 +887,11 @@ fn evaluate_as(
             None => Err(ProgrammerError::InvalidSyntax),
         },
         ExprKind::Unary { op, operand } => {
-            if *op == UnaryOp::Negate {
-                if let ExprKind::Number(number) = &operand.kind {
-                    return TypedInteger::parse(&format!("-{number}"), expected_mode)
-                        .map_err(ProgrammerError::Integer);
-                }
+            if *op == UnaryOp::Negate
+                && let ExprKind::Number(number) = &operand.kind
+            {
+                return TypedInteger::parse(&format!("-{number}"), expected_mode)
+                    .map_err(ProgrammerError::Integer);
             }
             let value = evaluate_as(operand, expected_mode, references)?;
             match op {
@@ -979,10 +974,9 @@ fn evaluate_constructor(
         op: UnaryOp::Negate,
         operand,
     } = &argument.kind
+        && let ExprKind::Number(number) = &operand.kind
     {
-        if let ExprKind::Number(number) = &operand.kind {
-            return parse_constructor_number(&format!("-{number}"), target_mode);
-        }
+        return parse_constructor_number(&format!("-{number}"), target_mode);
     }
     if let ExprKind::Name {
         name: reference, ..
@@ -1129,19 +1123,18 @@ fn evaluate_count(
         op: UnaryOp::Negate,
         operand,
     } = &expression.kind
+        && let ExprKind::Number(number) = &operand.kind
     {
-        if let ExprKind::Number(number) = &operand.kind {
-            let value = TypedInteger::parse(
-                &format!("-{number}"),
-                IntegerMode::signed(IntegerWidth::Bits128),
-            )
-            .map_err(ProgrammerError::Integer)?;
-            return Ok(IntegerCount::Signed(
-                value
-                    .as_i128()
-                    .ok_or(ProgrammerError::Integer(IntegerError::OutOfRange))?,
-            ));
-        }
+        let value = TypedInteger::parse(
+            &format!("-{number}"),
+            IntegerMode::signed(IntegerWidth::Bits128),
+        )
+        .map_err(ProgrammerError::Integer)?;
+        return Ok(IntegerCount::Signed(
+            value
+                .as_i128()
+                .ok_or(ProgrammerError::Integer(IntegerError::OutOfRange))?,
+        ));
     }
 
     let mode = infer_mode(expression, references)?.unwrap_or(DEFAULT_INTEGER_MODE);

@@ -309,7 +309,7 @@ impl FileLockDialogState {
                             .then_some(&view);
                         show_inspection_status(ui, status_view, current_inspection);
 
-                        if let Some(inspection) = current_inspection.as_deref() {
+                        if let Some(inspection) = current_inspection {
                             if inspection.reports_no_processes() {
                                 ui.weak("No processes reported.");
                             } else {
@@ -452,10 +452,9 @@ impl FileLockDialogState {
                             }
                             if let Some(path) = self.pick_file()
                                 && self.revalidate_root_pass(ctx, pending.provenance)
+                                && self.apply_selected_path(path)
                             {
-                                if self.apply_selected_path(path) {
-                                    self.notice = None;
-                                }
+                                self.notice = None;
                             }
                         }
                         FileLockAction::Inspect(path) => {

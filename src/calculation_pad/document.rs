@@ -14,7 +14,9 @@ use std::ops::Range;
 use super::integer::TypedInteger;
 use super::operators::{CheckedOperators, ModuloOperators};
 use super::programmer::{self, ProgrammerError, ProgrammerExpression};
-use super::quantity::{self, CalculatedQuantity, QuantityError, QuantityExpression, UnitProduct};
+use super::quantity::{
+    self, CalculatedQuantity, QuantityError, QuantityExpression, UnitParseEvidence, UnitProduct,
+};
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_LINES: usize = 256;
@@ -451,7 +453,7 @@ struct PreparedExpression {
     uses_programmer_syntax: bool,
     quantity: Option<QuantityExpression>,
     quantity_error: Option<QuantityError>,
-    quantity_has_unit: bool,
+    quantity_unit_evidence: UnitParseEvidence,
 }
 
 #[derive(Debug)]
@@ -724,7 +726,7 @@ fn prepare_line(
 
         let (quantity_source, _) = split_to_keyword(expression).expect("split matched above");
         let attempt = quantity::parse_expression(quantity_source);
-        if attempt.has_unit {
+        if attempt.unit_evidence.has_unit() {
             let target = match quantity::parse_unit_target(destination) {
                 Ok(target) => target,
                 Err(error) => {
@@ -758,26 +760,25 @@ fn prepare_line(
                 diagnostic: None,
             };
         }
-        if !attempt.references.is_empty() {
-            if let (Some(quantity_expression), Ok(target)) =
+        if !attempt.references.is_empty()
+            && let (Some(quantity_expression), Ok(target)) =
                 (attempt.expression, quantity::parse_unit_target(destination))
-            {
-                return PreparedLine {
-                    source_range,
-                    assignment_name,
-                    statement: PreparedStatement::QuantityTarget {
-                        expression: quantity_expression,
-                        target,
-                    },
-                    references: attempt
-                        .references
-                        .iter()
-                        .map(|name| prepared_reference(name))
-                        .collect(),
-                    dependencies: Vec::new(),
-                    diagnostic: None,
-                };
-            }
+        {
+            return PreparedLine {
+                source_range,
+                assignment_name,
+                statement: PreparedStatement::QuantityTarget {
+                    expression: quantity_expression,
+                    target,
+                },
+                references: attempt
+                    .references
+                    .iter()
+                    .map(|name| prepared_reference(name))
+                    .collect(),
+                dependencies: Vec::new(),
+                diagnostic: None,
+            };
         }
         return PreparedLine {
             source_range,
@@ -790,7 +791,10 @@ fn prepare_line(
     }
 
     let quantity_parse = quantity::parse_expression(expression);
-    if quantity_parse.has_unit && !programmer_parse.uses_programmer_syntax {
+    let quantity_unit_evidence = quantity_parse.unit_evidence;
+    if quantity_unit_evidence == UnitParseEvidence::Definitive
+        && !programmer_parse.uses_programmer_syntax
+    {
         let Some(quantity) = quantity_parse.expression else {
             return PreparedLine::invalid(
                 source_range,
@@ -816,7 +820,7 @@ fn prepare_line(
                 uses_programmer_syntax: false,
                 quantity: Some(quantity),
                 quantity_error: None,
-                quantity_has_unit: true,
+                quantity_unit_evidence,
             }),
             references,
             dependencies: Vec::new(),
@@ -862,6 +866,40 @@ fn prepare_line(
     let programmer = programmer_parse.expression;
     let uses_programmer_syntax = programmer_parse.uses_programmer_syntax;
     let programmer_error = programmer_parse.error;
+    if quantity_unit_evidence == UnitParseEvidence::PlainMinuteAlias
+        && !uses_programmer_syntax
+        && scalar.is_none()
+    {
+        if let Some(quantity) = quantity_parse.expression {
+            let references = quantity_parse
+                .references
+                .iter()
+                .map(|name| prepared_reference(name))
+                .collect();
+            return PreparedLine {
+                source_range,
+                assignment_name,
+                statement: PreparedStatement::Expression(PreparedExpression {
+                    scalar: None,
+                    scalar_error: None,
+                    programmer: None,
+                    programmer_error: None,
+                    uses_programmer_syntax: false,
+                    quantity: Some(quantity),
+                    quantity_error: None,
+                    quantity_unit_evidence,
+                }),
+                references,
+                dependencies: Vec::new(),
+                diagnostic: None,
+            };
+        }
+        return PreparedLine::invalid(
+            source_range,
+            assignment_name,
+            DiagnosticKind::Quantity(quantity_parse.error.unwrap_or(QuantityError::InvalidSyntax)),
+        );
+    }
     if scalar.is_none() && programmer.is_none() {
         let diagnostic = if uses_programmer_syntax {
             DiagnosticKind::Programmer(programmer_error.unwrap_or(ProgrammerError::InvalidSyntax))
@@ -889,6 +927,13 @@ fn prepare_line(
                 .map(|name| prepared_reference(name)),
         );
     }
+    if quantity_unit_evidence == UnitParseEvidence::PlainMinuteAlias {
+        for name in &quantity_parse.references {
+            if !references.iter().any(|reference| reference.name == *name) {
+                references.push(prepared_reference(name));
+            }
+        }
+    }
     PreparedLine {
         source_range,
         assignment_name,
@@ -900,7 +945,7 @@ fn prepare_line(
             uses_programmer_syntax,
             quantity: quantity_parse.expression,
             quantity_error: quantity_parse.error,
-            quantity_has_unit: quantity_parse.has_unit,
+            quantity_unit_evidence,
         }),
         references,
         dependencies: Vec::new(),
@@ -1718,26 +1763,24 @@ fn evaluate_line(
         return LineOutcome::Error(diagnostic.clone());
     }
 
-    if let PreparedStatement::Expression(expression) = &line.statement {
-        if defers_scalar_diagnostic(line) {
-            let typed_route_can_win = !line.references.is_empty()
-                && line.references.iter().all(|reference| {
-                    reference
-                        .target_line
-                        .and_then(|dependency| values.get(dependency))
-                        .and_then(Option::as_ref)
-                        .is_some_and(|value| {
-                            matches!(
-                                value,
-                                CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }
-                            )
-                        })
-                });
-            if !typed_route_can_win {
-                if let Some(error) = &expression.scalar_error {
-                    return LineOutcome::Error(Diagnostic::new(error.clone()));
-                }
-            }
+    if let PreparedStatement::Expression(expression) = &line.statement
+        && defers_scalar_diagnostic(line)
+    {
+        let typed_route_can_win = !line.references.is_empty()
+            && line.references.iter().all(|reference| {
+                reference
+                    .target_line
+                    .and_then(|dependency| values.get(dependency))
+                    .and_then(Option::as_ref)
+                    .is_some_and(|value| {
+                        matches!(
+                            value,
+                            CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }
+                        )
+                    })
+            });
+        if !typed_route_can_win && let Some(error) = &expression.scalar_error {
+            return LineOutcome::Error(Diagnostic::new(error.clone()));
         }
     }
 
@@ -1922,8 +1965,20 @@ fn evaluate_prepared_expression(
                 )
             })
     });
+    let ambiguous_minute_requires_quantity = expression.quantity_unit_evidence
+        == UnitParseEvidence::PlainMinuteAlias
+        && (expression.scalar.is_none()
+            || !line.references.iter().all(|reference| {
+                reference
+                    .target_line
+                    .and_then(|line_index| values.get(line_index))
+                    .and_then(Option::as_ref)
+                    .is_some_and(|value| matches!(value, CalculationValue::Scalar(_)))
+            }));
     if !expression.uses_programmer_syntax
-        && (expression.quantity_has_unit || has_quantity_reference)
+        && (expression.quantity_unit_evidence == UnitParseEvidence::Definitive
+            || has_quantity_reference
+            || ambiguous_minute_requires_quantity)
     {
         let Some(quantity) = expression.quantity.as_ref() else {
             return Err(DiagnosticKind::Quantity(
@@ -1963,10 +2018,10 @@ fn evaluate_prepared_expression(
         })?;
         let mut bindings = HashMap::with_capacity(line.references.len());
         for reference in &line.references {
-            if let Some(line_index) = reference.target_line {
-                if let Some(Some(value)) = values.get(line_index) {
-                    bindings.insert(reference.name.clone(), value.clone());
-                }
+            if let Some(line_index) = reference.target_line
+                && let Some(Some(value)) = values.get(line_index)
+            {
+                bindings.insert(reference.name.clone(), value.clone());
             }
         }
         return programmer
@@ -2331,6 +2386,40 @@ mod tests {
         assert_eq!(formatted(&evaluation, 13), "1 m");
         assert_eq!(formatted(&evaluation, 14), "1 m/s");
         assert_eq!(formatted(&evaluation, 16), "10 m");
+    }
+
+    #[test]
+    fn legacy_scalar_min_coexists_with_minutes() {
+        let source = concat!(
+            "2 min 3\n",
+            "x = 2\n",
+            "y = 5\n",
+            "x min y\n",
+            "2 min -3\n",
+            "2 min + 3\n",
+            "2 min\n",
+            "2 min + 3 min\n",
+            "2 min + 3 m\n",
+            "distance = 3 m\n",
+            "2 min + distance\n",
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+
+        assert_eq!(scalar(&evaluation, 0), 2.0);
+        assert_eq!(scalar(&evaluation, 3), 2.0);
+        assert_eq!(scalar(&evaluation, 4), -3.0);
+        assert_eq!(scalar(&evaluation, 5), 2.0);
+        assert_eq!(formatted(&evaluation, 6), "2 min");
+        assert_eq!(formatted(&evaluation, 7), "5 min");
+        assert!(matches!(
+            error(&evaluation, 8),
+            DiagnosticKind::Quantity(QuantityError::IncompatibleDimensions)
+        ));
+        assert!(matches!(
+            error(&evaluation, 10),
+            DiagnosticKind::Quantity(QuantityError::IncompatibleDimensions)
+        ));
     }
 
     #[test]

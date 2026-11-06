@@ -304,7 +304,7 @@ fn project_row(
 ) -> FolderSizeRow {
     let name = path
         .file_name()
-        .unwrap_or_else(|| path.as_os_str())
+        .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned();
     FolderSizeRow {
@@ -1172,10 +1172,10 @@ fn show_folder_rows(
     ui.horizontal(|ui| {
         if let Some((generation, index)) = current_directory
             && generation == projection.key.generation
+            && ui.button("Up").clicked()
+            && commit_allowed
         {
-            if ui.button("Up").clicked() && commit_allowed {
-                staged_actions.push(FolderSizeAction::Back { generation, index });
-            }
+            staged_actions.push(FolderSizeAction::Back { generation, index });
         }
         if let Some(path) = current_path {
             let full_path = path.display().to_string();
