@@ -28,6 +28,9 @@ where
         Command::Dialog(DialogCommand::ImageCompare) => host.open_image_compare_dialog(),
         Command::Dialog(DialogCommand::DuplicateFinder) => host.open_duplicate_finder_dialog(),
         Command::Dialog(DialogCommand::FolderSize) => host.open_folder_size_dialog(),
+        Command::Dialog(DialogCommand::FileLock { path }) => {
+            host.open_file_lock_dialog(path.as_deref())
+        }
         Command::Dialog(DialogCommand::Activity) => host.open_activity_dialog(),
         Command::Timer(TimerCommand::TimerDialog) => host.open_timer_dialog(),
         Command::Timer(TimerCommand::AlarmDialog) => host.open_alarm_dialog(),
@@ -76,6 +79,7 @@ mod tests {
     #[derive(Default)]
     struct Host {
         opened: Option<String>,
+        file_lock_path: Option<std::path::PathBuf>,
         settings_search_query: Option<String>,
         clear: bool,
         hide: bool,
@@ -165,6 +169,10 @@ mod tests {
         }
         fn open_folder_size_dialog(&mut self) {
             self.mark("folder_size");
+        }
+        fn open_file_lock_dialog(&mut self, path: Option<&std::path::Path>) {
+            self.mark("file_lock");
+            self.file_lock_path = path.map(std::path::Path::to_path_buf);
         }
         fn open_volume_dialog(&mut self) {
             self.mark("volume");
@@ -290,6 +298,23 @@ mod tests {
 
         assert_eq!(host.opened.as_deref(), Some("settings_search"));
         assert_eq!(host.settings_search_query.as_deref(), Some(query));
+        assert_eq!(outcome, CommandOutcome::default());
+    }
+
+    #[test]
+    fn file_lock_ui_dialog_route_preserves_optional_literal_path() {
+        let path = std::path::PathBuf::from(r"C:\Users\Jay\file with 雪.txt");
+        let mut host = Host::default();
+        let outcome = handle_simple_dialog(
+            &mut host,
+            &Command::Dialog(DialogCommand::FileLock {
+                path: Some(path.clone()),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(host.opened.as_deref(), Some("file_lock"));
+        assert_eq!(host.file_lock_path, Some(path));
         assert_eq!(outcome, CommandOutcome::default());
     }
 

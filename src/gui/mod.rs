@@ -30,6 +30,7 @@ mod duplicate_finder_dialog;
 pub mod duplicate_finder_smoke;
 mod event_channel;
 mod fav_dialog;
+mod file_lock_dialog;
 mod file_search_dialog;
 pub mod file_search_preview_dialog;
 mod folder_size_dialog;
@@ -174,6 +175,7 @@ pub use file_search_dialog::{
 };
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
 pub(crate) use folder_size_dialog::{FolderSizeDialogEffect, FolderSizeDialogState};
+pub(crate) use file_lock_dialog::{FileLockDialogEffect, FileLockDialogState, FileLockRevealRequest};
 pub use hash_generator_dialog::HashGeneratorDialogState;
 pub use image_compare_dialog::ImageCompareDialogState;
 pub use image_panel::ImagePanel;
@@ -782,6 +784,7 @@ pub enum Panel {
     ImageCompareDialog,
     DuplicateFinderDialog,
     FolderSizeDialog,
+    FileLockDialog,
     ActivityDialog,
 }
 
@@ -836,6 +839,7 @@ impl Panel {
             Self::ImageCompareDialog => "Image Comparison",
             Self::DuplicateFinderDialog => "Duplicate Finder",
             Self::FolderSizeDialog => "Folder Size",
+            Self::FileLockDialog => "File Lock Inspector",
             Self::ActivityDialog => "Activity",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
@@ -907,6 +911,7 @@ struct PanelStates {
     image_compare_dialog: bool,
     duplicate_finder_dialog: bool,
     folder_size_dialog: bool,
+    file_lock_dialog: bool,
     activity_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
@@ -1280,6 +1285,7 @@ pub struct LauncherApp {
     pub image_compare_dialog: ImageCompareDialogState,
     pub(crate) duplicate_finder_dialog: DuplicateFinderDialogState,
     pub(crate) folder_size_dialog: FolderSizeDialogState,
+    pub(crate) file_lock_dialog: FileLockDialogState,
     pub qr_dialog: QrDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
@@ -2623,6 +2629,11 @@ impl LauncherApp {
                     self.folder_size_dialog.stage_prefill(ctx, path);
                 }
             }
+            FileSearchUiCommand::InspectFileUsers(path) => {
+                if ctx.viewport_id() == egui::ViewportId::ROOT {
+                    self.file_lock_dialog.stage_prefill(ctx, path);
+                }
+            }
             FileSearchUiCommand::PersistPreferences(preferences) => {
                 match crate::settings::Settings::update(&self.settings_path, |settings| {
                     let mut cfg = settings
@@ -3894,6 +3905,7 @@ impl LauncherApp {
                 ctx,
                 activity_center.clone(),
             ),
+            file_lock_dialog: FileLockDialogState::new(ctx),
             activity_center: activity_center.clone(),
             activity_dialog: activity_dialog::ActivityDialogState::default(),
             qr_dialog: QrDialogState::default(),
@@ -4600,7 +4612,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 65] = [
+    const TRACKED_PANELS: [Panel; 66] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4665,6 +4677,7 @@ impl LauncherApp {
         Panel::ImageCompareDialog,
         Panel::DuplicateFinderDialog,
         Panel::FolderSizeDialog,
+        Panel::FileLockDialog,
         Panel::ActivityDialog,
     ];
 
@@ -4718,6 +4731,7 @@ impl LauncherApp {
             Panel::ImageCompareDialog => self.image_compare_dialog.open,
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open,
             Panel::FolderSizeDialog => self.folder_size_dialog.open,
+            Panel::FileLockDialog => self.file_lock_dialog.open,
             Panel::ActivityDialog => self.activity_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
@@ -4850,6 +4864,14 @@ impl LauncherApp {
             self.folder_size_dialog.request_close(&self.egui_ctx);
             self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
             if self.folder_size_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return true;
+        }
+        if panel == Panel::FileLockDialog {
+            self.file_lock_dialog.request_close(&self.egui_ctx);
+            self.panel_states.file_lock_dialog = self.file_lock_dialog.open;
+            if self.file_lock_dialog.open && !self.panel_stack.contains(&panel) {
                 self.panel_stack.push(panel);
             }
             return true;
@@ -5056,6 +5078,10 @@ impl LauncherApp {
             Panel::FolderSizeDialog => {
                 self.folder_size_dialog.request_close(&self.egui_ctx);
                 self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
+            }
+            Panel::FileLockDialog => {
+                self.file_lock_dialog.request_close(&self.egui_ctx);
+                self.panel_states.file_lock_dialog = self.file_lock_dialog.open;
             }
             Panel::ActivityDialog => {
                 self.activity_dialog.close();
@@ -5360,6 +5386,10 @@ impl LauncherApp {
                 self.folder_size_dialog.request_close(&self.egui_ctx);
                 self.panel_states.folder_size_dialog = self.folder_size_dialog.open;
             }
+            Panel::FileLockDialog => {
+                self.file_lock_dialog.request_close(&self.egui_ctx);
+                self.panel_states.file_lock_dialog = self.file_lock_dialog.open;
+            }
             Panel::ActivityDialog => {
                 self.activity_dialog.close();
                 self.panel_states.activity_dialog = false;
@@ -5460,6 +5490,10 @@ impl LauncherApp {
             if !self.panel_stack.contains(&panel) {
                 self.panel_stack.push(panel);
             }
+        } else if panel == Panel::FileLockDialog && self.file_lock_dialog.open {
+            if !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
         } else {
             self.panel_stack.retain(|p| *p != panel);
         }
@@ -5536,6 +5570,7 @@ impl LauncherApp {
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open(),
             Panel::FolderSizeDialog => self.folder_size_dialog.open(),
+            Panel::FileLockDialog => self.file_lock_dialog.open = true,
             Panel::ActivityDialog => self.activity_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
@@ -5711,6 +5746,7 @@ impl LauncherApp {
         check!(image_compare_dialog, Panel::ImageCompareDialog);
         check!(duplicate_finder_dialog, Panel::DuplicateFinderDialog);
         check!(folder_size_dialog, Panel::FolderSizeDialog);
+        check!(file_lock_dialog, Panel::FileLockDialog);
         check!(activity_dialog, Panel::ActivityDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
@@ -6417,6 +6453,7 @@ mod tests {
             (Panel::CalculationPadDialog, "Calculation Pad"),
             (Panel::DateTimeStudioDialog, "Date & Time Studio"),
             (Panel::FolderSizeDialog, "Folder Size"),
+            (Panel::FileLockDialog, "File Lock Inspector"),
         ] {
             assert_eq!(panel.display_label(), expected);
         }

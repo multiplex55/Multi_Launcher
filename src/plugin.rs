@@ -25,6 +25,7 @@ use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::duplicate_finder::DuplicateFinderPlugin;
 use crate::plugins::emoji::EmojiPlugin;
 use crate::plugins::fav::FavPlugin;
+use crate::plugins::file_lock::FileLockPlugin;
 use crate::plugins::file_search::FileSearchPlugin;
 use crate::plugins::folder_size::FolderSizePlugin;
 use crate::plugins::folders::FoldersPlugin;
@@ -966,6 +967,7 @@ impl PluginManager {
         self.register_with_settings(ImageComparePlugin, plugin_settings);
         self.register_with_settings(DuplicateFinderPlugin, plugin_settings);
         self.register_with_settings(FolderSizePlugin, plugin_settings);
+        self.register_with_settings(FileLockPlugin, plugin_settings);
         self.register_with_settings(ActivityPlugin, plugin_settings);
         self.register_with_settings(TableUtilityPlugin, plugin_settings);
         self.register_with_settings(CsvPlugin, plugin_settings);

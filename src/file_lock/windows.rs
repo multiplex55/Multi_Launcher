@@ -141,6 +141,32 @@ impl std::fmt::Display for FileLockInspectionFailure {
 
 impl std::error::Error for FileLockInspectionFailure {}
 
+/// A process image that was verified against a Restart Manager row. On
+/// Windows the process handle remains owned until the accepted reveal is
+/// dispatched, allowing a final nonblocking liveness check at that boundary.
+pub struct ValidatedFileLockExecutable {
+    path: PathBuf,
+    #[cfg(windows)]
+    process: std::os::windows::io::OwnedHandle,
+}
+
+impl ValidatedFileLockExecutable {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn ensure_process_is_alive(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            native::ensure_process_is_alive(&self.process)
+        }
+        #[cfg(not(windows))]
+        {
+            Err("executable validation is available on Windows only".into())
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawProcessRecord {
     process_id: u32,
@@ -462,14 +488,16 @@ mod native {
     use super::*;
     use std::fs::File;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::os::windows::io::FromRawHandle;
-    use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::Win32::Foundation::{
+        CloseHandle, FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES,
         FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, FILE_TYPE_DISK, FileAttributeTagInfo, GetFileInformationByHandleEx,
-        GetFileType, OPEN_EXISTING,
+        GetFileType, GetFinalPathNameByHandleW, OPEN_EXISTING,
     };
     use windows::Win32::System::RestartManager::{
         CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources,
@@ -477,11 +505,14 @@ mod native {
     };
     use windows::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
+        PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    struct Probe(File);
+    struct Probe {
+        _file: File,
+        handle: HANDLE,
+    }
 
     struct NativeApi;
 
@@ -494,7 +525,7 @@ mod native {
         }
     }
 
-    fn encode_path(path: &Path) -> Result<Vec<u16>, FileLockInspectionError> {
+    pub(super) fn encode_path(path: &Path) -> Result<Vec<u16>, FileLockInspectionError> {
         if !path.is_absolute() {
             return Err(FileLockInspectionError::InvalidPath);
         }
@@ -537,33 +568,37 @@ mod native {
         if creation_filetime != expected_creation_filetime {
             return None;
         }
+        let executable_path = query_image_path(process).ok()?;
+        Some(ProcessMetadata {
+            creation_filetime,
+            executable_path,
+        })
+    }
 
+    fn query_image_path(process: HANDLE) -> Result<PathBuf, String> {
         let mut buffer = vec![0_u16; 512];
         loop {
-            let mut length = u32::try_from(buffer.len()).ok()?;
-            let result = unsafe {
+            let mut length = u32::try_from(buffer.len())
+                .map_err(|_| "the process image path is too long".to_string())?;
+            match unsafe {
                 QueryFullProcessImageNameW(
                     process,
                     PROCESS_NAME_FORMAT(0),
                     PWSTR(buffer.as_mut_ptr()),
                     &mut length,
                 )
-            };
-            match result {
+            } {
                 Ok(()) if length > 0 && (length as usize) < buffer.len() => {
                     let length = length as usize;
                     if buffer[length] != 0 || buffer[..length].contains(&0) {
-                        return None;
+                        return Err("Windows returned a malformed executable path".into());
                     }
                     buffer.truncate(length);
-                    let executable_path = PathBuf::from(std::ffi::OsString::from_wide(&buffer));
-                    if !executable_path.is_absolute() {
-                        return None;
+                    let path = PathBuf::from(std::ffi::OsString::from_wide(&buffer));
+                    if !path.is_absolute() {
+                        return Err("Windows returned a non-absolute executable path".into());
                     }
-                    return Some(ProcessMetadata {
-                        creation_filetime,
-                        executable_path,
-                    });
+                    return Ok(path);
                 }
                 Ok(()) if buffer.len() < MAX_FILE_LOCK_PATH_UTF16_UNITS => {
                     let next = buffer
@@ -571,28 +606,190 @@ mod native {
                         .saturating_mul(2)
                         .min(MAX_FILE_LOCK_PATH_UTF16_UNITS);
                     if next <= buffer.len() {
-                        return None;
+                        return Err("the process image path exceeds the supported limit".into());
                     }
                     buffer.resize(next, 0);
                 }
-                Err(error) => {
-                    if error_code(&error) != windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER.0
-                        || buffer.len() >= MAX_FILE_LOCK_PATH_UTF16_UNITS
-                    {
-                        return None;
-                    }
+                Err(error)
+                    if error_code(&error)
+                        == windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER.0
+                        && buffer.len() < MAX_FILE_LOCK_PATH_UTF16_UNITS =>
+                {
                     let next = buffer
                         .len()
                         .saturating_mul(2)
                         .min(MAX_FILE_LOCK_PATH_UTF16_UNITS);
                     if next <= buffer.len() {
-                        return None;
+                        return Err("the process image path exceeds the supported limit".into());
                     }
                     buffer.resize(next, 0);
                 }
-                Ok(()) => return None,
+                Err(error) => {
+                    return Err(format!(
+                        "could not read the current executable path (Windows error {})",
+                        error_code(&error)
+                    ));
+                }
+                Ok(()) => return Err("Windows returned an empty executable path".into()),
             }
         }
+    }
+
+    fn require_local_drive(path: &Path) -> Result<(), String> {
+        use std::os::windows::fs::MetadataExt;
+        use std::path::{Component, Prefix};
+
+        let prefix = path.components().find_map(|component| match component {
+            Component::Prefix(prefix) => Some(prefix.kind()),
+            _ => None,
+        });
+        let drive = match prefix {
+            Some(Prefix::Disk(drive) | Prefix::VerbatimDisk(drive)) => drive,
+            _ => return Err("only executable paths on local drive volumes can be revealed".into()),
+        };
+        let drive_path = [
+            u16::from(drive.to_ascii_uppercase()),
+            b':' as u16,
+            b'\\' as u16,
+            0,
+        ];
+        let drive_type = unsafe {
+            windows::Win32::Storage::FileSystem::GetDriveTypeW(PCWSTR(drive_path.as_ptr()))
+        };
+        // GetDriveTypeW: removable=2, fixed=3, remote=4, CD-ROM=5, RAM disk=6.
+        if !matches!(drive_type, 2 | 3 | 5 | 6) {
+            return Err("network or unavailable executable paths are not revealed".into());
+        }
+
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => {
+                    current.push(prefix.as_os_str());
+                    continue;
+                }
+                Component::RootDir => current.push(component.as_os_str()),
+                Component::Normal(name) => current.push(name),
+                Component::CurDir | Component::ParentDir => {
+                    return Err("the executable path contains relative traversal".into());
+                }
+            }
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata)
+                    if metadata.file_attributes()
+                        & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+                        != 0 =>
+                {
+                    return Err("the executable path traverses a reparse point".into());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(format!("could not verify local executable path: {error}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn final_path_for_probe(probe: &Probe) -> Result<PathBuf, String> {
+        let mut buffer = vec![0_u16; 512];
+        loop {
+            let length = unsafe {
+                GetFinalPathNameByHandleW(
+                    probe.handle,
+                    &mut buffer,
+                    windows::Win32::Storage::FileSystem::GETFINALPATHNAMEBYHANDLE_FLAGS(0),
+                )
+            } as usize;
+            if length == 0 {
+                return Err("Windows could not resolve the executable file handle".into());
+            }
+            if length < buffer.len() {
+                if buffer[..length].contains(&0) {
+                    return Err("Windows returned a malformed final executable path".into());
+                }
+                return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length])));
+            }
+            if length >= MAX_FILE_LOCK_PATH_UTF16_UNITS {
+                return Err("the resolved executable path exceeds the supported limit".into());
+            }
+            buffer.resize(length.saturating_add(1), 0);
+        }
+    }
+
+    fn process_is_alive(process: HANDLE) -> Result<(), String> {
+        match unsafe { WaitForSingleObject(process, 0) } {
+            WAIT_TIMEOUT => Ok(()),
+            WAIT_OBJECT_0 => Err("the reported process has exited".into()),
+            status => Err(format!(
+                "could not verify that the reported process is still running (wait status 0x{:08x})",
+                status.0
+            )),
+        }
+    }
+
+    pub(super) fn validate_reported_executable(
+        process_id: u32,
+        expected_creation_filetime: u64,
+        expected_path: &Path,
+    ) -> Result<ValidatedFileLockExecutable, String> {
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                process_id,
+            )
+        }
+        .map_err(|error| {
+            format!(
+                "could not reopen reported PID {process_id} (Windows error {})",
+                error_code(&error)
+            )
+        })?;
+        let _process = ProcessHandle(process);
+
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }
+            .map_err(|error| {
+                format!(
+                    "could not recheck reported PID {process_id} (Windows error {})",
+                    error_code(&error)
+                )
+            })?;
+        if filetime_value(created) != expected_creation_filetime {
+            return Err("the reported PID now belongs to a different process".into());
+        }
+        process_is_alive(process)?;
+
+        let current_path = query_image_path(process)?;
+        if current_path != expected_path {
+            return Err("the reported executable path changed".into());
+        }
+        require_local_drive(&current_path)?;
+        let wide = encode_path(&current_path)
+            .map_err(|error| format!("the executable path is no longer valid: {error}"))?;
+        let mut api = NativeApi;
+        let (probe, _) = api
+            .probe_file(&wide)
+            .map_err(|error| format!("the reported executable is no longer a regular file: {error}"))?;
+        let resolved_path = final_path_for_probe(&probe)?;
+        require_local_drive(&resolved_path)?;
+        drop(probe);
+        process_is_alive(process)?;
+        let owned_process = unsafe { OwnedHandle::from_raw_handle(process.0) };
+        std::mem::forget(_process);
+        Ok(ValidatedFileLockExecutable {
+            path: current_path,
+            process: owned_process,
+        })
+    }
+
+    pub(super) fn ensure_process_is_alive(process: &OwnedHandle) -> Result<(), String> {
+        let handle = HANDLE(process.as_raw_handle());
+        process_is_alive(handle)
     }
 
     struct ProcessHandle(HANDLE);
@@ -653,7 +850,7 @@ mod native {
                             .unwrap_or(1),
                     )
                 })?;
-            Ok((Probe(file), identity))
+            Ok((Probe { _file: file, handle }, identity))
         }
 
         fn start_session(&mut self) -> Result<u32, u32> {
@@ -766,6 +963,46 @@ pub fn inspect_file(path: &Path) -> Result<FileLockInspection, FileLockInspectio
 #[cfg(not(windows))]
 pub fn inspect_file(_path: &Path) -> Result<FileLockInspection, FileLockInspectionFailure> {
     Err(failure(FileLockInspectionError::UnsupportedPlatform))
+}
+
+/// Validates the path shape accepted by the inspection adapter without touching
+/// the filesystem. Call this before retaining a picker or command path; the
+/// actual file identity is established only by an accepted Inspect action.
+pub fn validate_file_path(path: &Path) -> Result<(), FileLockInspectionError> {
+    #[cfg(windows)]
+    {
+        native::encode_path(path).map(|_| ())
+    }
+    #[cfg(not(windows))]
+    {
+        if !path.is_absolute() || path.as_os_str().to_string_lossy().contains('\0') {
+            return Err(FileLockInspectionError::InvalidPath);
+        }
+        let units = path.as_os_str().to_string_lossy().encode_utf16().count();
+        if units >= MAX_FILE_LOCK_PATH_UTF16_UNITS {
+            return Err(FileLockInspectionError::PathTooLong);
+        }
+        Ok(())
+    }
+}
+
+/// Revalidates a Restart Manager row before handing its executable to Explorer.
+/// The Windows implementation uses one process handle for identity, liveness,
+/// and image-path checks, then probes the reported path as a regular disk file.
+pub fn validate_reported_executable(
+    process_id: u32,
+    creation_filetime: u64,
+    expected_path: &Path,
+) -> Result<ValidatedFileLockExecutable, String> {
+    #[cfg(windows)]
+    {
+        native::validate_reported_executable(process_id, creation_filetime, expected_path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (process_id, creation_filetime, expected_path);
+        Err("executable validation is available on Windows only".into())
+    }
 }
 
 #[cfg(test)]

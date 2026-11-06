@@ -447,9 +447,10 @@ pub enum DialogCommand {
     ImageCompare,
     DuplicateFinder,
     FolderSize,
+    FileLock { path: Option<std::path::PathBuf> },
     Activity,
 }
-kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::CalculationPad => "calculation_pad", Self::DateTimeStudio => "date_time_studio", Self::DiagramStudio => "diagram_studio", Self::MarkdownStudio => "markdown_studio", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder", Self::FolderSize => "folder_size", Self::Activity => "activity");
+kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::CalculationPad => "calculation_pad", Self::DateTimeStudio => "date_time_studio", Self::DiagramStudio => "diagram_studio", Self::MarkdownStudio => "markdown_studio", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::SettingsSearch { .. } => "settings_search", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme", Self::ImageCompare => "image_compare", Self::DuplicateFinder => "duplicate_finder", Self::FolderSize => "folder_size", Self::FileLock { .. } => "file_lock", Self::Activity => "activity");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalendarCommand {
     Open { view: String },

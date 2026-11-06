@@ -269,6 +269,11 @@ impl DialogCommandHost for LauncherApp {
         self.focus_panel(super::Panel::FolderSizeDialog);
     }
 
+    fn open_file_lock_dialog(&mut self, path: Option<&std::path::Path>) {
+        self.file_lock_dialog
+            .request_open(&self.egui_ctx, path.map(std::path::Path::to_path_buf));
+    }
+
     fn open_activity_dialog(&mut self) {
         self.focus_panel(super::Panel::ActivityDialog);
     }

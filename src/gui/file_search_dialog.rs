@@ -331,6 +331,7 @@ pub enum FileSearchContextMenuAction {
     RevealInExplorer,
     OpenContainingDirectory,
     AnalyzeFolderSize,
+    InspectFileUsers,
     CopyFullPath,
     CopyFilename,
     CalculateHash,
@@ -345,6 +346,7 @@ pub enum FileSearchContextMenuAction {
 pub enum FileSearchUiCommand {
     OpenHash(PathBuf),
     OpenFolderSize(PathBuf),
+    InspectFileUsers(PathBuf),
     ConfigureRipgrep(PathBuf),
     PersistPreferences(FileSearchUiPreferences),
 }
@@ -426,6 +428,7 @@ pub(crate) enum FileSearchTestPopupControl {
     SizeColumnToggle,
     ModifiedColumnToggle,
     AnalyzeFolderSize,
+    InspectFileUsers,
     NestedContentSearch,
     ExportAnchor,
 }
@@ -2404,7 +2407,7 @@ impl FileSearchDialogState {
                                         self.result_context_menu(
                                             ui,
                                             &path,
-                                            kind == crate::file_search::model::FileKind::Directory,
+                                            kind,
                                             None,
                                             coordinator,
                                             commands,
@@ -2459,7 +2462,14 @@ impl FileSearchDialogState {
                             self.record_results_popup_anchor(ui, &response);
                         }
                         response.context_menu(|ui| {
-                            self.result_context_menu(ui, &path, false, None, coordinator, commands)
+                            self.result_context_menu(
+                                ui,
+                                &path,
+                                FileKind::File,
+                                None,
+                                coordinator,
+                                commands,
+                            )
                         });
                     });
                 }
@@ -2549,7 +2559,14 @@ impl FileSearchDialogState {
             ui.ctx().request_repaint();
             ui.close();
         }
-        self.result_context_menu(ui, path, false, Some(content_match), coordinator, commands);
+        self.result_context_menu(
+            ui,
+            path,
+            FileKind::File,
+            Some(content_match),
+            coordinator,
+            commands,
+        );
     }
 
     pub fn can_open_selected_result(&self) -> bool {
@@ -2667,18 +2684,21 @@ impl FileSearchDialogState {
     pub fn context_menu_intents_for_row(
         row: &FileSearchResultRow,
     ) -> Vec<FileSearchContextMenuIntent> {
-        let (path, is_directory, content_match) = match &row.payload {
+        let (path, is_directory, is_known_file, content_match) = match &row.payload {
             FileSearchRowPayload::Filename { path, kind, .. } => (
                 path.clone(),
                 *kind == crate::file_search::model::FileKind::Directory,
+                *kind == crate::file_search::model::FileKind::File,
                 None,
             ),
             FileSearchRowPayload::Content {
                 path,
                 content_match,
                 ..
-            } => (path.clone(), false, Some(content_match.clone())),
-            FileSearchRowPayload::ContentGroupHeader { path, .. } => (path.clone(), false, None),
+            } => (path.clone(), false, true, Some(content_match.clone())),
+            FileSearchRowPayload::ContentGroupHeader { path, .. } => {
+                (path.clone(), false, true, None)
+            }
         };
 
         let mut actions = vec![
@@ -2694,6 +2714,9 @@ impl FileSearchDialogState {
             actions.push(FileSearchContextMenuAction::AnalyzeFolderSize);
         } else {
             actions.push(FileSearchContextMenuAction::CalculateHash);
+        }
+        if is_known_file {
+            actions.push(FileSearchContextMenuAction::InspectFileUsers);
         }
         if content_match.is_some() {
             actions.push(FileSearchContextMenuAction::CopyMatchingLine);
@@ -2761,11 +2784,13 @@ impl FileSearchDialogState {
         &mut self,
         ui: &mut egui::Ui,
         path: &std::path::Path,
-        is_directory: bool,
+        kind: FileKind,
         first_match: Option<ContentMatch>,
         coordinator: &mut SearchCoordinator,
         commands: &mut Vec<FileSearchUiCommand>,
     ) {
+        let is_directory = kind == FileKind::Directory;
+        let can_inspect_file_users = kind == FileKind::File;
         if ui.button("Open in configured editor").clicked() {
             let settings = self.settings.clone();
             self.run_result_action("open in configured editor", || {
@@ -2797,6 +2822,24 @@ impl FileSearchDialogState {
                 execute_explorer_action(resolve_explorer_action(path)?)
             });
             ui.close();
+        }
+        if can_inspect_file_users {
+            let inspect_file_users = ui.button("Inspect file users…");
+            #[cfg(test)]
+            if inspect_file_users
+                .rect
+                .intersect(ui.clip_rect())
+                .is_positive()
+            {
+                self.test_native_popup_control_rects.insert(
+                    FileSearchTestPopupControl::InspectFileUsers,
+                    inspect_file_users.interact_rect.intersect(ui.clip_rect()),
+                );
+            }
+            if inspect_file_users.clicked() {
+                commands.push(FileSearchUiCommand::InspectFileUsers(path.to_path_buf()));
+                ui.close();
+            }
         }
         if ui.button("Open containing directory").clicked() {
             self.run_result_action("open containing directory", || {
@@ -4175,6 +4218,83 @@ mod tests {
                 .iter()
                 .any(|intent| intent.action == FileSearchContextMenuAction::AnalyzeFolderSize),
             "regular files do not expose folder-size analysis"
+        );
+    }
+
+    #[test]
+    fn file_lock_ui_context_action_requires_a_known_file_row() {
+        let mut row = FileSearchResultRow {
+            id: FileSearchResultRowId {
+                search_id: SearchId(1),
+                result_key: FileSearchResultKey::Filename {
+                    path: PathIdentity::from_path(std::path::Path::new("/tmp/report.txt")),
+                },
+                match_index: None,
+                path: "/tmp/report.txt".into(),
+                line_number: None,
+                column: None,
+            },
+            payload: FileSearchRowPayload::Filename {
+                path: "/tmp/report.txt".into(),
+                display_filename: "report.txt".into(),
+                parent_directory_display: "/tmp".into(),
+                kind: FileKind::File,
+                size: None,
+                modified: None,
+                rank: crate::file_search::model::FilenameRank::ExactFilename,
+                match_quality: crate::file_search::model::FilenameRank::ExactFilename,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+            },
+        };
+
+        let has_file_users = |row: &FileSearchResultRow| {
+            FileSearchDialogState::context_menu_intents_for_row(row)
+                .iter()
+                .any(|intent| intent.action == FileSearchContextMenuAction::InspectFileUsers)
+        };
+        assert!(has_file_users(&row), "regular filename rows are eligible");
+
+        if let FileSearchRowPayload::Filename { kind, .. } = &mut row.payload {
+            *kind = FileKind::Other;
+        }
+        assert!(
+            !has_file_users(&row),
+            "unknown object rows are not eligible"
+        );
+
+        row.payload = FileSearchRowPayload::Filename {
+            path: "/tmp".into(),
+            display_filename: "tmp".into(),
+            parent_directory_display: "/".into(),
+            kind: FileKind::Directory,
+            size: None,
+            modified: None,
+            rank: crate::file_search::model::FilenameRank::ExactFilename,
+            match_quality: crate::file_search::model::FilenameRank::ExactFilename,
+            filename_match_ranges: Vec::new(),
+            path_match_ranges: Vec::new(),
+        };
+        assert!(!has_file_users(&row), "directory rows are not eligible");
+
+        row.payload = FileSearchRowPayload::Content {
+            path: "/tmp/report.txt".into(),
+            content_match: ContentMatch::new(1, "needle".into(), 0, 6),
+            content_file_truncated: false,
+            is_last_displayed_match_from_truncated_file: false,
+        };
+        assert!(has_file_users(&row), "content match rows identify a file");
+
+        row.payload = FileSearchRowPayload::ContentGroupHeader {
+            path: "/tmp/report.txt".into(),
+            header: "report.txt".into(),
+            total_matches: 1,
+            truncated: false,
+            modified: None,
+        };
+        assert!(
+            has_file_users(&row),
+            "content group headers identify a file"
         );
     }
 

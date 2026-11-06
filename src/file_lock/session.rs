@@ -129,6 +129,19 @@ trait FileLockInspectionJob: Send + Sync + 'static {
     fn run(&self, path: PathBuf) -> Result<FileLockInspection, FileLockInspectionFailure>;
 }
 
+#[cfg(test)]
+struct TestInspectionJob<F>(F);
+
+#[cfg(test)]
+impl<F> FileLockInspectionJob for TestInspectionJob<F>
+where
+    F: Fn(PathBuf) -> Result<FileLockInspection, FileLockInspectionFailure> + Send + Sync + 'static,
+{
+    fn run(&self, path: PathBuf) -> Result<FileLockInspection, FileLockInspectionFailure> {
+        (self.0)(path)
+    }
+}
+
 struct NativeInspectionJob;
 
 impl FileLockInspectionJob for NativeInspectionJob {
@@ -207,6 +220,17 @@ impl FileLockSession {
             }),
             worker: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_job(
+        job: impl Fn(PathBuf) -> Result<FileLockInspection, FileLockInspectionFailure>
+        + Send
+        + Sync
+        + 'static,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_job(Arc::new(TestInspectionJob(job)), Arc::new(wake))
     }
 
     /// Queue a fresh inspection, replacing any not-yet-started request. An

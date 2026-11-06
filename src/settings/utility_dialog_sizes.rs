@@ -47,6 +47,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "duplicate-finder",
     "favorites",
     "file-preview",
+    "file-lock",
     "file-search",
     "folder-alias",
     "folder-size",

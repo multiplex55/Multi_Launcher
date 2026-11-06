@@ -22,6 +22,7 @@ enum DialogCopyOwner {
     Converter,
     DateTimeStudio,
     FolderSize,
+    FileLock,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +33,7 @@ enum RootDialogEffect {
         text: String,
     },
     OpenPath(std::path::PathBuf),
+    RevealFileLockExecutable(super::FileLockRevealRequest),
     SaveConverterPreferences,
     PrepareCalendar {
         instant_utc: chrono::DateTime<chrono::Utc>,
@@ -2160,6 +2162,7 @@ impl LauncherApp {
             Panel::ImageCompareDialog => NavigationDialogKind::ImageCompare.layer_id(),
             Panel::DuplicateFinderDialog => NavigationDialogKind::DuplicateFinder.layer_id(),
             Panel::FolderSizeDialog => middle(egui::Id::new(Some("Folder Size"))),
+            Panel::FileLockDialog => middle(egui::Id::new(Some("File Lock Inspector"))),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
             Panel::DiagramStudioDialog | Panel::RadialEditor => None,
             Panel::NotePanel | Panel::ImagePanel => None,
@@ -4746,7 +4749,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 8] {
+    fn viewport_bootstrap_state(&self) -> [bool; 9] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4756,6 +4759,7 @@ impl LauncherApp {
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
+            self.file_lock_dialog.needs_root_ui_when_hidden(),
         ]
     }
 
@@ -4768,7 +4772,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 8],
+        previously_pending: [bool; 9],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5083,6 +5087,21 @@ impl LauncherApp {
         owner_transition_pending: bool,
     ) {
         self.folder_size_dialog.show(
+            ctx,
+            root_visible,
+            !owner_transition_pending && self.native_ui_host_input_allowed(ctx, root_visible),
+            first_ui_pass,
+        );
+    }
+
+    fn show_file_lock(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first_ui_pass: bool,
+        owner_transition_pending: bool,
+    ) {
+        self.file_lock_dialog.show(
             ctx,
             root_visible,
             !owner_transition_pending && self.native_ui_host_input_allowed(ctx, root_visible),
@@ -6069,6 +6088,7 @@ impl LauncherApp {
                         | super::Panel::ImageCompareDialog
                         | super::Panel::DuplicateFinderDialog
                         | super::Panel::FolderSizeDialog
+                        | super::Panel::FileLockDialog
                         | super::Panel::ActivityDialog
                         | super::Panel::MouseSettingsDialog
                         | super::Panel::MouseGesturesDialog
@@ -10225,6 +10245,12 @@ impl LauncherApp {
             first_ui_pass,
             owner_transition_pending,
         );
+        self.show_file_lock(
+            &ctx,
+            frame_logic.should_be_visible,
+            first_ui_pass,
+            owner_transition_pending,
+        );
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         for action in self.activity_dialog.show(
             &ctx,
@@ -10998,6 +11024,28 @@ impl LauncherApp {
             }
         }
 
+        for file_lock_effect in self.file_lock_dialog.on_ui_frame_complete(ctx) {
+            match file_lock_effect {
+                super::FileLockDialogEffect::CopySnapshot(text) => {
+                    effects.push(RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::FileLock,
+                        text,
+                    });
+                }
+                super::FileLockDialogEffect::RevealExecutable(request) => {
+                    effects.push(RootDialogEffect::RevealFileLockExecutable(request));
+                }
+                super::FileLockDialogEffect::FocusPanel => {
+                    self.focus_panel(super::Panel::FileLockDialog);
+                    if let Some(layer) = self.query_focus_panel_layer(super::Panel::FileLockDialog)
+                    {
+                        ctx.move_to_top(layer);
+                    }
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                }
+            }
+        }
+
         if !self.calculation_pad_dialog.open {
             self.panel_states.calculation_pad_dialog = false;
             self.panel_stack
@@ -11017,6 +11065,11 @@ impl LauncherApp {
             self.panel_states.folder_size_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::FolderSizeDialog);
+        }
+        if !self.file_lock_dialog.open {
+            self.panel_states.file_lock_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::FileLockDialog);
         }
         effects
     }
@@ -11063,6 +11116,7 @@ impl LauncherApp {
                         DialogCopyOwner::FolderSize => {
                             self.folder_size_dialog.copy_completed(result)
                         }
+                        DialogCopyOwner::FileLock => self.file_lock_dialog.copy_completed(result),
                     }
                 }
                 RootDialogEffect::OpenPath(path) => {
@@ -11076,6 +11130,28 @@ impl LauncherApp {
                         .and_then(crate::file_search::actions::execute_explorer_action)
                         .map_err(|error| format!("Could not open the selected path: {error:#}"));
                     self.folder_size_dialog.path_action_completed(result);
+                }
+                RootDialogEffect::RevealFileLockExecutable(request) => {
+                    let path = match self
+                        .file_lock_dialog
+                        .take_reveal_path_for_dispatch(&request)
+                    {
+                        Ok(Some(path)) => path,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            self.file_lock_dialog.reveal_completed(Err(error));
+                            continue;
+                        }
+                    };
+                    #[cfg(test)]
+                    let result = {
+                        let _ = path;
+                        Ok(())
+                    };
+                    #[cfg(not(test))]
+                    let result = crate::file_search::actions::reveal_path(&path)
+                        .map_err(|error| format!("{error:#}"));
+                    self.file_lock_dialog.reveal_completed(result);
                 }
                 RootDialogEffect::SaveConverterPreferences => {
                     self.convert_panel.save_preferences();
@@ -11144,6 +11220,7 @@ impl eframe::App for LauncherApp {
             || self.pin_windows_need_hidden_root_ui()
             || self.screenshot_countdown.is_busy()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
+            || self.file_lock_dialog.needs_root_ui_when_hidden()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -11196,6 +11273,7 @@ impl eframe::App for LauncherApp {
         self.image_compare_dialog.shutdown();
         self.duplicate_finder_dialog.shutdown();
         self.folder_size_dialog.shutdown();
+        self.file_lock_dialog.shutdown();
         if let Err(failure) = self.brightness_dialog.shutdown() {
             self.report_error_message(
                 "brightness.shutdown",
@@ -14698,6 +14776,457 @@ mod tests {
             Some(&super::Panel::FolderSizeDialog),
             "the typed host focuses the docked Folder Size panel"
         );
+    }
+
+    fn open_file_lock_through_plugin(app: &mut LauncherApp, path: Option<&std::path::Path>) {
+        let mut action = crate::plugins::file_lock::FileLockPlugin
+            .search("filelock")
+            .into_iter()
+            .next()
+            .expect("exact File Lock plugin query returns one action");
+        action.args = path.map(|path| path.to_string_lossy().into_owned());
+        let invocation =
+            crate::commands::parse_command(action, None, crate::commands::ActivationSource::Enter)
+                .expect("File Lock plugin action parses");
+        app.dispatch_command_invocation(invocation);
+    }
+
+    fn wait_for_current_file_lock_inspection(ctx: &egui::Context, app: &mut LauncherApp) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app
+            .file_lock_dialog
+            .session_view_for_test()
+            .inspection_is_current()
+            && app.file_lock_dialog.session_view_for_test().status()
+                != crate::file_lock::FileLockSessionStatus::Failed
+            && Instant::now() < deadline
+        {
+            run_tool_dialog_frame(ctx, app, Vec::new(), false).drop_without_applying_deltas();
+            thread::yield_now();
+        }
+    }
+
+    fn click_file_lock_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        name: &str,
+        discard_release: bool,
+    ) {
+        let (rect, clip) = app
+            .file_lock_dialog
+            .test_action_rect(name)
+            .unwrap_or_else(|| panic!("File Lock action {name:?} was rendered"));
+        let visible_rect = rect.intersect(clip);
+        assert!(
+            visible_rect.is_positive() && visible_rect.contains(rect.center()),
+            "File Lock action {name:?} is clipped: action={rect:?}, clip={clip:?}"
+        );
+        run_tool_dialog_frame(
+            ctx,
+            app,
+            tool_dialog_pointer_events(visible_rect, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            ctx,
+            app,
+            tool_dialog_pointer_events(visible_rect, false),
+            discard_release,
+        )
+        .drop_without_applying_deltas();
+    }
+
+    fn expose_file_lock_context_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        workspace_root: &std::path::Path,
+        file_path: &std::path::Path,
+    ) -> egui::Rect {
+        use crate::gui::file_search_dialog::FileSearchTestPopupControl as PopupControl;
+
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(ctx, app);
+        prepare_actual_file_search_dialog(ctx, app, workspace_root);
+        std::fs::write(file_path, b"read-only file-user fixture")
+            .expect("the File Search result is a real isolated file");
+        seed_actual_file_search_file_result(
+            app,
+            crate::file_search::model::SearchId(947),
+            file_path,
+        );
+        for _ in 0..2 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+
+        let result = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Filename result")
+            .expect("the file result has a visible File Search response");
+        let result_rect = result.clipped_rect();
+        assert!(result_rect.is_positive());
+        click_file_search_at(
+            ctx,
+            app,
+            result_rect.center(),
+            egui::PointerButton::Secondary,
+        );
+        app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(ctx));
+        assert!(app.file_search_native_ui_owner_current(ctx, true));
+
+        app.file_search_dialog
+            .test_native_popup_control_rect(PopupControl::InspectFileUsers)
+            .expect("a regular file row has the real Inspect file users menu item")
+    }
+
+    #[test]
+    fn file_lock_ui_typed_open_inspect_copy_reveal_and_identity_invalidation() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let file_a = workspace.root().join("λ report.txt");
+        let file_b = workspace.root().join("other report.txt");
+        let file_c = workspace.root().join("failed inspection.txt");
+        std::fs::write(&file_a, b"fixture A").expect("create isolated file A");
+        std::fs::write(&file_b, b"fixture B").expect("create isolated file B");
+        std::fs::write(&file_c, b"fixture C").expect("create isolated file C");
+        let executable = workspace.root().join("reported process.exe");
+        std::fs::write(&executable, b"test-only reveal target")
+            .expect("create isolated executable-shaped file");
+
+        let inspection_executable = executable.clone();
+        let empty_path = file_b.clone();
+        let failed_path = file_c.clone();
+        let session = crate::file_lock::FileLockSession::with_test_job(
+            move |path| {
+                if path == failed_path {
+                    return Err(crate::file_lock::FileLockInspectionFailure {
+                        error: crate::file_lock::FileLockInspectionError::StartSessionFailed(172),
+                        cleanup_error: None,
+                    });
+                }
+                let processes = if path == empty_path {
+                    Vec::new()
+                } else {
+                    vec![crate::file_lock::FileLockProcess {
+                        process_id: 4242,
+                        creation_filetime: 133_000_000_000_000_000,
+                        application_name: "Synthetic process".into(),
+                        service_name: String::new(),
+                        executable_path: Some(inspection_executable.clone()),
+                    }]
+                };
+                Ok(crate::file_lock::FileLockInspection {
+                    path,
+                    identity: crate::file_operations::NativeFileIdentity::from_parts(1, [9; 16]),
+                    inspected_at: std::time::SystemTime::now(),
+                    processes,
+                })
+            },
+            || {},
+        );
+        app.file_lock_dialog.set_session_for_test(session);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_file_lock_through_plugin(&mut app, Some(&file_a));
+        assert!(
+            app.file_lock_dialog.needs_root_ui_when_hidden(),
+            "typed Open is retained until the root accepts its pass"
+        );
+        assert!(!app.file_lock_dialog.open);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(app.file_lock_dialog.open);
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::Panel::FileLockDialog),
+            "typed Open focuses the docked inspector"
+        );
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(file_a.as_path())
+        );
+        let unopened = app.file_lock_dialog.session_view_for_test();
+        assert_eq!(unopened.generation(), 0);
+        assert_eq!(
+            unopened.status(),
+            crate::file_lock::FileLockSessionStatus::Idle,
+            "opening with a path does not start inspection"
+        );
+
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        click_file_lock_action(&ctx, &mut app, "inspect", false);
+        wait_for_current_file_lock_inspection(&ctx, &mut app);
+        let inspected = app.file_lock_dialog.session_view_for_test();
+        assert!(
+            inspected.inspection_is_current(),
+            "the accepted Inspect publishes the current fake result: {:?}",
+            inspected.status()
+        );
+        assert_eq!(
+            inspected.inspection().unwrap().path,
+            file_a,
+            "the worker receives the exact selected path"
+        );
+        assert!(
+            app.file_lock_dialog.has_current_inspection_for_test(),
+            "rows are available only while the submitted token matches"
+        );
+        assert!(
+            !super::super::file_lock_dialog::process_details_unavailable_for_test(
+                &inspected.inspection().unwrap().processes[0]
+            ),
+            "an empty service name is normal when the executable and application are present"
+        );
+
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "refresh", false);
+        wait_for_current_file_lock_inspection(&ctx, &mut app);
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 2);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+
+        click_file_lock_action(&ctx, &mut app, "copy_snapshot", false);
+        let copied = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(matches!(
+            copied.as_slice(),
+            [RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::FileLock,
+                text,
+            }] if text.contains("λ report.txt") && text.contains("Synthetic process")
+        ));
+        assert_eq!(
+            app.file_lock_dialog.notice_for_test(),
+            Some("Inspection snapshot copied.")
+        );
+
+        click_file_lock_action(&ctx, &mut app, "process_row", false);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        app.file_lock_dialog
+            .set_reveal_result_for_test(Ok(executable.clone()));
+        click_file_lock_action(&ctx, &mut app, "reveal", false);
+        let reveal_effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(matches!(
+            reveal_effects.as_slice(),
+            [RootDialogEffect::RevealFileLockExecutable(request)]
+                if request.process_id == 4242
+                    && request.creation_filetime == 133_000_000_000_000_000
+                    && request.executable_path == executable
+        ));
+        assert_eq!(
+            app.file_lock_dialog.notice_for_test(),
+            Some("Requested executable reveal.")
+        );
+
+        app.file_lock_dialog.stage_prefill(&ctx, file_b.clone());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(file_b.as_path())
+        );
+        assert!(!app.file_lock_dialog.has_current_inspection_for_test());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "inspect", false);
+        wait_for_current_file_lock_inspection(&ctx, &mut app);
+        let empty = app.file_lock_dialog.session_view_for_test();
+        assert!(empty.inspection_is_current());
+        assert!(empty.inspection().unwrap().reports_no_processes());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "copy_snapshot", false);
+        let empty_copy = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(matches!(
+            empty_copy.as_slice(),
+            [RootDialogEffect::CopyText { text, .. }]
+                if text.contains("No processes reported.")
+        ));
+        app.file_lock_dialog.stage_prefill(&ctx, file_a.clone());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(file_a.as_path())
+        );
+        assert!(
+            !app.file_lock_dialog.has_current_inspection_for_test(),
+            "returning to A does not resurrect A's prior generation"
+        );
+
+        app.file_lock_dialog.stage_prefill(&ctx, file_c.clone());
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "inspect", false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.file_lock_dialog.session_view_for_test().status()
+            != crate::file_lock::FileLockSessionStatus::Failed
+            && Instant::now() < deadline
+        {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+            thread::yield_now();
+        }
+        let failed = app.file_lock_dialog.session_view_for_test();
+        assert_eq!(
+            failed.status(),
+            crate::file_lock::FileLockSessionStatus::Failed
+        );
+        assert_eq!(
+            failed.inspection_error().unwrap().error,
+            crate::file_lock::FileLockInspectionError::StartSessionFailed(172)
+        );
+        assert!(!app.file_lock_dialog.has_current_inspection_for_test());
+
+        app.file_lock_dialog.request_close(&ctx);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(!app.file_lock_dialog.open);
+        open_file_lock_through_plugin(&mut app, Some(&file_a));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(app.file_lock_dialog.open);
+        assert!(
+            !app.file_lock_dialog.has_current_inspection_for_test(),
+            "reopening never treats a completed older session as submitted"
+        );
+
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_lock_ui_file_search_prefill_requires_a_retained_result_menu_action() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let file_path = workspace.root().join("menu file.txt");
+        let action_rect =
+            expose_file_lock_context_action(&ctx, &mut app, workspace.root(), &file_path);
+
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            action_rect.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(app.file_lock_dialog.open);
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(file_path.as_path())
+        );
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().status(),
+            crate::file_lock::FileLockSessionStatus::Idle,
+            "File Search prefill focuses the tool without inspecting"
+        );
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let file_path = workspace.root().join("discarded menu file.txt");
+        let action_rect =
+            expose_file_lock_context_action(&ctx, &mut app, workspace.root(), &file_path);
+        click_file_search_at_with_discard(
+            &ctx,
+            &mut app,
+            action_rect.center(),
+            egui::PointerButton::Primary,
+            true,
+        );
+        assert!(
+            !app.file_lock_dialog.open,
+            "a discarded File Search menu pass does not open the inspector"
+        );
+        assert!(app.file_lock_dialog.selected_path_for_test().is_none());
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_lock_ui_choose_file_is_retained_and_discarded_without_inspection() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("chosen report.txt");
+        std::fs::write(&path, b"picker target").expect("create isolated picker file");
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_file_lock_through_plugin(&mut app, None);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        app.file_lock_dialog
+            .set_file_choice_for_test(Some(path.clone()));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+
+        click_file_lock_action(&ctx, &mut app, "choose_file", false);
+        assert_eq!(app.file_lock_dialog.file_picker_calls_for_test(), 1);
+        assert_eq!(
+            app.file_lock_dialog.selected_path_for_test(),
+            Some(path.as_path())
+        );
+        let chosen = app.file_lock_dialog.session_view_for_test();
+        assert_eq!(chosen.generation(), 0);
+        assert_eq!(
+            chosen.status(),
+            crate::file_lock::FileLockSessionStatus::Idle
+        );
+
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("discarded picker file.txt");
+        std::fs::write(&path, b"discarded picker target")
+            .expect("create isolated discarded picker file");
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_file_lock_through_plugin(&mut app, None);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        app.file_lock_dialog.set_file_choice_for_test(Some(path));
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        click_file_lock_action(&ctx, &mut app, "choose_file", true);
+        assert_eq!(
+            app.file_lock_dialog.file_picker_calls_for_test(),
+            0,
+            "a discarded Choose pass never opens the native picker"
+        );
+        assert!(app.file_lock_dialog.selected_path_for_test().is_none());
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_lock_ui_close_can_supersede_a_staged_open_before_inspection() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("cancelled open.txt");
+        std::fs::write(&path, b"cancelled open target")
+            .expect("create isolated close-before-open file");
+        prepare_tool_dialog_root(&ctx, &mut app);
+        open_file_lock_through_plugin(&mut app, Some(&path));
+        assert!(app.file_lock_dialog.needs_root_ui_when_hidden());
+        app.file_lock_dialog.request_close(&ctx);
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        assert!(!app.file_lock_dialog.open);
+        assert!(app.file_lock_dialog.selected_path_for_test().is_none());
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        assert!(!app.file_lock_dialog.needs_root_ui_when_hidden());
+        app.file_lock_dialog.shutdown();
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
@@ -37274,6 +37803,44 @@ mod tests {
                 }),
             });
         }
+        state.apply_event(SearchEvent::Completed { id: search_id });
+    }
+
+    fn seed_actual_file_search_file_result(
+        app: &mut LauncherApp,
+        search_id: crate::file_search::model::SearchId,
+        path: &std::path::Path,
+    ) {
+        use crate::file_search::model::{
+            FileKind, FilenameRank, FilenameResult, SearchEvent, SearchResult,
+        };
+
+        let state = &mut app.file_search_dialog;
+        state.selected_mode = crate::gui::file_search_dialog::FileSearchMode::Filename;
+        state.active_search_id = Some(search_id);
+        state.current_status = crate::file_search::model::SearchStatus::Running;
+        state.clear_results_and_selection();
+        state.active_search_id = Some(search_id);
+        state.apply_event(SearchEvent::Result {
+            id: search_id,
+            result: SearchResult::Filename(FilenameResult {
+                path: path.to_path_buf(),
+                file_name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                parent_directory: path.parent().map(std::path::Path::to_path_buf),
+                kind: FileKind::File,
+                size: Some(28),
+                modified: None,
+                rank: FilenameRank::ExactFilename,
+                match_quality: FilenameRank::ExactFilename,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+                arrival_index: 0,
+            }),
+        });
         state.apply_event(SearchEvent::Completed { id: search_id });
     }
 

@@ -413,6 +413,9 @@ fn execute_with_external(
         Command::Dialog(DialogCommand::FolderSize) => {
             anyhow::bail!("Folder Size requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::FileLock { .. }) => {
+            anyhow::bail!("File Lock Inspector requires the launcher interface")
+        }
         Command::Dialog(DialogCommand::Activity) => {
             anyhow::bail!("Activity requires the launcher interface")
         }
@@ -1436,6 +1439,40 @@ mod folder_size_headless_tests {
         assert_eq!(
             error.to_string(),
             "Folder Size requires the launcher interface"
+        );
+        assert_eq!(external_calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod file_lock_headless_tests {
+    use super::*;
+    use crate::actions::Action;
+
+    #[test]
+    fn file_lock_ui_route_requires_the_launcher_without_external_fallback() {
+        let action = Action {
+            label: "Inspect File Users".into(),
+            desc: String::new(),
+            action: "filelock:open".into(),
+            args: Some(r"C:\Users\Jay\file.txt".into()),
+        };
+        let mut external_calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::FileLock {
+                path: Some(std::path::PathBuf::from(r"C:\Users\Jay\file.txt")),
+            }),
+            &action,
+            &mut |_, _| {
+                external_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "File Lock Inspector requires the launcher interface"
         );
         assert_eq!(external_calls, 0);
     }

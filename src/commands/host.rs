@@ -72,6 +72,7 @@ pub trait DialogCommandHost {
     fn open_paste_sequence_dialog(&mut self) {}
     fn open_hash_generator_dialog(&mut self) {}
     fn open_activity_dialog(&mut self) {}
+    fn open_file_lock_dialog(&mut self, _path: Option<&std::path::Path>) {}
     fn run_paste_sequence(
         &mut self,
         _id: crate::paste_sequence::SequenceId,

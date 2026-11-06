@@ -478,6 +478,38 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         )
         .with_gui_failure_policy());
     }
+    if s.starts_with("filelock:") {
+        if s == "filelock:open" {
+            let path = match action.args.as_deref() {
+                None => None,
+                Some(value)
+                    if !value.is_empty()
+                        && !value.contains('\0')
+                        && value.encode_utf16().count().saturating_add(1)
+                            <= crate::file_lock::MAX_FILE_LOCK_PATH_UTF16_UNITS =>
+                {
+                    Some(std::path::PathBuf::from(value))
+                }
+                Some(_) => {
+                    return Err(CommandError::new(
+                        "file_lock",
+                        "File Lock Inspector path must be non-empty, bounded, and contain no NUL",
+                    )
+                    .with_gui_failure_policy());
+                }
+            };
+            return Ok(Command::Dialog(DialogCommand::FileLock { path }));
+        }
+        return Err(CommandError::new(
+            "file_lock",
+            if action.args.is_some() {
+                "File Lock Inspector only supports filelock:open with an optional literal path"
+            } else {
+                "unknown File Lock Inspector command"
+            },
+        )
+        .with_gui_failure_policy());
+    }
     if s.starts_with("activity:") {
         if s == "activity:open" && action.args.is_none() {
             return Ok(Command::Dialog(DialogCommand::Activity));
@@ -3298,5 +3330,53 @@ mod markdown_studio_parser_tests {
         assert_eq!(parsed, Command::Dialog(DialogCommand::MarkdownStudio));
         assert_eq!(parsed.domain(), "dialog");
         assert_eq!(parsed.kind_name(), "markdown_studio");
+    }
+}
+
+#[cfg(test)]
+mod file_lock_ui_command_tests {
+    use super::*;
+    use crate::actions::Action;
+
+    fn action(args: Option<String>) -> Action {
+        Action {
+            label: "File Lock Inspector".into(),
+            desc: String::new(),
+            action: "filelock:open".into(),
+            args,
+        }
+    }
+
+    #[test]
+    fn file_lock_ui_open_route_preserves_the_literal_path_without_touching_disk() {
+        let path = r"C:\Users\Jay\One Drive\資料 雪.txt";
+        assert_eq!(
+            parse_action(&action(Some(path.to_owned()))).unwrap(),
+            Command::Dialog(DialogCommand::FileLock {
+                path: Some(std::path::PathBuf::from(path)),
+            })
+        );
+        assert_eq!(
+            parse_action(&action(None)).unwrap(),
+            Command::Dialog(DialogCommand::FileLock { path: None })
+        );
+    }
+
+    #[test]
+    fn file_lock_ui_open_rejects_malformed_literal_path_payloads() {
+        let too_long = "x".repeat(crate::file_lock::MAX_FILE_LOCK_PATH_UTF16_UNITS);
+        for value in [String::new(), "bad\0path".to_owned(), too_long] {
+            let error = parse_action(&action(Some(value))).unwrap_err();
+            assert_eq!(error.domain, "file_lock");
+            assert!(error.to_string().contains("path"));
+        }
+
+        let unknown = Action {
+            label: "unknown".into(),
+            desc: String::new(),
+            action: "filelock:future".into(),
+            args: None,
+        };
+        assert_eq!(parse_action(&unknown).unwrap_err().domain, "file_lock");
     }
 }
