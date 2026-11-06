@@ -33,6 +33,7 @@ It’s designed to be “one hotkey away” from:
 - [Table Utility](#table-utility)
 - [Image Comparison](#image-comparison)
 - [Duplicate Finder](#duplicate-finder)
+- [Folder Size](#folder-size)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
@@ -909,6 +910,27 @@ the selected root and scanned file identity before acting. Reported duplicate
 bytes are logical totals; hard links and filesystem allocation mean they are
 not a promise of recoverable disk space. The tool never deletes or changes
 files.
+
+## Folder Size
+
+Type `foldersize` and choose **Open Folder Size**. Choose a local folder, then
+press **Scan**. Opening the tool or choosing a folder does not start a scan.
+You can also right-click a directory result in File Search and choose
+**Analyze folder size…** to fill in that folder. The result list shows the
+largest measured entries in the current directory first, including during a
+scan.
+Double-click a directory row to drill down, or use **Copy Path** and **Reveal/Open**
+to work with the displayed path. Use **Refresh** to scan again or **Cancel** to
+keep the last verified subtotal while the worker settles. ActivityCenter shows
+scans that have started and can cancel the current scan.
+
+The tool sums logical file bytes per directory entry. Each hard-link name
+contributes its file length; the subtotal does not measure allocated disk space.
+Shares use the measured subtotal, and no percentage is shown when it is zero.
+The scan reads metadata and skips reparse points and cloud placeholders without
+recalling file contents. Incomplete branches and skipped entries are marked so
+a partial subtotal is not mistaken for a complete result. Folder Size does not
+delete or change files.
 
 ## JSON and screen color utilities
 
