@@ -1,0 +1,171 @@
+# Desktop Productivity Completion and Acceptance Recovery
+
+## R01/M0-A — baseline
+
+The sole checkout is G:/Repos/rust/Multi_Launcher. The clean incoming branch was feat/silent-screen-recorder at 05153ac1af7cdd015f72c1d95dd4a8bcfed0d043, whose only change after M17-B was adding the recovery Goal and Kickstart. The exact authorized source snapshot is 1852f264dae69056f79bc0c3b593c70331fa620f. The upstream reflog, original push log and current original receipt agree that this was the pushed M17-B tip. The origin is multiplex55/Multi_Launcher. The index was empty and there was no ongoing Git operation. R01 was created directly from that snapshot.
+
+Development host reports Windows build 19045. Rust 1.99.1 and Nextest 0.9.135 are present. Original M17 verification reported 444 distinct affected cases passing across the first run and one exact correction, with no full N1–N12 observations. This is inherited evidence only. Exact original case names and results are in ignored target/desktop-productivity-expansion/m17-accepted-test-names.txt and m17-focused-run.log. Narrow original native results remain distinct from the full gates below.
+
+All four preserved-source archives match the SHA-256 checksums in the [original stop reports](../desktop-productivity-expansion/stalls). The C01 archive is a failed candidate and does not apply cleanly to M17-B. Recover relevant parts against current accepted source.
+
+| Category | Recovery checkpoints | State at baseline |
+| --- | --- | --- |
+| R01 | M0-A, M1-A Diagram click paths, M1-B shared geometry and focus | M0-A |
+| R02 | M2-A document/macro, M2-B settings/mouse, M2-C file/clipboard/developer/time, M2-D references and new utilities | Pending |
+| R03 | M3-A bit model, M3-B inspector/Copy/Insert, M3-C comparison/reference | Pending |
+| R04 | M4-A groups/swimlanes, M4-B starters, M4-C PNG/SVG, M4-D grouped draw.io | Pending |
+| R05 | M5-A safe Explorer operation, M5-B list editor/launch, M5-C utility/recorder integration | Pending |
+| R06 | M6-A focused verification, M6-B manual packet, M6-C final receipt | Pending |
+
+R01 starts with the original two exact failing test names. Their bodies were in the inactive archived patch. The initial attempt will distinguish unavailable cases from behavioral failures. Reconstruct the fixture and necessary production wiring, diagnose the click at the enabled/visible retained-pass boundary, then check ordinary Dock return and retained session identity. Use independent review and the focused correction budget in the recovery Goal. Full native checks are deferred to the final packet.
+
+## Inherited category and original 50-ID status
+### Category results
+
+| Category | Retained implementation and review | Mandatory gaps |
+| --- | --- | --- |
+| C01 — Utility hosts | Reference Calculation Pad session/accepted-pass wiring and shared geometry storage; 12 + 22 focused, reviewed | M1-B.2 archived after 52/54 and two unresolved docked Diagram clicks. Remaining ordinary hosts, focus/return/picker/geometry wiring, M2–M4, IDs 13–23; partial 24–26; N1–N4 |
+| C02 — Calculation | Exact integers, legacy scalar source, unit algebra and executable 30-example catalog; 18/46/69/3 checkpoint tests, reviewed; M17 scalar/minute overlap fixture passed | Separate inspector/bitfields/copy/insert/comparison, IDs 5–6, 8, 11; partial 12; N5 |
+| C03 — Diagram | Legacy Mermaid and bounded visual authority; basic transforms, snapping, anchors, assets/presets, recents/copy; reviewed ungrouped draw.io and internal rich PNG/SVG encoder; M17 direct/pending late Save As collision fixture passed | Archived group/container/swimlane, visual starter and rich Studio PNG/SVG publication increments; grouped conversion/interchange, independent reader, common hosts, N6/N7. Partial selected groups traced in ID audit |
+| C04 — Explorer tabs | Ordered operation and guarded read-only Windows observations, saved-list store; 21 + 9 focused, reviewed | Windows 10 build 19045 lacks supported tab observation. No verified mutation, editor/launcher/progress/cancel/typed route or common host; ID 61 partial and N8 unverified |
+| C05 — Folder sizes | Read-only, bounded logical per-entry metrics, docked controls, File Search handoff and exact Activity; 15/10/9 focused and disposable-tree/hard-link native evidence, reviewed | Shared detach/return/focus/geometry, ID 88 partial and full N9 unverified |
+| C06 — File locks | Read-only Restart Manager and exact process identity, docked controls, safe File Search prefill; 15/14 focused including exact held/released owned helper native evidence, reviewed | Shared detach/return/focus/geometry, ID 89 partial and full N10 unverified |
+| C07 — Recorder | Exact recorder session and WGC source; independently decoded owned-window GIF and video-only H.264 MP4; docked setup/retained compact controls, actual shortcut/admission and lifecycle tests, verified repeated active discard and exact resource cleanup; configured review | Full N11/N12: actual launcher hidden-root stop, global chord and pointer/still capture/live Pinboard coexistence, monitor/DPI; ordinary setup common host remains docked |
+
+Primary owners: existing launcher/utility host state; calculation_pad exact scalar/programmer/quantity boundary; diagram document/persistence/visual projection and draw.io; explorer_tabs read-only operation and store; folder_size/file_lock adapters and their docked GUI actions; recording session/controller/encoders and existing hotkey runtime.
+
+### Selected requirements
+
+Scope is 50 IDs from Goal E.4. Native N1–N12 remain separate from automated checks and isolated adapter/artifact evidence.
+
+| Category / IDs | Retained implementation and prior evidence | Incomplete or unverified |
+| --- | --- | --- |
+| C01: 13, 14, 15 | Existing owners traced; no new M2 source | Notes/each editor, Markdown Studio, MkMacro common host migration and native N2 |
+| C01: 16, 17, 18 | Existing owners traced; no new M3 source | Main/Dashboard and Mouse/Gesture Settings/common host, native N3 |
+| C01: 19, 20, 21, 22, 23 | Each existing utility owner traced; no new M4 source | All named file, clipboard, developer, time and file/image migrations; N4 |
+| C01: 24, 25, 26 | M1-A accepted reference lifecycle and shared provenance, 12/12; M1-B.1 geometry model and persistence, 22/22 | M1-B.2 52/54 with two unresolved docked Diagram click paths, full increment archived/inactive; shared wiring, geometry/focus/return, parentage, N1 |
+| C02: 1, 2, 3, 4, 7, 10 | M5-A/B exact integer model, grammar, operations and scalar compatibility 18/18 and 46/46 | Native N5 complete end-to-end path unavailable |
+| C02: 5, 6, 8, 11 | None | M6 separate inspector, working-copy bitfields, labels/copy, revision-fenced insert/undo, comparison absent due C01 dependency |
+| C02: 9 | Unit algebra M7-A all69 distinct; M17 verified legacy scalar minimum and signed operands coexist with minutes and dimension diagnostics | No claim of broad native workflow |
+| C02: 12 | M7-B retained reference and executable 30-example catalog; three exact tests | Missing M6 tools and corresponding interactive/reference completion |
+| C03: 27, 28, 34, 35 | M8 retained dual authoring, legacy v1/v2 and rich bounded v3, styles/layers/projected editor and viewer, 38/38/16 distinct; M17 verified late-collision-safe native Save As | N6/N7, common host transitions |
+| C03: 29, 30, 31, 32, 33, 36, 37, 39, 40, 41 | M9 retained transforms, snapping, navigation/minimap, anchored connectors, local embedded raster/presets (19/11/20/18 distinct) | Group/container/swimlane membership and descendant transform M9-B.2 inactive at 15/16; grouped conversion and interchange unavailable; full N7 |
+| C03: 38, 42, 43, 45, 46 | M10 retained Mermaid assistance, ungrouped visual-copy, exact duplicate, recents, internal visual PNG/SVG encoder (11/17/7 distinct) | Visual template UI 14/15 and Studio visual PNG/SVG controls/publication 15/16 inactive; native N6/N7 and grouped conversion |
+| C03: 44 | M11 bounded uncompressed single-page ungrouped draw.io, reviewable isolated import/native copy and current committed scene export, no clobber; 9/8/6 across adapter/Studio/docs | Grouped interchange depends on M9-B.2; compressed optional not attempted; independent external reader unavailable |
+| C04: 61 | Ordered operation, guarded read-only Explorer Shell observations and saved-list store, 21/9 distinct | Windows 10 lacks supported Explorer tabs; no positive tab/path attribution, native mutation, editor, launcher route, progress/cancel or ordinary host; N8 |
+| C05: 88 | Bounded metadata-only scan, docked UI, sorted rows/File Search and exact activity, 15/10/9 distinct; disposable Windows tree accounting | Shared detach/return unavailable, full N9 unverified |
+| C06: 89 | Read-only Restart Manager, exact process identity and docked actions, 15/14 distinct incl exact owned held-file adapter | Shared detach/return unavailable, full N10 unverified |
+| C07: 119 | M15 bounded WGC and silent GIF/H.264 MP4; M16 typed discovery, exact setup/controller, user result, capture interlocks and optional Stop; 15 + 15 launcher/shortcut focused cases, owned-window GIF and MP4 independently decoded and repeated active discard/retirement proven | Full N11/N12 (interactive launcher, actual global chord/pointer/still capture/live Pinboard, monitor/DPI); ordinary setup common detach/return absent under C.2 |
+
+Optional: 128-bit arithmetic and compressed draw.io import were not claimed or counted against required behavior. Audio is outside scope.
+
+
+## Original 38 milestone inventory
+
+See the inherited category results above for baseline disposition. The [original ledger](../desktop-productivity-expansion/EXECUTION.md) retains checkpoint-specific evidence. These entries are the original milestone inventory and do not imply recovery acceptance.
+
+| Milestone | Original scope |
+| --- | --- |
+| M0-B | Bounded baseline and host inventory |
+| M1-A | Reusable single-session host lifecycle |
+| M1-B | Geometry, focus and host controls |
+| M2-A | Notes and Markdown hosting |
+| M2-B | MkMacro editor hosting |
+| M3-A | Main Settings and Dashboard Settings hosting |
+| M3-B | Mouse Settings and Gesture hosting |
+| M4-A | File workflow dialogs |
+| M4-B | Clipboard workflow dialogs |
+| M4-C | Developer utility dialogs |
+| M4-D | Time and image/file utility dialogs; host coverage closure |
+| M5-A | Exact integer domain and checked operations |
+| M5-B | Grammar, references and compatibility |
+| M6-A | Separate programmer result inspector |
+| M6-B | Side-by-side calculation comparison |
+| M7-A | Dimensional arithmetic |
+| M7-B | Examples, reference and calculator acceptance |
+| M8-A | Authoring modes and backward-compatible document format |
+| M8-B | Rich scene objects, styles and layers |
+| M9-A | Direct manipulation and navigation |
+| M9-B | Connectors, containers and reusable assets |
+| M10-A | Mermaid assistance, templates, conversion and library |
+| M10-B | Current-scene exports and viewer parity |
+| M11-A | Bounded draw.io XML interchange |
+| M11-B | Diagram usability acceptance and documentation |
+| M12-A | Targeted Explorer tab operation |
+| M12-B | Saved folder lists and command integration |
+| M13-A | Bounded progressive scan and accounting |
+| M13-B | Folder-size interface and launcher actions |
+| M14-A | Restart Manager inspection boundary |
+| M14-B | File lock inspector UI and actions |
+| M15-A | Recording target and bounded capture lifecycle |
+| M15-B | Streaming animated GIF output |
+| M15-C | Video-only MP4 output |
+| M16-A | Recorder controls and command integration |
+| M16-B | Recording interoperability and cleanup acceptance |
+| M17-A | Scoped cumulative verification and final review |
+| M17-B | Final delivery, status and next-tip handoff |
+
+### Common host acceptance audit
+
+Scope: Goal C.2. Existing owners and routes are listed in the baseline inventory in [original execution ledger](../desktop-productivity-expansion/EXECUTION.md). M1-B.1 verified the shared geometry storage and recovery behavior in isolation; it did not wire native geometry and Dock/Pop Out controls into each surface. Baseline behavior and focused domain tests are not counted as common-host migration evidence.
+
+| Surface | Implementation | Host state test | Native status |
+| --- | --- | --- | --- |
+| Quick Notes | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Each note editor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Markdown Studio | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| MkMacro | Existing host; common migration absent | Unrun; no migration wiring | Unverified N2 |
+| Main Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Dashboard Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Mouse Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Mouse Gestures | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| Gesture Settings | Existing host; common migration absent | Unrun; no migration wiring | Unverified N3 |
+| File Search | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Diff | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Batch Rename | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Search & Replace | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Clipboard History | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Snippets | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Clipboard Modify | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Paste Sequences | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| JSON | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| XML | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Regex | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Table | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Timer/alarm authoring | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar root | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar event editor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calendar event details | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Date & Time Studio | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Image Compare | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Duplicate Finder | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| ZIP Extractor | Existing host; common migration absent | Unrun; no migration wiring | Unverified N4 |
+| Calculation Pad | Reference migration retains the existing dock/pop-out session via M1-A; shared geometry/focus integration from B.2 is inactive | M1-A accepted-pass, identity, dirty/history and pending decision coverage; full B.2 wiring unverified | Unverified N1 |
+| Diagram Studio | Existing native editor; shares M1-A pass provenance; B.2 docked click paths, ordinary detachment and picker parentage unaccepted | M1-A exact provenance passed; B.2 failures retained in stop report, inactive | Unverified N6/N7 |
+| Diagram viewer | Existing separate native/embedded view of the same owner; M1-A pass provenance only | M1-A close/reopen generation and embedded fallback passed; no common Dock/Pop Out wiring | Unverified N6/N7 |
+| Programmer inspector | M6 owner/UI absent | Unrun; no implementation | Unverified N5 |
+| Explorer saved-list editor/launcher | Ordered operation and saved-list store only; editor/launcher absent | Domain tests passed; no UI host state | Unverified N8 |
+| Folder Size Analyzer | Docked owner/actions delivered; common detach/return absent | Docked generation/picker/selection/cancellation state tested; no migration test | Unverified full N9; narrower disposable Windows tree metadata passed |
+| File Lock Inspector | Docked owner/actions delivered; common detach/return absent | Docked generation/prefill/action safety tested; no migration test | Unverified full N10; narrower held-file adapter with owned PID/creation time passed |
+| Silent recorder setup / compact controller | Docked setup and dedicated retained compact controller, including hidden root, live Stop/Discard, and retained output result; ordinary setup detach/return absent | Exact hidden and stale Watch/retained Stop, reciprocal capture guards, and exit wait for exact retirement passed; optional shortcut both routing modes tested | Full N11/N12 unverified; owned HWND WGC→GIF and WGC→MP4 independently decoded, repeated active discard and exact owned cleanup passed |
+
+File Search is still docked; retained folder-size and file-lock prefill/reveal interactions are separate, covered workflows. A recorder rectangle selector is a specialized overlay excluded from ordinary Dock/Pop Out under C.2.
+
+## Original native gates
+
+All gates below are NOT_RUN as full end-to-end flows at the recovery baseline. The recovery brief authorizes delivering safe implementation before final user verification. The original narrower observations are recorded in the category and host matrices.
+
+| Gate | Required observation |
+| --- | --- |
+| N1 — Reference host | Dirty Calculation Pad → pop out → hide launcher → edit/undo/copy → dock → cancel close. Same source/history remains, focus/Jump Mode belongs to the correct surface. |
+| N2 — Document and macro hosts | Notes and Markdown editable detached sessions; MkMacro harmless fixture retaining selection and exactly-once execution. Owned child prompts are reachable. |
+| N3 — Settings/mouse hosts | Main and Dashboard Settings save/cancel, Mouse/Gesture settings edit/record/cancel; no draft auto-commit or residual input suppression. |
+| N4 — Remaining utility families | Representative file workflow, clipboard workflow including second sequence run, structured editor/table, timer/calendar and image/ZIP inspection. Every requested surface still needs an automated wiring check even when native evidence is sampled by family. |
+| N5 — Programmer tools | Large exact result and shifted mask → independent inspector → bit toggle → copy chosen format → explicit insert/undo → comparison. Ordinary scalar pad remains text-first. |
+| N6 — Mermaid legacy | Existing `.mld`, supported source editing, invalid/stale preview, viewer and current export; exact source/dirty decisions survive. |
+| N7 — Rich diagram | Add shapes/text/image, connect, resize/rotate, multi-select/align, use container/layer, undo, save/reopen, PNG/SVG export and supported draw.io interchange. |
+| N8 — Explorer tabs | Five ordered test folders in one identified new window with another Explorer window already open. Verify paths, tab order and unrelated window preservation; cancel/foreground-loss test stops safely. |
+| N9 — Folder sizes | Known temporary tree → progressive sorted results → cancel → refresh → detach/dock; totals and incomplete status match expected accounting. |
+| N10 — File users | Hold a disposable file in a known helper → inspect → release → refresh. Confirm identity and truthful empty/failed presentation. |
+| N11 — Recording | Record moving controlled content to GIF and MP4; hide root and stop; independently inspect/play artifacts, duration/dimensions and absence of audio. Include non-primary/DPI geometry where available. |
+| N12 — Cleanup | Cancel selection/countdown/recording, close target, repeat start/stop, exit task app; normal mouse/hotkeys/still screenshot/live Pinboard remain usable. Inspect only task-owned resources/processes. |
