@@ -1,5 +1,6 @@
 mod model;
 mod session;
+mod windows;
 
 pub use model::{
     CanvasSize, CaptureIdentity, CaptureTarget, FrameError, FrameRate, FrameStamp, FrameTimeline,
@@ -13,3 +14,4 @@ pub use session::{
     FinalizationPermit, RecorderClock, RecordingBackend, RecordingSession, RecordingSessionError,
     RecordingSessionView, SinkReceipt, SystemRecorderClock,
 };
+pub use windows::WindowsRecordingBackend;
