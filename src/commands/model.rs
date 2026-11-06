@@ -75,6 +75,7 @@ pub enum Command {
     ClipboardModify(ClipboardModifyCommand),
     Screenshot(ScreenshotCommand),
     Pinboard(PinboardCommand),
+    Recording(RecordingCommand),
     ScreenDraw(ScreenDrawCommand),
     CoordinateTool(CoordinateToolCommand),
     Shell(ShellCommand),
@@ -122,6 +123,7 @@ impl Command {
             Self::ClipboardModify(_) => "clipboard_modify",
             Self::Screenshot(_) => "screenshot",
             Self::Pinboard(_) => "pinboard",
+            Self::Recording(_) => "recording",
             Self::ScreenDraw(_) => "screen_draw",
             Self::CoordinateTool(_) => "mouse",
             Self::Shell(_) => "shell",
@@ -168,6 +170,7 @@ impl Command {
             Self::ClipboardModify(v) => v.kind_name(),
             Self::Screenshot(v) => v.kind_name(),
             Self::Pinboard(v) => v.kind_name(),
+            Self::Recording(v) => v.kind_name(),
             Self::ScreenDraw(v) => v.kind_name(),
             Self::CoordinateTool(v) => v.kind_name(),
             Self::Shell(v) => v.kind_name(),
@@ -217,6 +220,14 @@ kinds!(ScreenDrawCommand,
     Self::NewCapture => "new_capture", Self::Ghost => "ghost",
     Self::Done => "done", Self::Clear => "clear", Self::Close => "close"
 );
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingCommand {
+    Open,
+    Stop,
+}
+
+kinds!(RecordingCommand, Self::Open => "open", Self::Stop => "stop");
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoordinateToolCommand {

@@ -1189,6 +1189,9 @@ impl LauncherApp {
         &mut self,
         intent: PinCaptureIntent,
     ) -> Result<bool, String> {
+        if let Some(reason) = self.recording_capture_conflict() {
+            return Err(reason.into());
+        }
         if self.pinboard_capture_busy() {
             return Ok(false);
         }

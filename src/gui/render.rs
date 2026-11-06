@@ -2164,6 +2164,7 @@ impl LauncherApp {
             Panel::FolderSizeDialog => middle(egui::Id::new(Some("Folder Size"))),
             Panel::FileLockDialog => middle(egui::Id::new(Some("File Lock Inspector"))),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
+            Panel::RecordingDialog => middle(egui::Id::new("recording-setup-window")),
             Panel::DiagramStudioDialog | Panel::RadialEditor => None,
             Panel::NotePanel | Panel::ImagePanel => None,
             Panel::CompletionDialog | Panel::SnippetPromptDialog | Panel::CropDialog => None,
@@ -3787,7 +3788,50 @@ impl LauncherApp {
         self.root_list_geometry.invalidate_geometry();
     }
 
+    pub(super) fn recording_capture_conflict(&self) -> Option<&'static str> {
+        if self.recording_controller.conflicts_with_capture() {
+            return Some(
+                "Finish, save, or discard the active recording before capturing another screen",
+            );
+        }
+        if self.recording_dialog.has_selector_operation() {
+            return Some(
+                "Finish or cancel recording region selection before capturing another screen",
+            );
+        }
+        None
+    }
+
+    pub(super) fn recording_start_conflict(&self) -> Option<&'static str> {
+        if self.recording_dialog.target_refresh_pending_for_shutdown() {
+            return Some(
+                "Wait for display targets to finish refreshing before starting a recording",
+            );
+        }
+        if self.screenshot_capture.is_busy()
+            || self.screenshot_countdown.is_busy()
+            || self.pending_screenshot_completion.is_some()
+            || self.screenshot_capture_parking.is_some()
+        {
+            return Some("Finish or cancel the active screenshot before starting a recording");
+        }
+        if self.screenshot_capture_conflict().is_some() {
+            return Some("Finish or cancel the active screen capture before starting a recording");
+        }
+        if self
+            .mkmacro_dialog
+            .visual_overlay_controller()
+            .has_pending_selector()
+        {
+            return Some("Finish or cancel the active screen selector before starting a recording");
+        }
+        None
+    }
+
     fn screenshot_capture_conflict(&self) -> Option<&'static str> {
+        if self.recording_capture_conflict().is_some() {
+            return Some("Finish or cancel the active recording before taking a screenshot");
+        }
         if self.pinboard_capture_busy() {
             return Some("Finish or cancel screenshot pin capture before taking a screenshot");
         }
@@ -4262,6 +4306,20 @@ impl LauncherApp {
         if let Some(completion) = self.screenshot_capture.tick(std::time::Instant::now(), ctx) {
             self.pending_screenshot_completion = Some(completion);
         }
+        self.recording_controller.poll();
+        self.poll_recording_targets(ctx);
+        self.poll_recording_region(ctx);
+        if self.recording_controller.has_active_job() {
+            match self.recording_controller.snapshot().session.state() {
+                crate::recording::RecorderState::Countdown { .. } => {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+                crate::recording::RecorderState::Recording { .. } => {
+                    ctx.request_repaint_after(Duration::from_millis(500));
+                }
+                _ => {}
+            }
+        }
         let mut geometry_cause = super::track_c_query_observer::GeometryCause::Other;
         if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
@@ -4457,6 +4515,12 @@ impl LauncherApp {
     }
 
     fn reconcile_root_visibility(&mut self, ctx: &egui::Context) -> (u64, Option<u64>, bool, bool) {
+        if ctx.embed_viewports()
+            && self.recording_controller.has_active_job()
+            && !self.visible_flag.load(Ordering::Acquire)
+        {
+            self.request_launcher_state(Some(true), Some(true));
+        }
         if self.pinboard_capture_owns_root() {
             let (revision, (should_be_visible, invocation_id, focus_intent)) =
                 self.visibility_revision.inspect(|| {
@@ -4749,7 +4813,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 9] {
+    fn viewport_bootstrap_state(&self) -> [bool; 10] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4760,6 +4824,8 @@ impl LauncherApp {
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
             self.file_lock_dialog.needs_root_ui_when_hidden(),
+            self.recording_dialog
+                .needs_compact_viewport_bootstrap(&self.recording_controller),
         ]
     }
 
@@ -4772,7 +4838,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 9],
+        previously_pending: [bool; 10],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -6928,6 +6994,7 @@ impl LauncherApp {
             self.show_macro_prompt(&ctx, first_ui_pass);
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
             self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
+            self.show_recording_compact_controller(&ctx);
             self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
             // An Immediate Regex Tester owns its own viewport and remains
             // usable while the launcher is hidden. Its ROOT scope and ROOT
@@ -7024,6 +7091,7 @@ impl LauncherApp {
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
         }
         self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
+        self.show_recording_compact_controller(&ctx);
         if first_ui_pass {
             self.cancel_screen_draw_startup_on_escape(&ctx);
             crate::performance::record_frame(
@@ -10251,6 +10319,7 @@ impl LauncherApp {
             first_ui_pass,
             owner_transition_pending,
         );
+        self.show_recording_setup(&ctx, frame_logic.should_be_visible);
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         for action in self.activity_dialog.show(
             &ctx,
@@ -10264,6 +10333,7 @@ impl LauncherApp {
             let panel = match owner {
                 crate::activity::ActivityOwner::FileSearch => Some(super::Panel::FileSearchDialog),
                 crate::activity::ActivityOwner::FolderSize => Some(super::Panel::FolderSizeDialog),
+                crate::activity::ActivityOwner::Recording => Some(super::Panel::RecordingDialog),
                 crate::activity::ActivityOwner::Table => Some(super::Panel::TableUtilityDialog),
                 crate::activity::ActivityOwner::DuplicateFinder => {
                     Some(super::Panel::DuplicateFinderDialog)
@@ -11187,7 +11257,9 @@ impl LauncherApp {
         }
         let overlay = self.mkmacro_dialog.visual_overlay.poll_app_exit(requested);
         if self.sequence_exit_requested || overlay.is_some() {
-            let ready = overlay.unwrap_or(true);
+            let ready = overlay.unwrap_or(true)
+                && self.recording_controller.shutdown_ready()
+                && !self.recording_dialog.target_refresh_pending_for_shutdown();
             ctx.send_viewport_cmd(if ready {
                 egui::ViewportCommand::Close
             } else {
@@ -11196,6 +11268,9 @@ impl LauncherApp {
             if !ready {
                 ctx.request_repaint_after(std::time::Duration::from_millis(10));
             }
+        }
+        if requested {
+            self.recording_controller.request_shutdown();
         }
     }
 }
@@ -11221,6 +11296,9 @@ impl eframe::App for LauncherApp {
             || self.screenshot_countdown.is_busy()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
+            || self
+                .recording_dialog
+                .needs_root_ui_when_hidden(&self.recording_controller)
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -11255,11 +11333,13 @@ impl eframe::App for LauncherApp {
         self.regex_tester_dialog.on_ui_frame_complete(_ctx);
         let effects = self.complete_retained_tool_dialogs(_ctx);
         self.dispatch_root_dialog_effects(_ctx, effects);
+        self.complete_recording_dialog(_ctx);
         self.finish_ui_frame_receipt();
         self.complete_jump_mode_frame(_ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.recording_controller.request_shutdown();
         crate::paste_sequence::admission::physical_paste_bridge()
             .invalidate_owner(self.event_sink.owner_id());
         self.hotfolder_action_adapter.set_active(false);
@@ -11458,6 +11538,7 @@ impl LauncherApp {
         self.regex_tester_dialog.on_ui_frame_complete(ctx);
         let effects = self.complete_retained_tool_dialogs(ctx);
         self.dispatch_root_dialog_effects(ctx, effects);
+        self.complete_recording_dialog(ctx);
         if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();
@@ -12333,6 +12414,79 @@ impl LauncherApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ExitCaptureBackend {
+        drop_gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    }
+
+    struct ExitCaptureSource {
+        generation: u64,
+        canvas: crate::recording::CanvasSize,
+        sent_frame: bool,
+        drop_gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    }
+
+    impl crate::recording::RecordingBackend for ExitCaptureBackend {
+        fn create_source(
+            &self,
+            request: &crate::recording::RecordingRequest,
+            generation: u64,
+        ) -> Result<Box<dyn crate::recording::CaptureSource>, String> {
+            Ok(Box::new(ExitCaptureSource {
+                generation,
+                canvas: request.canvas(),
+                sent_frame: false,
+                drop_gate: self.drop_gate.lock().unwrap().take(),
+            }))
+        }
+    }
+
+    impl crate::recording::CaptureSource for ExitCaptureSource {
+        fn poll(
+            &mut self,
+            max_wait: Duration,
+            stop: &crate::recording::CaptureStopToken,
+        ) -> crate::recording::CapturePoll {
+            if !self.sent_frame {
+                self.sent_frame = true;
+                return crate::recording::CapturePoll::Frame {
+                    generation: self.generation,
+                    frame: crate::recording::RgbaFrame::new(
+                        self.canvas,
+                        vec![255; self.canvas.rgba_bytes()],
+                    )
+                    .unwrap(),
+                };
+            }
+            if stop.stop_requested() || stop.is_cancelled() {
+                return crate::recording::CapturePoll::Ended(
+                    crate::recording::RecordingEndReason::UserStopped,
+                );
+            }
+            thread::sleep(max_wait.min(Duration::from_millis(5)));
+            crate::recording::CapturePoll::Pending
+        }
+    }
+
+    impl Drop for ExitCaptureSource {
+        fn drop(&mut self) {
+            if let Some((dropped, release)) = self.drop_gate.take() {
+                let _ = dropped.send(());
+                let _ = release.recv_timeout(Duration::from_secs(8));
+            }
+        }
+    }
+
+    struct ReleaseExitCaptureOnDrop(Option<mpsc::Sender<()>>);
+
+    impl Drop for ReleaseExitCaptureOnDrop {
+        fn drop(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
     #[test]
     fn paste_to_advance_close_guard_has_no_clipboard_restore_job() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
@@ -12351,6 +12505,116 @@ mod tests {
         );
         output.textures_delta.clear();
     }
+
+    #[test]
+    fn recording_ui_exit_waits_for_capture_and_writer_retirement() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _release_on_drop = ReleaseExitCaptureOnDrop(Some(release_tx.clone()));
+        app.recording_controller = crate::recording::RecordingController::new(
+            Arc::new(ExitCaptureBackend {
+                drop_gate: Mutex::new(Some((dropped_tx, release_rx))),
+            }),
+            || {},
+        );
+        let bounds = crate::mkmacro::ScreenRect::new(-32, 18, 32, 24);
+        let target = crate::recording::CaptureTarget::window(100, 200, 300, bounds).unwrap();
+        let options = crate::recording::RecordingOptions::new(
+            crate::recording::RecordingFormat::Gif,
+            crate::recording::FrameRate::new(12).unwrap(),
+            Duration::from_secs(120),
+            false,
+        )
+        .unwrap();
+        let request = crate::recording::RecordingRequest::new(target, bounds, options).unwrap();
+        app.recording_controller
+            .prepare(
+                request,
+                workspace.root().join("exit-guard.gif"),
+                &app.activity_center,
+            )
+            .unwrap();
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = app.recording_controller.snapshot();
+            if matches!(
+                snapshot.preparation,
+                Some(crate::recording::RecordingWriterPreparation::Ready)
+            ) {
+                assert!(matches!(
+                    snapshot.session.state(),
+                    crate::recording::RecorderState::Selecting
+                ));
+                app.recording_controller.poll();
+                break;
+            }
+            assert!(Instant::now() < ready_deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let recording_deadline = Instant::now() + Duration::from_secs(9);
+        loop {
+            let snapshot = app.recording_controller.snapshot();
+            if matches!(
+                snapshot.session.state(),
+                crate::recording::RecorderState::Recording { .. }
+            ) && snapshot.session.frames_written() > 0
+            {
+                break;
+            }
+            app.recording_controller.poll();
+            assert!(Instant::now() < recording_deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let close_frame = |app: &mut LauncherApp| {
+            let mut viewports = ctx.input(|input| input.raw.viewports.clone());
+            viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            );
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    viewports,
+                    ..Default::default()
+                },
+                |_| app.guard_overlay_app_exit(&ctx),
+            );
+            let commands = output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .clone();
+            output.drop_without_applying_deltas();
+            commands
+        };
+
+        let commands = close_frame(&mut app);
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        dropped_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("application shutdown cancelled capture and reached source retirement");
+        app.recording_controller.poll();
+        assert!(!app.recording_controller.shutdown_ready());
+
+        release_tx.send(()).unwrap();
+        let shutdown_deadline = Instant::now() + Duration::from_secs(6);
+        while !app.recording_controller.shutdown_ready() {
+            app.recording_controller.poll();
+            assert!(Instant::now() < shutdown_deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let commands = close_frame(&mut app);
+        assert!(commands.contains(&egui::ViewportCommand::Close));
+    }
+
     use crate::{
         gui::numpad_navigation::{
             LauncherNumpadNavigation, NumpadKeyStateProbe, PhysicalDigitKeyState,

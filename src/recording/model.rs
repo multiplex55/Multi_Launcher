@@ -16,6 +16,24 @@ pub enum RecordingFormat {
     Mp4,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputScale {
+    #[default]
+    Fit,
+    Half,
+    Quarter,
+}
+
+impl OutputScale {
+    const fn divisor(self) -> u32 {
+        match self {
+            Self::Fit => 1,
+            Self::Half => 2,
+            Self::Quarter => 4,
+        }
+    }
+}
+
 impl RecordingFormat {
     pub const fn default_frame_rate(self) -> u8 {
         match self {
@@ -195,6 +213,7 @@ pub struct RecordingRequest {
     target: CaptureTarget,
     region: ScreenRect,
     canvas: CanvasSize,
+    scale: OutputScale,
     options: RecordingOptions,
 }
 
@@ -203,6 +222,15 @@ impl RecordingRequest {
         target: CaptureTarget,
         region: ScreenRect,
         options: RecordingOptions,
+    ) -> Result<Self, RequestError> {
+        Self::new_with_scale(target, region, options, OutputScale::Fit)
+    }
+
+    pub fn new_with_scale(
+        target: CaptureTarget,
+        region: ScreenRect,
+        options: RecordingOptions,
+        scale: OutputScale,
     ) -> Result<Self, RequestError> {
         target.validate()?;
         validate_physical_rect(region)?;
@@ -219,11 +247,13 @@ impl RecordingRequest {
             }
             CaptureIdentity::Window { .. } | CaptureIdentity::Display { .. } => {}
         }
-        let canvas = CanvasSize::fit(region.width, region.height)?;
+        let fitted = CanvasSize::fit(region.width, region.height)?;
+        let canvas = fitted.scaled(scale)?;
         Ok(Self {
             target,
             region,
             canvas,
+            scale,
             options,
         })
     }
@@ -238,6 +268,19 @@ impl RecordingRequest {
 
     pub const fn canvas(&self) -> CanvasSize {
         self.canvas
+    }
+
+    pub const fn scale(&self) -> OutputScale {
+        self.scale
+    }
+
+    /// Dimensions written by the selected encoder. MP4 pads odd dimensions by
+    /// one pixel to satisfy Media Foundation's NV12 layout requirements.
+    pub const fn encoded_dimensions(&self) -> (u32, u32) {
+        match self.options.format() {
+            RecordingFormat::Gif => (self.canvas.width(), self.canvas.height()),
+            RecordingFormat::Mp4 => self.canvas.mp4_padded_dimensions(),
+        }
     }
 
     pub const fn options(&self) -> RecordingOptions {
@@ -282,6 +325,11 @@ impl CanvasSize {
         Self::new(fitted_width, fitted_height)
     }
 
+    fn scaled(self, scale: OutputScale) -> Result<Self, RequestError> {
+        let divisor = scale.divisor();
+        Self::new(self.width.div_ceil(divisor), self.height.div_ceil(divisor))
+    }
+
     pub fn new(width: u32, height: u32) -> Result<Self, RequestError> {
         if width == 0 || height == 0 || width > MAX_CANVAS_WIDTH || height > MAX_CANVAS_HEIGHT {
             return Err(RequestError::CanvasOutOfBounds);
@@ -308,6 +356,10 @@ impl CanvasSize {
 
     pub const fn rgba_bytes(self) -> usize {
         self.rgba_bytes
+    }
+
+    pub const fn mp4_padded_dimensions(self) -> (u32, u32) {
+        (self.width + self.width % 2, self.height + self.height % 2)
     }
 
     pub fn allocate_rgba(self) -> Result<Vec<u8>, FrameError> {

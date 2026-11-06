@@ -574,6 +574,9 @@ impl super::LauncherApp {
         self.ensure_color_pick_does_not_own_root()?;
         match self.screen_draw_controller.state() {
             ScreenDrawState::NoSession | ScreenDrawState::Failed { .. } => {
+                if let Some(reason) = self.recording_capture_conflict() {
+                    return Err(reason.into());
+                }
                 self.screen_draw_controller
                     .request_start()
                     .map_err(|error| error.to_string())?;
@@ -611,6 +614,9 @@ impl super::LauncherApp {
 
     pub(super) fn request_new_screen_draw_capture(&mut self) -> Result<(), String> {
         self.ensure_color_pick_does_not_own_root()?;
+        if let Some(reason) = self.recording_capture_conflict() {
+            return Err(reason.into());
+        }
         self.cancel_screen_draw_region_picker();
         self.clear_screen_draw_toolbar_native_bridge();
         self.screen_draw_controller

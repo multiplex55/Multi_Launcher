@@ -34,6 +34,7 @@ struct SharedOverlayClient {
     /// terminal shutdown.  In particular, shutdown cannot race a replacement
     /// worker into existence.
     service: Mutex<OverlayServiceState>,
+    selector_dispatch_control: Mutex<()>,
     factory: OverlayServiceFactory,
     next_id: AtomicU64,
     active_id: AtomicU64,
@@ -45,6 +46,8 @@ struct SharedOverlayClient {
     discarded_screen_draw_ids: Mutex<HashSet<OperationId>>,
     general_ocr_control: Mutex<()>,
     general_ocr_events: Mutex<GeneralOcrEventOwner>,
+    recording_region_control: Mutex<()>,
+    recording_region_events: Mutex<RecordingRegionEventOwner>,
     #[cfg(test)]
     pending_native_events_for_test: Mutex<VecDeque<VisualOverlayEvent>>,
 }
@@ -85,6 +88,30 @@ struct GeneralOcrEventOwner {
     retired_id: Option<OperationId>,
     events: VecDeque<VisualOverlayEvent>,
 }
+
+#[derive(Default)]
+struct RecordingRegionEventOwner {
+    operation_id: Option<OperationId>,
+    events: VecDeque<VisualOverlayEvent>,
+    retired_ids: VecDeque<OperationId>,
+}
+
+impl RecordingRegionEventOwner {
+    fn owns(&self, id: OperationId) -> bool {
+        self.operation_id == Some(id)
+    }
+
+    fn retire(&mut self, id: OperationId) {
+        if self.operation_id == Some(id) {
+            self.operation_id = None;
+        }
+        self.events.retain(|event| event_operation_id(event) != id);
+        if self.retired_ids.len() == PINBOARD_RETIRED_OPERATION_LIMIT {
+            self.retired_ids.pop_front();
+        }
+        self.retired_ids.push_back(id);
+    }
+}
 impl GeneralOcrEventOwner {
     fn owns(&self, id: OperationId) -> bool {
         self.current_id == Some(id) || self.retired_id == Some(id)
@@ -117,6 +144,17 @@ impl fmt::Display for GeneralOcrSelectionBusy {
 }
 impl std::error::Error for GeneralOcrSelectionBusy {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecordingRegionSelectionBusy;
+
+impl fmt::Display for RecordingRegionSelectionBusy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the recording region selector is still awaiting native cleanup")
+    }
+}
+
+impl std::error::Error for RecordingRegionSelectionBusy {}
+
 struct OverlayServiceState {
     service: Option<NativeVisualOverlayService>,
     terminal_shutdown: bool,
@@ -147,21 +185,30 @@ impl SharedVisualOverlayController {
             service.shutdown_and_join();
         }
         self.set_active_id(0);
+        if let Ok(mut owner) = self.0.recording_region_events.lock()
+            && let Some(id) = owner.operation_id
+        {
+            owner.retire(id);
+        }
+        self.sync_exclusive_owner();
         Some(true)
     }
     fn set_active_id(&self, id: OperationId) {
         self.0.active_id.store(id, Ordering::Release);
-        crate::hotkey::launcher_invocation::set_exclusive_owner(
-            crate::hotkey::launcher_invocation::ExclusiveOwner::VisualSelection,
-            id != 0,
-        );
+        self.sync_exclusive_owner();
     }
 
     fn sync_exclusive_owner(&self) {
+        let recording_region_pending = self
+            .0
+            .recording_region_events
+            .lock()
+            .is_ok_and(|owner| owner.operation_id.is_some());
         crate::hotkey::launcher_invocation::set_exclusive_owner(
             crate::hotkey::launcher_invocation::ExclusiveOwner::VisualSelection,
             self.0.active_id.load(Ordering::Acquire) != 0
-                || self.0.pinboard_selection_id.load(Ordering::Acquire) != 0,
+                || self.0.pinboard_selection_id.load(Ordering::Acquire) != 0
+                || recording_region_pending,
         );
     }
     /// Creates the production owner.  This is deliberately visible only to the
@@ -191,6 +238,7 @@ impl SharedVisualOverlayController {
                 service,
                 terminal_shutdown: false,
             }),
+            selector_dispatch_control: Mutex::new(()),
             factory,
             next_id: AtomicU64::new(1),
             active_id: AtomicU64::new(0),
@@ -202,6 +250,8 @@ impl SharedVisualOverlayController {
             discarded_screen_draw_ids: Mutex::new(HashSet::new()),
             general_ocr_control: Mutex::new(()),
             general_ocr_events: Mutex::new(GeneralOcrEventOwner::default()),
+            recording_region_control: Mutex::new(()),
+            recording_region_events: Mutex::new(RecordingRegionEventOwner::default()),
             #[cfg(test)]
             pending_native_events_for_test: Mutex::new(VecDeque::new()),
         }))
@@ -302,6 +352,42 @@ impl SharedVisualOverlayController {
         }
     }
     fn send_with_recovery(&self, id: OperationId, command: VisualOverlayCommand) -> OperationId {
+        let _dispatch = self.0.selector_dispatch_control.lock().unwrap();
+        self.send_with_recovery_serialized(id, command)
+    }
+
+    fn send_with_recovery_serialized(
+        &self,
+        id: OperationId,
+        command: VisualOverlayCommand,
+    ) -> OperationId {
+        let incoming_is_recording = matches!(
+            &command,
+            VisualOverlayCommand::BeginRectanglePick {
+                purpose: RectanglePurpose::RecordingRegion,
+                ..
+            }
+        );
+        let recorder_owner = self.0.recording_region_events.lock().unwrap();
+        let recorder_operation = recorder_owner.operation_id;
+        let recorder_conflict = recorder_operation.filter(|owned| *owned != id);
+        drop(recorder_owner);
+        if let Some(owned) = recorder_conflict {
+            return self.finish_dispatch(
+                id,
+                Vec::new(),
+                Some(format!(
+                    "Recording region selector operation {owned} still owns the shared selector"
+                )),
+            );
+        }
+        if incoming_is_recording && self.other_selector_owner(id).is_some() {
+            return self.finish_dispatch(
+                id,
+                Vec::new(),
+                Some("Another visual selector owns the shared screen selection".into()),
+            );
+        }
         let mut buffered = Vec::new();
         let failure = {
             let mut state = self.0.service.lock().unwrap();
@@ -386,6 +472,31 @@ impl SharedVisualOverlayController {
             }
         };
         self.finish_dispatch(id, buffered, failure)
+    }
+
+    fn other_selector_owner(&self, expected: OperationId) -> Option<OperationId> {
+        let active = self.0.active_id.load(Ordering::Acquire);
+        if active != 0 && active != expected {
+            return Some(active);
+        }
+        let screen_draw = self.0.screen_draw_id.load(Ordering::Acquire);
+        if screen_draw != 0 && screen_draw != expected {
+            return Some(screen_draw);
+        }
+        let pinboard = self.0.pinboard_selection_id.load(Ordering::Acquire);
+        if pinboard != 0 && pinboard != expected {
+            return Some(pinboard);
+        }
+        let ocr = self.0.general_ocr_events.lock().unwrap();
+        if let Some(id) = ocr
+            .current_id
+            .into_iter()
+            .chain(ocr.retired_id)
+            .find(|id| *id != expected)
+        {
+            return Some(id);
+        }
+        None
     }
     fn finish_dispatch(
         &self,
@@ -691,6 +802,96 @@ impl SharedVisualOverlayController {
             },
         ))
     }
+
+    /// Starts the recorder's bounded selector route. Its identity remains
+    /// owned until the UI consumes the single terminal event after native
+    /// overlay cleanup, even when the macro editor polls first.
+    pub(crate) fn begin_recording_region_rectangle_pick(
+        &self,
+        virtual_desktop: ScreenRect,
+    ) -> Result<OperationId, RecordingRegionSelectionBusy> {
+        let _dispatch = self.0.selector_dispatch_control.lock().unwrap();
+        let _control = self.0.recording_region_control.lock().unwrap();
+        let id = {
+            let mut owner = self.0.recording_region_events.lock().unwrap();
+            if owner.operation_id.is_some() {
+                return Err(RecordingRegionSelectionBusy);
+            }
+            let id = self.allocate();
+            owner.operation_id = Some(id);
+            id
+        };
+        Ok(self.send_with_recovery_serialized(
+            id,
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose: RectanglePurpose::RecordingRegion,
+                virtual_desktop,
+            },
+        ))
+    }
+
+    pub(crate) fn cancel_recording_region_operation(&self, expected: OperationId) {
+        let _control = self.0.recording_region_control.lock().unwrap();
+        if self
+            .0
+            .recording_region_events
+            .lock()
+            .unwrap()
+            .owns(expected)
+        {
+            self.cancel_operation(expected);
+        }
+    }
+
+    pub(crate) fn poll_recording_region_rectangle_event(
+        &self,
+        expected: OperationId,
+    ) -> Option<VisualOverlayEvent> {
+        let _control = self.0.recording_region_control.lock().unwrap();
+        self.receive_into_editor();
+        let service_stopped = self.0.service.lock().is_ok_and(|state| {
+            state
+                .service
+                .as_ref()
+                .is_none_or(|service| service.is_finished())
+        });
+        if service_stopped {
+            // A finished worker may have sent its terminal after the first
+            // nonblocking drain. Give that real event one final chance before
+            // settling the exact owner as unavailable.
+            self.receive_into_editor();
+        }
+        let mut owner = self.0.recording_region_events.lock().unwrap();
+        if !owner.owns(expected) {
+            return None;
+        }
+        let position = owner
+            .events
+            .iter()
+            .position(|event| event_operation_id(event) == expected);
+        let event = position
+            .and_then(|index| owner.events.remove(index))
+            .or_else(|| {
+                service_stopped.then(|| VisualOverlayEvent::Error {
+                    operation_id: expected,
+                    error: VisualOverlayError {
+                        kind: OverlayErrorKind::Platform,
+                        message: "visual overlay worker stopped before completing recording region selection".into(),
+                    },
+                })
+            });
+        if event.is_some() {
+            owner.retire(expected);
+            drop(owner);
+            let _ =
+                self.0
+                    .active_id
+                    .compare_exchange(expected, 0, Ordering::AcqRel, Ordering::Acquire);
+            self.sync_exclusive_owner();
+        }
+        event
+    }
     pub fn begin_point_pick(
         &self,
         request: super::visual_overlay::VisualPointRequest,
@@ -780,6 +981,29 @@ impl SharedVisualOverlayController {
             0 => None,
             id => Some(id),
         }
+    }
+
+    /// True while any visual selector is active or its purpose-specific owner
+    /// is still waiting to consume terminal cleanup acknowledgement.
+    pub(crate) fn has_pending_selector(&self) -> bool {
+        if self.0.active_id.load(Ordering::Acquire) != 0
+            || self.0.pinboard_selection_id.load(Ordering::Acquire) != 0
+            || self.0.screen_draw_id.load(Ordering::Acquire) != 0
+        {
+            return true;
+        }
+        if self
+            .0
+            .recording_region_events
+            .lock()
+            .is_ok_and(|owner| owner.operation_id.is_some())
+        {
+            return true;
+        }
+        self.0
+            .general_ocr_events
+            .lock()
+            .is_ok_and(|owner| owner.current_id.is_some() || owner.retired_id.is_some())
     }
     pub fn cancel_operation(&self, expected_operation_id: OperationId) {
         if self
@@ -880,6 +1104,22 @@ impl SharedVisualOverlayController {
             }
         }
         {
+            let mut owner = self.0.recording_region_events.lock().unwrap();
+            if owner.owns(id) {
+                if !owner
+                    .events
+                    .iter()
+                    .any(|queued| event_operation_id(queued) == id)
+                {
+                    owner.events.push_back(event);
+                }
+                return;
+            }
+            if owner.retired_ids.contains(&id) {
+                return;
+            }
+        }
+        {
             let mut owner = self.0.general_ocr_events.lock().unwrap();
             if owner.owns(id) {
                 // Each OCR rectangle operation has one terminal event. Ignore
@@ -894,12 +1134,12 @@ impl SharedVisualOverlayController {
                 return;
             }
         }
-        // Confirmation carries its purpose, allowing abandoned OCR confirms to
-        // be quarantined even after their identity has been consumed.
+        // Confirmation carries its purpose, allowing abandoned owned confirms
+        // to be quarantined even after their identity has been consumed.
         if matches!(
             event,
             VisualOverlayEvent::RectangleConfirmed {
-                purpose: RectanglePurpose::GeneralOcrCapture,
+                purpose: RectanglePurpose::GeneralOcrCapture | RectanglePurpose::RecordingRegion,
                 ..
             }
         ) {
@@ -1511,6 +1751,78 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn recording_rectangle_terminal_stays_owned_when_editor_polls_first() {
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let desktop = ScreenRect::new(-1920, -240, 3840, 1320);
+        let operation_id = fixture
+            .controller
+            .begin_recording_region_rectangle_pick(desktop)
+            .unwrap();
+        fixture.observer.wait_for_commands(1);
+        assert!(matches!(
+            fixture.observer.commands.lock().unwrap()[0],
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose: RectanglePurpose::RecordingRegion,
+                virtual_desktop,
+            } if id == operation_id && virtual_desktop == desktop
+        ));
+
+        fixture.observer.confirm_rectangle(
+            operation_id,
+            crate::mkmacro::MkPoint { x: -1800, y: -100 },
+            crate::mkmacro::MkPoint { x: 300, y: 700 },
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            assert!(fixture.controller.poll().is_empty());
+            assert!(
+                fixture
+                    .controller
+                    .begin_recording_region_rectangle_pick(desktop)
+                    .is_err()
+            );
+            if let Some(event) = fixture
+                .controller
+                .poll_recording_region_rectangle_event(operation_id)
+            {
+                assert_eq!(
+                    event,
+                    VisualOverlayEvent::RectangleConfirmed {
+                        operation_id,
+                        purpose: RectanglePurpose::RecordingRegion,
+                        rect: ScreenRect::new(-1800, -100, 2100, 800),
+                    }
+                );
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            fixture
+                .controller
+                .poll_recording_region_rectangle_event(operation_id),
+            None
+        );
+        assert!(fixture.controller.poll().is_empty());
+
+        let abandoned = fixture
+            .controller
+            .begin_recording_region_rectangle_pick(desktop)
+            .unwrap();
+        fixture.observer.wait_for_commands(2);
+        fixture.controller.terminal_shutdown_for_test();
+        assert!(
+            fixture
+                .controller
+                .poll_recording_region_rectangle_event(abandoned)
+                .is_some_and(|event| event_operation_id(&event) == abandoned)
+        );
+        assert!(!fixture.controller.has_pending_selector());
     }
 
     #[test]

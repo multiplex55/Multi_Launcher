@@ -64,6 +64,40 @@ mod screen_draw_parser_tests {
 }
 
 #[cfg(test)]
+mod recording_parser_tests {
+    use super::*;
+
+    fn action(raw: &str, args: Option<&str>) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn recording_namespace_parses_only_open_and_stop() {
+        for (raw, expected) in [
+            ("record:open", RecordingCommand::Open),
+            ("RECORD:OPEN", RecordingCommand::Open),
+            ("Record:Stop", RecordingCommand::Stop),
+        ] {
+            let parsed = parse_action(&action(raw, None)).unwrap();
+            assert_eq!(parsed, Command::Recording(expected));
+            assert_eq!(parsed.domain(), "recording");
+            assert_eq!(parsed.kind_name(), expected.kind_name());
+        }
+        assert!(parse_action(&action("record:start", None)).is_err());
+        assert!(parse_action(&action("record:stop", Some("payload"))).is_err());
+        assert!(matches!(
+            parse_action(&action("recording:open", None)).unwrap(),
+            Command::External(_)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod brightness_legacy_protocol_tests {
     use super::*;
 
@@ -358,6 +392,28 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
             _ => PinboardCommand::Unknown { raw: raw.into() },
         };
         return Ok(Command::Pinboard(command));
+    }
+    if s.get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("record:"))
+    {
+        if action.args.is_some() {
+            return Err(CommandError::new(
+                "recording",
+                "Screen recording commands do not accept a payload",
+            )
+            .with_gui_failure_policy());
+        }
+        let command = match s[7..].to_ascii_lowercase().as_str() {
+            "open" => RecordingCommand::Open,
+            "stop" => RecordingCommand::Stop,
+            _ => {
+                return Err(
+                    CommandError::new("recording", "Unknown screen recording command")
+                        .with_gui_failure_policy(),
+                );
+            }
+        };
+        return Ok(Command::Recording(command));
     }
     if s == "qr:open" {
         return Ok(Command::Dialog(DialogCommand::Qr {

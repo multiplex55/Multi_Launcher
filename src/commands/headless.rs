@@ -391,6 +391,9 @@ fn execute_with_external(
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
         Command::Pinboard(_) => anyhow::bail!("pinboard commands require the launcher interface"),
+        Command::Recording(_) => {
+            anyhow::bail!("screen recording commands require the launcher interface")
+        }
         Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
         Command::PasteSequence(_) => {
             anyhow::bail!("paste sequence commands require the launcher interface")

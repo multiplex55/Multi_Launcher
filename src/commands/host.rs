@@ -259,6 +259,15 @@ pub trait ScreenDrawCommandHost {
     ) -> Result<(), String>;
 }
 
+pub trait RecordingCommandHost {
+    fn execute_recording_command(
+        &mut self,
+        _command: super::RecordingCommand,
+    ) -> Result<(), String> {
+        Err("screen recording commands require the launcher interface".into())
+    }
+}
+
 pub trait ClipboardModifyCommandHost {
     fn open_clipboard_modify(&mut self, section: ClipboardModifySectionPayload);
     fn undo_clipboard_modify(&mut self) -> Result<(), String>;
@@ -363,6 +372,7 @@ pub trait CommandHost:
     + DiffCommandHost
     + ScreenshotCommandHost
     + PinboardCommandHost
+    + RecordingCommandHost
     + ScreenDrawCommandHost
     + ClipboardModifyCommandHost
     + DataCommandHost
@@ -392,6 +402,7 @@ impl<T> CommandHost for T where
         + DiffCommandHost
         + ScreenshotCommandHost
         + PinboardCommandHost
+        + RecordingCommandHost
         + ScreenDrawCommandHost
         + ClipboardModifyCommandHost
         + DataCommandHost

@@ -86,6 +86,7 @@ mod query_history;
 mod query_observation;
 mod radial_actions;
 mod radial_editor;
+mod recording_dialog;
 mod regex_tester_dialog;
 mod render;
 mod screen_draw_restore;
@@ -170,12 +171,14 @@ pub(crate) use data_recovery_dialog::{
 pub use diff_dialog::DiffDialogState;
 pub use duplicate_finder_dialog::DuplicateFinderDialogState;
 pub use fav_dialog::FavDialog;
+pub(crate) use file_lock_dialog::{
+    FileLockDialogEffect, FileLockDialogState, FileLockRevealRequest,
+};
 pub use file_search_dialog::{
     FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand,
 };
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
 pub(crate) use folder_size_dialog::{FolderSizeDialogEffect, FolderSizeDialogState};
-pub(crate) use file_lock_dialog::{FileLockDialogEffect, FileLockDialogState, FileLockRevealRequest};
 pub use hash_generator_dialog::HashGeneratorDialogState;
 pub use image_compare_dialog::ImageCompareDialogState;
 pub use image_panel::ImagePanel;
@@ -786,6 +789,7 @@ pub enum Panel {
     FolderSizeDialog,
     FileLockDialog,
     ActivityDialog,
+    RecordingDialog,
 }
 
 impl Panel {
@@ -841,6 +845,7 @@ impl Panel {
             Self::FolderSizeDialog => "Folder Size",
             Self::FileLockDialog => "File Lock Inspector",
             Self::ActivityDialog => "Activity",
+            Self::RecordingDialog => "Screen Recorder",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
             Self::VolumeDialog => "Volume",
@@ -913,6 +918,7 @@ struct PanelStates {
     folder_size_dialog: bool,
     file_lock_dialog: bool,
     activity_dialog: bool,
+    recording_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
@@ -1039,6 +1045,8 @@ pub struct LauncherApp {
     /// Main-thread orchestration for Screen Draw. Native session resources are
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
+    pub(crate) recording_controller: crate::recording::RecordingController,
+    pub(crate) recording_dialog: recording_dialog::RecordingDialogState,
     pub(crate) coordinate_tool: coordinate_tool::CoordinateToolGui,
     coordinate_capture_parking: Option<coordinate_tool::CoordinatePickParking>,
     coordinate_capture_generation: u64,
@@ -3603,6 +3611,11 @@ impl LauncherApp {
                 Arc::clone(&plugins.internal_services().mkmacro_store),
             );
         let activity_center = crate::activity::ActivityCenter::new();
+        let recording_repaint_ctx = ctx.clone();
+        let recording_controller = crate::recording::RecordingController::new(
+            Arc::new(crate::recording::WindowsRecordingBackend),
+            move || recording_repaint_ctx.request_repaint_of(egui::ViewportId::ROOT),
+        );
         crate::mkmacro::runtime::attach_activity_center(activity_center.clone());
         #[cfg(test)]
         let hotfolder_runtime = match init_policy {
@@ -3668,6 +3681,8 @@ impl LauncherApp {
                 controller.set_recovery_bridge(Arc::clone(&screen_draw_recovery_bridge));
                 controller
             },
+            recording_controller,
+            recording_dialog: recording_dialog::RecordingDialogState::default(),
             coordinate_tool: coordinate_tool::CoordinateToolGui::new(
                 settings_path.clone(),
                 settings.coordinate_tool.clone(),
@@ -4577,6 +4592,14 @@ impl LauncherApp {
         visible: Option<bool>,
         restore: Option<bool>,
     ) -> u64 {
+        let visible = if visible == Some(false)
+            && self.egui_ctx.embed_viewports()
+            && self.recording_controller.has_active_job()
+        {
+            Some(true)
+        } else {
+            visible
+        };
         let revision = self
             .visibility_revision
             .request(|| {
@@ -4597,6 +4620,11 @@ impl LauncherApp {
     pub(crate) fn toggle_launcher_visibility(&self) -> bool {
         self.visibility_revision
             .request(|| {
+                if self.egui_ctx.embed_viewports() && self.recording_controller.has_active_job() {
+                    self.visible_flag.store(true, Ordering::SeqCst);
+                    self.restore_flag.store(true, Ordering::SeqCst);
+                    return true;
+                }
                 let next = !self.visible_flag.load(Ordering::SeqCst);
                 self.visible_flag.store(next, Ordering::SeqCst);
                 next
@@ -4612,7 +4640,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 66] = [
+    const TRACKED_PANELS: [Panel; 67] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4679,6 +4707,7 @@ impl LauncherApp {
         Panel::FolderSizeDialog,
         Panel::FileLockDialog,
         Panel::ActivityDialog,
+        Panel::RecordingDialog,
     ];
 
     fn is_panel_open(&self, panel: Panel) -> bool {
@@ -4733,6 +4762,7 @@ impl LauncherApp {
             Panel::FolderSizeDialog => self.folder_size_dialog.open,
             Panel::FileLockDialog => self.file_lock_dialog.open,
             Panel::ActivityDialog => self.activity_dialog.open,
+            Panel::RecordingDialog => self.recording_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
@@ -5087,6 +5117,7 @@ impl LauncherApp {
                 self.activity_dialog.close();
                 self.panel_states.activity_dialog = false;
             }
+            Panel::RecordingDialog => self.close_recording_setup(),
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -5394,6 +5425,7 @@ impl LauncherApp {
                 self.activity_dialog.close();
                 self.panel_states.activity_dialog = false;
             }
+            Panel::RecordingDialog => self.close_recording_setup(),
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -5572,6 +5604,7 @@ impl LauncherApp {
             Panel::FolderSizeDialog => self.folder_size_dialog.open(),
             Panel::FileLockDialog => self.file_lock_dialog.open = true,
             Panel::ActivityDialog => self.activity_dialog.open(),
+            Panel::RecordingDialog => self.recording_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
             Panel::BrightnessDialog => {

@@ -28,6 +28,7 @@ pub enum ActivityOwner {
     LivePin,
     Macro,
     FolderSize,
+    Recording,
 }
 
 impl ActivityOwner {
@@ -48,6 +49,7 @@ impl ActivityOwner {
             Self::LivePin => "Live pin capture",
             Self::Macro => "Macro playback",
             Self::FolderSize => "Folder Size",
+            Self::Recording => "Screen recording",
         }
     }
 }
@@ -143,6 +145,7 @@ pub enum ActivityOperation {
     CaptureLivePin,
     PlayMacro,
     MeasureFolderSize,
+    RecordScreenClip,
 }
 
 impl ActivityOperation {
@@ -179,6 +182,7 @@ impl ActivityOperation {
             Self::CaptureLivePin => "Capture live pin",
             Self::PlayMacro => "Play macro",
             Self::MeasureFolderSize => "Measure folder size",
+            Self::RecordScreenClip => "Record screen clip",
         }
     }
 }

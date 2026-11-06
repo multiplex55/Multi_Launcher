@@ -11403,6 +11403,9 @@ mod tests {
                     RectanglePurpose::PinboardCapture => {
                         panic!("PinboardCapture is owned by the pinboard workflow")
                     }
+                    RectanglePurpose::RecordingRegion => {
+                        panic!("RecordingRegion is owned by the standalone recorder workflow")
+                    }
                 };
                 self.editor
                     .request_rectangle_selection(MACRO_ID, purpose, destination)

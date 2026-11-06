@@ -58,6 +58,7 @@ use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::qr::QrPlugin;
 use crate::plugins::radial::RadialPlugin;
 use crate::plugins::random::RandomPlugin;
+use crate::plugins::recording::RecordingPlugin;
 use crate::plugins::recycle::RecyclePlugin;
 use crate::plugins::reddit::RedditPlugin;
 use crate::plugins::regex_tester::RegexTesterPlugin;
@@ -947,6 +948,7 @@ impl PluginManager {
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
         self.register_with_settings(PinboardPlugin, plugin_settings);
         self.register_with_settings(ScreenDrawPlugin, plugin_settings);
+        self.register_with_settings(RecordingPlugin, plugin_settings);
         self.register_with_settings(CropPlugin, plugin_settings);
         self.register_with_settings(DataPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);

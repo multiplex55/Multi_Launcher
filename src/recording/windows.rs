@@ -173,6 +173,12 @@ fn fit_rgba_frame(
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WindowsRecordingBackend;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecordingDisplayTarget {
+    pub(crate) target: super::CaptureTarget,
+    pub(crate) device_name: String,
+}
+
 #[cfg(windows)]
 impl RecordingBackend for WindowsRecordingBackend {
     fn create_source(
@@ -185,6 +191,74 @@ impl RecordingBackend for WindowsRecordingBackend {
             generation,
         )))
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn enumerate_recording_displays() -> Result<Vec<RecordingDisplayTarget>, String> {
+    native::enumerate_recording_displays()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn enumerate_recording_displays() -> Result<Vec<RecordingDisplayTarget>, String> {
+    Err("Windows display enumeration is available only on Windows".into())
+}
+
+#[cfg(windows)]
+pub(crate) fn describe_recording_window(
+    hwnd: usize,
+    process_id: u32,
+) -> Result<super::CaptureTarget, String> {
+    native::describe_recording_window(hwnd, process_id)
+}
+
+/// Rechecks the signed capture identity and physical bounds captured before
+/// the user chose an output path. The capture worker repeats this check when
+/// it acquires the native source.
+#[cfg(windows)]
+pub(crate) fn validate_recording_target(target: &super::CaptureTarget) -> Result<(), String> {
+    match target.identity() {
+        CaptureIdentity::Window {
+            hwnd,
+            process_id,
+            thread_id,
+        } => {
+            let current = describe_recording_window(*hwnd, *process_id)
+                .map_err(|_| "the selected window changed while choosing the output path")?;
+            if current.identity() != target.identity()
+                || current.target_bounds() != target.target_bounds()
+            {
+                return Err("the selected window changed while choosing the output path".into());
+            }
+            let CaptureIdentity::Window {
+                thread_id: current_thread,
+                ..
+            } = current.identity()
+            else {
+                return Err("the selected window changed while choosing the output path".into());
+            };
+            if current_thread != thread_id {
+                return Err("the selected window changed while choosing the output path".into());
+            }
+            Ok(())
+        }
+        CaptureIdentity::Display {
+            hmonitor,
+            device_name,
+        } => native::validate_display_target(*hmonitor, device_name, target.target_bounds()),
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn describe_recording_window(
+    _hwnd: usize,
+    _process_id: u32,
+) -> Result<super::CaptureTarget, String> {
+    Err("Windows window capture is available only on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn validate_recording_target(_target: &super::CaptureTarget) -> Result<(), String> {
+    Err("Windows recording targets are available only on Windows".into())
 }
 
 #[cfg(not(windows))]
@@ -216,6 +290,7 @@ mod native {
     use windows::Win32::Graphics::Direct3D11::{
         D3D11_BOX, D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
     };
+    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HMONITOR, MONITORINFOEXW,
@@ -340,6 +415,162 @@ mod native {
         bounds: ScreenRect,
     }
 
+    fn read_monitor_snapshot(hmonitor: HMONITOR) -> Result<MonitorSnapshot, String> {
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if !unsafe { GetMonitorInfoW(hmonitor, (&mut info as *mut MONITORINFOEXW).cast()) }
+            .as_bool()
+        {
+            return Err("could not query the selected display identity".into());
+        }
+        let name_end = info
+            .szDevice
+            .iter()
+            .position(|character| *character == 0)
+            .unwrap_or(info.szDevice.len());
+        let device_name = String::from_utf16(&info.szDevice[..name_end])
+            .map_err(|_| "selected display device name is malformed")?;
+        if device_name.is_empty() {
+            return Err("selected display has an empty device name".into());
+        }
+        let rect = info.monitorInfo.rcMonitor;
+        let width = u32::try_from(i64::from(rect.right) - i64::from(rect.left))
+            .map_err(|_| "selected display has invalid physical bounds")?;
+        let height = u32::try_from(i64::from(rect.bottom) - i64::from(rect.top))
+            .map_err(|_| "selected display has invalid physical bounds")?;
+        let bounds = ScreenRect::new(rect.left, rect.top, width, height);
+        bounds
+            .validate_capture()
+            .map_err(|_| "selected display has invalid physical bounds")?;
+        Ok(MonitorSnapshot {
+            hmonitor: hmonitor.0 as usize,
+            device_name,
+            bounds,
+        })
+    }
+
+    pub(super) fn enumerate_recording_displays() -> Result<Vec<RecordingDisplayTarget>, String> {
+        struct Search {
+            snapshots: Vec<MonitorSnapshot>,
+            error: Option<String>,
+        }
+
+        unsafe extern "system" fn enumerate_monitor(
+            hmonitor: HMONITOR,
+            _hdc: windows::Win32::Graphics::Gdi::HDC,
+            _rect: *mut windows::Win32::Foundation::RECT,
+            data: LPARAM,
+        ) -> BOOL {
+            // SAFETY: EnumDisplayMonitors invokes this callback synchronously
+            // while the stack-owned Search remains alive.
+            let search = unsafe { &mut *(data.0 as *mut Search) };
+            match read_monitor_snapshot(hmonitor) {
+                Ok(snapshot) => search.snapshots.push(snapshot),
+                Err(error) => {
+                    search.error = Some(error);
+                    return BOOL(0);
+                }
+            }
+            BOOL(1)
+        }
+
+        let mut search = Search {
+            snapshots: Vec::new(),
+            error: None,
+        };
+        let enumerated = unsafe {
+            EnumDisplayMonitors(
+                None,
+                None,
+                Some(enumerate_monitor),
+                LPARAM((&mut search as *mut Search) as isize),
+            )
+        }
+        .as_bool();
+        if let Some(error) = search.error {
+            return Err(error);
+        }
+        if !enumerated {
+            return Err("Windows display enumeration failed".into());
+        }
+        search.snapshots.sort_by(|left, right| {
+            left.device_name
+                .to_ascii_lowercase()
+                .cmp(&right.device_name.to_ascii_lowercase())
+        });
+        search
+            .snapshots
+            .into_iter()
+            .map(|snapshot| {
+                let target = super::super::CaptureTarget::display(
+                    snapshot.hmonitor,
+                    snapshot.device_name.clone(),
+                    snapshot.bounds,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(RecordingDisplayTarget {
+                    target,
+                    device_name: snapshot.device_name,
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn describe_recording_window(
+        hwnd_value: usize,
+        expected_process_id: u32,
+    ) -> Result<super::super::CaptureTarget, String> {
+        let hwnd = HWND(hwnd_value as *mut core::ffi::c_void);
+        if hwnd_value == 0 {
+            return Err("the selected window is no longer available".into());
+        }
+        let read_identity = || {
+            if !unsafe { IsWindow(hwnd).as_bool() } {
+                return Err("the selected window is no longer available".to_owned());
+            }
+            let mut process_id = 0;
+            let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+            if thread_id == 0 {
+                return Err("could not query the selected window identity".to_owned());
+            }
+            Ok((process_id, thread_id))
+        };
+        let before = read_identity()?;
+        if before.0 != expected_process_id {
+            return Err("the selected window identity changed".into());
+        }
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut rect as *mut windows::Win32::Foundation::RECT).cast(),
+                std::mem::size_of::<windows::Win32::Foundation::RECT>() as u32,
+            )
+        }
+        .map_err(|error| format!("could not query physical window bounds: {error}"))?;
+        let after = read_identity()?;
+        if after != before || after.0 != expected_process_id {
+            return Err("the selected window identity changed while reading its bounds".into());
+        }
+        let width = u32::try_from(i64::from(rect.right) - i64::from(rect.left))
+            .map_err(|_| "the selected window has invalid physical bounds")?;
+        let height = u32::try_from(i64::from(rect.bottom) - i64::from(rect.top))
+            .map_err(|_| "the selected window has invalid physical bounds")?;
+        let target = super::super::CaptureTarget::window(
+            hwnd_value,
+            after.0,
+            after.1,
+            ScreenRect::new(rect.left, rect.top, width, height),
+        )
+        .map_err(|error| error.to_string())?;
+        let final_identity = read_identity()?;
+        if final_identity != after {
+            return Err("the selected window identity changed after reading its bounds".into());
+        }
+        Ok(target)
+    }
+
     fn target_identity(request: &RecordingRequest) -> CaptureTargetIdentity {
         match request.target().identity() {
             CaptureIdentity::Window {
@@ -390,51 +621,13 @@ mod native {
             if hmonitor != search.target {
                 return BOOL(1);
             }
-            let mut info = MONITORINFOEXW::default();
-            info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
-            if !unsafe { GetMonitorInfoW(hmonitor, (&mut info as *mut MONITORINFOEXW).cast()) }
-                .as_bool()
-            {
-                search.error = Some("could not query the selected display identity".into());
-                return BOOL(0);
-            }
-            let name_end = info
-                .szDevice
-                .iter()
-                .position(|character| *character == 0)
-                .unwrap_or(info.szDevice.len());
-            let device_name = match String::from_utf16(&info.szDevice[..name_end]) {
-                Ok(name) if !name.is_empty() => name,
-                Ok(_) => {
-                    search.error = Some("selected display has an empty device name".into());
+            match read_monitor_snapshot(hmonitor) {
+                Ok(snapshot) => search.result = Some(snapshot),
+                Err(error) => {
+                    search.error = Some(error);
                     return BOOL(0);
                 }
-                Err(_) => {
-                    search.error = Some("selected display device name is malformed".into());
-                    return BOOL(0);
-                }
-            };
-            let rect = info.monitorInfo.rcMonitor;
-            let width = i64::from(rect.right) - i64::from(rect.left);
-            let height = i64::from(rect.bottom) - i64::from(rect.top);
-            let Ok(width) = u32::try_from(width) else {
-                search.error = Some("selected display has invalid physical bounds".into());
-                return BOOL(0);
-            };
-            let Ok(height) = u32::try_from(height) else {
-                search.error = Some("selected display has invalid physical bounds".into());
-                return BOOL(0);
-            };
-            let bounds = ScreenRect::new(rect.left, rect.top, width, height);
-            if bounds.validate_capture().is_err() {
-                search.error = Some("selected display has invalid physical bounds".into());
-                return BOOL(0);
             }
-            search.result = Some(MonitorSnapshot {
-                hmonitor: hmonitor.0 as usize,
-                device_name,
-                bounds,
-            });
             BOOL(0)
         }
 
@@ -460,6 +653,20 @@ mod native {
             return Err("Windows display enumeration failed".into());
         }
         Ok(search.result)
+    }
+
+    pub(super) fn validate_display_target(
+        hmonitor: usize,
+        expected_device_name: &str,
+        expected_bounds: ScreenRect,
+    ) -> Result<(), String> {
+        let Some(current) = monitor_snapshot_for(hmonitor)? else {
+            return Err("the selected display changed while choosing the output path".into());
+        };
+        if current.device_name != expected_device_name || current.bounds != expected_bounds {
+            return Err("the selected display changed while choosing the output path".into());
+        }
+        Ok(())
     }
 
     fn expected_display(request: &RecordingRequest) -> Option<MonitorSnapshot> {

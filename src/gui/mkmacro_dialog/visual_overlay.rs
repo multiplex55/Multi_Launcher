@@ -172,6 +172,7 @@ pub enum PointInteractionPhase {
 pub enum RectanglePurpose {
     CropScreenshot,
     GeneralOcrCapture,
+    RecordingRegion,
     ScreenDrawExport,
     SearchRegion,
     ReferenceImageCapture,

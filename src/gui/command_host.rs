@@ -7,10 +7,10 @@ use crate::commands::{
     DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
     HeadlessCommandHost, HistoryPolicy, JsonUtilityCommandHost, LauncherCommandHost,
     MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    PinboardCommandHost, QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost,
-    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDelay, ScreenshotDestination,
-    ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
-    XmlToolkitCommandHost,
+    PinboardCommandHost, QueryPolicy, RadialCommandHost, RecordingCommandHost, ResultsPolicy,
+    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDelay,
+    ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
+    VisibilityPolicy, XmlToolkitCommandHost,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -194,6 +194,32 @@ impl ScreenDrawCommandHost for LauncherApp {
                 .request_clear()
                 .map_err(|error| error.to_string()),
             ScreenDrawCommand::Close => self.close_screen_draw_session(),
+        }
+    }
+}
+
+impl RecordingCommandHost for LauncherApp {
+    fn execute_recording_command(
+        &mut self,
+        command: crate::commands::RecordingCommand,
+    ) -> Result<(), String> {
+        match command {
+            crate::commands::RecordingCommand::Open => {
+                self.open_recording_setup();
+                Ok(())
+            }
+            crate::commands::RecordingCommand::Stop => {
+                let generation = self
+                    .recording_controller
+                    .snapshot()
+                    .active_generation
+                    .ok_or_else(|| "No recording is active".to_owned())?;
+                if self.recording_controller.stop_generation(generation)? {
+                    Ok(())
+                } else {
+                    Err("The recording is not accepting Stop".into())
+                }
+            }
         }
     }
 }
@@ -1030,6 +1056,9 @@ impl ScreenshotCommandHost for LauncherApp {
         destination: ScreenshotDestination,
         markup: ScreenshotMarkup,
     ) -> Result<ScreenshotCommandResult, String> {
+        if let Some(reason) = self.recording_capture_conflict() {
+            return Err(reason.into());
+        }
         let mode = match mode {
             ScreenshotMode::Window => crate::actions::screenshot::Mode::Window,
             ScreenshotMode::Region => crate::actions::screenshot::Mode::Region,

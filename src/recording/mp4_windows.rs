@@ -279,13 +279,7 @@ struct Nv12Layout {
 
 impl Nv12Layout {
     fn for_canvas(canvas: CanvasSize) -> Result<Self, Mp4RecordingError> {
-        let width = canvas
-            .width()
-            .checked_add(canvas.width() % 2)
-            .ok_or(Mp4RecordingError::InvalidInput("MP4 width overflow".into()))?;
-        let height = canvas.height().checked_add(canvas.height() % 2).ok_or(
-            Mp4RecordingError::InvalidInput("MP4 height overflow".into()),
-        )?;
+        let (width, height) = canvas.mp4_padded_dimensions();
         if width > super::MAX_CANVAS_WIDTH || height > super::MAX_CANVAS_HEIGHT {
             return Err(Mp4RecordingError::InvalidInput(
                 "the MP4 padded dimensions exceed the recording canvas limit".into(),
@@ -933,7 +927,7 @@ impl Mp4Recording {
             self.acknowledged_inputs,
             finalized,
         );
-        result.map_err(|error| Mp4RecordingError::Publication(error.to_string()))
+        result.map_err(Mp4RecordingError::Publication)
     }
 
     pub(crate) fn discard(mut self) -> Result<(), Mp4RecordingError> {
@@ -1062,7 +1056,7 @@ pub(crate) enum Mp4RecordingError {
     Native(String),
     Stage(String),
     Session(RecordingSessionError),
-    Publication(String),
+    Publication(RecordingOutputError),
     UnsupportedFormat,
     InvalidTransition,
     InvalidInput(String),
@@ -1079,8 +1073,8 @@ impl std::fmt::Display for Mp4RecordingError {
             Self::Capability(message)
             | Self::Native(message)
             | Self::Stage(message)
-            | Self::Publication(message)
             | Self::InvalidInput(message) => formatter.write_str(message),
+            Self::Publication(error) => error.fmt(formatter),
             Self::Session(error) => error.fmt(formatter),
             Self::UnsupportedFormat => {
                 formatter.write_str("this recording output only accepts MP4 requests")
