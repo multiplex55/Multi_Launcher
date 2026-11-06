@@ -6,6 +6,7 @@ use super::jump_mode::ui::{
     batch_rename_confirmation_layer_id,
 };
 use super::jump_mode::{SurfaceId, TargetGeneration};
+use super::search_replace_dialog::{SearchReplaceHostActions, SearchReplaceInteractionCheckpoint};
 use super::utility_dialog_size::{
     apply_native_utility_geometry_restore, close_native_utility_geometry_viewport,
 };
@@ -13,41 +14,66 @@ use super::utility_host::{
     HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
 };
 use super::utility_window_geometry::NativeViewportIdentity;
-use super::{BatchRenameDialogState, BatchRenameUiCommand};
+use super::{
+    BatchRenameDialogState, BatchRenameUiCommand, SearchReplaceDialogState, SearchReplaceUiCommand,
+};
 use crate::file_operations::RenameRuntimeSnapshot;
 
-const KEY: &str = "batch-rename";
-const SIZE: egui::Vec2 = egui::vec2(1040.0, 760.0);
-const MINIMUM: egui::Vec2 = egui::vec2(520.0, 360.0);
+pub(super) trait FileOperationDialog: Sized {
+    const KIND: NavigationDialogKind;
+    const KEY: &'static str;
+    const TITLE: &'static str;
+    const SIZE: egui::Vec2;
+    const MINIMUM: egui::Vec2;
+    const SCROLL_NATIVE_WINDOW: bool;
+    type Runtime;
+    type Actions;
+    type Checkpoint;
+    type Command: PartialEq;
 
-fn docked_layer() -> egui::LayerId {
-    NavigationDialogKind::BatchRename
-        .layer_id()
-        .expect("Batch Rename layer")
+    fn is_open(&self) -> bool;
+    fn session(&self) -> u64;
+    fn parent_targets_allowed(&self, runtime: &Self::Runtime) -> bool;
+    fn parent_input_allowed(&self) -> bool;
+    fn popup_layer(&self, ctx: &egui::Context, parent: egui::LayerId) -> Option<egui::LayerId>;
+    fn confirmation_binding(
+        &self,
+        viewport: egui::ViewportId,
+        instance: u64,
+    ) -> Option<NavigationViewportBinding>;
+    fn capture(&self) -> Self::Checkpoint;
+    fn restore(&mut self, checkpoint: Self::Checkpoint);
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        owner: NavigationOwner,
+        parent_input: bool,
+        child_owner: NavigationOwner,
+        first: bool,
+        instance: u64,
+        runtime: &Self::Runtime,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions;
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation>;
+    fn closed_command() -> Self::Command;
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        hwnd: Option<usize>,
+    ) -> Vec<Self::Command>;
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)>;
 }
 
-fn viewport(session: u64) -> egui::ViewportId {
-    egui::ViewportId::from_hash_of((KEY, session))
-}
+pub(super) type BatchRenameWindowHost = FileOperationWindowHost<BatchRenameDialogState>;
+pub(super) type SearchReplaceWindowHost = FileOperationWindowHost<SearchReplaceDialogState>;
 
-fn title(session: u64) -> String {
-    format!("Batch Renamer — {session}")
-}
-
-fn geometry_identity(session: u64, host: HostIdentity) -> NativeViewportIdentity {
-    NativeViewportIdentity {
-        key: crate::settings::UtilityToolKey::parse(KEY).expect("Batch Rename geometry key"),
-        viewport_id: viewport(session),
-        owner_generation: session,
-        host_generation: host.generation,
-    }
-}
-
-#[derive(Default)]
-pub(super) struct BatchRenameWindowHost {
+pub(super) struct FileOperationWindowHost<D: FileOperationDialog> {
     state: UtilityHostState,
     native_session: Option<u64>,
-    pending: Option<HostFrame>,
+    pending: Option<HostFrame<D>>,
     deferred_close: Option<(u64, HostIdentity)>,
     native_jump: JumpModeUi,
     native_jump_frame: Option<u64>,
@@ -55,7 +81,22 @@ pub(super) struct BatchRenameWindowHost {
     pub(super) test_button: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
-struct HostFrame {
+impl<D: FileOperationDialog> Default for FileOperationWindowHost<D> {
+    fn default() -> Self {
+        Self {
+            state: UtilityHostState::default(),
+            native_session: None,
+            pending: None,
+            deferred_close: None,
+            native_jump: JumpModeUi::default(),
+            native_jump_frame: None,
+            #[cfg(test)]
+            test_button: None,
+        }
+    }
+}
+
+struct HostFrame<D: FileOperationDialog> {
     root: ViewportPassProvenance,
     owner: ViewportPassProvenance,
     host: HostIdentity,
@@ -63,8 +104,8 @@ struct HostFrame {
     first: bool,
     os_close: bool,
     close: bool,
-    actions: Option<BatchRenameHostActions>,
-    checkpoint: Option<BatchRenameInteractionCheckpoint>,
+    actions: Option<D::Actions>,
+    checkpoint: Option<D::Checkpoint>,
     native_info: Option<egui::ViewportInfo>,
     embedded_layer: Option<egui::LayerId>,
     embedded_focus: Option<egui::Id>,
@@ -85,12 +126,39 @@ pub(super) struct HostInput<'a> {
     pub root_scopes: (Option<&'a JumpModeScope>, Option<&'a JumpModeScope>),
 }
 
-pub(super) struct HostCompletion {
-    pub commands: Vec<BatchRenameUiCommand>,
+pub(super) struct HostCompletion<C> {
+    pub commands: Vec<C>,
     pub show_root: bool,
 }
 
-impl BatchRenameWindowHost {
+impl<D: FileOperationDialog> FileOperationWindowHost<D> {
+    fn docked_layer() -> egui::LayerId {
+        D::KIND.layer_id().expect("file-operation layer")
+    }
+
+    fn viewport(session: u64) -> egui::ViewportId {
+        egui::ViewportId::from_hash_of((D::KEY, session))
+    }
+
+    fn title(session: u64) -> String {
+        format!("{} — {session}", D::TITLE)
+    }
+
+    fn geometry_identity(session: u64, host: HostIdentity) -> NativeViewportIdentity {
+        NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse(D::KEY)
+                .expect("file-operation geometry key"),
+            viewport_id: Self::viewport(session),
+            owner_generation: session,
+            host_generation: host.generation,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_viewport(session: u64) -> egui::ViewportId {
+        Self::viewport(session)
+    }
+
     #[cfg(test)]
     pub(super) fn test_native_target(&self, label: &str) -> Option<egui::Rect> {
         self.native_jump
@@ -103,7 +171,7 @@ impl BatchRenameWindowHost {
 
     pub(super) fn root_layer(&self) -> Option<egui::LayerId> {
         if self.state.presentation() == UtilityPresentation::Docked {
-            Some(docked_layer())
+            Some(Self::docked_layer())
         } else {
             self.state.embedded_root_layer()
         }
@@ -117,6 +185,10 @@ impl BatchRenameWindowHost {
 
     pub(super) fn request_focus(&mut self) {
         self.state.request_focus();
+    }
+
+    pub(super) fn has_deferred_close(&self) -> bool {
+        self.deferred_close.is_some()
     }
 
     pub(super) fn configure_jump(&mut self, root: &JumpModeUi, enabled: bool) {
@@ -135,7 +207,7 @@ impl BatchRenameWindowHost {
 
     fn close_viewport(&mut self, ctx: &egui::Context) {
         if let Some(session) = self.native_session.take() {
-            let identity = geometry_identity(session, self.state.identity());
+            let identity = Self::geometry_identity(session, self.state.identity());
             close_native_utility_geometry_viewport(ctx, identity);
             ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
         }
@@ -149,11 +221,11 @@ impl BatchRenameWindowHost {
     pub(super) fn show(
         &mut self,
         ctx: &egui::Context,
-        dialog: &mut BatchRenameDialogState,
-        runtime: &RenameRuntimeSnapshot,
+        dialog: &mut D,
+        runtime: &D::Runtime,
         input: HostInput<'_>,
     ) {
-        if !dialog.open {
+        if !dialog.is_open() {
             if self.native_session.is_some() {
                 self.retire(ctx);
             }
@@ -161,7 +233,7 @@ impl BatchRenameWindowHost {
         }
         let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
         let host = self.state.identity();
-        let session = dialog.jump_mode_target_generation();
+        let session = dialog.session();
         let mut os_close = self.deferred_close.take() == Some((session, host));
         if let Some(previous) = self.pending.take()
             && previous.root.frame_nr == root.frame_nr
@@ -169,7 +241,7 @@ impl BatchRenameWindowHost {
             && previous.session == session
         {
             if let Some(checkpoint) = previous.checkpoint {
-                checkpoint.restore(dialog);
+                dialog.restore(checkpoint);
             }
             os_close |= previous.os_close;
         }
@@ -219,11 +291,11 @@ impl BatchRenameWindowHost {
                 self.native_session = Some(session);
                 self.state.request_focus();
             }
-            let id = viewport(session);
+            let id = Self::viewport(session);
             let builder = egui::ViewportBuilder::default()
-                .with_title(title(session))
-                .with_inner_size(SIZE)
-                .with_min_inner_size(MINIMUM)
+                .with_title(Self::title(session))
+                .with_inner_size(D::SIZE)
+                .with_min_inner_size(D::MINIMUM)
                 .with_resizable(true);
             ctx.show_viewport_immediate(id, builder, |child, class| {
                 let child_ctx = child.ctx().clone();
@@ -231,7 +303,7 @@ impl BatchRenameWindowHost {
                     class == egui::ViewportClass::Immediate && child_ctx.viewport_id() == id;
                 let child_first = child.current_pass_index() == 0;
                 if !child_first && let Some(checkpoint) = frame.checkpoint.take() {
-                    checkpoint.restore(dialog);
+                    dialog.restore(checkpoint);
                 }
                 frame.owner = ViewportPassProvenance::current(&child_ctx, child_ctx.viewport_id());
                 frame.first = first && child_first && !child_ctx.will_discard();
@@ -272,10 +344,7 @@ impl BatchRenameWindowHost {
         }
         #[cfg(test)]
         {
-            self.test_button = frame
-                .actions
-                .as_ref()
-                .and_then(|actions| actions.host_button);
+            self.test_button = frame.actions.as_ref().and_then(D::test_button);
         }
         self.pending = Some(frame);
     }
@@ -283,24 +352,24 @@ impl BatchRenameWindowHost {
     fn draw_native(
         &mut self,
         ctx: &egui::Context,
-        dialog: &mut BatchRenameDialogState,
-        runtime: &RenameRuntimeSnapshot,
-        frame: &mut HostFrame,
+        dialog: &mut D,
+        runtime: &D::Runtime,
+        frame: &mut HostFrame<D>,
         viewport: egui::ViewportId,
         input: bool,
         close_shortcut: bool,
     ) {
         let instance = frame.session;
-        let layer = docked_layer();
+        let layer = Self::docked_layer();
         let parent = NavigationViewportBinding {
             viewport,
             base_layer: layer,
             owner: NavigationOwner::Dialog {
-                kind: NavigationDialogKind::BatchRename,
+                kind: D::KIND,
                 instance,
             },
         };
-        let child = confirmation_binding(dialog, viewport, instance);
+        let child = dialog.confirmation_binding(viewport, instance);
         let binding = child.unwrap_or(parent);
         let native_frame = ctx.cumulative_frame_nr();
         if self.native_jump_frame != Some(native_frame) {
@@ -311,9 +380,10 @@ impl BatchRenameWindowHost {
             .native_jump
             .update_navigation_owner_for_viewport(ctx, binding, input);
         let jump_current = self.native_jump.is_enabled() && owner == binding.owner;
-        let popup_layer = dialog.owned_combo_layer(ctx, layer);
+        let popup_layer = dialog.popup_layer(ctx, layer);
         let parent_current = input
             && child.is_none()
+            && dialog.parent_input_allowed()
             && parent.base_is_current(ctx)
             && parent.focus_is_owned(ctx, popup_layer)
             && (!egui::Popup::is_any_open(ctx) || popup_layer.is_some());
@@ -330,31 +400,20 @@ impl BatchRenameWindowHost {
         self.native_jump
             .handle_viewport_input(ctx, jump_current, frame.first, viewport);
         self.native_jump.begin_ui_pass();
-        let surface = SurfaceId::dialog(KEY, instance);
+        let surface = SurfaceId::dialog(D::KEY, instance);
         let parent_scope =
-            (jump_current && child.is_none() && dialog.jump_mode_parent_targets_allowed())
+            (jump_current && child.is_none() && dialog.parent_targets_allowed(runtime))
                 .then(|| {
                     self.native_jump.scope_for_viewport_binding(
                         surface.clone(),
                         TargetGeneration(instance),
-                        "batch-rename/form",
+                        format!("{}/form", D::KEY),
                         binding,
                     )
                 })
                 .flatten();
-        let child_scope = if jump_current
-            && let NavigationOwner::BatchRenameConfirmation {
-                confirmation_instance,
-                kind,
-                ..
-            } = owner
-        {
-            self.native_jump.scope_for_viewport_binding(
-                SurfaceId::popup(kind.surface_kind(), confirmation_instance, surface),
-                TargetGeneration(confirmation_instance),
-                "batch-rename/confirmation",
-                binding,
-            )
+        let child_scope = if jump_current {
+            confirmation_scope(&self.native_jump, owner, binding, surface)
         } else {
             None
         };
@@ -368,13 +427,13 @@ impl BatchRenameWindowHost {
         {
             frame.close = true;
         }
-        egui::Window::new("Batch Renamer")
+        egui::Window::new(D::TITLE)
             .id(layer.id)
             .title_bar(false)
             .fixed_rect(ctx.content_rect())
             .movable(false)
             .resizable(false)
-            .vscroll(true)
+            .vscroll(D::SCROLL_NATIVE_WINDOW)
             .show(ctx, |ui| {
                 draw(
                     ctx,
@@ -390,7 +449,9 @@ impl BatchRenameWindowHost {
                 );
             });
         self.native_jump.finish_ui_pass();
-        let binding_after = confirmation_binding(dialog, viewport, instance).unwrap_or(parent);
+        let binding_after = dialog
+            .confirmation_binding(viewport, instance)
+            .unwrap_or(parent);
         if binding_after != binding {
             ctx.request_repaint_of(viewport);
         }
@@ -413,14 +474,17 @@ impl BatchRenameWindowHost {
     pub(super) fn complete(
         &mut self,
         ctx: &egui::Context,
-        dialog: &mut BatchRenameDialogState,
-    ) -> Option<HostCompletion> {
+        dialog: &mut D,
+    ) -> Option<HostCompletion<D::Command>> {
         let mut frame = self.pending.take()?;
-        let current = dialog.open
-            && frame.session == dialog.jump_mode_target_generation()
+        let current = dialog.is_open()
+            && frame.session == dialog.session()
             && frame.host == self.state.identity();
         if frame.os_close {
-            ctx.send_viewport_cmd_to(viewport(frame.session), egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd_to(
+                Self::viewport(frame.session),
+                egui::ViewportCommand::CancelClose,
+            );
         }
         if !current
             || !frame.first
@@ -432,7 +496,7 @@ impl BatchRenameWindowHost {
                     self.deferred_close = Some((frame.session, frame.host));
                 }
                 if let Some(checkpoint) = frame.checkpoint.take() {
-                    checkpoint.restore(dialog);
+                    dialog.restore(checkpoint);
                 }
                 ctx.request_repaint_of(frame.owner.viewport_id);
             }
@@ -442,7 +506,7 @@ impl BatchRenameWindowHost {
         if frame.close || frame.os_close {
             self.retire(ctx);
             return Some(HostCompletion {
-                commands: vec![BatchRenameUiCommand::Closed],
+                commands: vec![D::closed_command()],
                 show_root: false,
             });
         }
@@ -451,17 +515,17 @@ impl BatchRenameWindowHost {
         let native = frame
             .native_info
             .as_ref()
-            .map(|_| geometry_identity(frame.session, frame.host));
+            .map(|_| Self::geometry_identity(frame.session, frame.host));
         if let (Some(identity), Some(info)) = (native, frame.native_info.as_ref()) {
             apply_native_utility_geometry_restore(
                 ctx,
                 egui::ViewportClass::Immediate,
                 true,
-                &title(frame.session),
+                &Self::title(frame.session),
                 identity,
                 info,
-                SIZE,
-                Some(MINIMUM),
+                D::SIZE,
+                Some(D::MINIMUM),
                 None,
             );
         }
@@ -474,20 +538,14 @@ impl BatchRenameWindowHost {
             self.state.complete_focus(frame.host);
         }
         let actions = frame.actions.take()?;
-        let presentation = actions.host_request.map(|popout| {
-            if popout {
-                UtilityPresentation::Popout
-            } else {
-                UtilityPresentation::Docked
-            }
-        });
+        let presentation = D::host_request(&actions);
         #[cfg(windows)]
         let hwnd = super::utility_dialog_size::utility_picker_hwnd(ctx, native);
         #[cfg(not(windows))]
         let hwnd = None;
-        let commands = dialog.complete_host_actions(actions, hwnd);
+        let commands = dialog.complete_actions(actions, hwnd);
         let mut show_root = false;
-        if commands.contains(&BatchRenameUiCommand::Closed) {
+        if commands.contains(&D::closed_command()) {
             self.retire(ctx);
         } else if let Some(presentation) = presentation
             && presentation != frame.host.host
@@ -497,7 +555,7 @@ impl BatchRenameWindowHost {
             self.cancel_jump();
             show_root = presentation == UtilityPresentation::Docked;
             if show_root {
-                ctx.move_to_top(docked_layer());
+                ctx.move_to_top(Self::docked_layer());
             }
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
@@ -508,22 +566,44 @@ impl BatchRenameWindowHost {
     }
 }
 
-fn confirmation_binding(
-    dialog: &BatchRenameDialogState,
-    viewport: egui::ViewportId,
-    instance: u64,
-) -> Option<NavigationViewportBinding> {
-    dialog
-        .jump_mode_pending_confirmation_identity()
-        .map(|(confirmation_instance, kind)| NavigationViewportBinding {
-            viewport,
-            base_layer: batch_rename_confirmation_layer_id(instance, confirmation_instance, kind),
-            owner: NavigationOwner::BatchRenameConfirmation {
-                parent_instance: instance,
-                confirmation_instance,
-                kind,
-            },
-        })
+fn confirmation_scope(
+    jump: &JumpModeUi,
+    owner: NavigationOwner,
+    binding: NavigationViewportBinding,
+    parent: SurfaceId,
+) -> Option<JumpModeScope> {
+    let (instance, kind, namespace) = match owner {
+        NavigationOwner::BatchRenameConfirmation {
+            confirmation_instance,
+            kind,
+            ..
+        } => (
+            confirmation_instance,
+            kind.surface_kind(),
+            "batch-rename/confirmation".to_owned(),
+        ),
+        NavigationOwner::SearchReplaceConfirmation {
+            confirmation_instance,
+            kind,
+            subject,
+            ..
+        } => (
+            confirmation_instance,
+            kind.surface_kind(),
+            format!(
+                "search-replace/confirmation/{}/{:016x}",
+                kind.surface_kind(),
+                egui::Id::new(("search-replace-confirmation-subject", subject)).value()
+            ),
+        ),
+        _ => return None,
+    };
+    jump.scope_for_viewport_binding(
+        SurfaceId::popup(kind, instance, parent),
+        TargetGeneration(instance),
+        namespace,
+        binding,
+    )
 }
 
 fn consume_close(ctx: &egui::Context) -> bool {
@@ -533,16 +613,11 @@ fn consume_close(ctx: &egui::Context) -> bool {
     })
 }
 
-#[cfg(test)]
-pub(super) fn test_viewport(session: u64) -> egui::ViewportId {
-    viewport(session)
-}
-
-fn draw(
+fn draw<D: FileOperationDialog>(
     ctx: &egui::Context,
-    dialog: &mut BatchRenameDialogState,
-    runtime: &RenameRuntimeSnapshot,
-    frame: &mut HostFrame,
+    dialog: &mut D,
+    runtime: &D::Runtime,
+    frame: &mut HostFrame<D>,
     child_ui: Option<&mut egui::Ui>,
     scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
     owner: NavigationOwner,
@@ -553,8 +628,12 @@ fn draw(
     let allow = frame.first && !frame.os_close && !frame.close;
     let capture = allow
         && (parent_current || child_owner != NavigationOwner::Blocked)
-        && (scopes.0.is_some()
-            || scopes.1.is_some()
+        && (scopes
+            .0
+            .is_some_and(JumpModeScope::has_pending_focus_intent)
+            || scopes
+                .1
+                .is_some_and(JumpModeScope::has_pending_focus_intent)
             || ctx.input(|input| {
                 input.pointer.any_down()
                     || input.events.iter().any(|event| {
@@ -565,12 +644,11 @@ fn draw(
                     })
             }));
     if capture {
-        frame.checkpoint = Some(BatchRenameInteractionCheckpoint::capture(dialog));
+        frame.checkpoint = Some(dialog.capture());
     }
-    frame.actions = Some(dialog.ui_with_host(
+    frame.actions = Some(dialog.render_host(
         ctx,
-        scopes.0,
-        scopes.1,
+        scopes,
         owner,
         allow && parent_current,
         if allow {
@@ -579,9 +657,230 @@ fn draw(
             NavigationOwner::Blocked
         },
         allow,
-        Some(parent_instance),
+        parent_instance,
         runtime,
         child_ui,
-        frame.host.host == UtilityPresentation::Popout,
+        frame.host.host,
     ));
+}
+
+impl FileOperationDialog for BatchRenameDialogState {
+    const KIND: NavigationDialogKind = NavigationDialogKind::BatchRename;
+    const KEY: &'static str = "batch-rename";
+    const TITLE: &'static str = "Batch Renamer";
+    const SIZE: egui::Vec2 = egui::vec2(1040.0, 760.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(520.0, 360.0);
+    const SCROLL_NATIVE_WINDOW: bool = true;
+    type Runtime = RenameRuntimeSnapshot;
+    type Actions = BatchRenameHostActions;
+    type Checkpoint = BatchRenameInteractionCheckpoint;
+    type Command = BatchRenameUiCommand;
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.jump_mode_target_generation()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        self.jump_mode_parent_targets_allowed()
+    }
+    fn parent_input_allowed(&self) -> bool {
+        !self.jump_mode_has_pending_confirmation()
+    }
+    fn popup_layer(&self, ctx: &egui::Context, parent: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_combo_layer(ctx, parent)
+    }
+    fn confirmation_binding(
+        &self,
+        viewport: egui::ViewportId,
+        instance: u64,
+    ) -> Option<NavigationViewportBinding> {
+        self.jump_mode_pending_confirmation_identity()
+            .map(|(confirmation_instance, kind)| NavigationViewportBinding {
+                viewport,
+                base_layer: batch_rename_confirmation_layer_id(
+                    instance,
+                    confirmation_instance,
+                    kind,
+                ),
+                owner: NavigationOwner::BatchRenameConfirmation {
+                    parent_instance: instance,
+                    confirmation_instance,
+                    kind,
+                },
+            })
+    }
+    fn capture(&self) -> Self::Checkpoint {
+        BatchRenameInteractionCheckpoint::capture(self)
+    }
+    fn restore(&mut self, checkpoint: Self::Checkpoint) {
+        checkpoint.restore(self);
+    }
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        owner: NavigationOwner,
+        parent_input: bool,
+        child_owner: NavigationOwner,
+        first: bool,
+        instance: u64,
+        runtime: &Self::Runtime,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.ui_with_host(
+            ctx,
+            scopes.0,
+            scopes.1,
+            owner,
+            parent_input,
+            child_owner,
+            first,
+            Some(instance),
+            runtime,
+            child_ui,
+            presentation == UtilityPresentation::Popout,
+        )
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request.map(|popout| {
+            if popout {
+                UtilityPresentation::Popout
+            } else {
+                UtilityPresentation::Docked
+            }
+        })
+    }
+    fn closed_command() -> Self::Command {
+        BatchRenameUiCommand::Closed
+    }
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        hwnd: Option<usize>,
+    ) -> Vec<Self::Command> {
+        self.complete_host_actions(actions, hwnd)
+    }
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
+}
+
+impl FileOperationDialog for SearchReplaceDialogState {
+    const KIND: NavigationDialogKind = NavigationDialogKind::SearchReplace;
+    const KEY: &'static str = "search-replace";
+    const TITLE: &'static str = "Search and Replace";
+    const SIZE: egui::Vec2 = egui::vec2(1120.0, 820.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(560.0, 360.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = crate::replace_executor::ReplaceWorkerSnapshot;
+    type Actions = SearchReplaceHostActions;
+    type Checkpoint = SearchReplaceInteractionCheckpoint;
+    type Command = SearchReplaceUiCommand;
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+
+    fn session(&self) -> u64 {
+        self.host_session_epoch()
+    }
+
+    fn parent_targets_allowed(&self, runtime: &Self::Runtime) -> bool {
+        self.jump_mode_parent_targets_allowed(runtime.active)
+    }
+
+    fn parent_input_allowed(&self) -> bool {
+        self.native_parent_ui_allowed()
+    }
+
+    fn popup_layer(&self, ctx: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        self.current_owned_native_popup_layer(ctx)
+    }
+
+    fn confirmation_binding(
+        &self,
+        viewport: egui::ViewportId,
+        instance: u64,
+    ) -> Option<NavigationViewportBinding> {
+        let identity = self.jump_mode_confirmation_identity()?;
+        Some(NavigationViewportBinding {
+            viewport,
+            base_layer: identity.kind.layer_id(),
+            owner: NavigationOwner::SearchReplaceConfirmation {
+                parent_instance: instance,
+                confirmation_instance: identity.confirmation_instance,
+                kind: identity.kind,
+                subject: identity.subject,
+            },
+        })
+    }
+
+    fn capture(&self) -> Self::Checkpoint {
+        SearchReplaceInteractionCheckpoint::capture(self)
+    }
+
+    fn restore(&mut self, checkpoint: Self::Checkpoint) {
+        checkpoint.restore(self);
+    }
+
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent_input: bool,
+        child_owner: NavigationOwner,
+        first: bool,
+        instance: u64,
+        runtime: &Self::Runtime,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        let child_is_current = self
+            .confirmation_binding(ctx.viewport_id(), instance)
+            .is_some_and(|binding| binding.owner == child_owner);
+        self.ui_with_host(
+            ctx,
+            scopes.0,
+            scopes.1,
+            parent_input,
+            first,
+            child_is_current,
+            instance,
+            runtime,
+            child_ui,
+            presentation == UtilityPresentation::Popout,
+        )
+    }
+
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request.map(|popout| {
+            if popout {
+                UtilityPresentation::Popout
+            } else {
+                UtilityPresentation::Docked
+            }
+        })
+    }
+
+    fn closed_command() -> Self::Command {
+        SearchReplaceUiCommand::Closed
+    }
+
+    fn complete_actions(
+        &mut self,
+        actions: Self::Actions,
+        hwnd: Option<usize>,
+    ) -> Vec<Self::Command> {
+        self.complete_host_actions(actions, hwnd)
+    }
+
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
 }

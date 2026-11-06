@@ -432,6 +432,7 @@ impl NavigationViewportBinding {
                 kind: NavigationDialogKind::RegexTester
                     | NavigationDialogKind::FileSearch
                     | NavigationDialogKind::BatchRename
+                    | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::ImageCompare
@@ -447,6 +448,7 @@ impl NavigationViewportBinding {
                 | NavigationOwner::Settings { .. }
                 | NavigationOwner::XmlOverwriteConfirmation { .. }
                 | NavigationOwner::BatchRenameConfirmation { .. }
+                | NavigationOwner::SearchReplaceConfirmation { .. }
                 | NavigationOwner::DashboardEditorConfirmation { .. }
                 | NavigationOwner::MouseGestureBinding { .. }
                 | NavigationOwner::MouseGestureDelete { .. }
@@ -458,7 +460,9 @@ impl NavigationViewportBinding {
         let visible_layer = visible_top_middle_layer(ctx);
         let layer_is_current = match self.owner {
             NavigationOwner::Dialog {
-                kind: kind @ (NavigationDialogKind::FileSearch | NavigationDialogKind::BatchRename),
+                kind: kind @ (NavigationDialogKind::FileSearch
+                    | NavigationDialogKind::BatchRename
+                    | NavigationDialogKind::SearchReplace),
                 ..
             } => {
                 Some(self.base_layer) == kind.layer_id() && visible_layer == Some(self.base_layer)
@@ -471,6 +475,9 @@ impl NavigationViewportBinding {
                 self.base_layer
                     == batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind)
                     && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::SearchReplaceConfirmation { kind, .. } => {
+                self.base_layer == kind.layer_id() && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::XmlOverwriteConfirmation {
                 parent_instance,
@@ -543,6 +550,9 @@ impl NavigationViewportBinding {
                 || Some(layer) == popup_layer
                 || (matches!(self.owner, NavigationOwner::BatchRenameConfirmation { .. })
                     && (Some(layer) == NavigationDialogKind::BatchRename.layer_id()
+                        || layer.order != egui::Order::Middle))
+                || (matches!(self.owner, NavigationOwner::SearchReplaceConfirmation { .. })
+                    && (Some(layer) == NavigationDialogKind::SearchReplace.layer_id()
                         || layer.order != egui::Order::Middle))
                 || (matches!(
                     self.owner,
@@ -894,6 +904,7 @@ pub(crate) fn resolve_search_replace_confirmation_owner(
     confirmation_instance: u64,
     kind: SearchReplaceConfirmationKind,
     subject: SearchReplaceConfirmationSubject,
+    parent_layer: egui::LayerId,
 ) -> NavigationOwner {
     let owner = NavigationOwner::SearchReplaceConfirmation {
         parent_instance,
@@ -902,7 +913,6 @@ pub(crate) fn resolve_search_replace_confirmation_owner(
         subject,
     };
     let child_layer = kind.layer_id();
-    let parent_layer = NavigationDialogKind::SearchReplace.layer_id();
     if ctx.viewport_id() == egui::ViewportId::ROOT
         && ctx.input(|input| input.focused)
         && ctx.memory(|memory| memory.top_modal_layer().is_none())
@@ -910,7 +920,7 @@ pub(crate) fn resolve_search_replace_confirmation_owner(
         && visible_top_middle_layer(ctx) == Some(child_layer)
         && focused_response_layer(ctx).is_none_or(|focused| {
             focused == child_layer
-                || Some(focused) == parent_layer
+                || focused == parent_layer
                 || focused.order != egui::Order::Middle
         })
     {

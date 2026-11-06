@@ -5,7 +5,7 @@ mod add_action_dialog;
 mod add_bookmark_dialog;
 mod alias_dialog;
 mod batch_rename_dialog;
-mod batch_rename_window_host;
+mod file_operation_window_host;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calculation_pad_dialog;
@@ -1251,9 +1251,10 @@ pub struct LauncherApp {
     pub diff_dialog: DiffDialogState,
     file_search_coordinator: SearchCoordinator,
     batch_rename_dialog: BatchRenameDialogState,
-    batch_rename_host: batch_rename_window_host::BatchRenameWindowHost,
+    batch_rename_host: file_operation_window_host::BatchRenameWindowHost,
     batch_rename_coordinator: Option<crate::file_operations::RenameScanCoordinator>,
     search_replace_dialog: SearchReplaceDialogState,
+    search_replace_host: file_operation_window_host::SearchReplaceWindowHost,
     replace_search_coordinator: Option<crate::search_replace::SearchCoordinator>,
     replace_preview_worker: Option<ReplacementPreviewWorker>,
     replace_executor_worker: Option<crate::replace_executor::ReplaceExecutorWorker>,
@@ -2607,6 +2608,7 @@ impl LauncherApp {
     }
 
     fn end_search_replace_session(&mut self) {
+        self.search_replace_host.retire(&self.egui_ctx);
         self.search_replace_dialog.end_session(
             self.replace_search_coordinator.as_ref(),
             self.replace_executor_worker.as_ref(),
@@ -3898,6 +3900,7 @@ impl LauncherApp {
             batch_rename_host: Default::default(),
             batch_rename_coordinator: None,
             search_replace_dialog: SearchReplaceDialogState::default(),
+            search_replace_host: Default::default(),
             replace_search_coordinator: None,
             replace_preview_worker: None,
             replace_executor_worker: None,
@@ -4834,6 +4837,7 @@ impl LauncherApp {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer().is_some(),
+            Panel::SearchReplaceDialog => self.search_replace_host.root_layer().is_some(),
             Panel::MouseGesturesDialog => self.mouse_gestures_host
                 .root_layer(mouse_form_host::MOUSE_GESTURES).is_some(),
             Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(mouse_form_host::MOUSE_SETTINGS).is_some(),
@@ -4897,9 +4901,9 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                == Some(&Panel::BatchRenameDialog)
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog))
         {
-            // Batch Rename stages keyboard close in its exact owner pass.
+            // These tools stage keyboard close in their exact owner pass.
             return false;
         }
         self.close_front_dialog()
@@ -5788,6 +5792,11 @@ impl LauncherApp {
         } else if panel == Panel::BatchRenameDialog {
             self.batch_rename_dialog.open();
             self.batch_rename_host.request_focus();
+        } else if panel == Panel::SearchReplaceDialog {
+            if !self.search_replace_dialog.open {
+                self.ensure_open(panel);
+            }
+            self.search_replace_host.request_focus();
         } else if panel == Panel::MouseGesturesDialog {
             self.mouse_gestures_dialog.open();
             self.mouse_gestures_host.request_focus();

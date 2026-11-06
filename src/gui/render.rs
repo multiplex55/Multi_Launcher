@@ -2143,7 +2143,7 @@ impl LauncherApp {
             Panel::DateTimeStudioDialog => middle(egui::Id::new("date-time-studio-window")),
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root(),
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer(),
-            Panel::SearchReplaceDialog => NavigationDialogKind::SearchReplace.layer_id(),
+            Panel::SearchReplaceDialog => self.search_replace_host.root_layer(),
             Panel::XmlToolkitDialog => NavigationDialogKind::XmlToolkit.layer_id(),
             Panel::TableUtilityDialog => NavigationDialogKind::TableUtility.layer_id(),
             Panel::QrDialog => middle(egui::Id::new(Some("QR Generator"))),
@@ -4833,7 +4833,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 21] {
+    fn viewport_bootstrap_state(&self) -> [bool; 22] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4854,6 +4854,7 @@ impl LauncherApp {
             self.file_search_host.needs_root_ui_when_hidden(self.file_search_dialog.open),
             self.diff_dialog.needs_root_ui_when_hidden(),
             self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open),
+            self.search_replace_needs_root_ui_when_hidden(),
             self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
             self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
@@ -4869,7 +4870,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 21],
+        previously_pending: [bool; 22],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5428,7 +5429,7 @@ impl LauncherApp {
             ctx,
             &mut self.batch_rename_dialog,
             &batch_rename_runtime,
-            super::batch_rename_window_host::HostInput {
+            super::file_operation_window_host::HostInput {
                 first,
                 root_visible,
                 root_input,
@@ -5440,6 +5441,103 @@ impl LauncherApp {
                 confirmation_owner: batch_rename_confirmation_native_owner,
                 parent_instance: batch_rename_parent_instance.unwrap_or_default(),
                 root_scopes: (batch_rename_scope.as_ref(), batch_rename_confirmation_scope.as_ref()),
+            },
+        );
+    }
+
+    fn search_replace_needs_root_ui_when_hidden(&self) -> bool {
+        self.search_replace_host.needs_root_ui_when_hidden(self.search_replace_dialog.open)
+            || self.search_replace_dialog.has_ready_host_submission()
+    }
+
+    fn show_search_replace_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        let search_replace_owner = if root_visible {
+            self.resolve_jump_mode_navigation_owner(ctx, true)
+        } else {
+            NavigationOwner::Blocked
+        };
+        let (search_replace_scope, search_replace_confirmation_scope) = match search_replace_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
+                instance,
+            } if self.jump_mode_enabled()
+                && self
+                    .search_replace_dialog
+                    .jump_mode_parent_targets_allowed(self.replace_worker_snapshot.active) =>
+            {
+                (
+                    self.jump_mode_ui.scope_for_navigation_owner(
+                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", instance),
+                        crate::gui::jump_mode::TargetGeneration(instance),
+                        "search-replace/form",
+                        ctx.viewport_id(),
+                        search_replace_owner,
+                        false,
+                    ),
+                    None,
+                )
+            }
+            crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind,
+                subject,
+            } if self.jump_mode_enabled()
+                && self
+                    .search_replace_dialog
+                    .jump_mode_confirmation_identity()
+                    .is_some_and(|identity| {
+                        identity.confirmation_instance == confirmation_instance
+                            && identity.kind == kind
+                            && identity.subject == subject
+                    }) =>
+            {
+                let subject_identity =
+                    egui::Id::new(("search-replace-confirmation-subject", subject)).value();
+                let scope = self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        kind.surface_kind(),
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", parent_instance),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    format!(
+                        "search-replace/confirmation/{}/{subject_identity:016x}",
+                        kind.surface_kind()
+                    ),
+                    ctx.viewport_id(),
+                    search_replace_owner,
+                    false,
+                );
+                (None, scope)
+            }
+            _ => (None, None),
+        };
+
+        let parent_input = self.search_replace_native_ui_owner_current(ctx, root_visible);
+        let parent_instance = self.jump_mode_ui
+            .dialog_instance(NavigationDialogKind::SearchReplace)
+            .unwrap_or_default();
+        let confirmation_owner = self.search_replace_root_confirmation_owner(ctx, root_visible);
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let jump_enabled = self.jump_mode_enabled();
+        self.search_replace_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        self.search_replace_host.show(
+            ctx, &mut self.search_replace_dialog, &self.replace_worker_snapshot,
+            super::file_operation_window_host::HostInput {
+                first, root_visible, root_input, native_input,
+                root_owner: search_replace_owner,
+                parent_owner: parent_input,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !self.pinned_panels.contains(&super::Panel::SearchReplaceDialog),
+                confirmation_owner, parent_instance,
+                root_scopes: (search_replace_scope.as_ref(), search_replace_confirmation_scope.as_ref()),
             },
         );
     }
@@ -6767,42 +6865,51 @@ impl LauncherApp {
         }
     }
 
-    fn search_replace_native_ui_owner_current(
-        &self,
-        ctx: &egui::Context,
-        root_visible: bool,
-    ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
-
-        if !self.search_replace_dialog.native_parent_ui_allowed()
-            || !self.native_ui_host_input_allowed(ctx, root_visible)
-            || NavigationDialogKind::SearchReplace
-                .layer_id()
-                .is_none_or(|layer| visible_top_middle_layer(ctx) != Some(layer))
-        {
-            return false;
-        }
-
-        !egui::Popup::is_any_open(ctx)
-            || self
-                .search_replace_dialog
-                .current_owned_native_popup_layer(ctx)
-                .is_some()
+    fn search_replace_owns_root_input(&self, ctx: &egui::Context, visible: bool) -> bool {
+        self.search_replace_native_ui_owner_current(ctx, visible)
+            || self.search_replace_root_confirmation_owner(ctx, visible)
+                != crate::gui::jump_mode::ui::NavigationOwner::Blocked
     }
 
-    fn search_replace_confirmation_native_ui_owner_current(
-        &self,
-        ctx: &egui::Context,
-        root_visible: bool,
+    fn search_replace_native_ui_owner_current(
+        &self, ctx: &egui::Context, root_visible: bool,
     ) -> bool {
-        let Some(layer) = self.search_replace_dialog.native_confirmation_layer_id() else {
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+        let Some(layer) = self.search_replace_host.root_layer() else {
             return false;
         };
-        self.search_replace_dialog.open
+        let popup = self.search_replace_dialog.current_owned_native_popup_layer(ctx);
+        self.search_replace_dialog.native_parent_ui_allowed()
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && ctx.memory(|memory| memory.top_modal_layer().is_none())
-            && !egui::Popup::is_any_open(ctx)
-            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && (!egui::Popup::is_any_open(ctx) || popup.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background || Some(focus) == popup
+            })
+    }
+
+    fn search_replace_root_confirmation_owner(
+        &self, ctx: &egui::Context, root_visible: bool,
+    ) -> crate::gui::jump_mode::ui::NavigationOwner {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, resolve_search_replace_confirmation_owner,
+        };
+        if !self.search_replace_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
+            return NavigationOwner::Blocked;
+        }
+        let Some(parent_layer) = self.search_replace_host.root_layer() else {
+            return NavigationOwner::Blocked;
+        };
+        let Some(parent_instance) = self.jump_mode_ui.dialog_instance(NavigationDialogKind::SearchReplace) else {
+            return NavigationOwner::Blocked;
+        };
+        let Some(identity) = self.search_replace_dialog.jump_mode_confirmation_identity() else {
+            return NavigationOwner::Blocked;
+        };
+        resolve_search_replace_confirmation_owner(
+            ctx, parent_instance, identity.confirmation_instance, identity.kind, identity.subject,
+            parent_layer,
+        )
     }
 
     fn clipboard_history_native_ui_owner_current(
@@ -7294,6 +7401,7 @@ impl LauncherApp {
                 .search_replace_dialog
                 .jump_mode_confirmation_identity()
                 .is_some()
+                && self.search_replace_host.root_layer().is_some()
             || self
                 .snippet_dialog
                 .jump_mode_pending_removal_identity()
@@ -7501,7 +7609,7 @@ impl LauncherApp {
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
-                self.search_replace_dialog.open,
+                self.search_replace_dialog.open && self.search_replace_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor,
@@ -7570,7 +7678,7 @@ impl LauncherApp {
                     .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
                 dashboard_editor_layer: self.dashboard_editor.host_layer_if_root(),
                 file_search_layer: self.file_search_host.root_layer(),
-                file_operation_layers: [self.batch_rename_host.root_layer(), None],
+                file_operation_layers: [self.batch_rename_host.root_layer(), self.search_replace_host.root_layer()],
                 mouse_form_layers: [
                     self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS),
                     self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS),
@@ -7588,6 +7696,8 @@ impl LauncherApp {
                         self.file_search_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::BatchRename {
                         self.batch_rename_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::SearchReplace {
+                        self.search_replace_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MouseSettings {
                         self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS).and(current)
                     } else if kind == NavigationDialogKind::MouseGestureSettings {
@@ -7839,27 +7949,24 @@ impl LauncherApp {
             && let Some(parent_instance) = self
                 .jump_mode_ui
                 .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace)
+            && let Some(parent_layer) = self.search_replace_host.root_layer()
             && let Some(identity) = self.search_replace_dialog.jump_mode_confirmation_identity()
         {
             use crate::gui::jump_mode::ui::{
-                NavigationDialogKind, NavigationOwner, resolve_search_replace_confirmation_owner,
+                NavigationOwner, resolve_search_replace_confirmation_owner,
                 visible_top_middle_layer,
             };
 
             let child_layer = identity.kind.layer_id();
-            let parent_layer = NavigationDialogKind::SearchReplace.layer_id();
             match visible_top_middle_layer(ctx) {
                 Some(layer) if layer == child_layer => {
                     combo_popup = None;
                     candidate = resolve_search_replace_confirmation_owner(
-                        ctx,
-                        parent_instance,
-                        identity.confirmation_instance,
-                        identity.kind,
-                        identity.subject,
+                        ctx, parent_instance, identity.confirmation_instance, identity.kind,
+                        identity.subject, parent_layer,
                     );
                 }
-                Some(layer) if Some(layer) == parent_layer => {
+                Some(layer) if layer == parent_layer => {
                     // A pending confirmation blocks the parent immediately,
                     // including the frame before the child becomes visible.
                     candidate = NavigationOwner::Blocked;
@@ -8273,6 +8380,7 @@ impl LauncherApp {
             self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_batch_rename_host(&ctx, first_ui_pass, false);
+            self.show_search_replace_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             if first_ui_pass {
                 self.run_background_after_menu();
@@ -9230,6 +9338,7 @@ impl LauncherApp {
                     )
                     && !self.diff_dialog.owns_root_input(&ctx)
                     && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
+                    && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -9311,6 +9420,7 @@ impl LauncherApp {
                     && self.any_root_panel_open()
                     && !self.diff_dialog.owns_root_input(&ctx)
                     && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
+                    && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -10185,6 +10295,7 @@ impl LauncherApp {
             self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_batch_rename_host(&ctx, first_ui_pass, false);
+            self.show_search_replace_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
@@ -10600,107 +10711,7 @@ impl LauncherApp {
         self.fav_dialog = fav_dlg;
         self.show_file_search_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_batch_rename_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        // Batch Rename may have changed the visible foreground earlier this pass,
-        // so Search & Replace must resolve its owner immediately before drawing.
-        let search_replace_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let (search_replace_scope, search_replace_confirmation_scope) = match search_replace_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
-                instance,
-            } if self.jump_mode_enabled()
-                && self
-                    .search_replace_dialog
-                    .jump_mode_parent_targets_allowed(self.replace_worker_snapshot.active) =>
-            {
-                (
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", instance),
-                        crate::gui::jump_mode::TargetGeneration(instance),
-                        "search-replace/form",
-                        ctx.viewport_id(),
-                        search_replace_owner,
-                        false,
-                    ),
-                    None,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation {
-                parent_instance,
-                confirmation_instance,
-                kind,
-                subject,
-            } if self.jump_mode_enabled()
-                && self
-                    .search_replace_dialog
-                    .jump_mode_confirmation_identity()
-                    .is_some_and(|identity| {
-                        identity.confirmation_instance == confirmation_instance
-                            && identity.kind == kind
-                            && identity.subject == subject
-                    }) =>
-            {
-                let subject_identity =
-                    egui::Id::new(("search-replace-confirmation-subject", subject)).value();
-                let scope = self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::popup(
-                        kind.surface_kind(),
-                        confirmation_instance,
-                        crate::gui::jump_mode::SurfaceId::dialog("search-replace", parent_instance),
-                    ),
-                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
-                    format!(
-                        "search-replace/confirmation/{}/{subject_identity:016x}",
-                        kind.surface_kind()
-                    ),
-                    ctx.viewport_id(),
-                    search_replace_owner,
-                    false,
-                );
-                (None, scope)
-            }
-            _ => (None, None),
-        };
-        let search_replace_native_owner =
-            self.search_replace_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let search_replace_confirmation_native_owner = self
-            .search_replace_confirmation_native_ui_owner_current(
-                &ctx,
-                frame_logic.should_be_visible,
-            );
-        if !search_replace_native_owner
-            && let Some(focused) = ctx.memory(|memory| memory.focused())
-            && ctx.read_response(focused).is_some_and(|response| {
-                Some(response.layer_id)
-                    == crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace.layer_id()
-            })
-        {
-            ctx.memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        let search_replace_instance = self
-            .jump_mode_ui
-            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace)
-            .unwrap_or_default();
-        let search_replace_commands = self.search_replace_dialog.ui_with_jump_mode(
-            &ctx,
-            search_replace_scope.as_ref(),
-            search_replace_confirmation_scope.as_ref(),
-            search_replace_native_owner,
-            first_ui_pass,
-            search_replace_confirmation_native_owner,
-            search_replace_instance,
-            &self.replace_worker_snapshot,
-        );
-        if first_ui_pass
-            && (search_replace_native_owner || search_replace_confirmation_native_owner)
-        {
-            for command in search_replace_commands {
-                self.handle_search_replace_ui_command(command);
-            }
-        }
-        if first_ui_pass {
-            self.submit_ready_search_replace_confirmation();
-        }
+        self.show_search_replace_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_diff_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let notes_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
@@ -11782,6 +11793,19 @@ impl LauncherApp {
                 effects.push(RootDialogEffect::ShowRoot);
             }
         }
+        if let Some(completion) = self.search_replace_host.complete(ctx, &mut self.search_replace_dialog) {
+            for command in completion.commands {
+                self.handle_search_replace_ui_command(command);
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        // A ready result can arrive with ROOT hidden. Accepted Close or Cancel
+        // has already revoked its authority before this submission boundary.
+        if !self.search_replace_host.has_deferred_close() {
+            self.submit_ready_search_replace_confirmation();
+        }
         if self.diff_dialog.on_host_frame_complete(ctx) {
             effects.push(RootDialogEffect::ShowRoot);
         }
@@ -12164,6 +12188,7 @@ impl eframe::App for LauncherApp {
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open)
+            || self.search_replace_needs_root_ui_when_hidden()
             || self
                 .recording_dialog
                 .needs_root_ui_when_hidden(&self.recording_controller)
@@ -44503,7 +44528,7 @@ mod tests {
             false,
         );
         assert!(!app.visible_flag.load(Ordering::Relaxed));
-        let viewport = crate::gui::batch_rename_window_host::test_viewport(session);
+        let viewport = crate::gui::file_operation_window_host::BatchRenameWindowHost::test_viewport(session);
         let detached_frame = |app: &mut LauncherApp, events| {
             super::with_immediate_viewport_test_events_for(viewport, events, || {
                 let output = app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0;
@@ -44558,7 +44583,7 @@ mod tests {
         );
         assert!(!app.visible_flag.load(Ordering::Relaxed));
 
-        let viewport = crate::gui::batch_rename_window_host::test_viewport(session);
+        let viewport = crate::gui::file_operation_window_host::BatchRenameWindowHost::test_viewport(session);
         let frame = |app: &mut LauncherApp, events, discard| {
             super::with_immediate_viewport_test_events_for(viewport, events, || {
                 app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
@@ -45412,6 +45437,116 @@ mod tests {
             false,
         );
         output.0.drop_without_applying_deltas();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn search_replace_detached_confirmation_applies_once_after_retention() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let parent = std::env::current_dir().unwrap().join("target/productivity_expansion");
+        std::fs::create_dir_all(&parent).unwrap();
+        let fixture = tempfile::tempdir_in(parent).unwrap();
+        let source = fixture.path().join("fixture.txt");
+        std::fs::write(&source, b"before needle after\n").unwrap();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(crate::gui::Panel::SearchReplaceDialog);
+        app.handle_search_replace_ui_command(crate::gui::SearchReplaceUiCommand::SelectRoot(
+            fixture.path().to_owned(),
+        ));
+        app.search_replace_dialog.test_seed_replacement("needle", "updated");
+        app.handle_search_replace_ui_command(crate::gui::SearchReplaceUiCommand::Search);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let counts = loop {
+            search_replace_test_frame(&ctx, &mut app, Vec::new());
+            if let Some(counts) = app.search_replace_dialog.test_result_counts() {
+                break counts;
+            }
+            assert!(Instant::now() < deadline, "fixture search must finish");
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!((counts.1, counts.2), (1, 1));
+        app.search_replace_dialog.test_approve_first_match();
+        let session = app.search_replace_dialog.host_session_epoch();
+        for _ in 0..3 {
+            search_replace_test_frame(&ctx, &mut app, Vec::new());
+        }
+        let (popout, clip, enabled) = app.search_replace_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        assert_eq!(ctx.layer_id_at(popout.center()), app.search_replace_host.root_layer());
+        for pressed in [true, false] {
+            search_replace_test_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.search_replace_host.root_layer().is_none());
+        search_replace_test_frame(
+            &ctx, &mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::file_operation_window_host::SearchReplaceWindowHost::test_viewport(session);
+        let frame = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let review = loop {
+            frame(&mut app, Vec::new(), false);
+            if let Some(rect) = app.search_replace_host.test_native_target("Review Apply") {
+                break rect;
+            }
+            assert!(Instant::now() < deadline, "native reviewed candidate must be reachable");
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(app.search_replace_dialog.test_result_counts(), Some(counts));
+        assert_eq!(app.search_replace_dialog.test_approved_match_count(), 1);
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(review, pressed), false);
+        }
+        let identity = app.search_replace_dialog.jump_mode_confirmation_identity().unwrap();
+        for _ in 0..4 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let confirm = app.search_replace_host.test_native_target("Confirm and Apply").unwrap();
+        frame(&mut app, tool_dialog_pointer_events(confirm, true), false);
+        frame(&mut app, tool_dialog_pointer_events(confirm, false), true);
+        assert_eq!(app.search_replace_dialog.jump_mode_confirmation_identity(), Some(identity));
+        assert!(!app.search_replace_dialog.test_apply_confirmation_pending());
+        assert_eq!(app.search_replace_dialog.test_receipt_count(), 0);
+        assert_eq!(std::fs::read(&source).unwrap(), b"before needle after\n");
+
+        for _ in 0..3 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let confirm = app.search_replace_host.test_native_target("Confirm and Apply").unwrap();
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(confirm, pressed), false);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.search_replace_dialog.test_receipt_count() == 0 {
+            frame(&mut app, Vec::new(), false);
+            assert!(Instant::now() < deadline, "accepted hidden apply must publish its receipt");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(std::fs::read(&source).unwrap(), b"before updated after\n");
+        assert_eq!(app.search_replace_dialog.test_receipt_count(), 1);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let (dock, clip, enabled) = app.search_replace_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.search_replace_host.root_layer().is_some());
+        assert_eq!(app.search_replace_dialog.host_session_epoch(), session);
+        assert_eq!(app.search_replace_dialog.test_receipt_count(), 1);
     }
 
     fn start_search_replace_hints(ctx: &egui::Context, app: &mut LauncherApp) {
