@@ -40,6 +40,7 @@ pub mod diagram;
 pub mod diff;
 pub(crate) mod duplicate_finder;
 pub mod explorer_tabs;
+pub mod file_lock;
 pub mod file_operations;
 pub mod file_search;
 pub mod folder_size;
