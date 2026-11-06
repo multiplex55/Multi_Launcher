@@ -34,6 +34,7 @@ It’s designed to be “one hotkey away” from:
 - [Image Comparison](#image-comparison)
 - [Duplicate Finder](#duplicate-finder)
 - [Folder Size](#folder-size)
+- [File Lock Inspector](#file-lock-inspector)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
@@ -931,6 +932,19 @@ The scan reads metadata and skips reparse points and cloud placeholders without
 recalling file contents. Incomplete branches and skipped entries are marked so
 a partial subtotal is not mistaken for a complete result. Folder Size does not
 delete or change files.
+
+## File Lock Inspector
+
+Type `filelock` and choose **Inspect File Users**, or right-click a file result
+in File Search and choose **Inspect file users…**. Choose or confirm the file,
+then press **Inspect**. Use **Refresh** for a new snapshot. You can copy the
+reported details or select a process and reveal its executable in Explorer
+after verifying the process is still running and its path matches the snapshot.
+
+Windows Restart Manager reports applications and services using the selected
+file. **No processes reported** does not guarantee that the file is unlocked.
+An unavailable process name or executable does not erase its reported row.
+Inspection does not unlock files or stop applications.
 
 ## JSON and screen color utilities
 
