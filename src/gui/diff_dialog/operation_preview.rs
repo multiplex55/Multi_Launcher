@@ -19,7 +19,17 @@ pub(super) struct OperationPreview {
 }
 
 impl OperationPreview {
+    #[cfg(test)]
     pub fn show(&mut self, ctx: &egui::Context, operation_active: bool) -> PreviewResponse {
+        self.show_with_input(ctx, operation_active, true)
+    }
+
+    pub(super) fn show_with_input(
+        &mut self,
+        ctx: &egui::Context,
+        operation_active: bool,
+        input_allowed: bool,
+    ) -> PreviewResponse {
         let mut response = PreviewResponse::Keep;
         #[cfg(test)]
         let mut status_response = None;
@@ -29,6 +39,7 @@ impl OperationPreview {
         let mut footer_observation = None;
         let window_output = egui::Window::new("Confirm folder operation")
             .id(egui::Id::new(("folder-operation-preview", self.context.comparison.view_id)))
+            .enabled(input_allowed)
             .collapsible(false)
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))

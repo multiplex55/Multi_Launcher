@@ -4847,6 +4847,7 @@ impl LauncherApp {
     fn any_root_panel_open(&self) -> bool {
         self.pin_list_open
             || self.ocr_surface_visible()
+            || self.diff_dialog.host_layer_if_root().is_some()
             || Self::TRACKED_PANELS
                 .iter()
                 .copied()

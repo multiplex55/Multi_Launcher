@@ -196,6 +196,7 @@ pub(super) fn show(
     ui: &mut egui::Ui,
     state: &mut FolderCompareState,
     runtime: &crate::diff::folder_runtime::FolderRuntime,
+    effects: &mut Vec<super::effects::ViewEffect>,
 ) -> FolderViewAction {
     ui.label("Folder comparison");
     let root_row = egui::vec2(ui.available_width().max(0.0), 22.0);
@@ -212,7 +213,7 @@ pub(super) fn show(
     });
     let mut action = FolderViewAction::Noop;
     ui.horizontal_wrapped(|ui| {
-        super::export::folder_menu(ui, state);
+        super::export::folder_menu(ui, state, effects);
         ui.menu_button("View", |ui| {
             for (label, filter) in [
                 ("All", FolderDisplayFilter::All),
@@ -258,9 +259,6 @@ pub(super) fn show(
             action = FolderViewAction::RequestRescan;
         }
     });
-    if super::folder_rules_dialog::show(ui.ctx(), state) {
-        action = FolderViewAction::RequestRescan;
-    }
     ui.horizontal_wrapped(|ui| {
         ui.label("Find path:");
         let filter_width = ui.available_width().max(ui.spacing().interact_size.x);
@@ -300,21 +298,25 @@ pub(super) fn show(
 
     let mut projected = projected_rows(state);
     let mut paths: Vec<_> = projected.iter().map(|r| r.path.clone()).collect();
-    let keys = ui.input(|i| {
-        (
-            i.modifiers.command && i.key_pressed(egui::Key::A),
-            i.key_pressed(egui::Key::ArrowUp),
-            i.key_pressed(egui::Key::ArrowDown),
-        )
-    });
-    if keys.0 {
-        apply_selection(state, &paths, None, SelectionGesture::SelectAll);
-    }
-    if keys.1 {
-        apply_selection(state, &paths, None, SelectionGesture::MoveUp);
-    }
-    if keys.2 {
-        apply_selection(state, &paths, None, SelectionGesture::MoveDown);
+    let focused = ui.memory(|memory| memory.focused());
+    let editing_text = focused.is_some_and(|id| egui::TextEdit::load_state(ui.ctx(), id).is_some());
+    if ui.is_enabled() && !editing_text {
+        let keys = ui.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::A),
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+        if keys.0 {
+            apply_selection(state, &paths, None, SelectionGesture::SelectAll);
+        }
+        if keys.1 {
+            apply_selection(state, &paths, None, SelectionGesture::MoveUp);
+        }
+        if keys.2 {
+            apply_selection(state, &paths, None, SelectionGesture::MoveDown);
+        }
     }
     ui.horizontal_wrapped(|ui| {
         for (label, nav) in [

@@ -1953,6 +1953,7 @@ impl LauncherApp {
                     .is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
             || (self.file_search_dialog.open
                 && self.file_search_host.root_layer().is_some_and(|layer| !ordinary_layer_is_allowed(layer)))
+            || self.diff_dialog.host_layer_if_root().is_some_and(|layer| !ordinary_layer_is_allowed(layer))
             || self.confirm_modal.is_open()
             || self.action_sheet.is_open()
             || self.snippet_prompt_dialog.is_open()
@@ -2057,6 +2058,7 @@ impl LauncherApp {
             .filter(|panel| self.is_panel_open(*panel))
             .filter_map(|panel| self.query_focus_panel_layer(panel))
             .chain(self.dashboard_editor.host_layer_if_root())
+            .chain(self.diff_dialog.host_layer_if_root())
             .chain(self.pin_list_open.then_some(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("screenshot-pin-list"),
@@ -2085,6 +2087,7 @@ impl LauncherApp {
             .into_iter()
             .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
             || self.dashboard_editor.host_layer_if_root().is_some()
+            || self.diff_dialog.host_layer_if_root().is_some()
             || self.show_plugins
             || !note_panel_layers.is_empty()
             || !self.image_panels.is_empty())
@@ -4830,7 +4833,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 19] {
+    fn viewport_bootstrap_state(&self) -> [bool; 20] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4849,6 +4852,7 @@ impl LauncherApp {
             self.settings_window_host.needs_root_ui_when_hidden(self.show_settings),
             self.mouse_gestures_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.open),
             self.file_search_host.needs_root_ui_when_hidden(self.file_search_dialog.open),
+            self.diff_dialog.needs_root_ui_when_hidden(),
             self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
             self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
@@ -4864,7 +4868,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 19],
+        previously_pending: [bool; 20],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5327,6 +5331,18 @@ impl LauncherApp {
             observer,
             ctx.input(|input| input.time),
         )
+    }
+
+    fn show_diff_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        self.diff_dialog.show_hosted(
+            ctx, &self.activity_center, first, root_visible, root_input, native_input,
+        );
     }
 
     fn file_search_has_root_presentation(&self) -> bool {
@@ -8140,6 +8156,7 @@ impl LauncherApp {
             self.show_main_settings_host(&ctx, first_ui_pass, false, false);
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
             self.show_file_search_host(&ctx, first_ui_pass, false);
+            self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             if first_ui_pass {
                 self.run_background_after_menu();
@@ -9095,6 +9112,7 @@ impl LauncherApp {
                         self.file_search_has_root_presentation(),
                         egui::Popup::is_any_open(&ctx),
                     )
+                    && !self.diff_dialog.owns_root_input(&ctx)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -9174,6 +9192,7 @@ impl LauncherApp {
                 if first_ui_pass
                     && close_panel_shortcut_modifiers.is_some()
                     && self.any_root_panel_open()
+                    && !self.diff_dialog.owns_root_input(&ctx)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -10046,6 +10065,7 @@ impl LauncherApp {
             }
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
             self.show_file_search_host(&ctx, first_ui_pass, false);
+            self.show_diff_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
@@ -10651,7 +10671,7 @@ impl LauncherApp {
         if first_ui_pass {
             self.submit_ready_search_replace_confirmation();
         }
-        self.diff_dialog.ui(&ctx, &self.activity_center);
+        self.show_diff_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let notes_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
         let notes_scope = match notes_owner {
@@ -11011,6 +11031,7 @@ impl LauncherApp {
                 crate::activity::ActivityOwner::Macro => Some(super::Panel::MkMacroDialog),
                 crate::activity::ActivityOwner::FolderCompare => {
                     self.diff_dialog.open = true;
+                    self.diff_dialog.request_host_focus();
                     ctx.request_repaint();
                     None
                 }
@@ -11723,6 +11744,9 @@ impl LauncherApp {
         }
         self.complete_mouse_settings_hosts(ctx);
         self.complete_file_search_host(ctx);
+        if self.diff_dialog.on_host_frame_complete(ctx) {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         if self.show_dashboard_editor || self.dashboard_editor.needs_root_ui_when_hidden() {
             let completion = self.dashboard_editor.on_host_frame_complete(
                 ctx,
@@ -36805,6 +36829,75 @@ mod tests {
         );
         state.set_open(true);
         state.store(ctx);
+    }
+
+    #[test]
+    fn diff_moves_the_same_busy_folder_workspace_and_polls_while_root_is_hidden() {
+        use crate::diff::model::DiffView;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let (left, right, dialog, cancelled, complete) = crate::gui::DiffDialogState::test_running_host_operation();
+        app.diff_dialog = dialog;
+        app.diff_dialog.open = true;
+        let workspace = app.diff_dialog.workspace.workspace_id;
+        let view = app.diff_dialog.workspace.current_view.id;
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (generation, busy, feedback) = app.diff_dialog.test_active_host_operation();
+        assert!(busy && feedback.is_none());
+        let (popout, clip, enabled) = app.diff_dialog.test_host_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert!(app.diff_dialog.host_layer_if_root().is_none());
+        let viewport = app.diff_dialog.test_host_viewport();
+        let mut hide = actual_query_input(true);
+        hide.events.push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, hide, false).0.drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                let output = app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0;
+                assert!(output.viewport_output.contains_key(&viewport) || app.diff_dialog.host_layer_if_root().is_some());
+                output.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        assert_eq!(app.diff_dialog.test_active_host_operation(), (generation, true, None));
+        let DiffView::FolderCompare(state) = &app.diff_dialog.workspace.current_view.view else {
+            panic!("the detached view must still be the same folder comparison");
+        };
+        assert_eq!(state.left_root, left.path());
+        assert_eq!(state.right_root, right.path());
+        assert_eq!(state.primary_selection.as_deref(), Some(std::path::Path::new("item.txt")));
+        assert!(!cancelled.load(Ordering::Relaxed));
+        complete();
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        let (_, busy, feedback) = app.diff_dialog.test_active_host_operation();
+        assert!(!busy);
+        assert_eq!(feedback, Some(1));
+
+        let (dock, clip, enabled) = app.diff_dialog.test_host_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(dock, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.diff_dialog.host_layer_if_root().is_some());
+        assert_eq!(app.diff_dialog.workspace.workspace_id, workspace);
+        assert_eq!(app.diff_dialog.workspace.current_view.id, view);
     }
 
     #[test]

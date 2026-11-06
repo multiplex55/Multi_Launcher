@@ -987,7 +987,9 @@ impl FileSearchCommandHost for LauncherApp {
 
 impl DiffCommandHost for LauncherApp {
     fn open_diff(&mut self, payload: &crate::diff::query::DiffOpenPayload) -> Result<(), String> {
-        self.diff_dialog.open_payload(payload.clone())
+        self.diff_dialog.open_payload(payload.clone())?;
+        self.diff_dialog.request_host_focus();
+        Ok(())
     }
 }
 

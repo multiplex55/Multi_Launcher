@@ -9,10 +9,12 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::collections::HashSet;
 mod binary_view;
+mod effects;
 mod export;
 mod folder_rules_dialog;
 mod folder_table;
 mod folder_view;
+mod host;
 mod operation_preview;
 mod rules_dialog;
 mod text_view;
@@ -87,7 +89,38 @@ fn render_retained_folder(
     render(state)
 }
 
+enum DiffUiAction {
+    Back,
+    OpenPaths(String, String),
+    Swap,
+    Reload,
+    Recompare,
+    RefreshFolder,
+    PickPath(crate::diff::model::DiffSide, bool),
+    BeginTextInput(TextInputPurpose),
+    PasteTextInput(crate::diff::model::DiffSide),
+    ApplyTextInput,
+    DismissTextInput,
+    CompareSelectionWithClipboard(u64),
+    OpenRecent(crate::diff::persistence::DisplayPathPairV1),
+    Folder(u64, folder_view::FolderViewAction),
+    OperationPreview(operation_preview::PreviewResponse),
+    ViewEffects(u64, Vec<effects::ViewEffect>),
+    RequestClose,
+    MoveHost(crate::gui::utility_host::UtilityPresentation),
+    DockedPosition([f32; 2]),
+    ClosePrompt(CloseDecision),
+}
+
+enum CloseDecision {
+    Save,
+    Discard,
+    Cancel,
+}
+
 struct WorkspaceRenderOutcome {
+    view_id: u64,
+    effects: Vec<effects::ViewEffect>,
     folder_action: folder_view::FolderViewAction,
     text_action: Option<text_view::TextViewAction>,
     error: Option<String>,
@@ -100,6 +133,7 @@ enum TextInputPurpose {
     EditInputs { view_id: u64 },
 }
 
+#[derive(Clone)]
 struct TextInputDraft {
     purpose: TextInputPurpose,
     left: String,
@@ -248,6 +282,9 @@ pub struct DiffDialogState {
     restored_text_preferences: HashMap<u64, RestoredTextPreferences>,
     text_input: Option<TextInputDraft>,
     close_prompt: bool,
+    host: host::DiffWindowHost,
+    #[cfg(test)]
+    host_button: Option<(egui::Rect, egui::Rect, bool)>,
     pub persistence: crate::diff::persistence::DiffPersistenceV1,
 }
 
@@ -477,7 +514,19 @@ impl DiffDialogState {
         }
     }
 
+    #[cfg(test)]
     fn show_text_input(&mut self, ctx: &egui::Context) {
+        let mut actions = Vec::new();
+        self.render_text_input(ctx, &mut actions, true);
+        self.apply_ui_actions(actions, effects::PickerOwner::Legacy);
+    }
+
+    fn render_text_input(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<DiffUiAction>,
+        input_allowed: bool,
+    ) {
         let Some(draft) = self.text_input.as_mut() else {
             return;
         };
@@ -494,6 +543,7 @@ impl DiffDialogState {
         };
         egui::Window::new(title)
             .id(egui::Id::new((self.workspace.workspace_id, "text_input", identity)))
+            .enabled(input_allowed)
             .collapsible(false)
             .resizable(true)
             .default_size(egui::vec2(760.0, 540.0))
@@ -542,16 +592,7 @@ impl DiffDialogState {
                         );
                         column.horizontal(|ui| {
                             if ui.button(format!("Paste {side:?}")).clicked() {
-                                let result = paste_memory_input(input, || {
-                                    crate::actions::clipboard::get_text().map_err(|_| {
-                                        "Clipboard is unavailable or does not contain plain text"
-                                            .to_string()
-                                    })
-                                });
-                                match result {
-                                    Ok(()) => draft.error = None,
-                                    Err(error) => draft.error = Some(error),
-                                }
+                                actions.push(DiffUiAction::PasteTextInput(side));
                             }
                             ui.label(format!("{} bytes", input.len()));
                         });
@@ -575,18 +616,13 @@ impl DiffDialogState {
                 });
                 },
             );
+        if !input_allowed {
+            return;
+        }
         if submit {
-            if let Some(draft) = self.text_input.take() {
-                match self.apply_text_input(draft) {
-                    Ok(()) => {}
-                    Err((mut draft, error)) => {
-                        draft.error = Some(error);
-                        self.text_input = Some(draft);
-                    }
-                }
-            }
+            actions.push(DiffUiAction::ApplyTextInput);
         } else if cancel || !open {
-            self.text_input = None;
+            actions.push(DiffUiAction::DismissTextInput);
         }
     }
 
@@ -924,10 +960,41 @@ impl DiffDialogState {
         self.watch_views.clear();
         self.operation_preview = None;
     }
+    /// Request that the owning host close. A dirty comparison keeps its
+    /// runtime alive until the existing unsaved-changes prompt is resolved.
+    pub(crate) fn request_host_close(&mut self) -> bool {
+        if self.text_views.values().any(|model| model.has_dirty()) {
+            self.close_prompt = true;
+            self.open = true;
+            false
+        } else {
+            self.open = false;
+            self.clear_runtime_resources();
+            true
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_close_prompt_open(&self) -> bool {
+        self.close_prompt
+    }
+
+    #[cfg(test)]
     pub fn ui(&mut self, ctx: &egui::Context, activity_center: &crate::activity::ActivityCenter) {
         if !self.open {
             return;
         }
+        self.advance_view_runtime(activity_center);
+        let actions = self.render_docked(ctx, None, true);
+        self.apply_ui_actions(actions, effects::PickerOwner::Legacy);
+    }
+
+    fn render_docked(
+        &mut self,
+        ctx: &egui::Context,
+        presentation: Option<crate::gui::utility_host::UtilityPresentation>,
+        input_allowed: bool,
+    ) -> Vec<DiffUiAction> {
         let mut open = self.open;
         let screen = ctx.input(|i| i.content_rect());
         let chrome = window_chrome(ctx);
@@ -964,7 +1031,7 @@ impl DiffDialogState {
         if let Some(position) = initial_position {
             window = window.default_pos(position);
         }
-        let mut text_input_request = None;
+        let mut actions = Vec::new();
         let response = size_access.show_window(
             ctx,
             key,
@@ -973,261 +1040,628 @@ impl DiffDialogState {
             egui::Vec2::from(default_body_size) + chrome,
             minimum_outer_size,
             window,
-            |ui| {
-                let body_viewport = DiffViewport::remaining(ui);
-                allocate_viewport(ui, body_viewport, |ui| {
-                    if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
-                        self.navigate_back();
-                    }
-                    let header_height = ui.spacing().interact_size.y;
-                    let header_width = ui.available_width().max(0.0);
-                    egui::ScrollArea::horizontal()
-                        .max_height(header_height)
-                        .show(ui, |ui| {
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(header_width, header_height),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    let path_width = header_path_width(
-                                        header_width,
-                                        ui.spacing().item_spacing.x,
-                                    )
-                                    .min(header_width);
-                                    let left = ui.add_sized(
-                                        [path_width, header_height],
-                                        egui::TextEdit::singleline(
-                                            &mut self.workspace.left_visible,
-                                        )
-                                        .id(egui::Id::new((self.workspace.workspace_id, "left")))
-                                        .hint_text("Left file or folder"),
-                                    );
-                                    if self.workspace.focus_left_requested {
-                                        left.request_focus();
-                                        self.workspace.focus_left_requested = false;
-                                    }
-                                    picker_menu(
-                                        ui,
-                                        &mut self.workspace,
-                                        crate::diff::model::DiffSide::Left,
-                                    );
-                                    ui.label("↔");
-                                    ui.add_sized(
-                                        [path_width, header_height],
-                                        egui::TextEdit::singleline(
-                                            &mut self.workspace.right_visible,
-                                        )
-                                        .id(egui::Id::new((self.workspace.workspace_id, "right")))
-                                        .hint_text("Right file or folder"),
-                                    );
-                                    picker_menu(
-                                        ui,
-                                        &mut self.workspace,
-                                        crate::diff::model::DiffSide::Right,
-                                    );
-                                    if ui.button("Compare Text…").clicked() {
-                                        text_input_request = Some(TextInputPurpose::NewComparison);
-                                    }
-                                    if matches!(
-                                        &self.workspace.current_view.view,
-                                        DiffView::TextCompare(state)
-                                            if state.origin == TextCompareOrigin::Memory
-                                    ) && ui.button("Edit Inputs…").clicked()
-                                    {
-                                        text_input_request = Some(TextInputPurpose::EditInputs {
-                                            view_id: self.workspace.current_view.id,
-                                        });
-                                    }
-                                    if ui
-                                        .button("Compare")
-                                        .on_hover_text("Compare/change paths (Ctrl+O)")
-                                        .clicked()
-                                        || ui.input_mut(|i| {
-                                            i.consume_key(egui::Modifiers::CTRL, egui::Key::O)
-                                        })
-                                    {
-                                        let _ = self.open_and_record(
-                                            self.workspace.left_visible.clone(),
-                                            self.workspace.right_visible.clone(),
-                                        );
-                                    }
-                                    ui.menu_button("More", |ui| {
-                                        let active = !matches!(
-                                            self.workspace.current_view.view,
-                                            DiffView::Start
-                                        );
-                                        if ui
-                                            .add_enabled(active, egui::Button::new("Swap Sides"))
-                                            .clicked()
-                                        {
-                                            self.swap_sides();
-                                            ui.close();
-                                        }
-                                        let active_comparison = matches!(
-                                            self.workspace.current_view.view,
-                                            DiffView::TextCompare(_) | DiffView::BinaryCompare(_)
-                                        );
-                                        let reloadable = matches!(
-                                            &self.workspace.current_view.view,
-                                            DiffView::TextCompare(state)
-                                                if state.origin == TextCompareOrigin::FileBacked
-                                        ) || matches!(
-                                            self.workspace.current_view.view,
-                                            DiffView::BinaryCompare(_)
-                                        );
-                                        if ui
-                                            .add_enabled(
-                                                reloadable,
-                                                egui::Button::new("Reload Files"),
-                                            )
-                                            .on_disabled_hover_text(
-                                                "In-memory text has no files to reload",
-                                            )
-                                            .clicked()
-                                        {
-                                            self.reload_files();
-                                            ui.close();
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                active_comparison,
-                                                egui::Button::new("Recompare"),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.recompare();
-                                            ui.close();
-                                        }
-                                        let folder = matches!(
-                                            self.workspace.current_view.view,
-                                            DiffView::FolderCompare(_)
-                                        );
-                                        if ui
-                                            .add_enabled(
-                                                folder,
-                                                egui::Button::new("Refresh Folder"),
-                                            )
-                                            .on_disabled_hover_text(
-                                                "Open a Folder comparison first",
-                                            )
-                                            .clicked()
-                                        {
-                                            self.refresh_folder();
-                                            ui.close();
-                                        }
-                                    });
-                                },
-                            );
-                        });
-                    if let Some(error) = &self.workspace.error {
-                        bounded_message(ui, error, 48.0);
-                    }
-                    if !self.workspace.navigation_stack.is_empty() && ui.button("← Back").clicked()
-                    {
-                        self.navigate_back();
-                    }
-                    ui.separator();
-                    let outcome = allocate_remaining_workspace(ui, |ui| {
-                        self.render_workspace(ctx, ui, activity_center)
-                    })
-                    .inner;
-                    if let Some(error) = outcome.error {
-                        self.workspace.error = Some(error);
-                    }
-                    if let Some(text_view::TextViewAction::CompareSelectionWithClipboard {
-                        view_id,
-                    }) = outcome.text_action
-                        && let Err(error) =
-                            self.compare_selection_with_clipboard_using(view_id, || {
-                                crate::actions::clipboard::get_text().map_err(|error| {
-                                    format!("Clipboard text is unavailable: {error}")
-                                })
-                            })
-                    {
-                        self.workspace.error = Some(error);
-                    }
-                    if let Some(recent) = outcome.recent_to_open {
-                        match crate::diff::persistence::reopen_recent(&recent) {
-                            Ok((left, right)) => {
-                                let _ = self.open_and_record(left, right);
-                            }
-                            Err(error) => self.workspace.error = Some(error.to_string()),
-                        }
-                    }
-                    self.apply_folder_action(outcome.folder_action);
-                    body_viewport.size
-                })
-                .inner
-            },
+            |ui| self.render_host_body(ctx, ui, &mut actions, presentation, input_allowed),
         );
-        if let Some(purpose) = text_input_request {
-            self.begin_text_input(purpose);
-        }
-        self.show_text_input(ctx);
-        self.show_operation_preview(ctx);
+        self.render_diff_children(
+            ctx,
+            &mut actions,
+            input_allowed,
+            presentation.is_some(),
+            host::docked_layer(self.workspace.workspace_id),
+        );
         if let Some(response) = response
             && let Some(inner_size) = response.inner
             && let Some((_size, position)) =
                 runtime_window_geometry(inner_size, response.response.rect.left_top(), body_screen)
         {
-            self.persistence.window_position = Some(position);
+            actions.push(DiffUiAction::DockedPosition(position));
         }
-        if !open && self.text_views.values().any(|m| m.has_dirty()) {
-            self.close_prompt = true;
-            open = true;
+        if !open
+            && input_allowed
+            && self.main_input_allowed(
+                ctx,
+                host::docked_layer(self.workspace.workspace_id),
+                presentation.is_some(),
+            )
+        {
+            actions.push(DiffUiAction::RequestClose);
         }
-        if self.close_prompt {
-            egui::Window::new("Unsaved comparison")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label("One or both sides contain unsaved changes.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Save modified").clicked() {
-                            let ok = self.text_views.values_mut().all(|m| {
-                                let mut ok = true;
-                                if m.left.is_dirty() {
-                                    ok &=
-                                        text_view::save_side(m, crate::diff::model::DiffSide::Left)
-                                }
-                                if m.right.is_dirty() {
-                                    ok &=
-                                        text_view::save_side(m, crate::diff::model::DiffSide::Right)
-                                }
-                                ok
-                            });
-                            if ok {
-                                self.close_prompt = false;
-                                open = false;
-                            }
+        actions
+    }
+
+    fn render_host_body(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        actions: &mut Vec<DiffUiAction>,
+        presentation: Option<crate::gui::utility_host::UtilityPresentation>,
+        input_allowed: bool,
+    ) -> egui::Vec2 {
+        let main_input =
+            input_allowed && self.main_input_allowed(ctx, ui.layer_id(), presentation.is_some());
+        ui.add_enabled_ui(main_input, |ui| {
+            self.render_diff_body(ctx, ui, actions, presentation)
+        })
+        .inner
+    }
+
+    fn render_diff_children(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<DiffUiAction>,
+        input_allowed: bool,
+        hosted: bool,
+        parent_layer: egui::LayerId,
+    ) {
+        let workspace = self.workspace.workspace_id;
+        let view = self.workspace.current_view.id;
+        let child_input =
+            |id| input_allowed && (!hosted || host::child_input_allowed(ctx, id, parent_layer));
+        let rules_allowed =
+            !self.close_prompt && self.text_input.is_none() && self.operation_preview.is_none();
+        let text_allowed = input_allowed
+            && !self.close_prompt
+            && self.text_input.as_ref().is_some_and(|draft| {
+                let id = match draft.purpose {
+                    TextInputPurpose::NewComparison => 0,
+                    TextInputPurpose::EditInputs { view_id } => view_id,
+                };
+                child_input(egui::Id::new((workspace, "text_input", id)))
+            });
+        let operation_allowed = input_allowed
+            && !self.close_prompt
+            && self.text_input.is_none()
+            && child_input(egui::Id::new(("folder-operation-preview", view)));
+        match &mut self.workspace.current_view.view {
+            DiffView::TextCompare(_) => {
+                if let Some(rules) = rules_dialog::show(
+                    ctx,
+                    workspace,
+                    view,
+                    rules_allowed && child_input(rules_dialog::window_id(workspace, view)),
+                ) {
+                    actions.push(DiffUiAction::ViewEffects(
+                        view,
+                        vec![effects::ViewEffect::SetTextRules(rules)],
+                    ));
+                }
+            }
+            DiffView::FolderCompare(state) => {
+                if folder_rules_dialog::show(
+                    ctx,
+                    state,
+                    rules_allowed && child_input(folder_rules_dialog::window_id()),
+                ) {
+                    actions.push(DiffUiAction::Folder(
+                        view,
+                        folder_view::FolderViewAction::RequestRescan,
+                    ));
+                }
+            }
+            _ => {}
+        }
+        self.render_text_input(ctx, actions, text_allowed);
+        self.render_operation_preview(ctx, actions, operation_allowed);
+        if !self.close_prompt {
+            return;
+        }
+        let close_id = egui::Id::new(("diff_close_prompt", workspace));
+        egui::Window::new("Unsaved comparison")
+            .id(close_id)
+            .enabled(child_input(close_id))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("One or both sides contain unsaved changes.");
+                ui.horizontal(|ui| {
+                    for (label, decision) in [
+                        ("Save modified", CloseDecision::Save),
+                        ("Discard", CloseDecision::Discard),
+                        ("Cancel", CloseDecision::Cancel),
+                    ] {
+                        if ui.button(label).clicked() {
+                            actions.push(DiffUiAction::ClosePrompt(decision));
                         }
-                        if ui.button("Discard").clicked() {
-                            self.close_prompt = false;
-                            open = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.cancel_close_prompt(&mut open);
-                        }
-                    });
+                    }
                 });
+            });
+    }
+
+    fn apply_ui_actions(&mut self, actions: Vec<DiffUiAction>, picker: effects::PickerOwner) {
+        for action in actions {
+            if !self.open {
+                break;
+            }
+            match action {
+                DiffUiAction::Back => {
+                    self.navigate_back();
+                }
+                DiffUiAction::OpenPaths(left, right) => {
+                    let _ = self.open_and_record(left, right);
+                }
+                DiffUiAction::Swap => self.swap_sides(),
+                DiffUiAction::Reload => self.reload_files(),
+                DiffUiAction::Recompare => self.recompare(),
+                DiffUiAction::RefreshFolder => self.refresh_folder(),
+                DiffUiAction::PickPath(side, folder) => match picker.dialog() {
+                    Ok(dialog) => {
+                        let path = if folder {
+                            dialog.pick_folder()
+                        } else {
+                            dialog.pick_file()
+                        };
+                        self.workspace.assign_selected_path(side, path);
+                    }
+                    Err(error) => self.workspace.error = Some(error.to_owned()),
+                },
+                DiffUiAction::BeginTextInput(purpose) => self.begin_text_input(purpose),
+                DiffUiAction::PasteTextInput(side) => {
+                    if let Some(draft) = self.text_input.as_mut() {
+                        let input = match side {
+                            crate::diff::model::DiffSide::Left => &mut draft.left,
+                            crate::diff::model::DiffSide::Right => &mut draft.right,
+                        };
+                        draft.error = paste_memory_input(input, || {
+                            crate::actions::clipboard::get_text().map_err(|_| {
+                                "Clipboard is unavailable or does not contain plain text".to_owned()
+                            })
+                        })
+                        .err();
+                    }
+                }
+                DiffUiAction::ApplyTextInput => {
+                    if let Some(draft) = self.text_input.take()
+                        && let Err((mut draft, error)) = self.apply_text_input(draft)
+                    {
+                        draft.error = Some(error);
+                        self.text_input = Some(draft);
+                    }
+                }
+                DiffUiAction::DismissTextInput => self.text_input = None,
+                DiffUiAction::CompareSelectionWithClipboard(view_id) => {
+                    if let Err(error) = self.compare_selection_with_clipboard_using(view_id, || {
+                        crate::actions::clipboard::get_text()
+                            .map_err(|error| format!("Clipboard text is unavailable: {error}"))
+                    }) {
+                        self.workspace.error = Some(error);
+                    }
+                }
+                DiffUiAction::OpenRecent(recent) => {
+                    match crate::diff::persistence::reopen_recent(&recent) {
+                        Ok((left, right)) => {
+                            let _ = self.open_and_record(left, right);
+                        }
+                        Err(error) => self.workspace.error = Some(error.to_string()),
+                    }
+                }
+                DiffUiAction::Folder(view_id, action)
+                    if view_id == self.workspace.current_view.id =>
+                {
+                    self.apply_folder_action(action);
+                }
+                DiffUiAction::Folder(..) => {}
+                DiffUiAction::OperationPreview(response) => {
+                    self.apply_operation_preview_response(response)
+                }
+                DiffUiAction::ViewEffects(view_id, effects) => {
+                    self.apply_view_effects(view_id, effects, picker)
+                }
+                DiffUiAction::RequestClose => {
+                    self.request_host_close();
+                }
+                DiffUiAction::MoveHost(_) => {}
+                DiffUiAction::DockedPosition(position) => {
+                    self.persistence.window_position = Some(position);
+                }
+                DiffUiAction::ClosePrompt(decision) if self.close_prompt => {
+                    self.apply_close_decision(decision, picker)
+                }
+                DiffUiAction::ClosePrompt(_) => {}
+            }
         }
-        self.open = open;
-        if !self.open {
-            self.clear_runtime_resources();
+        if let DiffView::FolderCompare(s) = &self.workspace.current_view.view {
+            let sort = crate::diff::settings::FolderSortStateV1 {
+                column: s.sort.column,
+                descending: s.sort.descending,
+            };
+            self.workspace.settings.folder_sort = sort;
+            self.workspace.settings.folder_column_widths = s.column_widths.validated();
+            self.persistence.config.folder_sort = sort;
+            self.persistence.config.folder_column_widths = s.column_widths.validated();
         }
+    }
+
+    fn apply_close_decision(&mut self, decision: CloseDecision, picker: effects::PickerOwner) {
+        use crate::diff::model::DiffSide;
+        match decision {
+            CloseDecision::Save => {
+                let ok = self.text_views.values_mut().all(|model| {
+                    let left = !model.left.is_dirty()
+                        || text_view::save_side_in_host(model, DiffSide::Left, picker);
+                    let right = !model.right.is_dirty()
+                        || text_view::save_side_in_host(model, DiffSide::Right, picker);
+                    left && right
+                });
+                if !ok {
+                    return;
+                }
+            }
+            CloseDecision::Discard => {}
+            CloseDecision::Cancel => {
+                let mut open = self.open;
+                self.cancel_close_prompt(&mut open);
+                self.open = open;
+                return;
+            }
+        }
+        self.close_prompt = false;
+        self.open = false;
+        self.clear_runtime_resources();
+    }
+
+    /// The shared workspace body is independent of its containing window.
+    fn render_diff_body(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        actions: &mut Vec<DiffUiAction>,
+        presentation: Option<crate::gui::utility_host::UtilityPresentation>,
+    ) -> egui::Vec2 {
+        let body_viewport = DiffViewport::remaining(ui);
+        allocate_viewport(ui, body_viewport, |ui| {
+            if ui.is_enabled()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft))
+            {
+                actions.push(DiffUiAction::Back);
+            }
+            let header_height = ui.spacing().interact_size.y;
+            let header_width = ui.available_width().max(0.0);
+            egui::ScrollArea::horizontal()
+                .max_height(header_height)
+                .show(ui, |ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(header_width, header_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            if let Some(presentation) = presentation {
+                                let (response, requested) =
+                                    crate::gui::utility_host::presentation_button(
+                                        ui,
+                                        presentation,
+                                        ui.is_enabled(),
+                                    );
+                                #[cfg(test)]
+                                {
+                                    self.host_button =
+                                        Some((response.rect, ui.clip_rect(), response.enabled()));
+                                }
+                                if response.clicked() {
+                                    actions.push(DiffUiAction::MoveHost(requested));
+                                }
+                            }
+                            let path_width =
+                                header_path_width(header_width, ui.spacing().item_spacing.x)
+                                    .min(header_width);
+                            let left = ui.add_sized(
+                                [path_width, header_height],
+                                egui::TextEdit::singleline(&mut self.workspace.left_visible)
+                                    .id(egui::Id::new((self.workspace.workspace_id, "left")))
+                                    .hint_text("Left file or folder"),
+                            );
+                            if ui.is_enabled() && self.workspace.focus_left_requested {
+                                left.request_focus();
+                                self.workspace.focus_left_requested = false;
+                            }
+                            picker_menu(ui, actions, crate::diff::model::DiffSide::Left);
+                            ui.label("↔");
+                            ui.add_sized(
+                                [path_width, header_height],
+                                egui::TextEdit::singleline(&mut self.workspace.right_visible)
+                                    .id(egui::Id::new((self.workspace.workspace_id, "right")))
+                                    .hint_text("Right file or folder"),
+                            );
+                            picker_menu(ui, actions, crate::diff::model::DiffSide::Right);
+                            if ui.button("Compare Text…").clicked() {
+                                actions.push(DiffUiAction::BeginTextInput(
+                                    TextInputPurpose::NewComparison,
+                                ));
+                            }
+                            if matches!(
+                                &self.workspace.current_view.view,
+                                DiffView::TextCompare(state)
+                                    if state.origin == TextCompareOrigin::Memory
+                            ) && ui.button("Edit Inputs…").clicked()
+                            {
+                                actions.push(DiffUiAction::BeginTextInput(
+                                    TextInputPurpose::EditInputs {
+                                        view_id: self.workspace.current_view.id,
+                                    },
+                                ));
+                            }
+                            if ui
+                                .button("Compare")
+                                .on_hover_text("Compare/change paths (Ctrl+O)")
+                                .clicked()
+                                || (ui.is_enabled()
+                                    && ui.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::CTRL, egui::Key::O)
+                                    }))
+                            {
+                                actions.push(DiffUiAction::OpenPaths(
+                                    self.workspace.left_visible.clone(),
+                                    self.workspace.right_visible.clone(),
+                                ));
+                            }
+                            ui.menu_button("More", |ui| {
+                                let active =
+                                    !matches!(self.workspace.current_view.view, DiffView::Start);
+                                if ui
+                                    .add_enabled(active, egui::Button::new("Swap Sides"))
+                                    .clicked()
+                                {
+                                    actions.push(DiffUiAction::Swap);
+                                    ui.close();
+                                }
+                                let active_comparison = matches!(
+                                    self.workspace.current_view.view,
+                                    DiffView::TextCompare(_) | DiffView::BinaryCompare(_)
+                                );
+                                let reloadable = matches!(
+                                    &self.workspace.current_view.view,
+                                    DiffView::TextCompare(state)
+                                        if state.origin == TextCompareOrigin::FileBacked
+                                ) || matches!(
+                                    self.workspace.current_view.view,
+                                    DiffView::BinaryCompare(_)
+                                );
+                                if ui
+                                    .add_enabled(reloadable, egui::Button::new("Reload Files"))
+                                    .on_disabled_hover_text("In-memory text has no files to reload")
+                                    .clicked()
+                                {
+                                    actions.push(DiffUiAction::Reload);
+                                    ui.close();
+                                }
+                                if ui
+                                    .add_enabled(active_comparison, egui::Button::new("Recompare"))
+                                    .clicked()
+                                {
+                                    actions.push(DiffUiAction::Recompare);
+                                    ui.close();
+                                }
+                                let folder = matches!(
+                                    self.workspace.current_view.view,
+                                    DiffView::FolderCompare(_)
+                                );
+                                if ui
+                                    .add_enabled(folder, egui::Button::new("Refresh Folder"))
+                                    .on_disabled_hover_text("Open a Folder comparison first")
+                                    .clicked()
+                                {
+                                    actions.push(DiffUiAction::RefreshFolder);
+                                    ui.close();
+                                }
+                            });
+                        },
+                    );
+                });
+            if let Some(error) = &self.workspace.error {
+                bounded_message(ui, error, 48.0);
+            }
+            if !self.workspace.navigation_stack.is_empty() && ui.button("← Back").clicked() {
+                actions.push(DiffUiAction::Back);
+            }
+            ui.separator();
+            let outcome =
+                allocate_remaining_workspace(ui, |ui| self.render_workspace(ctx, ui)).inner;
+            if !outcome.effects.is_empty() {
+                actions.push(DiffUiAction::ViewEffects(outcome.view_id, outcome.effects));
+            }
+            if let Some(error) = outcome.error {
+                self.workspace.error = Some(error);
+            }
+            if let Some(text_view::TextViewAction::CompareSelectionWithClipboard { view_id }) =
+                outcome.text_action
+            {
+                actions.push(DiffUiAction::CompareSelectionWithClipboard(view_id));
+            }
+            if let Some(recent) = outcome.recent_to_open {
+                actions.push(DiffUiAction::OpenRecent(recent));
+            }
+            if !matches!(outcome.folder_action, folder_view::FolderViewAction::Noop) {
+                actions.push(DiffUiAction::Folder(outcome.view_id, outcome.folder_action));
+            }
+            body_viewport.size
+        })
+        .inner
     }
 
     /// Renders the retained active view and defers workspace mutations until its
     /// mutable borrow has ended in the caller.
+    fn apply_view_effects(
+        &mut self,
+        view_id: u64,
+        effects: Vec<effects::ViewEffect>,
+        picker: effects::PickerOwner,
+    ) {
+        if self.workspace.current_view.id != view_id {
+            return;
+        }
+        for effect in effects {
+            match effect {
+                effects::ViewEffect::SaveText(request) => {
+                    if let Some(model) = self.text_views.get_mut(&view_id) {
+                        request.apply(model, picker);
+                    }
+                }
+                effects::ViewEffect::Export(export) => {
+                    if let Err(error) = export.save(picker) {
+                        self.workspace.error = Some(error);
+                    }
+                }
+                effects::ViewEffect::SetTextRules(rules) => {
+                    if let Some(model) = self.text_views.get_mut(&view_id) {
+                        model.set_rules(rules);
+                    }
+                }
+                effects::ViewEffect::ResolveTextConflict { side, reload } => {
+                    if let (Some(watch), Some(model)) = (
+                        self.watch_views.get_mut(&view_id),
+                        self.text_views.get_mut(&view_id),
+                    ) {
+                        let loaded = watch.resolve_text_conflict(side, reload);
+                        if let Some(loaded) = loaded {
+                            if let Err(error) = model.reload_external(side, &loaded) {
+                                self.workspace.error = Some(error);
+                            }
+                        } else if !reload {
+                            let index = usize::from(side == crate::diff::model::DiffSide::Right);
+                            model.external_conflict[index] = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn advance_view_runtime(&mut self, activity: &crate::activity::ActivityCenter) {
+        let workspace_id = self.workspace.workspace_id;
+        let view_id = self.workspace.current_view.id;
+        if let DiffView::FolderCompare(s) = &mut self.workspace.current_view.view {
+            let runtime = self.folder_runtimes.entry(view_id).or_default();
+            runtime.attach_activity_center(activity.clone());
+            poll_folder_runtime(view_id, s, runtime);
+            let tag = crate::diff::watch::WatchTag {
+                workspace: workspace_id,
+                view: view_id,
+                generation: runtime.generation,
+            };
+            if self
+                .watch_views
+                .get(&view_id)
+                .is_none_or(|watch| watch.tag != tag)
+            {
+                self.watch_views.insert(
+                    view_id,
+                    crate::diff::watch::ViewWatchRuntime::folder(
+                        tag,
+                        s.left_root.clone(),
+                        s.right_root.clone(),
+                    ),
+                );
+            }
+            let changes = self
+                .watch_views
+                .get_mut(&view_id)
+                .map(|w| w.poll(std::time::Instant::now(), [false; 2]))
+                .unwrap_or_default();
+            for change in changes {
+                if let crate::diff::watch::ViewWatchAction::FolderChanged { subtree, .. } = change {
+                    for entry in s.model.entries.values() {
+                        if entry.relative_path.starts_with(&subtree) {
+                            s.stale_paths.insert(entry.relative_path.clone());
+                        }
+                    }
+                    // A bounded replacement scan discovers additions/removals; it
+                    // never performs synchronization or filesystem mutation.
+                    runtime.prepare_rescan();
+                }
+            }
+        }
+        if let DiffView::BinaryCompare(s) = &self.workspace.current_view.view {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.binary_views.entry(view_id)
+            {
+                match crate::diff::binary_compare::BinaryViewModel::load(
+                    s,
+                    self.workspace.settings.pane_split,
+                ) {
+                    Ok(model) => {
+                        entry.insert(model);
+                    }
+                    Err(error) => {
+                        self.workspace.error = Some(error);
+                    }
+                }
+            }
+            let tag = crate::diff::watch::WatchTag {
+                workspace: workspace_id,
+                view: view_id,
+                generation: 1,
+            };
+            if self
+                .watch_views
+                .get(&view_id)
+                .is_none_or(|watch| watch.tag != tag)
+            {
+                self.watch_views.insert(
+                    view_id,
+                    crate::diff::watch::ViewWatchRuntime::binary(
+                        tag,
+                        s.left.clone(),
+                        s.right.clone(),
+                    ),
+                );
+            }
+            let refresh = self.watch_views.get_mut(&view_id).is_some_and(|watch| {
+                watch
+                    .poll(std::time::Instant::now(), [false; 2])
+                    .into_iter()
+                    .any(|a| matches!(a, crate::diff::watch::ViewWatchAction::BinaryRefresh))
+            });
+            if refresh
+                && let Some(model) = self.binary_views.get_mut(&view_id)
+                && let Err(error) = model.refresh_external(s)
+            {
+                self.workspace.error = Some(format!("Binary view is stale: {error}"));
+            }
+        }
+        self.advance_text_watch();
+        if let Some(model) = self.text_views.get_mut(&view_id) {
+            model.poll();
+        }
+    }
+
+    fn advance_text_watch(&mut self) {
+        let view = self.workspace.current_view.id;
+        if !matches!(&self.workspace.current_view.view, DiffView::TextCompare(state)
+            if state.origin == TextCompareOrigin::FileBacked)
+        {
+            return;
+        }
+        let Some(model) = self.text_views.get_mut(&view) else {
+            return;
+        };
+        let Some(watch) = self.watch_views.get_mut(&view) else {
+            return;
+        };
+        let dirty = [model.left.is_dirty(), model.right.is_dirty()];
+        for action in watch.poll(std::time::Instant::now(), dirty) {
+            match action {
+                crate::diff::watch::ViewWatchAction::TextReload { side, loaded } => {
+                    if let Err(error) = model.reload_external(side, &loaded) {
+                        self.workspace.error = Some(error);
+                    }
+                }
+                crate::diff::watch::ViewWatchAction::TextConflict { side, .. } => {
+                    let index = usize::from(side == crate::diff::model::DiffSide::Right);
+                    model.external_conflict[index] = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn render_workspace(
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
-        activity_center: &crate::activity::ActivityCenter,
     ) -> WorkspaceRenderOutcome {
         // Copy only lightweight context before borrowing the retained view.
         let workspace_id = self.workspace.workspace_id;
         let view_id = self.workspace.current_view.id;
         let settings = self.workspace.settings.clone();
+        let mut effects = Vec::new();
         let mut action = folder_view::FolderViewAction::Noop;
         let mut text_action = None;
         let mut render_error = None;
@@ -1288,32 +1722,6 @@ impl DiffDialogState {
                     }
                 }
                 if let Some(m) = self.text_views.get_mut(&view_id) {
-                    let dirty = [m.left.is_dirty(), m.right.is_dirty()];
-                    let actions = if s.origin == TextCompareOrigin::Memory {
-                        Vec::new()
-                    } else {
-                        self.watch_views
-                            .get_mut(&view_id)
-                            .map(|w| w.poll(std::time::Instant::now(), dirty))
-                            .unwrap_or_default()
-                    };
-                    for action in actions {
-                        match action {
-                            crate::diff::watch::ViewWatchAction::TextReload { side, loaded } => {
-                                if let Err(e) = m.reload_external(side, &loaded) {
-                                    render_error = Some(e);
-                                }
-                            }
-                            crate::diff::watch::ViewWatchAction::TextConflict { side, .. } => {
-                                m.external_conflict[if side == crate::diff::model::DiffSide::Left {
-                                    0
-                                } else {
-                                    1
-                                }] = true
-                            }
-                            _ => {}
-                        }
-                    }
                     for (index, side, label) in [
                         (0, crate::diff::model::DiffSide::Left, "Left"),
                         (1, crate::diff::model::DiffSide::Right, "Right"),
@@ -1324,24 +1732,23 @@ impl DiffDialogState {
                                     "{label} changed on disk; in-memory edits were preserved."
                                 );
                                 semantic_status(ui, StatusTone::Warning, &message, None);
-                                if ui.button("Reload / discard edits").clicked()
-                                    && let Some(loaded) = self
-                                        .watch_views
-                                        .get_mut(&view_id)
-                                        .and_then(|w| w.resolve_text_conflict(side, true))
-                                {
-                                    let _ = m.reload_external(side, &loaded);
+                                if ui.button("Reload / discard edits").clicked() {
+                                    effects.push(effects::ViewEffect::ResolveTextConflict {
+                                        side,
+                                        reload: true,
+                                    });
                                 }
                                 if ui.button("Keep current").clicked() {
-                                    if let Some(w) = self.watch_views.get_mut(&view_id) {
-                                        w.resolve_text_conflict(side, false);
-                                    }
-                                    m.external_conflict[index] = false;
+                                    effects.push(effects::ViewEffect::ResolveTextConflict {
+                                        side,
+                                        reload: false,
+                                    });
                                 }
                             });
                         }
                     }
-                    text_action = text_view::show(ui, workspace_id, view_id, m);
+                    text_action =
+                        text_view::show_with_effects(ui, workspace_id, view_id, m, &mut effects);
                 }
                 let source_label = |path: Option<&std::path::PathBuf>| {
                     if s.origin == TextCompareOrigin::Memory {
@@ -1358,97 +1765,13 @@ impl DiffDialogState {
                     ui.label(format!("Right: {}", source_label(s.right.as_ref())));
                 });
             }
-            DiffView::BinaryCompare(s) => {
-                if let std::collections::hash_map::Entry::Vacant(entry) =
-                    self.binary_views.entry(view_id)
-                {
-                    match crate::diff::binary_compare::BinaryViewModel::load(s, settings.pane_split)
-                    {
-                        Ok(model) => {
-                            entry.insert(model);
-                        }
-                        Err(error) => {
-                            render_error = Some(error);
-                        }
-                    }
-                }
-                let tag = crate::diff::watch::WatchTag {
-                    workspace: workspace_id,
-                    view: view_id,
-                    generation: 1,
-                };
-                if self
-                    .watch_views
-                    .get(&view_id)
-                    .is_none_or(|watch| watch.tag != tag)
-                {
-                    self.watch_views.insert(
-                        view_id,
-                        crate::diff::watch::ViewWatchRuntime::binary(
-                            tag,
-                            s.left.clone(),
-                            s.right.clone(),
-                        ),
-                    );
-                }
-                let refresh = self.watch_views.get_mut(&view_id).is_some_and(|watch| {
-                    watch
-                        .poll(std::time::Instant::now(), [false; 2])
-                        .into_iter()
-                        .any(|a| matches!(a, crate::diff::watch::ViewWatchAction::BinaryRefresh))
-                });
-                if refresh
-                    && let Some(model) = self.binary_views.get_mut(&view_id)
-                    && let Err(error) = model.refresh_external(s)
-                {
-                    render_error = Some(format!("Binary view is stale: {error}"));
-                }
+            DiffView::BinaryCompare(_) => {
                 if let Some(model) = self.binary_views.get_mut(&view_id) {
                     let _ = binary_view::show(ui, workspace_id, view_id, model);
                 }
             }
             DiffView::FolderCompare(s) => {
                 let runtime = self.folder_runtimes.entry(view_id).or_default();
-                runtime.attach_activity_center(activity_center.clone());
-                poll_folder_runtime(view_id, s, runtime);
-                let tag = crate::diff::watch::WatchTag {
-                    workspace: workspace_id,
-                    view: view_id,
-                    generation: runtime.generation,
-                };
-                if self
-                    .watch_views
-                    .get(&view_id)
-                    .is_none_or(|watch| watch.tag != tag)
-                {
-                    self.watch_views.insert(
-                        view_id,
-                        crate::diff::watch::ViewWatchRuntime::folder(
-                            tag,
-                            s.left_root.clone(),
-                            s.right_root.clone(),
-                        ),
-                    );
-                }
-                let changes = self
-                    .watch_views
-                    .get_mut(&view_id)
-                    .map(|w| w.poll(std::time::Instant::now(), [false; 2]))
-                    .unwrap_or_default();
-                for change in changes {
-                    if let crate::diff::watch::ViewWatchAction::FolderChanged { subtree, .. } =
-                        change
-                    {
-                        for entry in s.model.entries.values() {
-                            if entry.relative_path.starts_with(&subtree) {
-                                s.stale_paths.insert(entry.relative_path.clone());
-                            }
-                        }
-                        // A bounded replacement scan discovers additions/removals; it
-                        // never performs synchronization or filesystem mutation.
-                        runtime.prepare_rescan();
-                    }
-                }
                 if runtime.is_active() {
                     ctx.request_repaint();
                 }
@@ -1464,18 +1787,14 @@ impl DiffDialogState {
                 if let Some(feedback) = &runtime.operation_feedback {
                     show_folder_operation_feedback(ui, view_id, feedback);
                 }
-                action = render_retained_folder(s, |state| folder_view::show(ui, state, runtime));
-                let sort = crate::diff::settings::FolderSortStateV1 {
-                    column: s.sort.column,
-                    descending: s.sort.descending,
-                };
-                self.workspace.settings.folder_sort = sort;
-                self.workspace.settings.folder_column_widths = s.column_widths.validated();
-                self.persistence.config.folder_sort = sort;
-                self.persistence.config.folder_column_widths = s.column_widths.validated();
+                action = render_retained_folder(s, |state| {
+                    folder_view::show(ui, state, runtime, &mut effects)
+                });
             }
         }
         WorkspaceRenderOutcome {
+            view_id,
+            effects,
             folder_action: action,
             text_action,
             error: render_error,
@@ -1650,7 +1969,12 @@ impl DiffDialogState {
         paths
     }
 
-    fn show_operation_preview(&mut self, ctx: &egui::Context) {
+    fn render_operation_preview(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<DiffUiAction>,
+        input_allowed: bool,
+    ) {
         if self
             .operation_preview
             .as_ref()
@@ -1663,9 +1987,12 @@ impl DiffDialogState {
             .as_ref()
             .and_then(|p| self.folder_runtimes.get(&p.context.comparison.view_id))
             .is_some_and(|runtime| runtime.mutation_active());
-        let response = self.operation_preview.as_mut().map(|p| p.show(ctx, active));
-        if let Some(response) = response {
-            self.apply_operation_preview_response(response);
+        let response = self
+            .operation_preview
+            .as_mut()
+            .map(|p| p.show_with_input(ctx, active, input_allowed));
+        if input_allowed && let Some(response) = response {
+            actions.push(DiffUiAction::OperationPreview(response));
         }
     }
 
@@ -2095,16 +2422,16 @@ fn refresh_after_mutation(
 
 fn picker_menu(
     ui: &mut egui::Ui,
-    workspace: &mut DiffWorkspace,
+    actions: &mut Vec<DiffUiAction>,
     side: crate::diff::model::DiffSide,
 ) {
     ui.menu_button("Browse ▾", |ui| {
         if ui.button("Select File…").clicked() {
-            workspace.assign_selected_path(side, rfd::FileDialog::new().pick_file());
+            actions.push(DiffUiAction::PickPath(side, false));
             ui.close();
         }
         if ui.button("Select Folder…").clicked() {
-            workspace.assign_selected_path(side, rfd::FileDialog::new().pick_folder());
+            actions.push(DiffUiAction::PickPath(side, true));
             ui.close();
         }
     });
@@ -2138,6 +2465,19 @@ mod tests {
             .replace_source("edited scratch".into())
             .unwrap();
         (dialog, view_id)
+    }
+
+    #[test]
+    fn host_close_keeps_dirty_owner_until_confirmation() {
+        let (mut dialog, view_id) = dirty_memory_dialog();
+        assert!(!dialog.request_host_close());
+        assert!(dialog.open);
+        assert!(dialog.host_close_prompt_open());
+        assert!(dialog.text_views.get(&view_id).unwrap().has_dirty());
+        let mut open = dialog.open;
+        dialog.cancel_close_prompt(&mut open);
+        assert!(open);
+        assert!(dialog.text_views.get(&view_id).unwrap().has_dirty());
     }
 
     fn memory_dialog_with_inputs(left: &str, right: &str) -> (DiffDialogState, u64) {
@@ -2846,6 +3186,45 @@ mod tests {
             crate::diff::file_ops::OperationHandle::with_test_channel(receiver, cancel.clone()),
         );
         (cancel, sender)
+    }
+
+    impl DiffDialogState {
+        pub(crate) fn test_running_host_operation() -> (
+            tempfile::TempDir,
+            tempfile::TempDir,
+            Self,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+            impl FnOnce(),
+        ) {
+            let (left, right, mut dialog, context) = operation_fixture();
+            let runtime = dialog.folder_runtimes.get_mut(&950).unwrap();
+            // A user operation starts after the first poll has bound the scan roots.
+            runtime.left_root = Some(context.comparison.left_root.clone());
+            runtime.right_root = Some(context.comparison.right_root.clone());
+            let (cancelled, sender) = pending_operation(runtime, &context);
+            let complete = move || {
+                sender
+                    .send(OperationEvent::Completed(operation_report(
+                        &context,
+                        vec![ItemOutcome::Copied],
+                        false,
+                    )))
+                    .unwrap();
+            };
+            (left, right, dialog, cancelled, complete)
+        }
+
+        pub(crate) fn test_active_host_operation(&self) -> (u64, bool, Option<usize>) {
+            let runtime = &self.folder_runtimes[&self.workspace.current_view.id];
+            (
+                runtime.generation,
+                runtime.mutation_active(),
+                runtime
+                    .operation_feedback
+                    .as_ref()
+                    .map(|feedback| feedback.completed),
+            )
+        }
     }
 
     fn pending_operation_fixture() -> (

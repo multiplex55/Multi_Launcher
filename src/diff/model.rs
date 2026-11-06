@@ -1310,6 +1310,87 @@ pub struct TextViewModel {
     receiver: Option<Receiver<CompareMessage>>,
 }
 
+// A rejected host pass may restore editor controls and undo state without
+// taking ownership of the comparison result or its worker receiver.
+macro_rules! view_ui_checkpoint {
+    ($snapshot:ident for $model:ident { $($field:ident: $kind:ty),* $(,)? }) => {
+        pub(crate) struct $snapshot {
+            $($field: $kind,)*
+        }
+
+        impl $snapshot {
+            pub(crate) fn capture(model: &$model) -> Self {
+                Self { $($field: model.$field.clone(),)* }
+            }
+
+            pub(crate) fn restore(self, model: &mut $model) {
+                $(model.$field = self.$field;)*
+            }
+        }
+    };
+}
+
+view_ui_checkpoint! { TextUiCheckpoint for TextViewModel {
+    left: TextDocument,
+    right: TextDocument,
+    rules: TextComparisonRules,
+    active_side: DiffSide,
+    current_row: Option<usize>,
+    current_row_identity: Option<CurrentTextRowIdentity>,
+    pending_scroll_row: Option<usize>,
+    pending_scroll_generation: u64,
+    pending_find_scroll_request: Option<PendingScrollRequest>,
+    scroll: TextScrollState,
+    projection_mode: RowProjectionMode,
+    projection_context: usize,
+    find_open: bool,
+    find_query: String,
+    find_scope: FindScope,
+    find_case_sensitive: bool,
+    find_projection_only: bool,
+    find_matches: Vec<FindMatch>,
+    current_find_match: Option<usize>,
+    wrap: bool,
+    syntax: bool,
+    visible_whitespace: bool,
+    visible_line_endings: bool,
+    text_details_open: bool,
+    text_details_height: f32,
+    manual_alignments: Vec<ManualTextAlignment>,
+    pending_alignment: Option<PendingTextAlignment>,
+    alignment_error: Option<String>,
+    source_line_selection: Option<SourceLineSelection>,
+    annotation_revision: u64,
+    annotation_notice: Option<String>,
+    projection_notice: Option<String>,
+    manual_alignment_source_ids: (u64, u64),
+    manual_alignment_source_revisions: (u64, u64),
+    current_intraline: Option<IntralineLocation>,
+    splitter: f32,
+    recalculate_at: Option<Instant>,
+    recalculating: bool,
+    comparison_error: Option<String>,
+    left_error: Option<String>,
+    right_error: Option<String>,
+    cursor: Option<SourcePosition>,
+}}
+
+view_ui_checkpoint! { FolderUiCheckpoint for FolderCompareState {
+    selected_paths: BTreeSet<PathBuf>,
+    primary_selection: Option<PathBuf>,
+    expanded_nodes: BTreeSet<PathBuf>,
+    scroll_anchor: Option<PathBuf>,
+    display_filter: FolderDisplayFilter,
+    path_filter: String,
+    sort: FolderSortState,
+    column_widths: FolderColumnWidthsV1,
+    draft_rules: FolderRulesDraft,
+    folder_rules_open: bool,
+    folder_rules_cancel_snapshot: Option<FolderRulesDraft>,
+    alignment_overrides: Vec<FolderAlignmentOverride>,
+    pending_alignment: Option<(bool, PathBuf)>,
+}}
+
 impl TextViewModel {
     #[cfg(test)]
     pub(crate) fn from_test_text(left: String, right: String) -> Self {

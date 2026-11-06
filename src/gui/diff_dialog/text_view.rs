@@ -1,3 +1,4 @@
+use super::effects::{PickerOwner, TextSaveRequest, ViewEffect};
 use crate::diff::model::TextCompareOrigin;
 use crate::diff::model::{DiffSide, TextViewModel};
 use crate::diff::text_compare::{
@@ -30,6 +31,7 @@ fn equality_status_labels(
     )
 }
 
+#[cfg(test)]
 pub fn show(
     ui: &mut egui::Ui,
     workspace: u64,
@@ -37,7 +39,38 @@ pub fn show(
     model: &mut TextViewModel,
 ) -> Option<TextViewAction> {
     model.poll();
-    shortcuts(ui, model);
+    let mut effects = Vec::new();
+    let action = show_with_effects(ui, workspace, view, model, &mut effects);
+    if let Some(rules) = super::rules_dialog::show(ui.ctx(), workspace, view, ui.is_enabled()) {
+        model.set_rules(rules);
+    }
+    for effect in effects {
+        match effect {
+            ViewEffect::SaveText(save) => {
+                save.apply(model, PickerOwner::Legacy);
+            }
+            ViewEffect::Export(export) => {
+                if let Err(error) = export.save(PickerOwner::Legacy) {
+                    tracing::error!("{error}");
+                }
+            }
+            ViewEffect::SetTextRules(rules) => model.set_rules(rules),
+            ViewEffect::ResolveTextConflict { .. } => {}
+        }
+    }
+    action
+}
+
+pub(super) fn show_with_effects(
+    ui: &mut egui::Ui,
+    workspace: u64,
+    view: u64,
+    model: &mut TextViewModel,
+    effects: &mut Vec<ViewEffect>,
+) -> Option<TextViewAction> {
+    if ui.is_enabled() {
+        shortcuts(ui, model, effects);
+    }
     let mut action = None;
     // Keep the expanded toolbar reachable without pushing Find and the
     // comparison panes out of a small viewport at large text sizes.
@@ -226,11 +259,11 @@ pub fn show(
                     }
                 });
                 ui.menu_button("More", |ui| {
-                    super::export::text_menu(ui, model);
+                    super::export::text_menu(ui, model, effects);
                     if ui.button("Rules…").clicked() {
                         ui.ctx().data_mut(|d| {
                             d.insert_temp(
-                                egui::Id::new(("diff-rules", view)),
+                                super::rules_dialog::state_id(workspace, view),
                                 super::rules_dialog::RulesDialogState::new(&model.rules),
                             )
                         });
@@ -277,17 +310,29 @@ pub fn show(
                         "Save Right"
                     };
                     if ui.button(save_left).clicked() {
-                        save_side(model, DiffSide::Left);
+                        effects.push(ViewEffect::SaveText(TextSaveRequest::capture(
+                            model,
+                            DiffSide::Left,
+                        )));
                     }
                     if ui.button(save_right).clicked() {
-                        save_side(model, DiffSide::Right);
+                        effects.push(ViewEffect::SaveText(TextSaveRequest::capture(
+                            model,
+                            DiffSide::Right,
+                        )));
                     }
                     if ui.button("Save All Modified").clicked() {
                         if model.left.is_dirty() {
-                            save_side(model, DiffSide::Left);
+                            effects.push(ViewEffect::SaveText(TextSaveRequest::capture(
+                                model,
+                                DiffSide::Left,
+                            )));
                         }
                         if model.right.is_dirty() {
-                            save_side(model, DiffSide::Right);
+                            effects.push(ViewEffect::SaveText(TextSaveRequest::capture(
+                                model,
+                                DiffSide::Right,
+                            )));
                         }
                     }
                 });
@@ -509,7 +554,6 @@ pub fn show(
     if model.text_details_open {
         text_details(ui, model, details_height);
     }
-    super::rules_dialog::show(ui.ctx(), view, model);
     action
 }
 
@@ -611,13 +655,30 @@ fn side_name(side: DiffSide) -> &'static str {
     }
 }
 
-pub(super) fn save_side(model: &mut TextViewModel, side: DiffSide) -> bool {
+pub(super) fn save_side_in_host(
+    model: &mut TextViewModel,
+    side: DiffSide,
+    picker: PickerOwner,
+) -> bool {
+    if model.origin != TextCompareOrigin::Memory {
+        return model.save(side);
+    }
+    let picker = match picker.dialog() {
+        Ok(dialog) => dialog,
+        Err(error) => {
+            match side {
+                DiffSide::Left => model.left_error = Some(error.to_owned()),
+                DiffSide::Right => model.right_error = Some(error.to_owned()),
+            }
+            return false;
+        }
+    };
     let name = match side {
         DiffSide::Left => "left.txt",
         DiffSide::Right => "right.txt",
     };
     save_side_with_picker(model, side, || {
-        rfd::FileDialog::new()
+        picker
             .add_filter("Text files", &["txt"])
             .set_file_name(name)
             .save_file()
@@ -1349,7 +1410,7 @@ fn side_status(
         semantic_status(ui, StatusTone::Error, e, None);
     }
 }
-fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
+fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel, effects: &mut Vec<ViewEffect>) {
     let mut save_active_side = None;
     let mut save_all = false;
     ui.input_mut(|i| {
@@ -1390,14 +1451,20 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
         }
     });
     if let Some(side) = save_active_side {
-        save_side(m, side);
+        effects.push(ViewEffect::SaveText(TextSaveRequest::capture(m, side)));
     }
     if save_all {
         if m.left.is_dirty() {
-            save_side(m, DiffSide::Left);
+            effects.push(ViewEffect::SaveText(TextSaveRequest::capture(
+                m,
+                DiffSide::Left,
+            )));
         }
         if m.right.is_dirty() {
-            save_side(m, DiffSide::Right);
+            effects.push(ViewEffect::SaveText(TextSaveRequest::capture(
+                m,
+                DiffSide::Right,
+            )));
         }
     }
 
