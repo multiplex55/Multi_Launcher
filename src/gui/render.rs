@@ -1976,7 +1976,10 @@ impl LauncherApp {
             || self
                 .note_panels
                 .iter()
-                .any(|panel| panel.query_focus_protected_state_blocks())
+                .any(|panel| {
+                    panel.host_layer_if_root().is_some()
+                        && panel.query_focus_protected_state_blocks()
+                })
         {
             return true;
         }
@@ -1986,7 +1989,7 @@ impl LauncherApp {
                 || self
                     .note_panels
                     .iter()
-                    .any(|panel| panel.open && panel.show_query_focus_layer() == layer)
+                    .any(|panel| panel.host_layer_if_root() == Some(layer))
                 || (allow_ordinary_tools && ordinary_layer_is_allowed(layer))
         };
         if visible_top_middle_layer(ctx).is_some_and(|layer| !passive_ordinary_layer(layer)) {
@@ -2002,7 +2005,9 @@ impl LauncherApp {
                 || self
                     .note_panels
                     .iter()
-                    .any(|panel| panel.owns_query_focus_layer(ctx)));
+                    .any(|panel| {
+                        panel.host_layer_if_root().is_some() && panel.owns_query_focus_layer(ctx)
+                    }));
         let focused_outside_allowed_layer = focused_layer.is_some_and(|layer| {
             Some(layer) != query_layer
                 && !focused_notes_layer
@@ -2046,8 +2051,7 @@ impl LauncherApp {
         let note_panel_layers = self
             .note_panels
             .iter()
-            .filter(|panel| panel.open)
-            .map(|panel| panel.show_query_focus_layer())
+            .filter_map(|panel| panel.host_layer_if_root())
             .collect::<std::collections::HashSet<_>>();
         let ordinary_panel_layers = Self::TRACKED_PANELS
             .into_iter()
@@ -2065,7 +2069,7 @@ impl LauncherApp {
             .chain(
                 self.note_panels
                     .iter()
-                    .filter(|panel| panel.open)
+                    .filter(|panel| panel.host_layer_if_root().is_some())
                     .flat_map(|panel| panel.query_focus_ordinary_layers()),
             )
             .chain(
@@ -2084,10 +2088,10 @@ impl LauncherApp {
             .collect::<std::collections::HashSet<_>>();
         (Self::TRACKED_PANELS
             .into_iter()
-            .any(|panel| self.is_panel_open(panel))
+            .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
             || (self.show_dashboard_editor && self.dashboard_editor.open)
             || self.show_plugins
-            || !self.note_panels.is_empty()
+            || !note_panel_layers.is_empty()
             || !self.image_panels.is_empty())
         .then_some(super::QueryFocusOrdinaryContext {
             note_panel_layers,
@@ -4823,7 +4827,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 11] {
+    fn viewport_bootstrap_state(&self) -> [bool; 12] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4837,6 +4841,7 @@ impl LauncherApp {
             self.recording_dialog
                 .needs_compact_viewport_bootstrap(&self.recording_controller),
             self.notes_dialog.needs_root_ui_when_hidden(),
+            self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
         ]
     }
 
@@ -4849,7 +4854,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 11],
+        previously_pending: [bool; 12],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5024,6 +5029,51 @@ impl LauncherApp {
                 true,
             );
             self.notes_dialog = notes;
+        }
+    }
+
+    fn show_note_panels(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+        mut note_close_frame: Option<&mut super::query_observation::NoteCloseRenderFrame>,
+    ) {
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        let note_instances: Vec<_> = self
+            .note_panels
+            .iter()
+            .filter(|panel| root_visible || panel.needs_root_ui_when_hidden())
+            .map(|panel| panel.prompt_identity())
+            .collect();
+        for identity in note_instances {
+            let Some(index) = self
+                .note_panels
+                .iter()
+                .position(|panel| panel.prompt_identity() == identity)
+            else {
+                continue;
+            };
+            let mut panel = self.note_panels.remove(index);
+            let mut discard = None;
+            let observe = panel.host_layer_if_root().is_some() && note_close_frame.is_some();
+            panel.ui_with_host(
+                ctx,
+                self,
+                first_ui_pass,
+                root_visible,
+                application_input_allowed,
+                root_input_allowed,
+                observe.then_some(&mut discard),
+            );
+            if let Some(observed) = note_close_frame.as_deref_mut().filter(|_| observe) {
+                observed.observe_panel(&panel, discard);
+            }
+            if panel.open {
+                self.note_panels
+                    .insert(index.min(self.note_panels.len()), panel);
+            }
         }
     }
 
@@ -7100,6 +7150,7 @@ impl LauncherApp {
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
+            self.show_note_panels(&ctx, first_ui_pass, false, None);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -7902,7 +7953,9 @@ impl LauncherApp {
                         .note_panels
                         .iter_mut()
                         .rev()
-                        .find(|panel| panel.owns_keyboard_layer(&ctx))
+                        .find(|panel| {
+                            panel.host_layer_if_root().is_some() && panel.owns_keyboard_layer(&ctx)
+                        })
                     {
                         if find {
                             panel.open_find();
@@ -8061,6 +8114,7 @@ impl LauncherApp {
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
                     && !self.notes_dialog.owns_root_input(&ctx)
+                    && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     #[cfg(test)]
@@ -8104,7 +8158,7 @@ impl LauncherApp {
                                 self.jump_mode_ui.settings_instance(),
                             );
                     if !search_escape_handled && !jump_session_escape_preempted {
-                        if self.any_panel_open() {
+                        if self.any_root_panel_open() {
                             if self.close_front_dialog() {
                                 ctx.input_mut(|i| {
                                     i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
@@ -8129,7 +8183,7 @@ impl LauncherApp {
                 });
                 if first_ui_pass
                     && close_panel_shortcut_modifiers.is_some()
-                    && self.any_panel_open()
+                    && self.any_root_panel_open()
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -8143,6 +8197,7 @@ impl LauncherApp {
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
                     && !self.notes_dialog.owns_root_input(&ctx)
+                    && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && self.close_front_dialog()
                 {
                     let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
@@ -10153,23 +10208,12 @@ impl LauncherApp {
             .radial_query_observation
             .has_note_close_request()
             .then(|| super::query_observation::NoteCloseRenderFrame::new(&ctx));
-        let mut i = 0;
-        while i < self.note_panels.len() {
-            let mut panel = self.note_panels.remove(i);
-            let mut discard = None;
-            panel.ui_with_note_close_observation(
-                &ctx,
-                self,
-                note_close_frame.as_ref().map(|_| &mut discard),
-            );
-            if let Some(observed) = &mut note_close_frame {
-                observed.observe_panel(&panel, discard);
-            }
-            if panel.open {
-                self.note_panels.insert(i, panel);
-                i += 1;
-            }
-        }
+        self.show_note_panels(
+            &ctx,
+            first_ui_pass,
+            frame_logic.should_be_visible,
+            note_close_frame.as_mut(),
+        );
         let mut i = 0;
         while i < self.image_panels.len() {
             let mut panel = self.image_panels.remove(i);
@@ -10954,17 +10998,65 @@ pub(crate) fn persist_launcher_close_preferences(
 
 impl LauncherApp {
     fn complete_markdown_diagram_handoff(&mut self, ctx: &egui::Context) {
-        let note_open_effects = self
+        let note_instances: Vec<_> = self
             .note_panels
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(index, panel)| {
-                panel
-                    .on_ui_frame_complete(ctx)
-                    .map(|effect| (index, effect))
-            })
-            .collect::<Vec<_>>();
-        for (panel_index, note_effect) in note_open_effects {
+            .iter()
+            .map(|panel| panel.prompt_identity())
+            .collect();
+        let mut note_open_effects = Vec::new();
+        let mut note_open_requests = Vec::new();
+        let mut image_open_requests = Vec::new();
+        let mut note_links = Vec::new();
+        let mut show_root = false;
+        for identity in note_instances {
+            let Some(index) = self
+                .note_panels
+                .iter()
+                .position(|panel| panel.prompt_identity() == identity)
+            else {
+                continue;
+            };
+            let mut panel = self.note_panels.remove(index);
+            let completion = panel.on_host_frame_complete(ctx, self);
+            show_root |= completion.show_root;
+            note_open_requests.extend(completion.open_note_slugs);
+            image_open_requests.extend(completion.open_image_paths);
+            note_links.extend(completion.links);
+            if !completion.closed && panel.open {
+                self.note_panels
+                    .insert(index.min(self.note_panels.len()), panel);
+                if let Some(effect) = completion.effect {
+                    note_open_effects.push((completion.panel_identity, effect));
+                }
+            }
+        }
+        self.panel_states.note_panel = !self.note_panels.is_empty();
+        if self.note_panels.is_empty() {
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::NotePanel);
+        }
+        for slug in note_open_requests {
+            show_root |= self.open_note_panel_from_link(&slug);
+        }
+        for path in image_open_requests {
+            let previous_count = self.image_panels.len();
+            self.open_image_panel(&path);
+            show_root |= self.image_panels.len() > previous_count;
+        }
+        for link in note_links {
+            show_root |= super::note_panel::dispatch_note_link(ctx, self, link);
+        }
+        if show_root {
+            self.request_launcher_visibility(true);
+        }
+        for (identity, note_effect) in note_open_effects {
+            let Some(panel_index) = self
+                .note_panels
+                .iter()
+                .position(|panel| panel.prompt_identity() == identity)
+            else {
+                continue;
+            };
             match note_effect {
                 super::note_panel::NotePanelEffect::InsertCustomTable(request) => {
                     let result = self
@@ -16527,6 +16619,65 @@ mod tests {
         assert!(!app.qr_dialog.open);
         assert!(app.markdown_studio_dialog.open);
         assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::MarkdownStudioDialog));
+    }
+
+    #[test]
+    fn root_close_leaves_detached_note_open_and_closes_the_docked_peer() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = false;
+        let make_note = |slug: &str| {
+            super::super::note_panel::NotePanel::from_note(crate::plugins::note::Note {
+                title: "Same title".into(),
+                path: std::path::PathBuf::new(),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: slug.into(),
+                alias: None,
+                aliases: Vec::new(),
+                entity_refs: Vec::new(),
+            })
+        };
+        app.focus_panel(super::super::Panel::QrDialog);
+        app.update_panel_stack();
+        app.push_note_panel(make_note("root-note"));
+        let mut detached = make_note("detached-note");
+        detached.test_pop_out();
+        let detached_identity = detached.prompt_identity();
+        app.push_note_panel(detached);
+        assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::NotePanel));
+
+        assert!(app.close_front_dialog());
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(app.note_panels[0].prompt_identity(), detached_identity);
+        assert!(app.note_panels[0].open);
+        assert!(app.qr_dialog.open);
+
+        assert!(app.close_front_dialog());
+        assert!(!app.qr_dialog.open);
+        assert_eq!(app.note_panels.len(), 1);
+        assert_eq!(app.note_panels[0].prompt_identity(), detached_identity);
+        assert!(app.note_panels[0].open);
+        assert!(app.any_panel_open());
+        assert!(!app.any_root_panel_open());
+
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.note_panels[0].prompt_identity(), detached_identity);
+        assert!(app.note_panels[0].open);
     }
 
     #[test]
@@ -48863,8 +49014,9 @@ mod tests {
 
     #[test]
     fn note_find_shortcut_uses_focused_or_top_note_and_preserves_ctrl_w_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         prepare_actual_query_frame(&ctx, &mut app);
 
         let make_panel = |slug: &str| {

@@ -4795,6 +4795,27 @@ impl LauncherApp {
                 .any(|panel| self.is_panel_open(panel))
     }
 
+    fn panel_has_root_presentation(&self, panel: Panel) -> bool {
+        match panel {
+            Panel::NotesDialog => !self.notes_dialog.is_popped_out(),
+            Panel::MarkdownStudioDialog => !self.markdown_studio_dialog.is_popped_out(),
+            Panel::NotePanel => self
+                .note_panels
+                .iter()
+                .any(|note| note.host_layer_if_root().is_some()),
+            _ => true,
+        }
+    }
+
+    fn any_root_panel_open(&self) -> bool {
+        self.pin_list_open
+            || self.ocr_surface_visible()
+            || Self::TRACKED_PANELS
+                .iter()
+                .copied()
+                .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
+    }
+
     pub fn unregister_all_hotkeys(&self) {
         use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
         if let Ok(mut registered_hotkeys) = self.registered_hotkeys.lock() {
@@ -4839,42 +4860,22 @@ impl LauncherApp {
             self.close_ocr_surface();
             return true;
         }
-        if self.panel_stack.last() == Some(&Panel::Editor) && self.editor.repair_dialog_is_open() {
+        let Some(panel_index) = self
+            .panel_stack
+            .iter()
+            .rposition(|panel| self.panel_has_root_presentation(*panel))
+        else {
+            return false;
+        };
+        let panel = self.panel_stack[panel_index];
+        if panel == Panel::Editor && self.editor.repair_dialog_is_open() {
             self.editor.retire_repair_dialog();
             return true;
         }
-        if self.panel_stack.last() == Some(&Panel::NotesDialog)
-            && self.notes_dialog.is_popped_out()
-        {
-            let Some(panel) = self.panel_stack.pop() else {
-                return false;
-            };
-            let closed = self.close_front_dialog();
-            if self.notes_dialog.open && !self.panel_stack.contains(&panel) {
-                self.panel_stack.push(panel);
-            }
-            return closed;
-        }
-        if self.panel_stack.last() == Some(&Panel::MarkdownStudioDialog)
-            && self.markdown_studio_dialog.is_popped_out()
-        {
-            let Some(panel) = self.panel_stack.pop() else {
-                return false;
-            };
-            let closed = self.close_front_dialog();
-            if self.markdown_studio_dialog.open && !self.panel_stack.contains(&panel) {
-                self.panel_stack.push(panel);
-            }
-            return closed;
-        }
-        let panel = match self.panel_stack.pop() {
-            Some(p) => p,
-            None => return false,
-        };
         if self.pinned_panels.contains(&panel) {
-            self.panel_stack.push(panel);
             return false;
         }
+        self.panel_stack.remove(panel_index);
         if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.request_close();
             self.panel_states.calculation_pad_dialog = self.calculation_pad_dialog.open;
@@ -5045,16 +5046,29 @@ impl LauncherApp {
                 self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
-                if let Some(mut note_panel) = self.note_panels.pop() {
+                let note_index = self
+                    .note_panels
+                    .iter()
+                    .rposition(|note| {
+                        note.host_layer_if_root().is_some()
+                            && note.owns_keyboard_layer(&self.egui_ctx)
+                    })
+                    .or_else(|| {
+                        self.note_panels
+                            .iter()
+                            .rposition(|note| note.host_layer_if_root().is_some())
+                    });
+                if let Some(index) = note_index {
+                    let mut note_panel = self.note_panels.remove(index);
                     note_panel.request_close(self);
                     if note_panel.open {
-                        self.note_panels.push(note_panel);
-                        self.panel_stack.push(Panel::NotePanel);
+                        self.note_panels.insert(index, note_panel);
                     }
                 }
                 self.panel_states.note_panel = !self.note_panels.is_empty();
                 if self.panel_states.note_panel && !self.panel_stack.contains(&Panel::NotePanel) {
-                    self.panel_stack.push(Panel::NotePanel);
+                    self.panel_stack
+                        .insert(panel_index.min(self.panel_stack.len()), Panel::NotePanel);
                 }
             }
             Panel::ImagePanel => {
@@ -5956,6 +5970,13 @@ impl LauncherApp {
         self.note_panels.push(panel);
         // Allow keyboard shortcuts like Esc/Cmd+W to immediately close the panel
         self.update_panel_stack();
+    }
+
+    fn open_note_panel_from_link(&mut self, slug: &str) -> bool {
+        self.open_note_panel(slug, None);
+        self.note_panels
+            .last()
+            .is_some_and(|panel| panel.host_layer_if_root().is_some())
     }
 
     pub fn push_note_panel(&mut self, panel: NotePanel) {

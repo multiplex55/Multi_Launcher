@@ -258,3 +258,19 @@ The initial run filter was test(/::(quick_notes_popup_owner_stays_with_identity_
 | Quick Notes | Single draft across Dock/Pop Out; retained save, template and external intents; owner-specific keyboard and Jump Mode; launcher query return; hidden-root host route | Real host buttons with discard, draft/save, popup and query-return checks. Initial 5/6 and exact correction 3/3 | IMPLEMENTED_USER_VALIDATION_PENDING (N2) |
 
 Next is M2-A.2b independent note editors on the same R02 branch, followed by MkMacro.
+
+### R02/M2-A.2b — Independent note editors
+
+Source starts at pushed Quick Notes checkpoint aff2d8fab2112ee0f50140850d82aa4fe71ad2a4. This slice covers independent note editors within original ID13/C01 M2-A. Each editor retains its draft, undo history, child prompts and logical identity across Dock and Pop Out. Root shortcuts select an eligible docked note or underlying dialog. The detached editor owns its Find and close shortcuts, stays live with the launcher hidden, and uses the accepted host for attachments and export. Note and image links, saves, and existing Diagram handoffs use the originating editor's retained pass. Launcher note links raise the resolved docked editor, including alias and new draft targets.
+
+The first list attempt exposed compile errors and executed zero tests. After correction, the list matched 10. The initial run passed 9/10. The new launcher test failed because its fixture had opened the underlying QR dialog without publishing its panel stack state. The fixture now initializes the order before inserting notes. The six-case rerun passed 6/6 and the production check exited 0. Initial and rerun SHA-256 values are 328B8B8027322123FB3844D8FA4FBDB150CEE82B569C258BBEA57121EADAC2FA and 31D3EB8EA569D59B304E0BB3083DB1996541E72B773ECE040703689FE9BD36BD. A test-generated default clipboard modifiers file was preserved under ignored evidence.
+
+Independent review cleared the host identity, dirty draft rollback, prompt focus, and root and detached close boundaries. It also found that embedded Attach/Export needed the verified root owner, link activation needed to use the resolved target, and native Find needed to handle Ctrl+F and Escape before editor close. The re-review cleared all three corrections.
+
+For the final run, `$f = (Get-Content target/desktop-productivity-completion-recovery/r02-m2-a2b-final-filter.txt -Raw).Trim()`. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 14. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 14/14, with 7430 skipped. Run SHA-256: 5E9ADD441D0C57DB79493B028A4D7756E6B1905AAB156E8BBB2307CF1F67FF92. `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0. Check SHA-256: D7C7A8480BF8F22309890A2971FC53B9FC161C00ECEE0682C01FFA24B92473B0. Rustfmt parsed the three touched Rust files and `git diff --check` passed. Source scope is `src/gui/mod.rs`, `src/gui/note_panel.rs`, and `src/gui/render.rs`.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Independent note editor | Distinct live editor per logical instance, visible Dock and Pop Out, dirty draft and undo state, owner-qualified prompts and pickers, independent input and hidden-root operation | Actual harness host buttons and child Find keys, root close with same-title peers, rejected edit rollback, resolved note links, save/conflict, export, and Diagram history checks | IMPLEMENTED_USER_VALIDATION_PENDING (N2) |
+
+Next is M2-A.3 MkMacro Editor on the same R02 branch.
