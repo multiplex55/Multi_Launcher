@@ -326,3 +326,15 @@ For verification, `$f` is the trimmed contents of the exact selector in the igno
 | Main Settings | One draft and save worker across Dock and Pop Out, current-owner navigation, hidden-launcher operation, retained Save and Cancel | Visible host and Cancel clicks, discarded and accepted launcher and child Escape, hidden save-worker completion, production build | IMPLEMENTED_USER_VALIDATION_PENDING (N3) |
 
 Next is R02/M2-B.3 Mouse Settings and Gesture Settings on the same branch.
+
+### R02/M2-B.3 — Mouse Settings and Gesture Settings
+
+The Mouse Settings and Gesture Settings portion of original IDs 16–18/C01 M3-A starts from pushed Main Settings checkpoint `7b1c0f03214288e09fb80c2cdf337230293c7573`. Both forms retain their existing draft across Dock and Pop Out, use the same body in ROOT and detached presentations, and stay live while the launcher is hidden. Mouse appearance Apply and the five runtime switches retain their separate semantics. Gesture Save keeps its persisted plugin, Main Settings, and runtime synchronization. Its ignore-window picker stays in the owning viewport and prevents parent shortcut and host-move takeover.
+
+Independent review identified ROOT close bypass, detached popup input loss, Settings navigation mutation on discarded passes, and an embedded close shortcut bypass. The corrections use exact owner checks, retain recognized native combo ownership, and commit Settings search observations only with current retained ROOT and child passes. Re-review cleared those findings. Tests use actual enabled host controls and a detached combo selection, preserve an unsaved Gesture edit, exercise hidden launcher rendering and Dock, and check discarded Escape and picker ownership.
+
+The initial exact list matched eight. A preliminary direct harness diagnostic passed six selected cases. The final exact selector is `r02-m2-b3-filter.txt` under the ignored recovery evidence directory. With `$f` set to its trimmed contents, `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched nine (log SHA-256 B74B789A79F491653AB7B98C02BA6A65CD5B500658DE5DD11B263C72A9FCBE7A). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 9/9 with 7448 skipped (run SHA-256 A3157AE3D086408AFEFE2A2DDDB50473386A57D600BE1B104EFE7955B343331D). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 (log SHA-256 F4555492B1A941F201D839ADA5F747B62FF80C90767B07D4155F064287ABAEBE). Scoped formatting and `git diff --check` passed.
+
+Source scope is `src/gui/{mouse_form_host,mouse_settings_dialog,mouse_gesture_settings_dialog,mod,render}.rs`, `src/gui/jump_mode/ui.rs`, and `src/settings_editor/render.rs`. Native N3 remains `IMPLEMENTED_USER_VALIDATION_PENDING`.
+
+Next is R02/M2-B.4 Mouse Gestures editor on the same branch.

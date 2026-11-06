@@ -536,6 +536,26 @@ struct SettingsNavigationFrameState {
     response_observations: Vec<TestPendingResponseObservation>,
 }
 
+#[derive(Clone, PartialEq)]
+pub(crate) struct SettingsNavigationSnapshot {
+    pending: Option<PendingSettingsNavigation>,
+    highlight: Option<super::state::SettingsNavigationHighlight>,
+}
+
+impl SettingsNavigationSnapshot {
+    pub(crate) fn capture(editor: &SettingsEditor) -> Self {
+        Self {
+            pending: editor.pending_settings_navigation.clone(),
+            highlight: editor.settings_navigation_highlight.clone(),
+        }
+    }
+
+    pub(crate) fn restore(self, editor: &mut SettingsEditor) {
+        editor.pending_settings_navigation = self.pending;
+        editor.settings_navigation_highlight = self.highlight;
+    }
+}
+
 /// A cloneable view of one navigation request for the current egui frame.
 /// It stores request provenance and owned outcomes only, never widget responses.
 #[derive(Clone)]
@@ -1298,6 +1318,11 @@ impl SettingsEditor {
                     .is_some_and(|pending| {
                         pending.stage == SettingsNavigationStage::DedicatedOwner
                             && settings_destination_owner_open(app, &pending.section)
+                            && match pending.section {
+                                SettingsSection::Mouse => app.mouse_settings_has_root_presentation(),
+                                SettingsSection::MouseGestures => app.mouse_gesture_settings_has_root_presentation(),
+                                _ => true,
+                            }
                     });
             }
             SettingsHostAction::HotkeyDirectory => {
@@ -1321,7 +1346,7 @@ impl SettingsEditor {
             }
             SettingsHostAction::MouseGestureSettings => {
                 app.open_mouse_gesture_settings_dialog();
-                return true;
+                return app.mouse_gesture_settings_has_root_presentation();
             }
             SettingsHostAction::ClipboardModify(command) => match command {
                 ClipboardModifySettingsCommand::OpenDialog => {

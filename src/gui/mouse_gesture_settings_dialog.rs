@@ -81,7 +81,7 @@ struct MouseGestureSettingsUiLayout {
 ///
 /// This edits the `mouse_gestures` entry inside `Settings::plugin_settings` and
 /// applies changes live.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MouseGestureSettingsDialog {
     pub open: bool,
     needs_reload: bool,
@@ -103,7 +103,81 @@ pub struct MouseGestureSettingsDialog {
     last_enable_checkbox_response: Option<egui::Response>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct GestureSettingsUiActions {
+    pub(crate) host_request: Option<bool>,
+    effects: Vec<GestureSettingsEffect>,
+    #[cfg(test)]
+    pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+
+#[derive(Clone)]
+enum GestureSettingsEffect {
+    Save(MouseGestureSettings),
+    ApplyRuntime(MouseGestureSettings),
+    OpenWindowPicker,
+    Reload,
+    Close,
+}
+
+impl GestureSettingsUiActions {
+    pub(crate) fn request_close(&mut self) {
+        self.effects.push(GestureSettingsEffect::Close);
+    }
+}
+
 impl MouseGestureSettingsDialog {
+    fn perform_or_stage(
+        &mut self,
+        app: &mut crate::gui::LauncherApp,
+        actions: &mut Option<GestureSettingsUiActions>,
+        effect: GestureSettingsEffect,
+    ) {
+        if let Some(actions) = actions {
+            actions.effects.push(effect);
+        } else {
+            self.perform_effect(app, effect);
+        }
+    }
+
+    fn perform_effect(&mut self, app: &mut crate::gui::LauncherApp, effect: GestureSettingsEffect) {
+        match effect {
+            GestureSettingsEffect::Save(settings) if self.settings == settings => self.save(app),
+            GestureSettingsEffect::ApplyRuntime(settings) if self.settings == settings => {
+                apply_runtime_settings(settings);
+            }
+            GestureSettingsEffect::OpenWindowPicker => {
+                self.window_picker_error = None;
+                match collect_visible_window_titles() {
+                    Ok(titles) => self.window_picker_titles = titles,
+                    Err(error) => {
+                        self.window_picker_error =
+                            Some(format!("Failed to enumerate windows: {error}"));
+                        self.window_picker_titles.clear();
+                    }
+                }
+                self.window_picker_open = true;
+            }
+            GestureSettingsEffect::Reload => self.needs_reload = true,
+            GestureSettingsEffect::Close => {
+                self.open = false;
+                self.window_picker_open = false;
+                self.window_picker_titles.clear();
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn complete_host_actions(
+        &mut self,
+        app: &mut crate::gui::LauncherApp,
+        actions: GestureSettingsUiActions,
+    ) {
+        for effect in actions.effects {
+            self.perform_effect(app, effect);
+        }
+    }
+
     pub(crate) fn window_picker_is_open(&self) -> bool {
         self.window_picker_open
     }
@@ -275,6 +349,34 @@ impl MouseGestureSettingsDialog {
         self.show_ui_with_jump_mode(ctx, app, None, None, true, true, true)
     }
 
+    pub(crate) fn ui_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut crate::gui::LauncherApp,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        dialog_instance: Option<u64>,
+        native_ui_owner: bool,
+        native_picker_owner: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        is_popout: bool,
+    ) -> GestureSettingsUiActions {
+        let mut actions = Some(GestureSettingsUiActions::default());
+        self.show_ui_inner(
+            ctx,
+            app,
+            scope,
+            dialog_instance,
+            native_ui_owner,
+            native_picker_owner,
+            first_ui_pass,
+            child_ui,
+            Some(is_popout),
+            &mut actions,
+        );
+        actions.unwrap_or_default()
+    }
+
     fn show_ui_with_jump_mode(
         &mut self,
         ctx: &egui::Context,
@@ -284,6 +386,33 @@ impl MouseGestureSettingsDialog {
         native_ui_owner: bool,
         native_picker_owner: bool,
         first_ui_pass: bool,
+    ) -> Option<MouseGestureSettingsUiLayout> {
+        self.show_ui_inner(
+            ctx,
+            app,
+            scope,
+            dialog_instance,
+            native_ui_owner,
+            native_picker_owner,
+            first_ui_pass,
+            None,
+            None,
+            &mut None,
+        )
+    }
+
+    fn show_ui_inner(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut crate::gui::LauncherApp,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        dialog_instance: Option<u64>,
+        native_ui_owner: bool,
+        native_picker_owner: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        host_presentation: Option<bool>,
+        actions: &mut Option<GestureSettingsUiActions>,
     ) -> Option<MouseGestureSettingsUiLayout> {
         if !self.open {
             return None;
@@ -320,37 +449,20 @@ impl MouseGestureSettingsDialog {
         let mut picker_changed = false;
         let mut ignore_rows_changed = false;
         let mut visual_order = 0;
-        let window = egui::Window::new("Mouse Gesture Settings")
-
-            .resizable(true)
-            .default_size(egui::vec2(520.0, 480.0))
-            .min_size(egui::vec2(360.0, 260.0))
-            .max_size(egui::vec2(
-                (ctx.content_rect().width() - 16.0).max(360.0),
-                (ctx.content_rect().height() - 16.0).max(260.0),
-            ))
-            .show_utility(ctx, "gesture-settings", egui::Id::new("Mouse Gesture Settings"), Some(&mut open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(520.0, 480.0)), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(360.0, 260.0)).with_maximum(egui::vec2(
-                (ctx.content_rect().width() - 16.0).max(360.0),
-                (ctx.content_rect().height() - 16.0).max(260.0),
-            )), |ui| {
-                authorized_main_pass = native_ui_owner
-                    && first_ui_pass
-                    && ui.is_visible()
-                    && !ui.is_sizing_pass();
-                if !authorized_main_pass && main_state_before_pass.is_none() {
-                    main_state_before_pass = Some((
-                        self.settings.clone(),
-                        self.ignore_input.clone(),
-                        self.dirty,
-                    ));
-                }
-                if authorized_main_pass && self.needs_reload {
-                    self.reload(&app.settings_path);
-                }
-                if authorized_main_pass {
-                    self.ensure_ignore_row_tokens();
-                }
-                ui.add_enabled_ui(native_ui_owner && !self.window_picker_open, |ui| {
+        let mut draw_body = |ui: &mut egui::Ui| {
+            authorized_main_pass =
+                native_ui_owner && first_ui_pass && ui.is_visible() && !ui.is_sizing_pass();
+            if !authorized_main_pass && main_state_before_pass.is_none() {
+                main_state_before_pass =
+                    Some((self.settings.clone(), self.ignore_input.clone(), self.dirty));
+            }
+            if authorized_main_pass && self.needs_reload {
+                self.reload(&app.settings_path);
+            }
+            if authorized_main_pass {
+                self.ensure_ignore_row_tokens();
+            }
+            ui.add_enabled_ui(native_ui_owner && !self.window_picker_open, |ui| {
                 if let Some(err) = self.last_error.as_ref() {
                     semantic_status(ui, StatusTone::Error, "Settings error", Some(err));
                     ui.separator();
@@ -727,23 +839,8 @@ impl MouseGestureSettingsDialog {
                 if !cfg!(windows) {
                     window_button.on_hover_text("Window picker is only available on Windows.");
                 } else if window_button.clicked() && authorized_main_pass {
-                    self.window_picker_error = None;
-                    match collect_visible_window_titles() {
-                        Ok(titles) => {
-                            self.window_picker_titles = titles;
-                            self.window_picker_open = true;
-                        }
-                        Err(err) => {
-                            self.window_picker_error = Some(format!(
-                                "Failed to enumerate windows: {err}"
-                            ));
-                            self.window_picker_titles.clear();
-                            self.window_picker_open = true;
-                        }
-                    }
-                    if self.window_picker_open
-                        && let Some(scope) = scope
-                    {
+                    self.perform_or_stage(app, actions, GestureSettingsEffect::OpenWindowPicker);
+                    if let Some(scope) = scope {
                         // The child is a native-only picker. Do not leave the
                         // parent's earlier targets actionable for this pass.
                         scope.discard_registered_targets();
@@ -830,12 +927,13 @@ impl MouseGestureSettingsDialog {
 
                 if changed && authorized_main_pass {
                     self.dirty = true;
-                    // Live-apply while editing.
-                    apply_runtime_settings(self.settings.clone());
+                    let settings = self.settings.clone();
+                    self.perform_or_stage(app, actions, GestureSettingsEffect::ApplyRuntime(settings));
                 }
                 if picker_changed && authorized_picker_pass {
                     self.dirty = true;
-                    apply_runtime_settings(self.settings.clone());
+                    let settings = self.settings.clone();
+                    self.perform_or_stage(app, actions, GestureSettingsEffect::ApplyRuntime(settings));
                 }
                 if ignore_rows_changed && (authorized_main_pass || authorized_picker_pass) {
                     if let Some(row_scope) = &row_scope {
@@ -855,7 +953,7 @@ impl MouseGestureSettingsDialog {
                         crate::gui::jump_mode::TargetKind::Button, &mut visual_order,
                     );
                     if reload_button.clicked() && authorized_main_pass {
-                        self.needs_reload = true;
+                        self.perform_or_stage(app, actions, GestureSettingsEffect::Reload);
                     }
 
                     let save_button = ui.add_enabled(self.dirty, egui::Button::new("Save"));
@@ -867,7 +965,8 @@ impl MouseGestureSettingsDialog {
                         .clicked()
                         && authorized_main_pass
                     {
-                        self.save(app);
+                        let settings = self.settings.clone();
+                        self.perform_or_stage(app, actions, GestureSettingsEffect::Save(settings));
                     }
                     let close_button = ui.button("Close");
                     register_mouse_gesture_settings_target(
@@ -876,6 +975,23 @@ impl MouseGestureSettingsDialog {
                     );
                     if close_button.clicked() && authorized_main_pass {
                         close_requested = true;
+                    }
+                    if let Some(is_popout) = host_presentation {
+                        let current = if is_popout {
+                            super::utility_host::UtilityPresentation::Popout
+                        } else {
+                            super::utility_host::UtilityPresentation::Docked
+                        };
+                        let (response, requested) = super::utility_host::presentation_button(
+                            ui, current, authorized_main_pass && !self.window_picker_open,
+                        );
+                        if let Some(actions) = actions {
+                            #[cfg(test)]
+                            { actions.host_button = Some((response.rect, ui.clip_rect(), response.enabled())); }
+                            if response.clicked() && authorized_main_pass && !ctx.will_discard() {
+                                actions.host_request = Some(requested == super::utility_host::UtilityPresentation::Popout);
+                            }
+                        }
                     }
                     (reload_button, save_button, close_button)
                 }).inner;
@@ -889,13 +1005,56 @@ impl MouseGestureSettingsDialog {
                     close_button,
                 }
                 }).inner
-            });
+        };
+        let mut draw_host_body = |ui: &mut egui::Ui| {
+            if host_presentation.is_some() {
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new("gesture_settings_host_body")),
+                    |ui| draw_body(ui),
+                )
+                .inner
+            } else {
+                draw_body(ui)
+            }
+        };
+        let layout = if let Some(ui) = child_ui {
+            Some(draw_host_body(ui))
+        } else {
+            egui::Window::new("Mouse Gesture Settings")
+                .resizable(true)
+                .default_size(egui::vec2(520.0, 480.0))
+                .min_size(egui::vec2(360.0, 260.0))
+                .max_size(egui::vec2(
+                    (ctx.content_rect().width() - 16.0).max(360.0),
+                    (ctx.content_rect().height() - 16.0).max(260.0),
+                ))
+                .show_utility(
+                    ctx,
+                    "gesture-settings",
+                    egui::Id::new("Mouse Gesture Settings"),
+                    Some(&mut open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::vec2(520.0, 480.0),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(360.0, 260.0))
+                    .with_maximum(egui::vec2(
+                        (ctx.content_rect().width() - 16.0).max(360.0),
+                        (ctx.content_rect().height() - 16.0).max(260.0),
+                    )),
+                    |ui| draw_host_body(ui),
+                )
+                .and_then(|window| window.inner)
+        };
 
         let pinned = app
             .pinned_panels
             .contains(&crate::gui::Panel::MouseGestureSettingsDialog);
-        if native_ui_owner && first_ui_pass {
-            self.open = (open && !close_requested) || pinned;
+        if native_ui_owner && first_ui_pass && !pinned && (!open || close_requested) {
+            self.perform_or_stage(app, actions, GestureSettingsEffect::Close);
         }
         if authorized_picker_pass {
             self.window_picker_open = self.window_picker_open && self.open;
@@ -908,7 +1067,6 @@ impl MouseGestureSettingsDialog {
             self.settings = settings;
             self.dirty = dirty;
         }
-        let layout = window.and_then(|window| window.inner);
         #[cfg(test)]
         if let Some(layout) = &layout {
             self.last_scroll_area_id = Some(layout.scroll.id);
@@ -1005,6 +1163,82 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn hosted_gesture_frame(
+        ctx: &egui::Context,
+        dialog: &mut MouseGestureSettingsDialog,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) -> GestureSettingsUiActions {
+        let mut actions = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                actions = Some(dialog.ui_with_host(
+                    ui.ctx(),
+                    app,
+                    None,
+                    Some(1),
+                    true,
+                    false,
+                    ui.current_pass_index() == 0,
+                    None,
+                    false,
+                ));
+            },
+        );
+        output.drop_without_applying_deltas();
+        actions.expect("Gesture Settings host frame")
+    }
+
+    #[test]
+    fn gesture_settings_visible_host_button_preserves_pending_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let mut app = test_app(&ctx, directory.path());
+        let mut dialog = MouseGestureSettingsDialog::default();
+        dialog.open();
+        dialog.needs_reload = false;
+        dialog.settings.enabled = !dialog.settings.enabled;
+        dialog.dirty = true;
+        let draft = dialog.settings.clone();
+
+        let mut actions = GestureSettingsUiActions::default();
+        for _ in 0..3 {
+            actions = hosted_gesture_frame(&ctx, &mut dialog, &mut app, Vec::new());
+        }
+        let (rect, clip, enabled) = actions.host_button.expect("Pop Out control");
+        assert!(enabled && clip.contains_rect(rect));
+        for pressed in [true, false] {
+            actions = hosted_gesture_frame(
+                &ctx,
+                &mut dialog,
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(rect.center()),
+                    egui::Event::PointerButton {
+                        pos: rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(actions.host_request, Some(true));
+        assert_eq!(dialog.settings, draft);
+        assert!(dialog.dirty);
+        assert!(!directory.path().join("settings.json").exists());
     }
 
     fn render_frame(

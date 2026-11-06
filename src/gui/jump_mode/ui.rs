@@ -435,6 +435,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::ImageCompare
                     | NavigationDialogKind::DuplicateFinder
                     | NavigationDialogKind::DashboardEditor
+                    | NavigationDialogKind::MouseSettings
+                    | NavigationDialogKind::MouseGestureSettings
                     | NavigationDialogKind::RadialDesigner,
                 ..
             } | NavigationOwner::Notes { .. }
@@ -1014,6 +1016,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) paste_sequence: Option<u64>,
     pub(crate) mkmacro: Option<(u64, egui::LayerId)>,
     pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
+    pub(crate) mouse_form_layers: [Option<egui::LayerId>; 2],
     pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
 }
 
@@ -1106,6 +1109,10 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             Some(NavigationOwner::MkMacro { instance })
         } else if let Some(kind) = if windows.dashboard_editor_layer == Some(layer) {
             Some(NavigationDialogKind::DashboardEditor)
+        } else if windows.mouse_form_layers[0] == Some(layer) {
+            Some(NavigationDialogKind::MouseSettings)
+        } else if windows.mouse_form_layers[1] == Some(layer) {
+            Some(NavigationDialogKind::MouseGestureSettings)
         } else {
             NavigationDialogKind::for_layer(layer).filter(|kind| {
                 *kind != NavigationDialogKind::DashboardEditor
@@ -4289,6 +4296,7 @@ mod tests {
             paste_sequence: None,
             mkmacro: None,
             dashboard_editor_layer: None,
+            mouse_form_layers: [None; 2],
             dialogs: [None; NavigationDialogKind::ALL.len()],
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);
