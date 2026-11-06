@@ -2140,7 +2140,7 @@ impl LauncherApp {
             Panel::RegexTesterDialog => NavigationDialogKind::RegexTester.layer_id(),
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
             Panel::DateTimeStudioDialog => middle(egui::Id::new("date-time-studio-window")),
-            Panel::MarkdownStudioDialog => middle(egui::Id::new("markdown-studio-window")),
+            Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root(),
             Panel::BatchRenameDialog => NavigationDialogKind::BatchRename.layer_id(),
             Panel::SearchReplaceDialog => NavigationDialogKind::SearchReplace.layer_id(),
             Panel::XmlToolkitDialog => NavigationDialogKind::XmlToolkit.layer_id(),
@@ -4959,6 +4959,23 @@ impl LauncherApp {
         }
     }
 
+    fn show_markdown_studio(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        if root_visible || self.markdown_studio_dialog.needs_root_ui_when_hidden() {
+            self.markdown_studio_dialog.show_on_root(
+                ctx,
+                first_ui_pass,
+                self.native_ui_application_input_allowed(ctx),
+                root_visible,
+                self.native_ui_host_input_allowed(ctx, root_visible),
+            );
+        }
+    }
+
     fn show_diagram_studio(
         &mut self,
         ctx: &egui::Context,
@@ -7030,6 +7047,7 @@ impl LauncherApp {
             self.show_regex_tester(&ctx, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
+            self.show_markdown_studio(&ctx, first_ui_pass, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -7987,6 +8005,9 @@ impl LauncherApp {
                     && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
+                    && !self
+                        .markdown_studio_dialog
+                        .owns_root_input(&ctx)
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     #[cfg(test)]
@@ -8065,6 +8086,9 @@ impl LauncherApp {
                     && !self
                         .calculation_pad_dialog
                         .embedded_host_owns_root_input(&ctx)
+                    && !self
+                        .markdown_studio_dialog
+                        .owns_root_input(&ctx)
                     && self.close_front_dialog()
                 {
                     let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
@@ -10428,7 +10452,7 @@ impl LauncherApp {
         self.qr_dialog.show(&ctx);
         self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_calculation_pad(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        self.markdown_studio_dialog.show(&ctx, first_ui_pass);
+        self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let calendar_editor_open = self.calendar_editor_open;
         let _ = self
             .date_time_studio_dialog
@@ -11321,6 +11345,7 @@ impl eframe::App for LauncherApp {
         self.needs_viewport_bootstrap()
             || self.pin_windows_need_hidden_root_ui()
             || self.screenshot_countdown.is_busy()
+            || self.markdown_studio_dialog.needs_root_ui_when_hidden()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
             || self
@@ -11346,6 +11371,12 @@ impl eframe::App for LauncherApp {
         }
         let (markdown_effect, markdown_closed) =
             self.markdown_studio_dialog.on_ui_frame_complete(_ctx);
+        if self
+            .markdown_studio_dialog
+            .take_show_root_after_host_change()
+        {
+            self.request_launcher_visibility(true);
+        }
         if markdown_closed {
             self.panel_states.markdown_studio_dialog = false;
             self.panel_stack
@@ -11560,6 +11591,12 @@ impl LauncherApp {
         }
         let (markdown_effect, markdown_closed) =
             self.markdown_studio_dialog.on_ui_frame_complete(ctx);
+        if self
+            .markdown_studio_dialog
+            .take_show_root_after_host_change()
+        {
+            self.request_launcher_visibility(true);
+        }
         if markdown_closed {
             self.panel_states.markdown_studio_dialog = false;
             self.panel_stack
@@ -16277,6 +16314,21 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
             [RootDialogEffect::PrepareCalendar { .. }]
         ));
+    }
+
+    #[test]
+    fn root_close_skips_detached_markdown_and_closes_underlying_dialog() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.focus_panel(super::super::Panel::QrDialog);
+        app.focus_panel(super::super::Panel::MarkdownStudioDialog);
+        app.markdown_studio_dialog.test_pop_out();
+
+        assert!(app.close_front_dialog());
+
+        assert!(!app.qr_dialog.open);
+        assert!(app.markdown_studio_dialog.open);
+        assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::MarkdownStudioDialog));
     }
 
     #[test]

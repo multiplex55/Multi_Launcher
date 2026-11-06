@@ -222,3 +222,23 @@ R02 starts from the clean, pushed R01 final tip b8c3f259cbd55d483fb1346b262026ed
 - M2-A starts with Markdown Studio, the smallest document consumer, then Quick Notes and independent note editors, then MkMacro. Reuse retained pass and presentation identity with one live owner per logical instance. Preserve source-before-intent ordering, focus and Unicode selection, note history and prompts, and exactly-once macro execution.
 - M2-B follows for Main, Dashboard, Mouse, Gestures and Gesture Settings. Preserve drafts and recording ownership. M2-C follows in small file, clipboard, developer and time/image slices. M2-D closes reference and new utility host wiring. Surface-level requirements are in the baseline matrix above.
 - Host moves are presentation changes. Each surface retains its own document/worker owner and explicit close or save decisions. Test state and actual visible actions per host and keep native evidence separate.
+
+### R02 baseline and exact brief restoration
+
+R02/M0-A 9fb5099a6cc1d4d8f9bf384be0afa038e97a9a42 has direct parent b8c3f259cbd55d483fb1346b262026ed42d5d820 and was pushed. At the user's request, the two recovery briefs absent from R02 were restored in docs-only commit 2db5aae61e35026e73b3da34c2c32d94508c12d1 and pushed. Both committed Git blobs match 05153ac1af7cdd015f72c1d95dd4a8bcfed0d043 exactly. Markdown source work stayed unstaged and separate.
+
+### R02/M2-A.1 — Markdown Studio in verification
+
+Markdown Studio retains one document across root and native hosts, with stable body and TextEdit IDs. It stages edits and intents behind both the originating and root pass, applies source before intents, and reuses the accepted HWND capability for owner-qualified pickers. A detached Studio has its own input and focus route. The launcher close route skips that child when it selects an underlying root dialog. Idle retained child frames drive native geometry and focus.
+
+Initial Nextest list matched 13, and 13/13 passed. The selected set includes new actual host clicks and root close routing, plus existing document, Unicode selection, dirty close, export and Diagram handoff tests. Independent review identified a final root ownership gap and nested egui lock; both were corrected. The final focused run and Windows production check are pending.
+
+After root ownership correction, 12/13 passed. The strengthened focused Unicode fixture exposed egui collapsing the cursor on the host toolbar press while the TextEdit still held focus. Keep the logical source range on outside pointer activation and let actual edits or selection drags rebase it. The production check exposed one export picker borrow-order error. Acquiring the owner-qualified picker before borrowing the filename corrected it. The exact Unicode correction subset then passed 3/3 and production check exited 0. The new launcher close fixture initially used a shared app-data root and generated a default clipboard-modifier config; the generated file was preserved under ignored evidence and the fixture now uses the isolated app workspace. A final focused subset rechecks that isolation and the simultaneous edit guard.
+
+Final exact list matched 4 and the affected rerun passed 4/4, 7436 skipped. The unaffected initial cases retained their prior pass evidence. The commands used --locked --offline -p multi_launcher --lib --cargo-profile fast-dev and exact filter test(/::(markdown_studio_visible_host_buttons_pop_out_and_dock_the_same_document|root_close_skips_detached_markdown_and_closes_underlying_dialog|markdown_studio_keeps_logical_unicode_selection_when_toolbar_takes_focus|markdown_studio_format_toolbar_preserves_selected_unicode_source_range)$/), plus --no-fail-fast for run. Run SHA-256: C822692002B9C7603F1D7624733A6516064C71C8A03DE26CA6A6A1E280B39C88. Final production cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev exited 0, SHA-256: 141D1B65591BC0A58ECA33ACEADAA2FEA9F7990126F2757849627C6548548588. Scoped Rust formatting and git diff --check passed. Independent review cleared both final root shortcut findings. Picker ownership compiled and native GUI validation remains pending.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Markdown Studio | One dirty document, selection and undo history across Dock and Pop Out, retained host effects, root/child focus and owned native pickers | Real harness pointer clicks, isolated launcher close routing, dirty close, Unicode, save, export and Diagram handoff regression checks | IMPLEMENTED_USER_VALIDATION_PENDING (N2) |
+
+M2-A proceeds next through Quick Notes, independent note editors, and MkMacro in the same R02 branch.

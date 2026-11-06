@@ -4844,6 +4844,18 @@ impl LauncherApp {
             self.editor.retire_repair_dialog();
             return true;
         }
+        if self.panel_stack.last() == Some(&Panel::MarkdownStudioDialog)
+            && self.markdown_studio_dialog.is_popped_out()
+        {
+            let Some(panel) = self.panel_stack.pop() else {
+                return false;
+            };
+            let closed = self.close_front_dialog();
+            if self.markdown_studio_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return closed;
+        }
         let panel = match self.panel_stack.pop() {
             Some(p) => p,
             None => return false,

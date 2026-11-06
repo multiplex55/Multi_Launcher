@@ -23,9 +23,18 @@ use std::sync::Arc;
 
 use super::markdown_export::{ensure_extension, publish_export};
 use super::markdown_preview::{MarkdownAssetImageLoader, MarkdownPreviewCache};
+use super::utility_dialog_size::{UtilityDialogSizeWindowExt, UtilityWindowSizeRecipe};
+use super::utility_host::{
+    HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+    presentation_button,
+};
+use super::utility_window_geometry::NativeViewportIdentity;
 
 const STUDIO_WINDOW_ID: &str = "markdown-studio-window";
+const STUDIO_VIEWPORT_ID: &str = "markdown_studio_viewport";
 const SOURCE_EDITOR_ID: &str = "markdown-studio-source";
+const STUDIO_DEFAULT_SIZE: egui::Vec2 = egui::vec2(1180.0, 760.0);
+const STUDIO_MINIMUM_SIZE: egui::Vec2 = egui::vec2(460.0, 320.0);
 const MAX_LOCAL_ASSET_COUNT: usize = 128;
 const MAX_LOCAL_ASSET_AGGREGATE_BYTES: usize =
     crate::notes_markdown::MAX_LOCAL_RASTER_AGGREGATE_BYTES;
@@ -56,14 +65,26 @@ enum StudioIntent {
 }
 
 struct RootEffects {
-    frame_nr: u64,
-    pass_nr: u64,
+    root_pass: ViewportPassProvenance,
+    host: HostIdentity,
+    owner_pass: Option<ViewportPassProvenance>,
+    owner_viewport_id: egui::ViewportId,
+    owner_pass_accepted: bool,
+    owner_context: egui::Context,
+    callback_observed: bool,
+    callback_class: egui::ViewportClass,
+    native_viewport: Option<egui::ViewportInfo>,
+    os_close_requested: bool,
+    focus_host: bool,
+    embedded_root_layer: Option<egui::LayerId>,
+    embedded_root_focused_id: Option<egui::Id>,
     source: Option<String>,
     selection: Option<Range<usize>>,
     selection_to_install: Option<Range<usize>>,
     focus_editor_after_open: bool,
     view_mode: Option<ViewMode>,
     intent: Option<StudioIntent>,
+    host_request: Option<UtilityPresentation>,
 }
 
 #[derive(Debug)]
@@ -83,6 +104,8 @@ pub(crate) struct MarkdownFenceOrigin {
 
 pub(crate) struct MarkdownStudioDialog {
     pub(crate) open: bool,
+    host_state: UtilityHostState,
+    show_root_after_host_change: bool,
     document: MarkdownDocument,
     default_directory: PathBuf,
     mode: ViewMode,
@@ -98,6 +121,8 @@ pub(crate) struct MarkdownStudioDialog {
     pending_effects: Option<RootEffects>,
     message: Option<(bool, String)>,
     close_requested: bool,
+    #[cfg(windows)]
+    picker_owner: Option<(egui::Context, Option<NativeViewportIdentity>)>,
     #[cfg(test)]
     test_editor_id: Option<egui::Id>,
     #[cfg(test)]
@@ -120,12 +145,44 @@ pub(crate) struct MarkdownStudioDialog {
     test_picker_calls: usize,
     #[cfg(test)]
     test_discard_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_presentation_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_presentation_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_presentation_clip_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_presentation_enabled: Option<bool>,
+}
+
+fn studio_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(STUDIO_VIEWPORT_ID)
+}
+
+fn studio_viewport_builder() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title("Markdown Studio")
+        .with_inner_size(STUDIO_DEFAULT_SIZE)
+        .with_min_inner_size(STUDIO_MINIMUM_SIZE)
+        .with_resizable(true)
+        .with_visible(true)
+}
+
+fn native_geometry_identity(host: HostIdentity) -> Option<NativeViewportIdentity> {
+    (host.host == UtilityPresentation::Popout).then_some(NativeViewportIdentity {
+        key: crate::settings::UtilityToolKey::parse("markdown-studio").ok()?,
+        viewport_id: studio_viewport_id(),
+        owner_generation: 0,
+        host_generation: host.generation,
+    })
 }
 
 impl MarkdownStudioDialog {
     pub(crate) fn new(root: &AppDataRoot) -> Self {
         Self {
             open: false,
+            host_state: UtilityHostState::docked(),
+            show_root_after_host_change: false,
             document: MarkdownDocument::new(),
             default_directory: root.path().to_path_buf(),
             mode: ViewMode::Split,
@@ -141,6 +198,8 @@ impl MarkdownStudioDialog {
             pending_effects: None,
             message: None,
             close_requested: false,
+            #[cfg(windows)]
+            picker_owner: None,
             #[cfg(test)]
             test_editor_id: None,
             #[cfg(test)]
@@ -163,6 +222,14 @@ impl MarkdownStudioDialog {
             test_picker_calls: 0,
             #[cfg(test)]
             test_discard_id: None,
+            #[cfg(test)]
+            test_presentation_id: None,
+            #[cfg(test)]
+            test_presentation_rect: None,
+            #[cfg(test)]
+            test_presentation_clip_rect: None,
+            #[cfg(test)]
+            test_presentation_enabled: None,
         }
     }
 
@@ -186,6 +253,7 @@ impl MarkdownStudioDialog {
         // selection before the next editor pass.
         self.open_focus_pending = true;
         self.close_requested = false;
+        self.host_state.request_focus();
     }
 
     /// Pinned maintenance is passive and cannot resurrect a retired document.
@@ -198,6 +266,64 @@ impl MarkdownStudioDialog {
     pub(crate) fn request_close(&mut self) {
         if self.open {
             self.close_requested = true;
+        }
+    }
+
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        self.host_state.bootstrap_pending()
+            || (self.open && self.host_state.presentation() == UtilityPresentation::Popout)
+            || self.close_requested
+            || self.pending_effects.is_some()
+    }
+
+    pub(crate) fn is_popped_out(&self) -> bool {
+        self.host_state.presentation() == UtilityPresentation::Popout
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pop_out(&mut self) {
+        self.host_state.transition(UtilityPresentation::Popout);
+    }
+
+    pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
+        if ctx.viewport_id() != egui::ViewportId::ROOT || !ctx.input(|input| input.focused) {
+            return false;
+        }
+        let Some(layer) = self.host_layer_if_root() else {
+            return false;
+        };
+        let focused = ctx.memory(|memory| memory.focused());
+        if !focused
+            .and_then(|id| ctx.read_response(id))
+            .is_some_and(|response| response.layer_id == layer)
+        {
+            return false;
+        }
+        let pointer_position = ctx.input(|input| {
+            (input.pointer.any_pressed() || input.pointer.any_released())
+                .then(|| input.pointer.interact_pos())
+                .flatten()
+        });
+        !pointer_position.is_some_and(|position| {
+            ctx.layer_id_at(position)
+                .is_some_and(|hit_layer| hit_layer != layer)
+        })
+    }
+
+    pub(crate) fn take_show_root_after_host_change(&mut self) -> bool {
+        std::mem::take(&mut self.show_root_after_host_change)
+    }
+
+    pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
+        if !self.open {
+            return None;
+        }
+        match self.host_state.presentation() {
+            UtilityPresentation::Docked => Some(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new(STUDIO_WINDOW_ID),
+            )),
+            UtilityPresentation::Popout => self.host_state.embedded_root_layer(),
         }
     }
 
@@ -305,6 +431,17 @@ impl MarkdownStudioDialog {
     }
 
     pub(crate) fn show(&mut self, ctx: &egui::Context, first_ui_pass: bool) {
+        self.show_on_root(ctx, first_ui_pass, true, true, true);
+    }
+
+    pub(crate) fn show_on_root(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        application_input_allowed: bool,
+        root_visible: bool,
+        root_input_allowed: bool,
+    ) {
         #[cfg(test)]
         {
             self.test_editor_rect = None;
@@ -315,12 +452,17 @@ impl MarkdownStudioDialog {
             self.test_format_menu_rect = None;
             self.test_bold_rect = None;
             self.test_discard_id = None;
+            self.test_presentation_id = None;
+            self.test_presentation_rect = None;
+            self.test_presentation_clip_rect = None;
+            self.test_presentation_enabled = None;
         }
         if !self.open {
+            self.pending_effects = None;
             return;
         }
-        let frame_nr = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
-        let pass_nr = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+        let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let host = self.host_state.identity();
         let original_source = self.document.source().unwrap_or_default().to_owned();
         let revision = self.document.revision().unwrap_or(0);
         self.ensure_preview(ctx, revision, &original_source);
@@ -329,139 +471,258 @@ impl MarkdownStudioDialog {
         let mut selection_to_install = None;
         let mut intent = None;
         let mut next_mode = None;
+        let mut host_request = None;
         let focus_editor_after_open = self.open_focus_pending;
-        let authorized = first_ui_pass && !ctx.will_discard();
-        #[cfg(windows)]
-        if authorized {
-            ctx.input_mut(|input| {
-                super::native_keyboard::reserve_windows_system_menu_alt_space(&mut input.events);
-                super::native_keyboard::reserve_windows_system_menu_alt_space(
-                    &mut input.raw.events,
-                );
-            });
-        }
-        if authorized && self.document.pending_transition().is_none() {
-            let popup_open = egui::Popup::is_any_open(ctx);
-            if ctx.input_mut(|input| {
-                (!popup_open && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-                    || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-            }) || self.close_requested
-            {
-                intent = Some(StudioIntent::Close);
-            }
-        }
+        let mut owner_context = ctx.clone();
+        let mut owner_viewport_id = egui::ViewportId::ROOT;
+        let mut owner_pass = None;
+        let mut owner_pass_accepted = false;
+        let mut callback_observed = false;
+        let mut callback_class = egui::ViewportClass::Root;
+        let mut native_viewport = None;
+        let mut os_close_requested = false;
+        let mut focus_host = false;
+        let mut embedded_root_layer = None;
+        let mut embedded_root_focused_id = None;
 
-        let content_size = ctx.content_rect().size();
-        let min_size = egui::vec2(460.0, 320.0).min(content_size);
-        let mut window_open = true;
-        let output = egui::Window::new("Markdown Studio")
-            .id(egui::Id::new(STUDIO_WINDOW_ID))
-            .open(&mut window_open)
-            .resizable(true)
-            .default_size(egui::vec2(1180.0, 760.0))
-            .min_size(min_size)
-            .max_size(content_size)
-            .show(ctx, |ui| {
-                let allowed = authorized && ui.is_visible() && !ui.is_sizing_pass();
-                ui.add_enabled_ui(allowed, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("markdown-studio-workspace")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.header_ui(
+        if host.host == UtilityPresentation::Popout {
+            ctx.show_viewport_immediate(
+                studio_viewport_id(),
+                studio_viewport_builder(),
+                |ui, class| {
+                    callback_observed = true;
+                    callback_class = class;
+                    let child_context = ui.ctx().clone();
+                    let independent = class == egui::ViewportClass::Immediate
+                        && child_context.viewport_id() == studio_viewport_id();
+                    owner_context = child_context.clone();
+                    owner_viewport_id = if independent {
+                        child_context.viewport_id()
+                    } else {
+                        egui::ViewportId::ROOT
+                    };
+                    let pass = ViewportPassProvenance::current(
+                        &child_context,
+                        child_context.viewport_id(),
+                    );
+                    let pass_authorized = first_ui_pass
+                        && ui.current_pass_index() == 0
+                        && !ctx.will_discard()
+                        && !child_context.will_discard();
+                    if independent {
+                        native_viewport = Some(ui.input(|input| input.viewport().clone()));
+                    }
+                    #[cfg(windows)]
+                    if pass_authorized {
+                        child_context.input_mut(|input| {
+                            super::native_keyboard::reserve_windows_system_menu_alt_space(
+                                &mut input.events,
+                            );
+                            super::native_keyboard::reserve_windows_system_menu_alt_space(
+                                &mut input.raw.events,
+                            );
+                        });
+                    }
+
+                    let modal_open =
+                        child_context.memory(|memory| memory.top_modal_layer().is_some());
+                    let focused = child_context.input(|input| input.focused);
+                    let visible_body = independent || (ui.is_visible() && !ui.is_sizing_pass());
+                    let surface_input_allowed = if independent {
+                        application_input_allowed
+                            && child_context.viewport_id() == studio_viewport_id()
+                    } else {
+                        root_input_allowed && child_context.viewport_id() == egui::ViewportId::ROOT
+                    };
+                    let actions_allowed = pass_authorized
+                        && surface_input_allowed
+                        && focused
+                        && !modal_open
+                        && visible_body;
+                    let keyboard_allowed = actions_allowed
+                        && (independent || focused_on_layer(&child_context, ui.layer_id()));
+                    let close_by_os = independent
+                        && child_context.input(|input| input.viewport().close_requested());
+                    os_close_requested = close_by_os;
+                    if pass_authorized && self.document.pending_transition().is_none() {
+                        if close_by_os || self.close_requested {
+                            intent = Some(StudioIntent::Close);
+                        } else if keyboard_close_requested(&child_context, keyboard_allowed) {
+                            intent = Some(StudioIntent::Close);
+                        }
+                    }
+                    let body_allowed = actions_allowed && intent.is_none();
+                    let can_change_host = body_allowed
+                        && self.document.pending_transition().is_none()
+                        && !self.close_requested;
+                    if independent {
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            host_request = self.draw_studio_body(
                                 ui,
+                                &child_context,
+                                host.host,
+                                body_allowed,
+                                can_change_host,
+                                &original_source,
                                 &mut source,
                                 &mut selection,
                                 &mut selection_to_install,
                                 &mut intent,
                                 &mut next_mode,
                             );
-                            self.message_ui(ui);
-                            self.transition_ui(ui, &mut intent);
-                            ui.separator();
-                            let pending = self.document.pending_transition().is_some();
-                            let current_mode = next_mode.unwrap_or(self.mode);
-                            let width = ui.available_width();
-                            if current_mode == ViewMode::Source {
-                                self.editor_panel(
-                                    ui,
-                                    ctx,
-                                    &mut source,
-                                    &mut selection,
-                                    &mut selection_to_install,
-                                    &mut intent,
-                                    allowed && !pending,
-                                );
-                            } else if current_mode == ViewMode::Preview {
-                                self.preview_panel(
-                                    ui,
-                                    &mut intent,
-                                    allowed && !pending,
-                                    &original_source,
-                                );
-                            } else if width >= 880.0 {
-                                ui.columns(2, |columns| {
-                                    self.editor_panel(
-                                        &mut columns[0],
-                                        ctx,
-                                        &mut source,
-                                        &mut selection,
-                                        &mut selection_to_install,
-                                        &mut intent,
-                                        allowed && !pending,
-                                    );
-                                    self.preview_panel(
-                                        &mut columns[1],
-                                        &mut intent,
-                                        allowed && !pending,
-                                        &original_source,
-                                    );
-                                });
-                            } else {
-                                self.editor_panel(
-                                    ui,
-                                    ctx,
-                                    &mut source,
-                                    &mut selection,
-                                    &mut selection_to_install,
-                                    &mut intent,
-                                    allowed && !pending,
-                                );
-                                ui.separator();
-                                self.preview_panel(
-                                    ui,
-                                    &mut intent,
-                                    allowed && !pending,
-                                    &original_source,
-                                );
-                            }
                         });
-                });
-            });
-
-        if output.is_none() || !authorized {
-            return;
+                    } else {
+                        host_request = self.draw_studio_body(
+                            ui,
+                            &child_context,
+                            host.host,
+                            body_allowed,
+                            can_change_host,
+                            &original_source,
+                            &mut source,
+                            &mut selection,
+                            &mut selection_to_install,
+                            &mut intent,
+                            &mut next_mode,
+                        );
+                        if child_context.viewport_id() == egui::ViewportId::ROOT {
+                            embedded_root_layer = Some(ui.layer_id());
+                            embedded_root_focused_id =
+                                child_context.memory(|memory| memory.focused());
+                        }
+                    }
+                    focus_host = self.host_state.focus_pending()
+                        && pass_authorized
+                        && surface_input_allowed
+                        && !modal_open
+                        && visible_body;
+                    owner_pass_accepted = pass_authorized;
+                    if independent && pass_authorized {
+                        owner_pass = Some(pass);
+                    }
+                },
+            );
+        } else if root_visible || self.close_requested {
+            let content_size = ctx.content_rect().size();
+            let min_size = STUDIO_MINIMUM_SIZE.min(content_size);
+            let mut window_open = true;
+            let id = egui::Id::new(STUDIO_WINDOW_ID);
+            let output = egui::Window::new("Markdown Studio")
+                .id(id)
+                .enabled(root_input_allowed)
+                .collapsible(false)
+                .resizable(true)
+                .default_size(STUDIO_DEFAULT_SIZE)
+                .min_size(min_size)
+                .max_size(content_size)
+                .show_utility(
+                    ctx,
+                    "markdown-studio",
+                    id,
+                    Some(&mut window_open),
+                    UtilityWindowSizeRecipe::outer(STUDIO_DEFAULT_SIZE)
+                        .with_minimum(min_size)
+                        .with_maximum(content_size),
+                    |ui| {
+                        callback_observed = true;
+                        callback_class = egui::ViewportClass::Root;
+                        owner_context = ui.ctx().clone();
+                        let pass_authorized =
+                            first_ui_pass && !ctx.will_discard() && !ui.ctx().will_discard();
+                        #[cfg(windows)]
+                        if pass_authorized {
+                            ui.ctx().input_mut(|input| {
+                                super::native_keyboard::reserve_windows_system_menu_alt_space(
+                                    &mut input.events,
+                                );
+                                super::native_keyboard::reserve_windows_system_menu_alt_space(
+                                    &mut input.raw.events,
+                                );
+                            });
+                        }
+                        let visible_body = ui.is_visible() && !ui.is_sizing_pass();
+                        let modal_open =
+                            ui.ctx().memory(|memory| memory.top_modal_layer().is_some());
+                        let focused = ui.ctx().input(|input| input.focused);
+                        let actions_allowed = pass_authorized
+                            && root_input_allowed
+                            && ui.ctx().viewport_id() == egui::ViewportId::ROOT
+                            && focused
+                            && !modal_open
+                            && visible_body;
+                        let keyboard_allowed =
+                            actions_allowed && focused_on_layer(ui.ctx(), ui.layer_id());
+                        if pass_authorized && self.document.pending_transition().is_none() {
+                            if self.close_requested {
+                                intent = Some(StudioIntent::Close);
+                            } else if keyboard_close_requested(ui.ctx(), keyboard_allowed) {
+                                intent = Some(StudioIntent::Close);
+                            }
+                        }
+                        owner_pass_accepted = pass_authorized;
+                        let body_allowed = actions_allowed && intent.is_none();
+                        let can_change_host = body_allowed
+                            && self.document.pending_transition().is_none()
+                            && !self.close_requested;
+                        let owner_context = ui.ctx().clone();
+                        host_request = self.draw_studio_body(
+                            ui,
+                            &owner_context,
+                            host.host,
+                            body_allowed,
+                            can_change_host,
+                            &original_source,
+                            &mut source,
+                            &mut selection,
+                            &mut selection_to_install,
+                            &mut intent,
+                            &mut next_mode,
+                        );
+                    },
+                );
+            if output.is_some() && !window_open && owner_pass_accepted {
+                intent = Some(StudioIntent::Close);
+            }
         }
-        if !window_open {
-            intent = Some(StudioIntent::Close);
+
+        if !callback_observed || !first_ui_pass {
+            return;
         }
         let source_changed = source != original_source;
         if source_changed
             || intent.is_some()
+            || host_request.is_some()
             || next_mode.is_some()
             || selection != self.selection
             || selection_to_install.is_some()
             || focus_editor_after_open
+            || os_close_requested
+            || focus_host
+            || self.host_state.bootstrap_pending()
+            || self.host_state.focus_pending()
+            || callback_class == egui::ViewportClass::Immediate && native_viewport.is_some()
         {
             self.pending_effects = Some(RootEffects {
-                frame_nr,
-                pass_nr,
+                root_pass,
+                host,
+                owner_pass,
+                owner_viewport_id,
+                owner_pass_accepted,
+                owner_context,
+                callback_observed,
+                callback_class,
+                native_viewport,
+                os_close_requested,
+                focus_host,
+                embedded_root_layer,
+                embedded_root_focused_id,
                 source: source_changed.then_some(source),
                 selection: (selection != self.selection).then_some(selection),
                 selection_to_install,
                 focus_editor_after_open,
                 view_mode: next_mode,
                 intent,
+                host_request,
             });
         }
     }
@@ -475,12 +736,60 @@ impl MarkdownStudioDialog {
         let Some(effects) = self.pending_effects.take() else {
             return (None, false);
         };
-        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
-            == effects.frame_nr.saturating_add(1)
-            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
-                == effects.pass_nr.saturating_add(1);
-        if !retained {
+        let owner_pass_retained = effects.owner_pass_accepted
+            && effects.callback_observed
+            && match effects.owner_pass {
+                Some(pass) => {
+                    effects.host.host == UtilityPresentation::Popout
+                        && effects.owner_viewport_id == pass.viewport_id
+                        && pass.viewport_id == studio_viewport_id()
+                        && pass.was_retained(ctx)
+                }
+                None => effects.owner_viewport_id == egui::ViewportId::ROOT,
+            };
+        if !effects.root_pass.was_retained(ctx)
+            || effects.host != self.host_state.identity()
+            || !owner_pass_retained
+        {
+            if effects.os_close_requested {
+                ctx.send_viewport_cmd_to(studio_viewport_id(), egui::ViewportCommand::CancelClose);
+            }
             return (None, false);
+        }
+        if effects.os_close_requested {
+            ctx.send_viewport_cmd_to(studio_viewport_id(), egui::ViewportCommand::CancelClose);
+        }
+        self.host_state.complete_bootstrap(
+            effects.host,
+            effects.embedded_root_layer,
+            effects.embedded_root_focused_id,
+        );
+        if effects.focus_host {
+            if effects.callback_class == egui::ViewportClass::Immediate {
+                ctx.send_viewport_cmd_to(studio_viewport_id(), egui::ViewportCommand::Focus);
+            }
+            self.host_state.complete_focus(effects.host);
+        }
+        let restore_native_geometry = !effects.os_close_requested
+            && !matches!(effects.intent.as_ref(), Some(StudioIntent::Close))
+            && effects.host_request != Some(UtilityPresentation::Docked);
+        if let (Some(identity), Some(viewport_info)) = (
+            native_geometry_identity(effects.host),
+            effects.native_viewport.as_ref(),
+        ) && effects.callback_class == egui::ViewportClass::Immediate
+            && restore_native_geometry
+        {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                effects.callback_class,
+                true,
+                "Markdown Studio",
+                identity,
+                viewport_info,
+                STUDIO_DEFAULT_SIZE,
+                Some(STUDIO_MINIMUM_SIZE),
+                None,
+            );
         }
         if let Some(mode) = effects.view_mode {
             self.mode = mode;
@@ -507,8 +816,10 @@ impl MarkdownStudioDialog {
         if effects.focus_editor_after_open {
             self.open_focus_pending = false;
             self.deferred_selection = Some(self.selection.clone());
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            ctx.request_repaint_of(effects.owner_viewport_id);
         }
+        let mut diagram_effect = None;
+        let has_intent = effects.intent.is_some();
         if let Some(intent) = effects.intent {
             if matches!(&intent, StudioIntent::Close) {
                 // Consume a host/title/keyboard close only after this frame was
@@ -516,15 +827,165 @@ impl MarkdownStudioDialog {
                 // for the next accepted frame.
                 self.close_requested = false;
             }
-            let effect = self.apply_intent(intent, ctx);
-            return (effect, !self.open);
+            let native_identity = (effects.callback_class == egui::ViewportClass::Immediate)
+                .then(|| native_geometry_identity(effects.host))
+                .flatten();
+            #[cfg(windows)]
+            {
+                self.picker_owner = Some((effects.owner_context.clone(), native_identity));
+            }
+            diagram_effect = self.apply_intent(intent, &effects.owner_context);
+            #[cfg(windows)]
+            {
+                self.picker_owner = None;
+            }
         }
-        (None, false)
+        if !self.open {
+            if let Some(identity) = native_geometry_identity(effects.host) {
+                super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+                ctx.send_viewport_cmd_to(studio_viewport_id(), egui::ViewportCommand::Close);
+            }
+            self.host_state.retire_to_docked();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return (diagram_effect, true);
+        }
+
+        if !has_intent
+            && let Some(requested) = effects.host_request
+            && self.document.pending_transition().is_none()
+            && requested != self.host_state.presentation()
+        {
+            let identity = native_geometry_identity(effects.host);
+            if requested == UtilityPresentation::Docked {
+                if let Some(identity) = identity {
+                    super::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                }
+                ctx.send_viewport_cmd_to(studio_viewport_id(), egui::ViewportCommand::Close);
+            }
+            if self.host_state.transition(requested) {
+                self.deferred_selection = Some(self.selection.clone());
+                if requested == UtilityPresentation::Docked {
+                    self.show_root_after_host_change = true;
+                }
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                if requested == UtilityPresentation::Popout {
+                    ctx.request_repaint_of(studio_viewport_id());
+                }
+            }
+        }
+        (diagram_effect, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_studio_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        presentation: UtilityPresentation,
+        interaction_allowed: bool,
+        host_change_allowed: bool,
+        original_source: &str,
+        source: &mut String,
+        selection: &mut Range<usize>,
+        selection_to_install: &mut Option<Range<usize>>,
+        intent: &mut Option<StudioIntent>,
+        next_mode: &mut Option<ViewMode>,
+    ) -> Option<UtilityPresentation> {
+        let mut host_request = None;
+        ui.scope_builder(
+            egui::UiBuilder::new().id(egui::Id::new(STUDIO_WINDOW_ID)),
+            |ui| {
+                let allowed = interaction_allowed;
+                ui.add_enabled_ui(allowed, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("markdown-studio-workspace")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.header_ui(
+                                ui,
+                                presentation,
+                                host_change_allowed,
+                                &mut host_request,
+                                source,
+                                selection,
+                                selection_to_install,
+                                intent,
+                                next_mode,
+                            );
+                            self.message_ui(ui);
+                            self.transition_ui(ui, intent);
+                            ui.separator();
+                            let pending = self.document.pending_transition().is_some();
+                            let current_mode = next_mode.unwrap_or(self.mode);
+                            let width = ui.available_width();
+                            if current_mode == ViewMode::Source {
+                                self.editor_panel(
+                                    ui,
+                                    ctx,
+                                    source,
+                                    selection,
+                                    selection_to_install,
+                                    intent,
+                                    allowed && !pending,
+                                );
+                            } else if current_mode == ViewMode::Preview {
+                                self.preview_panel(
+                                    ui,
+                                    intent,
+                                    allowed && !pending,
+                                    original_source,
+                                );
+                            } else if width >= 880.0 {
+                                ui.columns(2, |columns| {
+                                    self.editor_panel(
+                                        &mut columns[0],
+                                        ctx,
+                                        source,
+                                        selection,
+                                        selection_to_install,
+                                        intent,
+                                        allowed && !pending,
+                                    );
+                                    self.preview_panel(
+                                        &mut columns[1],
+                                        intent,
+                                        allowed && !pending,
+                                        original_source,
+                                    );
+                                });
+                            } else {
+                                self.editor_panel(
+                                    ui,
+                                    ctx,
+                                    source,
+                                    selection,
+                                    selection_to_install,
+                                    intent,
+                                    allowed && !pending,
+                                );
+                                ui.separator();
+                                self.preview_panel(
+                                    ui,
+                                    intent,
+                                    allowed && !pending,
+                                    original_source,
+                                );
+                            }
+                        });
+                });
+            },
+        );
+        host_request
     }
 
     fn header_ui(
         &mut self,
         ui: &mut egui::Ui,
+        presentation: UtilityPresentation,
+        host_change_allowed: bool,
+        host_request: &mut Option<UtilityPresentation>,
         source: &mut String,
         selection: &mut Range<usize>,
         selection_to_install: &mut Option<Range<usize>>,
@@ -573,6 +1034,18 @@ impl MarkdownStudioDialog {
             ui.strong(title);
             if self.document.is_dirty() {
                 ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes");
+            }
+            let (control, requested) =
+                presentation_button(ui, presentation, host_change_allowed && !pending);
+            #[cfg(test)]
+            if ui.is_visible() && !ui.is_sizing_pass() {
+                self.test_presentation_id = Some(control.id);
+                self.test_presentation_rect = Some(control.rect);
+                self.test_presentation_clip_rect = Some(ui.clip_rect());
+                self.test_presentation_enabled = Some(host_change_allowed && !pending);
+            }
+            if control.clicked() {
+                *host_request = Some(requested);
             }
         });
         ui.horizontal_wrapped(|ui| {
@@ -856,7 +1329,16 @@ impl MarkdownStudioDialog {
         // egui may collapse a TextEdit's mechanical cursor when a toolbar
         // button takes focus. Keep the dialog's source-bound logical
         // selection in that case; only a focused editor can author a new one.
-        if ui.memory(|memory| memory.has_focus(id))
+        let pointer_click_outside_editor = ui.input(|input| {
+            (input.pointer.any_pressed() || input.pointer.any_released())
+                && input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|position| !_response.interact_rect.contains(position))
+        }) && !_response.dragged()
+            && !_response.changed();
+        if !pointer_click_outside_editor
+            && ui.memory(|memory| memory.has_focus(id))
             && let Some(range) = cursor_range_to_bytes(ctx, id, source)
         {
             *selection = range;
@@ -1188,6 +1670,35 @@ impl MarkdownStudioDialog {
         }
     }
 
+    #[cfg(not(test))]
+    fn owned_file_dialog(&mut self) -> Option<rfd::FileDialog> {
+        #[cfg(windows)]
+        {
+            let Some((ctx, identity)) = self.picker_owner.as_ref() else {
+                self.set_error(
+                    "Markdown Studio could not identify the current window for its file dialog. Focus the Studio and try again.".into(),
+                );
+                return None;
+            };
+            let hwnd = super::utility_dialog_size::utility_picker_hwnd(ctx, *identity)
+                .and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize));
+            let Some(hwnd) = hwnd else {
+                self.set_error(
+                    "The current Markdown Studio window is not ready to own the file dialog. Focus it and try again.".into(),
+                );
+                return None;
+            };
+            Some(
+                rfd::FileDialog::new()
+                    .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            Some(rfd::FileDialog::new())
+        }
+    }
+
     fn pick_markdown_file(&mut self, save: bool) -> Option<PathBuf> {
         #[cfg(test)]
         {
@@ -1201,7 +1712,9 @@ impl MarkdownStudioDialog {
         }
         #[cfg(not(test))]
         {
-            let mut picker = rfd::FileDialog::new().add_filter("Markdown (*.md)", &["md"]);
+            let mut picker = self
+                .owned_file_dialog()?
+                .add_filter("Markdown (*.md)", &["md"]);
             let directory = self.picker_directory();
             if directory.is_dir() {
                 picker = picker.set_directory(directory);
@@ -1246,13 +1759,14 @@ impl MarkdownStudioDialog {
                 MarkdownExportFormat::Markdown => "md",
                 MarkdownExportFormat::Html => "html",
             };
+            let picker = self.owned_file_dialog()?;
             let stem = self
                 .document
                 .path()
                 .and_then(Path::file_stem)
                 .unwrap_or_else(|| std::ffi::OsStr::new("untitled"))
                 .to_string_lossy();
-            let mut picker = rfd::FileDialog::new()
+            let mut picker = picker
                 .add_filter("Markdown export", &[extension])
                 .set_file_name(format!("{stem}.{extension}"));
             let directory = self.picker_directory();
@@ -1390,6 +1904,24 @@ fn install_selection(ctx: &egui::Context, id: egui::Id, source: &str, range: Ran
         )));
     state.store(ctx, id);
     ctx.memory_mut(|memory| memory.request_focus(id));
+}
+
+fn keyboard_close_requested(ctx: &egui::Context, allowed: bool) -> bool {
+    if !allowed {
+        return false;
+    }
+    let popup_open = egui::Popup::is_any_open(ctx);
+    ctx.input_mut(|input| {
+        (!popup_open && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+    })
+}
+
+fn focused_on_layer(ctx: &egui::Context, layer: egui::LayerId) -> bool {
+    ctx.memory(|memory| memory.focused()).is_some_and(|id| {
+        ctx.read_response(id)
+            .is_some_and(|response| response.layer_id == layer)
+    })
 }
 
 fn cursor_range_to_bytes(ctx: &egui::Context, id: egui::Id, source: &str) -> Option<Range<usize>> {
@@ -1551,6 +2083,140 @@ mod tests {
         let (effect, closed) = dialog.on_ui_frame_complete(ctx);
         assert!(effect.is_none());
         assert!(!closed || !dialog.open);
+    }
+
+    fn hosted_frame_with_root_events(
+        dialog: &mut MarkdownStudioDialog,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        super::super::render::with_immediate_viewport_renderer(ctx, || {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 760.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    // Match the launcher, which checks ownership before showing the tool.
+                    let _ = dialog.owns_root_input(ui.ctx());
+                    dialog.show_on_root(
+                        ui.ctx(),
+                        ui.ctx().current_pass_index() == 0,
+                        true,
+                        true,
+                        true,
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+            let (effect, closed) = dialog.on_ui_frame_complete(ctx);
+            assert!(effect.is_none());
+            assert!(!closed);
+        });
+    }
+
+    fn hosted_frame_with_child_events(
+        dialog: &mut MarkdownStudioDialog,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        super::super::render::with_immediate_viewport_test_events(events, || {
+            hosted_frame_with_root_events(dialog, ctx, Vec::new());
+        });
+    }
+
+    #[test]
+    fn markdown_studio_visible_host_buttons_pop_out_and_dock_the_same_document() {
+        let source = "# Markdown Studio Ω\n\nDraft body\n";
+        let mut dialog = dialog_with_source(source);
+        let omega = source.find('Ω').unwrap();
+        dialog.selection = omega..omega + 'Ω'.len_utf8();
+        let original_selection = dialog.selection.clone();
+        dialog.deferred_selection = Some(original_selection.clone());
+        let original_revision = dialog.document.revision();
+        let original_undo_depth = dialog.document.undo_depth();
+        let original_dirty = dialog.document.is_dirty();
+        assert!(original_dirty);
+        let ctx = egui::Context::default();
+
+        hosted_frame_with_root_events(&mut dialog, &ctx, Vec::new());
+        hosted_frame_with_root_events(&mut dialog, &ctx, Vec::new());
+        let root_editor_id = dialog.test_editor_id.unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(root_editor_id));
+        assert!(dialog.owns_root_input(&ctx));
+        assert_eq!(
+            dialog.selection, original_selection,
+            "the editor starts with the Unicode range"
+        );
+        assert_eq!(dialog.test_presentation_enabled, Some(true));
+        let root_button = dialog.test_presentation_rect.unwrap();
+        assert!(
+            dialog
+                .test_presentation_clip_rect
+                .unwrap()
+                .contains_rect(root_button)
+        );
+        assert_eq!(
+            ctx.layer_id_at(root_button.center()),
+            Some(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new(STUDIO_WINDOW_ID),
+            )),
+            "the visible Pop Out control must be on the retained Markdown window layer"
+        );
+        for pressed in [true, false] {
+            hosted_frame_with_root_events(
+                &mut dialog,
+                &ctx,
+                pointer_frame_event(root_button.center(), pressed),
+            );
+        }
+
+        assert_eq!(
+            dialog.host_state.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert_eq!(dialog.test_source(), Some(source));
+        assert_eq!(dialog.document.revision(), original_revision);
+        assert_eq!(dialog.document.undo_depth(), original_undo_depth);
+        assert_eq!(dialog.document.is_dirty(), original_dirty);
+        assert_eq!(dialog.selection, original_selection);
+
+        hosted_frame_with_root_events(&mut dialog, &ctx, Vec::new());
+        assert_eq!(dialog.test_editor_id, Some(root_editor_id));
+        assert_eq!(dialog.test_presentation_enabled, Some(true));
+        let child_button = dialog.test_presentation_rect.unwrap();
+        assert!(
+            dialog
+                .test_presentation_clip_rect
+                .unwrap()
+                .contains_rect(child_button)
+        );
+        for pressed in [true, false] {
+            hosted_frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                pointer_frame_event(child_button.center(), pressed),
+            );
+        }
+
+        assert_eq!(
+            dialog.host_state.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(dialog.take_show_root_after_host_change());
+        hosted_frame_with_root_events(&mut dialog, &ctx, Vec::new());
+        assert_eq!(dialog.test_editor_id, Some(root_editor_id));
+        assert_eq!(dialog.test_source(), Some(source));
+        assert_eq!(dialog.document.revision(), original_revision);
+        assert_eq!(dialog.document.undo_depth(), original_undo_depth);
+        assert_eq!(dialog.document.is_dirty(), original_dirty);
+        assert_eq!(dialog.selection, original_selection);
     }
 
     #[test]
