@@ -79,6 +79,7 @@ pub mod qr;
 pub mod radial;
 pub mod regex_tester;
 pub mod replace_executor;
+pub mod recording;
 pub mod screen_draw;
 pub mod search_replace;
 pub mod settings;
