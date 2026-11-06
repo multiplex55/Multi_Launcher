@@ -184,6 +184,10 @@ impl RecordingController {
         }
     }
 
+    pub fn attach_stop_hotkey_bridge(&self, bridge: &super::RecordingStopHotkeyBridge) {
+        bridge.attach(&self.session);
+    }
+
     pub fn snapshot(&self) -> RecordingControllerSnapshot {
         let session = self.session.view();
         let Some(writer) = self.writer.as_ref() else {

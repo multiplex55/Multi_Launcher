@@ -2817,6 +2817,7 @@ impl SettingsEditor {
         let target_id = match entry.id.as_str() {
             "hotkeys.quit.value" => "hotkeys.quit.enabled",
             "hotkeys.help.value" => "hotkeys.help.enabled",
+            "hotkeys.recording_stop.value" => "hotkeys.recording_stop.enabled",
             "paste.next.hotkey" => "paste.next.enabled",
             "paste.cancel.hotkey" => "paste.cancel.enabled",
             "launcher.static_position" => "launcher.follow_mouse",
@@ -2901,6 +2902,7 @@ impl SettingsEditor {
         Some(match entry.id.as_str() {
             "hotkeys.quit.value" => self.quit_hotkey_enabled,
             "hotkeys.help.value" => self.help_hotkey_enabled,
+            "hotkeys.recording_stop.value" => self.recording_stop_hotkey_enabled,
             "paste.next.hotkey" => self.paste_next_enabled,
             "paste.cancel.hotkey" => self.paste_cancel_enabled,
             "launcher.static_position" => !self.follow_mouse,
@@ -3110,6 +3112,13 @@ impl SettingsEditor {
             "Enable help hotkey",
             "Help hotkey",
             HotkeyKind::Help,
+        );
+        self.render_optional_hotkey(
+            ui,
+            targets,
+            "Enable Stop & Save hotkey",
+            "Stop & Save hotkey",
+            HotkeyKind::RecordingStop,
         );
         let directory = targets.button(ui, "hotkeys.open_directory", "Open Hotkey Directory");
         crate::gui::theme::widgets::secondary_help(
@@ -3497,6 +3506,12 @@ impl SettingsEditor {
                 &mut self.help_hotkey_valid,
                 &mut self.last_valid_help_hotkey,
             ),
+            HotkeyKind::RecordingStop => (
+                &mut self.recording_stop_hotkey_enabled,
+                &mut self.recording_stop_hotkey,
+                &mut self.recording_stop_hotkey_valid,
+                &mut self.last_valid_recording_stop_hotkey,
+            ),
         };
         let (toggle_identity, field_identity) = match kind {
             HotkeyKind::Quit => (
@@ -3507,13 +3522,20 @@ impl SettingsEditor {
                 setting_ids::HOTKEY_HELP_ENABLED,
                 setting_ids::HOTKEY_HELP_VALUE,
             ),
+            HotkeyKind::RecordingStop => (
+                setting_ids::HOTKEY_RECORDING_STOP_ENABLED,
+                setting_ids::HOTKEY_RECORDING_STOP_VALUE,
+            ),
         };
         targets.checkbox(ui, enabled, toggle_identity, toggle_label);
         if *enabled {
             crate::gui::theme::widgets::labeled_form_row(ui, field_label, |ui| {
                 let resp = targets.text_edit_singleline(ui, value, field_identity, field_label);
                 if resp.changed() {
-                    *valid = crate::hotkey::parse_hotkey(value).is_some();
+                    *valid = crate::hotkey::parse_hotkey(value).is_some_and(|hotkey| {
+                        !matches!(kind, HotkeyKind::RecordingStop)
+                            || hotkey.key != crate::hotkey::Key::Escape
+                    });
                     if *valid {
                         *last_valid = value.clone();
                     }
@@ -4719,6 +4741,7 @@ mod radial_language_tests {
 enum HotkeyKind {
     Quit,
     Help,
+    RecordingStop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

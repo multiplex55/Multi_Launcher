@@ -139,6 +139,7 @@ fn class_of(event: &WatchEvent) -> EventClass {
         WatchEvent::IndexReady => EventClass::IndexCompletion,
         WatchEvent::ExecuteAction(_)
         | WatchEvent::PasteSequenceHotkey(_)
+        | WatchEvent::RecordingStopGeneration(_)
         | WatchEvent::PhysicalPaste(_) => EventClass::Action,
         WatchEvent::RadialDispatch(_)
         | WatchEvent::RadialPrepare(_)

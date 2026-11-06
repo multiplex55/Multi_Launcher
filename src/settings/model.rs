@@ -690,6 +690,8 @@ pub struct Settings {
     pub quit_hotkey: Option<String>,
     pub help_hotkey: Option<String>,
     #[serde(default)]
+    pub recording_stop_hotkey: Option<String>,
+    #[serde(default)]
     pub paste_sequence: PasteSequencePreferences,
     #[serde(default)]
     pub table_utility_resources: TableUtilityResourcePreferences,
@@ -1147,6 +1149,7 @@ impl Default for Settings {
             hotkey: default_launcher_hotkey(),
             quit_hotkey: None,
             help_hotkey: Some("F1".into()),
+            recording_stop_hotkey: None,
             paste_sequence: PasteSequencePreferences::default(),
             table_utility_resources: TableUtilityResourcePreferences::default(),
             index_paths: None,

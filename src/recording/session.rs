@@ -4,7 +4,7 @@ use super::model::{
 };
 use crate::thread_reaper::{self, ReapPermit};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -198,6 +198,7 @@ impl FinalizationPermit {
         inner.terminal = None;
         inner.pending_terminal = None;
         inner.state = RecorderState::Failed(failure);
+        self.shared.clear_stoppable_generation(self.generation);
         self.settled = true;
         drop(inner);
         (self.shared.wake)();
@@ -223,6 +224,7 @@ impl Drop for FinalizationPermit {
                 inner.state = RecorderState::Failed(RecordingFailure::Sink(
                     "finalization permit was abandoned before publication settled".into(),
                 ));
+                self.shared.clear_stoppable_generation(self.generation);
                 true
             } else {
                 false
@@ -419,9 +421,35 @@ impl RetirementReceipt {
 
 struct SessionShared {
     inner: Mutex<SessionInner>,
+    stoppable_generation: Arc<AtomicU64>,
     wake: Arc<dyn Fn() + Send + Sync + 'static>,
     clock: Arc<dyn RecorderClock>,
     backend: Arc<dyn RecordingBackend>,
+}
+
+impl SessionShared {
+    fn clear_stoppable_generation(&self, generation: u64) {
+        let _ = self.stoppable_generation.compare_exchange(
+            generation,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+/// Clears the native-hook projection before the live source is dropped on any
+/// worker exit. The generation compare prevents an old source retirement from
+/// clearing a newer session's admission.
+struct StoppableGenerationGuard<'a> {
+    shared: &'a SessionShared,
+    generation: u64,
+}
+
+impl Drop for StoppableGenerationGuard<'_> {
+    fn drop(&mut self) {
+        self.shared.clear_stoppable_generation(self.generation);
+    }
 }
 
 pub struct RecordingSession {
@@ -525,6 +553,7 @@ impl RecordingSession {
                     mailbox_replacements: 0,
                     worker: None,
                 }),
+                stoppable_generation: Arc::new(AtomicU64::new(0)),
                 wake: Arc::new(wake),
                 clock,
                 backend,
@@ -551,6 +580,7 @@ impl RecordingSession {
                 .generation
                 .checked_add(1)
                 .ok_or(RecordingSessionError::GenerationExhausted)?;
+            self.shared.stoppable_generation.store(0, Ordering::Release);
             inner.generation = generation;
             inner.request = Some(request);
             inner.state = RecorderState::Selecting;
@@ -701,6 +731,7 @@ impl RecordingSession {
             };
             inner.last_clock = Some(now);
             token.request_stop();
+            self.shared.clear_stoppable_generation(inner.generation);
             inner.pending_terminal = Some(CaptureTerminal {
                 generation: inner.generation,
                 reason,
@@ -740,6 +771,7 @@ impl RecordingSession {
                 if let Some(token) = inner.stop_token.as_ref() {
                     token.cancel();
                 }
+                self.shared.stoppable_generation.store(0, Ordering::Release);
                 inner.mailbox = None;
                 inner.request = None;
                 inner.pending_terminal = None;
@@ -758,6 +790,7 @@ impl RecordingSession {
             if let Some(token) = inner.stop_token.as_ref() {
                 token.cancel();
             }
+            self.shared.stoppable_generation.store(0, Ordering::Release);
             inner.stop_token = None;
             inner.mailbox = None;
             inner.request = None;
@@ -782,6 +815,7 @@ impl RecordingSession {
             let mut inner = self.shared.inner.lock().unwrap();
             if !inner.closed {
                 inner.closed = true;
+                self.shared.stoppable_generation.store(0, Ordering::Release);
                 // A claimed finalization is already authorized to publish.
                 // Closing the owner retires capture, but it must not revoke
                 // that exact consumer's ability to report its output receipt.
@@ -993,6 +1027,7 @@ impl RecordingSession {
         if let Some(token) = inner.stop_token.as_ref() {
             token.cancel();
         }
+        self.shared.clear_stoppable_generation(generation);
         inner.mailbox = None;
         inner.pending_terminal = None;
         inner.terminal = None;
@@ -1019,6 +1054,10 @@ impl RecordingSession {
             mailbox_replacements: inner.mailbox_replacements,
             finalization_claimed: inner.finalization_claim_id.is_some(),
         }
+    }
+
+    pub(crate) fn stoppable_generation_projection(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.shared.stoppable_generation)
     }
 
     fn start_worker(&self, generation: u64) -> Result<(), RecordingSessionError> {
@@ -1259,6 +1298,7 @@ impl RetirementTicket {
                     )
                 {
                     inner.state = RecorderState::Failed(RecordingFailure::WorkerPanicked);
+                    shared.clear_stoppable_generation(self.generation);
                 }
             }
             self.receipt
@@ -1322,6 +1362,9 @@ fn run_capture_worker(
         Ok(source) => source,
         Err(error) => return WorkerOutcome::Failed(RecordingFailure::Source(error)),
     };
+    // Declare this after `source` so it drops first: global shortcut admission
+    // closes before potentially slow native source teardown begins.
+    let _stoppable_generation = StoppableGenerationGuard { shared, generation };
     if stop.is_cancelled() {
         return WorkerOutcome::Cancelled;
     }
@@ -1348,6 +1391,9 @@ fn run_capture_worker(
             elapsed: Duration::ZERO,
             accepted_frames: 0,
         };
+        shared
+            .stoppable_generation
+            .store(generation, Ordering::Release);
     }
     (shared.wake)();
 
@@ -1444,6 +1490,7 @@ fn run_capture_worker(
                             let failure =
                                 RecordingFailure::InvalidFrame(FrameError::WrongDimensions);
                             inner.mailbox = None;
+                            shared.clear_stoppable_generation(generation);
                             inner.state = RecorderState::Failed(failure.clone());
                             return WorkerOutcome::Failed(failure);
                         }
@@ -1637,6 +1684,7 @@ fn claim_terminal(
         elapsed,
         accepted_frames: inner.accepted_frames,
     };
+    shared.clear_stoppable_generation(generation);
     inner.last_clock = Some(now);
     inner.state = RecorderState::Recording {
         elapsed,
@@ -1653,6 +1701,7 @@ fn publish_worker_outcome(shared: &SessionShared, generation: u64, outcome: Work
     if inner.closed || inner.generation != generation {
         return;
     }
+    shared.clear_stoppable_generation(generation);
     if matches!(
         &inner.state,
         RecorderState::Failed(RecordingFailure::Sink(_))
@@ -2197,16 +2246,28 @@ mod tests {
             })
         });
         let session = session(Arc::clone(&clock), backend);
+        let stop_bridge = crate::recording::RecordingStopHotkeyBridge::default();
+        stop_bridge.attach(&session);
         let generation = session.select(request(Duration::from_secs(2))).unwrap();
         session.start().unwrap();
         let recording = wait_for(&session, |view| view.accepted_frames() == 1);
         assert!(matches!(recording.state(), RecorderState::Recording { .. }));
+        assert_eq!(stop_bridge.capture_stoppable_generation(), Some(generation));
         entered_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("source reached the in-flight second poll");
 
         clock.set(Duration::from_millis(100));
         assert!(session.stop().unwrap());
+        assert!(matches!(
+            session.view().state(),
+            RecorderState::Recording { .. }
+        ));
+        assert_eq!(
+            stop_bridge.capture_stoppable_generation(),
+            None,
+            "a pending Stop token closes hook admission before the visible state advances"
+        );
         clock.set(Duration::from_millis(500));
         assert!(!session.stop().unwrap(), "the first Stop is immutable");
         release_tx.send(()).unwrap();
@@ -2311,11 +2372,14 @@ mod tests {
             Box::new(source)
         });
         let session = session(Arc::clone(&clock), backend);
+        let stop_bridge = crate::recording::RecordingStopHotkeyBridge::default();
+        stop_bridge.attach(&session);
         let generation = session.select(request(Duration::from_secs(2))).unwrap();
         session.start().unwrap();
         drop_started_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("terminal was claimed before source destruction");
+        assert_eq!(stop_bridge.capture_stoppable_generation(), None);
 
         clock.set(Duration::from_millis(500));
         assert!(
@@ -2328,6 +2392,52 @@ mod tests {
         assert_eq!(terminal.reason(), RecordingEndReason::TargetLost);
         assert_eq!(terminal.elapsed(), Duration::from_millis(200));
         acknowledge_latest(&session, generation);
+    }
+
+    #[test]
+    fn recording_session_invalid_frame_clears_stop_admission_before_slow_source_drop() {
+        let clock = Arc::new(FakeClock::default());
+        let (drop_started_tx, drop_started_rx) = mpsc::channel();
+        let (drop_release_tx, drop_release_rx) = mpsc::channel();
+        let source_clock = Arc::clone(&clock);
+        let drop_release_slot = Arc::new(Mutex::new(Some(drop_release_rx)));
+        let source_drop_release = Arc::clone(&drop_release_slot);
+        let drop_started = drop_started_tx.clone();
+        let backend = backend(move |_, generation| {
+            Box::new(
+                ScriptSource::new(
+                    Arc::clone(&source_clock),
+                    generation,
+                    CanvasSize::new(16, 16).unwrap(),
+                    [ScriptStep::Frame(Duration::ZERO)],
+                )
+                .with_drop_gate(
+                    drop_started.clone(),
+                    source_drop_release
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("one source per test"),
+                ),
+            )
+        });
+        let session = session(Arc::clone(&clock), backend);
+        let stop_bridge = crate::recording::RecordingStopHotkeyBridge::default();
+        stop_bridge.attach(&session);
+        session.select(request(Duration::from_secs(2))).unwrap();
+        session.start().unwrap();
+
+        drop_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("invalid frame failed before source destruction");
+        assert!(matches!(
+            session.view().state(),
+            RecorderState::Failed(RecordingFailure::InvalidFrame(FrameError::WrongDimensions))
+        ));
+        assert_eq!(stop_bridge.capture_stoppable_generation(), None);
+
+        drop_release_tx.send(()).unwrap();
+        wait_for(&session, |view| !view.worker_busy());
     }
 
     #[test]

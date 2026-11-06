@@ -5824,6 +5824,13 @@ impl LauncherApp {
         self.screen_draw_recovery_bridge = bridge;
     }
 
+    pub fn install_recording_stop_hotkey_bridge(
+        &mut self,
+        bridge: Arc<crate::recording::RecordingStopHotkeyBridge>,
+    ) {
+        self.recording_controller.attach_stop_hotkey_bridge(&bridge);
+    }
+
     /// Returns the app-owned observed event receiver. `try_recv` and
     /// `recv_timeout` expose plain `WatchEvent` values while internal queue
     /// age/depth diagnostics remain behind the private envelope.
@@ -6177,7 +6184,8 @@ pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
             WatchEvent::Actions
             | WatchEvent::IndexReady
             | WatchEvent::Folders
-            | WatchEvent::Bookmarks => {
+            | WatchEvent::Bookmarks
+            | WatchEvent::RecordingStopGeneration(_) => {
                 return Some(ev.into());
             }
             WatchEvent::Dashboard(_)
@@ -6233,7 +6241,8 @@ pub fn recv_test_event_timeout(rx: &EventReceiver, timeout: Duration) -> Option<
             | WatchEvent::Folders
             | WatchEvent::Bookmarks
             | WatchEvent::ScreenDrawRecover(_)
-            | WatchEvent::ScreenDrawEmergency(_) => {
+            | WatchEvent::ScreenDrawEmergency(_)
+            | WatchEvent::RecordingStopGeneration(_) => {
                 return Some(event.into());
             }
             _ if Instant::now() < deadline => {}

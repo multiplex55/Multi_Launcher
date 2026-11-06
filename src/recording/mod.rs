@@ -5,6 +5,7 @@ mod model;
 mod mp4_windows;
 mod output;
 mod session;
+mod stop_hotkey;
 mod windows;
 
 pub use controller::{
@@ -26,6 +27,7 @@ pub use session::{
     FinalizationPermit, RecorderClock, RecordingBackend, RecordingSession, RecordingSessionError,
     RecordingSessionView, SinkReceipt, SystemRecorderClock,
 };
+pub use stop_hotkey::RecordingStopHotkeyBridge;
 pub use windows::WindowsRecordingBackend;
 pub(crate) use windows::{
     RecordingDisplayTarget, describe_recording_window, enumerate_recording_displays,

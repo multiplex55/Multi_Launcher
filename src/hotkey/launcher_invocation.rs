@@ -132,6 +132,8 @@ pub enum PriorityOwner {
 pub enum RelatedAction {
     Quit,
     Help,
+    RecordingStop,
+    RecordingStopGeneration(u64),
     ScreenDrawLaunch,
     ScreenDrawEmergency,
     DirectMenu { trigger_id: String, menu_id: MenuId },
@@ -838,6 +840,7 @@ fn related_binding_eligible(down: &std::collections::HashSet<u32>, hotkey: &Hotk
 fn related_priority(action: &RelatedAction) -> u8 {
     match action {
         RelatedAction::ScreenDrawEmergency => 0,
+        RelatedAction::RecordingStop | RelatedAction::RecordingStopGeneration(_) => 1,
         RelatedAction::Quit => 1,
         RelatedAction::ScreenDrawLaunch => 2,
         RelatedAction::Help => 3,
@@ -852,6 +855,63 @@ fn related_allowed(owner: PriorityOwner, action: &RelatedAction) -> bool {
             action,
             RelatedAction::Quit | RelatedAction::ScreenDrawEmergency
         )
+}
+
+fn observe_related_hotkey_edges(
+    related: &mut [(RelatedBinding, bool)],
+    down: &std::collections::HashSet<u32>,
+    owner: PriorityOwner,
+    recording_stop_bridge: Option<&crate::recording::RecordingStopHotkeyBridge>,
+) -> (Option<(u8, RelatedAction, u32)>, Option<u64>) {
+    let mut selected: Option<(u8, RelatedAction, u32)> = None;
+    let mut recording_stop_edge = false;
+    for (binding, latched) in related {
+        let eligible = related_binding_eligible(down, &binding.hotkey);
+        if eligible && !*latched {
+            if matches!(binding.action, RelatedAction::RecordingStop) {
+                recording_stop_edge = true;
+            } else {
+                let priority = related_priority(&binding.action);
+                if selected.as_ref().is_none_or(|(p, _, _)| priority < *p)
+                    && let Some(primary) = vk_from_key(binding.hotkey.key)
+                {
+                    selected = Some((priority, binding.action.clone(), primary));
+                }
+            }
+        }
+        *latched = eligible;
+    }
+    let recording_stop_generation = (recording_stop_edge && owner == PriorityOwner::Launcher)
+        .then(|| recording_stop_bridge.and_then(|bridge| bridge.capture_stoppable_generation()))
+        .flatten();
+    (selected, recording_stop_generation)
+}
+
+fn retire_recording_stop_key_after_escape_route(
+    related: &mut [(RelatedBinding, bool)],
+    down: &mut std::collections::HashSet<u32>,
+    event: KeyEvent,
+    accept_external_injected: bool,
+) -> bool {
+    if event.transition != KeyTransition::Up
+        || event.provenance == InputProvenance::SelfInjected
+        || (event.provenance == InputProvenance::ExternalInjected && !accept_external_injected)
+    {
+        return false;
+    }
+    let mut recorder_primary = false;
+    for (binding, latched) in related {
+        if matches!(binding.action, RelatedAction::RecordingStop)
+            && vk_from_key(binding.hotkey.key) == Some(event.vk)
+        {
+            *latched = false;
+            recorder_primary = true;
+        }
+    }
+    if recorder_primary {
+        down.remove(&event.vk);
+    }
+    recorder_primary
 }
 
 fn command_generation_is_valid(sequence: u64, invalid_through: u64) -> bool {
@@ -1286,14 +1346,34 @@ impl LauncherInvocationService {
         owner: std::sync::Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
         wake: std::sync::mpsc::Sender<()>,
     ) -> Result<Self, String> {
+        Self::start_inner(config, related, owner, wake, None)
+    }
+
+    pub fn start_with_recording_stop_bridge(
+        config: InvocationConfig,
+        related: Vec<RelatedBinding>,
+        owner: std::sync::Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
+        wake: std::sync::mpsc::Sender<()>,
+        bridge: std::sync::Arc<crate::recording::RecordingStopHotkeyBridge>,
+    ) -> Result<Self, String> {
+        Self::start_inner(config, related, owner, wake, Some(bridge))
+    }
+
+    fn start_inner(
+        config: InvocationConfig,
+        related: Vec<RelatedBinding>,
+        owner: std::sync::Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
+        wake: std::sync::mpsc::Sender<()>,
+        recording_stop_bridge: Option<std::sync::Arc<crate::recording::RecordingStopHotkeyBridge>>,
+    ) -> Result<Self, String> {
         crate::paste_sequence::admission::physical_paste_bridge().install_wake(wake.clone());
         #[cfg(all(windows, not(test)))]
         {
-            native_service::start(config, related, owner, wake)
+            native_service::start(config, related, owner, wake, recording_stop_bridge)
         }
         #[cfg(any(not(windows), test))]
         {
-            let _ = (config, related, owner, wake);
+            let _ = (config, related, owner, wake, recording_stop_bridge);
             Err("shared launcher invocation requires the Windows native backend".into())
         }
     }
@@ -1673,6 +1753,7 @@ mod native_service {
         physical_paste: crate::paste_sequence::admission::PhysicalPasteReducer,
         adapter: LauncherInvocationAdapter,
         owner: Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
+        recording_stop_bridge: Option<Arc<crate::recording::RecordingStopHotkeyBridge>>,
         notices: mpsc::Sender<ServiceNotice>,
         wake: mpsc::Sender<()>,
         epoch: Instant,
@@ -1930,6 +2011,12 @@ mod native_service {
                     navigation_modifiers,
                     allow_navigation,
                 ) {
+                    let _ = retire_recording_stop_key_after_escape_route(
+                        &mut state.related,
+                        &mut state.down,
+                        key_event,
+                        accept_external_injected,
+                    );
                     let consume = out.consume;
                     publish(state, out);
                     if consume {
@@ -1970,18 +2057,21 @@ mod native_service {
                     } else {
                         state.down.insert(data.vkCode);
                     }
-                    let mut selected: Option<(u8, RelatedAction, u32)> = None;
-                    for (binding, latched) in &mut state.related {
-                        let eligible = related_binding_eligible(&state.down, &binding.hotkey);
-                        if eligible && !*latched {
-                            let priority = related_priority(&binding.action);
-                            if selected.as_ref().is_none_or(|(p, _, _)| priority < *p)
-                                && let Some(primary) = vk_from_key(binding.hotkey.key)
-                            {
-                                selected = Some((priority, binding.action.clone(), primary));
-                            }
-                        }
-                        *latched = eligible;
+                    let (selected, recording_stop_generation) = observe_related_hotkey_edges(
+                        &mut state.related,
+                        &state.down,
+                        current_owner,
+                        state.recording_stop_bridge.as_deref(),
+                    );
+                    if let Some(generation) = recording_stop_generation {
+                        let _ = state.notices.send(ServiceNotice {
+                            recovery: None,
+                            intents: Vec::new(),
+                            error: None,
+                            action: Some(RelatedAction::RecordingStopGeneration(generation)),
+                            cancellation: None,
+                        });
+                        let _ = state.wake.send(());
                     }
                     if let Some((_, action, related_primary)) =
                         selected.filter(|(_, action, _)| related_allowed(current_owner, action))
@@ -2237,6 +2327,7 @@ mod native_service {
         related: Vec<RelatedBinding>,
         owner: Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
         wake: mpsc::Sender<()>,
+        recording_stop_bridge: Option<Arc<crate::recording::RecordingStopHotkeyBridge>>,
     ) -> Result<LauncherInvocationService, String> {
         let (tx, notices) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
@@ -2311,6 +2402,7 @@ mod native_service {
                         ),
                         adapter,
                         owner,
+                        recording_stop_bridge,
                         notices: tx,
                         wake,
                         epoch: Instant::now(),
@@ -3949,6 +4041,159 @@ mod tests {
             PriorityOwner::ExclusiveTool,
             &RelatedAction::Quit
         ));
+    }
+
+    #[test]
+    fn recording_stop_shared_edge_freezes_generation_without_stealing_help_edge() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let projection = std::sync::Arc::new(AtomicU64::new(0));
+        let bridge = crate::recording::RecordingStopHotkeyBridge::default();
+        bridge.attach_projection_for_test(&projection);
+        let mut related = vec![
+            (
+                RelatedBinding {
+                    hotkey: super::super::parse_hotkey("Ctrl+B").unwrap(),
+                    action: RelatedAction::RecordingStop,
+                },
+                false,
+            ),
+            (
+                RelatedBinding {
+                    hotkey: super::super::parse_hotkey("Ctrl+A").unwrap(),
+                    action: RelatedAction::Help,
+                },
+                false,
+            ),
+        ];
+        let mut down = std::collections::HashSet::from([
+            vk_from_key(Key::KeyA).unwrap(),
+            vk_from_key(Key::KeyB).unwrap(),
+        ]);
+        let (selected, generation) = observe_related_hotkey_edges(
+            &mut related,
+            &down,
+            PriorityOwner::Launcher,
+            Some(&bridge),
+        );
+        assert!(selected.is_none());
+        assert!(generation.is_none());
+
+        // While idle, the recorder edge is still latched but cannot enter
+        // selected-action competition or steal the simultaneous Help edge.
+        down.insert(0xA2);
+        let (selected, generation) = observe_related_hotkey_edges(
+            &mut related,
+            &down,
+            PriorityOwner::Launcher,
+            Some(&bridge),
+        );
+        assert!(matches!(
+            selected,
+            Some((_, RelatedAction::Help, primary)) if primary == vk_from_key(Key::KeyA).unwrap()
+        ));
+        assert_eq!(generation, None);
+
+        // A session that starts while the chord remains held does not turn
+        // the idle edge into a new action. Only a release and fresh edge can
+        // capture the then-current generation.
+        projection.store(41, Ordering::Release);
+        let (selected, generation) = observe_related_hotkey_edges(
+            &mut related,
+            &down,
+            PriorityOwner::Launcher,
+            Some(&bridge),
+        );
+        assert!(selected.is_none());
+        assert_eq!(generation, None);
+        down.remove(&0xA2);
+        let _ = observe_related_hotkey_edges(
+            &mut related,
+            &down,
+            PriorityOwner::Launcher,
+            Some(&bridge),
+        );
+        down.insert(0xA2);
+        let (selected, generation) = observe_related_hotkey_edges(
+            &mut related,
+            &down,
+            PriorityOwner::Launcher,
+            Some(&bridge),
+        );
+        assert!(matches!(
+            selected,
+            Some((_, RelatedAction::Help, primary)) if primary == vk_from_key(Key::KeyA).unwrap()
+        ));
+        assert_eq!(generation, Some(41));
+
+        // The queued value remains the edge's generation after a later session
+        // becomes current; consumers never resample from the bridge.
+        projection.store(42, Ordering::Release);
+        assert_eq!(generation, Some(41));
+        let (selected, generation) = observe_related_hotkey_edges(
+            &mut related,
+            &down,
+            PriorityOwner::Launcher,
+            Some(&bridge),
+        );
+        assert!(selected.is_none());
+        assert_eq!(generation, None);
+    }
+
+    #[test]
+    fn consumed_navigation_release_retires_recording_stop_primary_from_related_state() {
+        let mut related = vec![(
+            RelatedBinding {
+                hotkey: super::super::parse_hotkey("Ctrl+Enter").unwrap(),
+                action: RelatedAction::RecordingStop,
+            },
+            false,
+        )];
+        let primary = vk_from_key(Key::Return).unwrap();
+        let mut down = std::collections::HashSet::from([primary]);
+        let (selected, generation) =
+            observe_related_hotkey_edges(&mut related, &down, PriorityOwner::Launcher, None);
+        assert!(selected.is_none());
+        assert!(generation.is_none());
+
+        // The radial Escape/navigation boundary handles Return's release
+        // before ordinary related-key bookkeeping sees it.
+        let mut escape = EscapeOwnership {
+            active_session: Some((InvocationId(901), SessionId::new("navigation-release"))),
+            ..Default::default()
+        };
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        let release = KeyEvent {
+            vk: primary,
+            transition: KeyTransition::Up,
+            at: 2,
+            provenance: InputProvenance::Physical,
+        };
+        assert!(
+            route_escape_event(
+                &mut escape,
+                &mut adapter,
+                release,
+                true,
+                Default::default(),
+                true,
+            )
+            .is_some()
+        );
+        assert!(retire_recording_stop_key_after_escape_route(
+            &mut related,
+            &mut down,
+            release,
+            true,
+        ));
+        assert!(!down.contains(&primary));
+
+        escape.cancel_session();
+        down.insert(0xA2);
+        let (selected, generation) =
+            observe_related_hotkey_edges(&mut related, &down, PriorityOwner::Launcher, None);
+        assert!(selected.is_none());
+        assert!(generation.is_none());
     }
 
     #[test]

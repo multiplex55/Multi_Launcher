@@ -85,6 +85,7 @@ define_general_settings_fields!(
     hotkey,
     quit_hotkey,
     help_hotkey,
+    recording_stop_hotkey,
     paste_sequence,
     debug_logging,
     enable_toasts,
@@ -158,6 +159,7 @@ struct InvocationSettingsBaseline {
     hotkey: Option<String>,
     quit_hotkey: Option<String>,
     help_hotkey: Option<String>,
+    recording_stop_hotkey: Option<String>,
     radial: crate::radial::model::RadialFeatureSettings,
     screen_draw: ScreenDrawChordBaseline,
 }
@@ -201,6 +203,7 @@ impl InvocationSettingsBaseline {
             paste_sequence: settings.paste_sequence.clone(),
             quit_hotkey: settings.quit_hotkey.clone(),
             help_hotkey: settings.help_hotkey.clone(),
+            recording_stop_hotkey: settings.recording_stop_hotkey.clone(),
             radial: settings.radial.clone(),
             screen_draw,
         }
@@ -323,7 +326,7 @@ impl SettingsSaveIntent {
             .is_some_and(|expected| *expected != InvocationSettingsBaseline::from_settings(latest))
         {
             anyhow::bail!(
-                "launcher, Jump, radial, Screen Draw, or Paste Sequence settings changed since this editor was opened"
+                "launcher, recorder, Jump, radial, Screen Draw, or Paste Sequence settings changed since this editor was opened"
             );
         }
         Ok(())
@@ -439,6 +442,7 @@ fn overlay_acknowledged_invocation(latest: &mut Settings, committed: &Settings) 
     latest.hotkey = committed.hotkey.clone();
     latest.quit_hotkey = committed.quit_hotkey.clone();
     latest.help_hotkey = committed.help_hotkey.clone();
+    latest.recording_stop_hotkey = committed.recording_stop_hotkey.clone();
     latest.radial = committed.radial.clone();
     overlay_screen_draw_route_chords(latest, committed);
 }
@@ -515,6 +519,9 @@ fn append_invocation_route_changes(
     }
     if latest.help_hotkey != committed.help_hotkey {
         push_changed_field(changed, "help_hotkey".into());
+    }
+    if latest.recording_stop_hotkey != committed.recording_stop_hotkey {
+        push_changed_field(changed, "recording_stop_hotkey".into());
     }
     if latest.radial != committed.radial {
         push_changed_field(changed, "radial".into());
@@ -1892,6 +1899,43 @@ mod tests {
 
     fn save_path(root: &Path) -> String {
         root.join("settings.json").to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn recording_stop_shortcut_is_owned_and_tracked_as_an_invocation_route() {
+        let before = Settings::default();
+        let mut desired = before.clone();
+        desired.recording_stop_hotkey = Some("Ctrl+Shift+F10".into());
+        let intent = SettingsSaveIntent::general(desired.clone(), &before);
+
+        let mut concurrent = before.clone();
+        concurrent.recording_stop_hotkey = Some("Ctrl+Shift+F11".into());
+        assert!(intent.verify_invocation_baseline(&concurrent).is_err());
+
+        let mut written = before.clone();
+        intent.apply(&mut written);
+        assert_eq!(written.recording_stop_hotkey, desired.recording_stop_hotkey);
+        assert!(
+            intent
+                .changed_owned_fields(&before, &written)
+                .iter()
+                .any(|field| field == "recording_stop_hotkey")
+        );
+
+        let mut acknowledged = before.clone();
+        intent.overlay_applied(&mut acknowledged, &written);
+        assert_eq!(
+            acknowledged.recording_stop_hotkey,
+            Some("Ctrl+Shift+F10".into())
+        );
+
+        let mut rollback = written.clone();
+        assert!(
+            intent
+                .rollback_owned(&mut rollback, &before, &written)
+                .is_empty()
+        );
+        assert_eq!(rollback.recording_stop_hotkey, before.recording_stop_hotkey);
     }
 
     fn intent_with_hotkey(baseline: &Settings, hotkey: &str) -> SettingsSaveIntent {

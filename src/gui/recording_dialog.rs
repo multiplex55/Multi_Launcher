@@ -1567,6 +1567,9 @@ mod tests {
         let mut app = test_app(&ctx, directory.path());
         app.recording_controller =
             crate::recording::RecordingController::new(Arc::new(UiBackend), || {});
+        let stop_bridge = Arc::new(crate::recording::RecordingStopHotkeyBridge::default());
+        app.recording_controller
+            .attach_stop_hotkey_bridge(&stop_bridge);
         let target_bounds = ScreenRect::new(-64, -40, 32, 24);
         let target = CaptureTarget::window(11, 22, 33, target_bounds).unwrap();
         let options = crate::recording::RecordingOptions::new(
@@ -1615,6 +1618,17 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }
+        assert_eq!(stop_bridge.capture_stoppable_generation(), Some(generation));
+
+        crate::gui::send_event(crate::gui::WatchEvent::RecordingStopGeneration(
+            generation.wrapping_add(1),
+        ));
+        app.process_watch_events();
+        assert_eq!(stop_bridge.capture_stoppable_generation(), Some(generation));
+        assert!(matches!(
+            app.recording_controller.snapshot().session.state(),
+            crate::recording::RecorderState::Recording { .. }
+        ));
 
         let render_compact = |app: &mut crate::gui::LauncherApp,
                               events: Vec<egui::Event>,

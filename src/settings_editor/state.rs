@@ -166,6 +166,10 @@ pub struct SettingsEditor {
     pub(crate) help_hotkey: String,
     pub(crate) help_hotkey_valid: bool,
     pub(crate) last_valid_help_hotkey: String,
+    pub(crate) recording_stop_hotkey_enabled: bool,
+    pub(crate) recording_stop_hotkey: String,
+    pub(crate) recording_stop_hotkey_valid: bool,
+    pub(crate) last_valid_recording_stop_hotkey: String,
     pub(crate) radial_enabled: bool,
     pub(crate) radial_shared_tap_hold: bool,
     pub(crate) radial_hold_threshold_ms: u64,
@@ -402,6 +406,11 @@ impl SettingsEditor {
                     self.help_hotkey_enabled
                         .then_some(self.help_hotkey.as_str()),
                 ),
+                (
+                    "recording Stop hotkey",
+                    self.recording_stop_hotkey_enabled
+                        .then_some(self.recording_stop_hotkey.as_str()),
+                ),
             ];
             if let Some(message) = crate::hotkey::validation::jump_chord_conflict(
                 chord,
@@ -499,6 +508,18 @@ impl SettingsEditor {
             self.help_hotkey_valid = true;
             return Err("Failed to save settings: help hotkey is invalid");
         }
+        if self.recording_stop_hotkey_enabled && parse_hotkey(&self.recording_stop_hotkey).is_none()
+        {
+            self.recording_stop_hotkey = self.last_valid_recording_stop_hotkey.clone();
+            self.recording_stop_hotkey_valid = true;
+            return Err("Failed to save settings: recording Stop hotkey is invalid");
+        }
+        if self.recording_stop_hotkey_enabled
+            && parse_hotkey(&self.recording_stop_hotkey)
+                .is_some_and(|hotkey| hotkey.key == crate::hotkey::Key::Escape)
+        {
+            return Err("Failed to save settings: Escape is reserved by the launcher");
+        }
         if self.radial_enabled
             && !(crate::radial::settings::MIN_HOLD_THRESHOLD_MS
                 ..=crate::radial::settings::MAX_HOLD_THRESHOLD_MS)
@@ -528,6 +549,9 @@ impl SettingsEditor {
         }
         if self.help_hotkey_enabled {
             self.last_valid_help_hotkey = self.help_hotkey.clone();
+        }
+        if self.recording_stop_hotkey_enabled {
+            self.last_valid_recording_stop_hotkey = self.recording_stop_hotkey.clone();
         }
         Ok(())
     }
@@ -652,6 +676,12 @@ impl SettingsEditor {
         }
         if self.help_hotkey_enabled {
             reserved.push(("help launcher".into(), self.help_hotkey.clone()));
+        }
+        if self.recording_stop_hotkey_enabled {
+            reserved.push((
+                "recording Stop & Save".into(),
+                self.recording_stop_hotkey.clone(),
+            ));
         }
         let screen_draw = self
             .plugin_settings

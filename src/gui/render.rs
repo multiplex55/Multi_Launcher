@@ -5222,6 +5222,7 @@ impl LauncherApp {
                     MainSetting::Launcher => "hotkeys.launcher",
                     MainSetting::Quit => "hotkeys.quit.value",
                     MainSetting::Help => "hotkeys.help.value",
+                    MainSetting::RecordingStop => "hotkeys.recording_stop.value",
                 };
                 let settings_was_open = self.show_settings;
                 let settings_instance = self.jump_mode_ui.settings_instance();

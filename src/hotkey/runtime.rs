@@ -10,6 +10,8 @@ use std::time::Duration;
 // Shared signal to open launcher
 pub struct HotkeyTrigger {
     pub open: Arc<Mutex<bool>>,
+    recording_stop_bridge: Option<Arc<crate::recording::RecordingStopHotkeyBridge>>,
+    recording_stop_generation: Option<Arc<Mutex<Option<u64>>>>,
     pub _key: Key,
     pub _ctrl: bool,
     pub _shift: bool,
@@ -38,12 +40,75 @@ impl HotkeyTrigger {
     pub fn new(hotkey: Hotkey) -> Self {
         Self {
             open: Arc::new(Mutex::new(false)),
+            recording_stop_bridge: None,
+            recording_stop_generation: None,
             _key: hotkey.key,
             _ctrl: hotkey.ctrl,
             _shift: hotkey.shift,
             _alt: hotkey.alt,
             _alt_gr: hotkey.alt_gr,
             _win: hotkey.win,
+        }
+    }
+
+    pub fn new_recording_stop(
+        hotkey: Hotkey,
+        bridge: Arc<crate::recording::RecordingStopHotkeyBridge>,
+    ) -> Self {
+        let mut trigger = Self::new(hotkey);
+        trigger.recording_stop_bridge = Some(bridge);
+        trigger.recording_stop_generation = Some(Arc::new(Mutex::new(None)));
+        trigger
+    }
+
+    pub fn is_recording_stop(&self) -> bool {
+        self.recording_stop_bridge.is_some()
+    }
+
+    pub fn hotkey(&self) -> Hotkey {
+        Hotkey {
+            key: self._key,
+            ctrl: self._ctrl,
+            shift: self._shift,
+            alt: self._alt,
+            alt_gr: self._alt_gr,
+            win: self._win,
+        }
+    }
+
+    pub fn take_recording_stop_generation(&self) -> Option<u64> {
+        self.recording_stop_generation.as_ref()?.lock().ok()?.take()
+    }
+
+    fn clear_recording_stop_pending(&self) {
+        if let Some(generation_slot) = self.recording_stop_generation.as_ref() {
+            if let Ok(mut generation) = generation_slot.lock() {
+                *generation = None;
+            }
+        }
+    }
+
+    fn fire(&self) -> bool {
+        if let Some(bridge) = self.recording_stop_bridge.as_ref() {
+            let Some(generation) = bridge.capture_stoppable_generation() else {
+                return false;
+            };
+            let Some(generation_slot) = self.recording_stop_generation.as_ref() else {
+                return false;
+            };
+            let Ok(mut pending) = generation_slot.lock() else {
+                return false;
+            };
+            if pending.is_some_and(|previous| previous >= generation) {
+                return false;
+            }
+            *pending = Some(generation);
+            true
+        } else if let Ok(mut open) = self.open.lock() {
+            *open = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -134,10 +199,7 @@ impl HotkeyTrigger {
         let need_alt: Vec<bool> = triggers.iter().map(|t| t._alt).collect();
         let need_alt_gr: Vec<bool> = triggers.iter().map(|t| t._alt_gr).collect();
         let need_win: Vec<bool> = triggers.iter().map(|t| t._win).collect();
-        let open_listeners: Vec<_> = triggers
-            .iter()
-            .map(|trigger| trigger.open.clone())
-            .collect();
+        let triggers_for_listener: Vec<_> = triggers.iter().map(Arc::clone).collect();
         let trigger_count = triggers.len();
         let join = thread::Builder::new()
             .name(format!("hotkey-{label}"))
@@ -185,10 +247,9 @@ impl HotkeyTrigger {
                             update_trigger_cycle(triggered[i], combo, suppress_new_press);
                         triggered[i] = next_triggered;
                         if fire {
-                            if let Ok(mut flag) = open_listeners[i].lock() {
-                                *flag = true;
+                            if triggers_for_listener[i].fire() {
+                                let _ = event_tx.send(());
                             }
-                            let _ = event_tx.send(());
                         }
                     }
                     thread::sleep(Duration::from_millis(20));
@@ -235,6 +296,9 @@ impl HotkeyListener {
     }
 
     pub fn activate(&self) {
+        for trigger in &self.triggers {
+            trigger.clear_recording_stop_pending();
+        }
         self.suppress_first_active_scan
             .store(true, Ordering::Release);
         self.active.store(true, Ordering::Release);
@@ -252,6 +316,9 @@ impl HotkeyListener {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+        for trigger in &self.triggers {
+            trigger.clear_recording_stop_pending();
         }
     }
 }
@@ -336,7 +403,6 @@ impl Drop for HotkeyListener {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]) {
-    let open_listeners: Vec<_> = triggers.iter().map(|t| t.open.clone()).collect();
     let watch_keys: Vec<Key> = triggers.iter().map(|t| t._key).collect();
     let need_ctrl: Vec<bool> = triggers.iter().map(|t| t._ctrl).collect();
     let need_shift: Vec<bool> = triggers.iter().map(|t| t._shift).collect();
@@ -412,9 +478,7 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
             if combo {
                 if !triggered[i] {
                     triggered[i] = true;
-                    if let Ok(mut flag) = open_listeners[i].lock() {
-                        *flag = true;
-                    }
+                    let _ = triggers[i].fire();
                 }
             } else {
                 triggered[i] = false;
@@ -472,5 +536,82 @@ mod tests {
         assert_eq!(listener.triggers().len(), 1);
         assert_eq!(listener.triggers()[0]._key, Key::F2);
         listener.stop();
+    }
+
+    #[test]
+    fn legacy_stop_edge_freezes_generation_in_single_payload_slot() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let projection = Arc::new(AtomicU64::new(0));
+        let bridge = Arc::new(crate::recording::RecordingStopHotkeyBridge::default());
+        bridge.attach_projection_for_test(&projection);
+        let trigger = Arc::new(HotkeyTrigger::new_recording_stop(
+            crate::hotkey::parse_hotkey("Ctrl+F10").unwrap(),
+            Arc::clone(&bridge),
+        ));
+
+        projection.store(27, Ordering::Release);
+        process_test_events(
+            &[Arc::clone(&trigger)],
+            &[
+                EventType::KeyPress(Key::ControlLeft),
+                EventType::KeyPress(Key::F10),
+            ],
+        );
+        projection.store(28, Ordering::Release);
+        assert_eq!(trigger.take_recording_stop_generation(), Some(27));
+    }
+
+    #[test]
+    fn legacy_stop_slot_replaces_stale_generation_and_candidate_clear_is_isolated() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let projection = Arc::new(AtomicU64::new(0));
+        let bridge = Arc::new(crate::recording::RecordingStopHotkeyBridge::default());
+        bridge.attach_projection_for_test(&projection);
+        let installed = Arc::new(HotkeyTrigger::new_recording_stop(
+            crate::hotkey::parse_hotkey("Ctrl+F10").unwrap(),
+            Arc::clone(&bridge),
+        ));
+        let edge = || {
+            process_test_events(
+                &[Arc::clone(&installed)],
+                &[
+                    EventType::KeyPress(Key::ControlLeft),
+                    EventType::KeyPress(Key::F10),
+                ],
+            );
+        };
+
+        projection.store(31, Ordering::Release);
+        edge();
+        projection.store(32, Ordering::Release);
+        edge();
+        assert_eq!(installed.take_recording_stop_generation(), Some(32));
+
+        projection.store(33, Ordering::Release);
+        edge();
+        let candidate = Arc::new(HotkeyTrigger::new_recording_stop(
+            crate::hotkey::parse_hotkey("Ctrl+F10").unwrap(),
+            bridge,
+        ));
+        process_test_events(
+            &[Arc::clone(&candidate)],
+            &[
+                EventType::KeyPress(Key::ControlLeft),
+                EventType::KeyPress(Key::F10),
+            ],
+        );
+        assert_eq!(
+            *candidate
+                .recording_stop_generation
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap(),
+            Some(33)
+        );
+        candidate.clear_recording_stop_pending();
+        assert_eq!(installed.take_recording_stop_generation(), Some(33));
     }
 }

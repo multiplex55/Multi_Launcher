@@ -37,6 +37,20 @@ impl SettingsEditor {
         } else {
             String::new()
         };
+        let recording_stop_hotkey = settings.recording_stop_hotkey.clone().unwrap_or_default();
+        let recording_stop_hotkey_enabled = settings.recording_stop_hotkey.is_some();
+        let recording_stop_hotkey_valid = if recording_stop_hotkey_enabled {
+            parse_hotkey(&recording_stop_hotkey).is_some()
+                && parse_hotkey(&recording_stop_hotkey)
+                    .is_none_or(|hotkey| hotkey.key != crate::hotkey::Key::Escape)
+        } else {
+            true
+        };
+        let last_valid_recording_stop_hotkey = if recording_stop_hotkey_valid {
+            recording_stop_hotkey.clone()
+        } else {
+            String::new()
+        };
         let follow_mouse = settings.follow_mouse;
         let (static_enabled, _, _) = Self::normalized_static_settings(
             follow_mouse,
@@ -79,6 +93,10 @@ impl SettingsEditor {
             help_hotkey,
             help_hotkey_valid,
             last_valid_help_hotkey,
+            recording_stop_hotkey_enabled,
+            recording_stop_hotkey,
+            recording_stop_hotkey_valid,
+            last_valid_recording_stop_hotkey,
             radial_enabled: settings.radial.enabled,
             radial_shared_tap_hold: settings.radial.shared_tap_hold,
             radial_hold_threshold_ms: settings.radial.hold_threshold_ms,
@@ -301,6 +319,13 @@ impl SettingsEditor {
             } else {
                 Some(self.help_hotkey.clone())
             },
+            recording_stop_hotkey: if !self.recording_stop_hotkey_enabled
+                || self.recording_stop_hotkey.trim().is_empty()
+            {
+                None
+            } else {
+                Some(self.recording_stop_hotkey.clone())
+            },
             index_paths: current.index_paths.clone(),
             max_indexed_items: current.max_indexed_items,
             plugin_dirs: current.plugin_dirs.clone(),
@@ -436,6 +461,35 @@ mod tests {
     use crate::plugins::note::NotePluginSettings;
     use crate::plugins::screenshot::ScreenshotPluginSettings;
     use crate::settings::Settings;
+
+    #[test]
+    fn recording_stop_shortcut_round_trips_and_can_be_disabled() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.recording_stop_hotkey, None);
+        let editor = SettingsEditor::from_settings(&settings);
+        assert!(!editor.recording_stop_hotkey_enabled);
+        let default_saved = editor.to_settings(&settings).unwrap();
+        assert_eq!(default_saved.recording_stop_hotkey, None);
+
+        settings.recording_stop_hotkey = Some("Ctrl+Shift+F10".into());
+        let mut editor = SettingsEditor::from_settings(&settings);
+        assert!(editor.recording_stop_hotkey_enabled);
+        assert_eq!(editor.recording_stop_hotkey, "Ctrl+Shift+F10");
+        assert_eq!(
+            editor.to_settings(&settings).unwrap().recording_stop_hotkey,
+            settings.recording_stop_hotkey
+        );
+
+        editor.recording_stop_hotkey_enabled = false;
+        assert_eq!(
+            editor.to_settings(&settings).unwrap().recording_stop_hotkey,
+            None
+        );
+
+        editor.recording_stop_hotkey_enabled = true;
+        editor.recording_stop_hotkey = "Ctrl+Escape".into();
+        assert!(editor.validate_before_save().is_err());
+    }
 
     #[test]
     fn calculation_pad_recovery_preference_round_trips_through_the_editor() {
