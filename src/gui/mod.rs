@@ -1430,7 +1430,6 @@ struct PendingShowQueryFocus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct QueryFocusOrdinaryContext {
-    notes_dialog_open: bool,
     note_panel_layers: std::collections::HashSet<egui::LayerId>,
     ordinary_panel_layers: std::collections::HashSet<egui::LayerId>,
 }
@@ -4844,6 +4843,18 @@ impl LauncherApp {
             self.editor.retire_repair_dialog();
             return true;
         }
+        if self.panel_stack.last() == Some(&Panel::NotesDialog)
+            && self.notes_dialog.is_popped_out()
+        {
+            let Some(panel) = self.panel_stack.pop() else {
+                return false;
+            };
+            let closed = self.close_front_dialog();
+            if self.notes_dialog.open && !self.panel_stack.contains(&panel) {
+                self.panel_stack.push(panel);
+            }
+            return closed;
+        }
         if self.panel_stack.last() == Some(&Panel::MarkdownStudioDialog)
             && self.markdown_studio_dialog.is_popped_out()
         {
@@ -5661,6 +5672,8 @@ impl LauncherApp {
             self.calculation_pad_dialog.open();
         } else if panel == Panel::DateTimeStudioDialog {
             self.date_time_studio_dialog.open();
+        } else if panel == Panel::NotesDialog {
+            self.notes_dialog.open();
         } else if panel == Panel::DiagramStudioDialog {
             self.diagram_studio_dialog.open();
         } else if panel == Panel::MarkdownStudioDialog {

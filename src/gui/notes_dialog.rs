@@ -1,7 +1,15 @@
 use crate::actions::Action;
 use crate::gui::theme::widgets::{self, ButtonEmphasis};
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
+use crate::gui::utility_host::{
+    HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+    presentation_button,
+};
+use crate::gui::utility_window_geometry::NativeViewportIdentity;
 use crate::gui::{ActivationSource, LauncherApp};
+use crate::gui::jump_mode::ui::{
+    JumpModeScope, JumpModeUi, NavigationOwner, NavigationViewportBinding,
+};
 use crate::plugins::note::{
     Note, append_note_content, delete_template, get_template, list_templates, note_backlink_count,
     note_cache_snapshot_with_version, note_version, reload_templates, save_note, save_note_content,
@@ -10,6 +18,36 @@ use crate::plugins::note::{
 use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good};
 use chrono::{DateTime, Local};
 use eframe::egui;
+
+const QUICK_NOTES_VIEWPORT_ID: &str = "quick_notes_viewport";
+const QUICK_NOTES_BODY_ID: &str = "quick_notes_body";
+const QUICK_NOTES_DEFAULT_SIZE: egui::Vec2 = egui::vec2(360.0, 240.0);
+const QUICK_NOTES_MINIMUM_SIZE: egui::Vec2 = egui::vec2(200.0, 150.0);
+
+fn quick_notes_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(QUICK_NOTES_VIEWPORT_ID)
+}
+
+fn quick_notes_viewport_builder() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title("Quick Notes")
+        .with_inner_size(QUICK_NOTES_DEFAULT_SIZE)
+        .with_min_inner_size(QUICK_NOTES_MINIMUM_SIZE)
+        .with_resizable(true)
+        .with_visible(true)
+}
+
+fn quick_notes_native_identity(
+    host: HostIdentity,
+    owner_generation: u64,
+) -> Option<NativeViewportIdentity> {
+    (host.host == UtilityPresentation::Popout).then_some(NativeViewportIdentity {
+        key: crate::settings::UtilityToolKey::parse("quick-notes").ok()?,
+        viewport_id: quick_notes_viewport_id(),
+        owner_generation,
+        host_generation: host.generation,
+    })
+}
 
 #[cfg(test)]
 mod c2f_observation {
@@ -815,6 +853,12 @@ fn update_filtered_projection(
 #[derive(Default)]
 pub struct NotesDialog {
     pub open: bool,
+    host_state: UtilityHostState,
+    show_root_after_host_change: bool,
+    native_jump_mode: JumpModeUi,
+    native_jump_frame: Option<u64>,
+    pending_effects: Option<NotesFrameEffects>,
+    retained_draft_checkpoint: Option<(u64, u64, NotesDraftCheckpoint)>,
     entries: Vec<Note>,
     index: Vec<String>,
     entries_revision: Option<u64>,
@@ -829,6 +873,7 @@ pub struct NotesDialog {
     notes_geometry: Option<NotesGeometry>,
     menu_owner: Option<NoteMenuOwner>,
     refresh_retry: Option<RefreshRetry>,
+    editor_context_menu_open: bool,
     edit_idx: Option<usize>,
     text: String,
     search: String,
@@ -881,6 +926,14 @@ pub struct NotesDialog {
     test_edit_save_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_edit_cancel_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_host_button_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_host_button_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_host_button_clip_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_host_button_enabled: Option<bool>,
 }
 
 #[cfg(feature = "qa-framebuffer-capture")]
@@ -909,7 +962,64 @@ enum PendingNoteSave {
     Append { identity: String, suffix: String },
 }
 
-#[derive(Default)]
+struct NotesFrameEffects {
+    root_pass: ViewportPassProvenance,
+    host: HostIdentity,
+    owner_pass: Option<ViewportPassProvenance>,
+    owner_viewport_id: egui::ViewportId,
+    owner_pass_accepted: bool,
+    owner_instance: u64,
+    callback_observed: bool,
+    callback_class: egui::ViewportClass,
+    native_viewport: Option<egui::ViewportInfo>,
+    embedded_root_layer: Option<egui::LayerId>,
+    embedded_root_focused_id: Option<egui::Id>,
+    host_request: Option<UtilityPresentation>,
+    focus_host: bool,
+    close_requested: bool,
+    os_close_requested: bool,
+    note_to_save: Option<PendingNoteSave>,
+    save_edit: bool,
+    remove_note_index: Option<usize>,
+    refresh_entries: bool,
+    rebuild_index: bool,
+    wrap_links_slug: Option<String>,
+    open_note_panels: Vec<String>,
+    open_unused_assets: bool,
+    activations: Vec<Action>,
+    external_open_paths: Vec<std::path::PathBuf>,
+    clipboard_texts: Vec<String>,
+    notices: Vec<String>,
+    template_actions: Vec<TemplateManagerAction>,
+    draft_checkpoint: Option<NotesDraftCheckpoint>,
+}
+
+#[derive(Clone)]
+struct NotesDraftCheckpoint {
+    edit_idx: Option<usize>,
+    text: String,
+    search: String,
+    editor_context_menu_open: bool,
+    template_manager: TemplateManagerState,
+}
+
+enum TemplateManagerAction {
+    Save { name: String, content: String },
+    Delete { name: String },
+    Open { name: String },
+}
+
+pub(crate) struct NotesFrameCompletion {
+    pub(crate) closed: bool,
+    pub(crate) show_root: bool,
+    pub(crate) open_note_panels: Vec<String>,
+    pub(crate) open_unused_assets: bool,
+    pub(crate) activations: Vec<Action>,
+    pub(crate) external_open_paths: Vec<std::path::PathBuf>,
+    pub(crate) clipboard_texts: Vec<String>,
+}
+
+#[derive(Clone, Default)]
 struct TemplateManagerState {
     open: bool,
     templates: Vec<String>,
@@ -949,14 +1059,16 @@ impl TemplateManagerState {
         self.content = get_template(name).unwrap_or_default();
     }
 
-    fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+    fn ui(&mut self, ctx: &egui::Context, input_allowed: bool) -> Vec<TemplateManagerAction> {
         if !self.open {
-            return;
+            return Vec::new();
         }
 
         let mut refresh = false;
         let mut open = self.open;
+        let mut actions = Vec::new();
         egui::Window::new("Note Templates")
+            .enabled(input_allowed)
             .resizable(true)
             .default_size((520.0, 360.0))
             .min_width(320.0)
@@ -994,15 +1106,9 @@ impl TemplateManagerState {
                                         self.load_for_edit(&name);
                                     }
                                     if ui.small_button("Open").clicked() {
-                                        match template_path(&name)
-                                            .and_then(|path| open::that(path).map_err(Into::into))
-                                        {
-                                            Ok(()) => {}
-                                            Err(e) => app.report_error_message(
-                                                "ui operation",
-                                                format!("Failed to open template: {e}"),
-                                            ),
-                                        }
+                                        actions.push(TemplateManagerAction::Open {
+                                            name: name.clone(),
+                                        });
                                     }
                                     if ui.small_button("Delete").clicked() {
                                         self.pending_delete = Some(name.clone());
@@ -1039,19 +1145,10 @@ impl TemplateManagerState {
                             )
                             .clicked()
                             {
-                                match validate_template_name(&self.name).and_then(|name| {
-                                    save_template(name, &self.content).map(|_| name.to_string())
-                                }) {
-                                    Ok(saved_name) => {
-                                        self.selected = Some(saved_name);
-                                        refresh = true;
-                                        app.search();
-                                    }
-                                    Err(e) => app.report_error_message(
-                                        "ui operation",
-                                        format!("Failed to save template: {e}"),
-                                    ),
-                                }
+                                actions.push(TemplateManagerAction::Save {
+                                    name: self.name.clone(),
+                                    content: self.content.clone(),
+                                });
                             }
                             if ui.button("Clear").clicked() {
                                 self.clear_editor();
@@ -1066,6 +1163,7 @@ impl TemplateManagerState {
             let mut confirm_open = true;
             egui::Window::new("Delete Template?")
                 .open(&mut confirm_open)
+                .enabled(input_allowed)
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
@@ -1079,20 +1177,7 @@ impl TemplateManagerState {
                         if widgets::with_button_emphasis(ui, delete, ButtonEmphasis::Destructive)
                             .clicked()
                         {
-                            match delete_template(&name) {
-                                Ok(()) => {
-                                    if self.selected.as_deref() == Some(name.as_str()) {
-                                        self.clear_editor();
-                                    }
-                                    self.pending_delete = None;
-                                    refresh = true;
-                                    app.search();
-                                }
-                                Err(e) => app.report_error_message(
-                                    "ui operation",
-                                    format!("Failed to delete template: {e}"),
-                                ),
-                            }
+                            actions.push(TemplateManagerAction::Delete { name: name.clone() });
                         }
                         if ui.button("Cancel").clicked() {
                             self.pending_delete = None;
@@ -1106,6 +1191,72 @@ impl TemplateManagerState {
 
         if refresh {
             self.refresh();
+        }
+        actions
+    }
+
+    fn owns_input(&self, ctx: &egui::Context) -> bool {
+        let template_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(Some("Note Templates")),
+        );
+        let delete_layer = egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(Some("Delete Template?")),
+        );
+        let layer = if self.pending_delete.is_some() {
+            delete_layer
+        } else if self.open {
+            template_layer
+        } else {
+            return false;
+        };
+        (crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            || ctx.memory(|memory| memory.top_modal_layer()) == Some(layer))
+            && crate::gui::jump_mode::ui::focused_response_layer(ctx)
+                .is_none_or(|focused| focused == layer)
+    }
+
+    fn apply_action(&mut self, action: TemplateManagerAction, app: &mut LauncherApp) {
+        match action {
+            TemplateManagerAction::Save { name, content } => {
+                match validate_template_name(&name)
+                    .and_then(|name| save_template(name, &content).map(|_| name.to_string()))
+                {
+                    Ok(saved_name) => {
+                        self.selected = Some(saved_name);
+                        self.refresh();
+                        app.search();
+                    }
+                    Err(error) => app.report_error_message(
+                        "ui operation",
+                        format!("Failed to save template: {error}"),
+                    ),
+                }
+            }
+            TemplateManagerAction::Delete { name } => match delete_template(&name) {
+                Ok(()) => {
+                    if self.selected.as_deref() == Some(name.as_str()) {
+                        self.clear_editor();
+                    }
+                    self.pending_delete = None;
+                    self.refresh();
+                    app.search();
+                }
+                Err(error) => app.report_error_message(
+                    "ui operation",
+                    format!("Failed to delete template: {error}"),
+                ),
+            },
+            TemplateManagerAction::Open { name } => match template_path(&name)
+                .and_then(|path| open::that(path).map_err(Into::into))
+            {
+                Ok(()) => {}
+                Err(error) => app.report_error_message(
+                    "ui operation",
+                    format!("Failed to open template: {error}"),
+                ),
+            },
         }
     }
 }
@@ -1136,10 +1287,101 @@ impl NotesDialog {
     pub(crate) fn jump_mode_unsupported_nested_owner_open(&self) -> bool {
         self.open
             && (self.template_manager.open
+                || self.editor_context_menu_open
                 || self
                     .menu_owner
                     .as_ref()
                     .is_some_and(|owner| owner.response.context_menu_opened()))
+    }
+
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        self.host_state.bootstrap_pending()
+            || self.host_state.presentation() == UtilityPresentation::Popout
+            || self.pending_effects.is_some()
+    }
+
+    pub(crate) fn is_popped_out(&self) -> bool {
+        self.host_state.presentation() == UtilityPresentation::Popout
+    }
+
+    pub(crate) fn host_layer_if_root(&self) -> Option<egui::LayerId> {
+        if !self.open {
+            return None;
+        }
+        match self.host_state.presentation() {
+            UtilityPresentation::Docked => {
+                Some(crate::gui::jump_mode::ui::notes_dialog_layer_id())
+            }
+            UtilityPresentation::Popout => self.host_state.embedded_root_layer(),
+        }
+    }
+
+    pub(crate) fn owns_root_input(&self, ctx: &egui::Context) -> bool {
+        let Some(layer) = self.host_layer_if_root() else {
+            return false;
+        };
+        let template_owner = self.template_manager.owns_input(ctx);
+        let popup_owner = self.editor_context_menu_open
+            || self
+                .menu_owner
+                .as_ref()
+                .is_some_and(|owner| owner.response.context_menu_opened());
+        let modal_owner = template_owner
+            && ctx.memory(|memory| memory.top_modal_layer().is_some());
+        ctx.viewport_id() == egui::ViewportId::ROOT
+            && ctx.input(|input| input.focused)
+            && (ctx.memory(|memory| memory.top_modal_layer().is_none()) || modal_owner)
+            && (crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                || template_owner
+                || popup_owner)
+            && crate::gui::jump_mode::ui::focused_response_layer(ctx)
+                .is_none_or(|focused_layer| {
+                    focused_layer == layer || template_owner || popup_owner
+                })
+    }
+
+    pub(crate) fn take_show_root_after_host_change(&mut self) -> bool {
+        std::mem::take(&mut self.show_root_after_host_change)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_identity(&self) -> (bool, u64) {
+        let identity = self.host_state.identity();
+        (identity.host == UtilityPresentation::Popout, identity.generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_button(&self) -> (egui::Id, egui::Rect, egui::Rect, bool) {
+        (
+            self.test_host_button_id.expect("host control rendered"),
+            self.test_host_button_rect.expect("host control rendered"),
+            self.test_host_button_clip_rect
+                .expect("host control rendered"),
+            self.test_host_button_enabled
+                .expect("host control rendered"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pop_out(&mut self) {
+        self.host_state.transition(UtilityPresentation::Popout);
+    }
+
+    fn host_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        presentation: UtilityPresentation,
+        allowed: bool,
+    ) -> Option<UtilityPresentation> {
+        let (response, requested) = presentation_button(ui, presentation, allowed);
+        #[cfg(test)]
+        if ui.is_visible() && !ui.is_sizing_pass() {
+            self.test_host_button_id = Some(response.id);
+            self.test_host_button_rect = Some(response.rect);
+            self.test_host_button_clip_rect = Some(ui.clip_rect());
+            self.test_host_button_enabled = Some(allowed && ui.is_enabled());
+        }
+        response.clicked().then_some(requested)
     }
 
     #[cfg(test)]
@@ -1585,6 +1827,21 @@ impl NotesDialog {
     }
 
     pub fn open(&mut self) {
+        if self.host_state.presentation() == UtilityPresentation::Popout {
+            if self.open {
+                self.host_state.request_focus();
+                return;
+            }
+            self.open = true;
+            self.edit_idx = None;
+            self.text.clear();
+            self.search.clear();
+            self.host_state.request_focus();
+            if self.template_manager.open {
+                self.template_manager.refresh();
+            }
+            return;
+        }
         self.open = true;
         self.edit_idx = None;
         self.text.clear();
@@ -1612,6 +1869,15 @@ impl NotesDialog {
     }
 
     fn save_note_draft(&mut self, pending: PendingNoteSave, app: &mut LauncherApp) -> bool {
+        self.save_note_draft_with_focus(pending, app, true)
+    }
+
+    fn save_note_draft_with_focus(
+        &mut self,
+        pending: PendingNoteSave,
+        app: &mut LauncherApp,
+        focus_launcher: bool,
+    ) -> bool {
         let result = match pending {
             PendingNoteSave::New(mut note) => {
                 save_note(&mut note, true).map(|saved| saved.then_some(note))
@@ -1627,7 +1893,9 @@ impl NotesDialog {
                     self.refresh_entries_from_notes();
                 }
                 app.search();
-                app.focus_input();
+                if focus_launcher {
+                    app.focus_input();
+                }
                 true
             }
             Ok(None) => {
@@ -1649,7 +1917,36 @@ impl NotesDialog {
         &mut self,
         ctx: &egui::Context,
         app: &mut LauncherApp,
-        jump_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_scope: Option<JumpModeScope>,
+    ) {
+        self.ui_with_host(
+            ctx,
+            app,
+            jump_scope,
+            true,
+            true,
+            true,
+            true,
+            true,
+            0,
+            false,
+            false,
+        );
+    }
+
+    pub(crate) fn ui_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        root_jump_scope: Option<JumpModeScope>,
+        first_ui_pass: bool,
+        application_input_allowed: bool,
+        root_visible: bool,
+        root_input_allowed: bool,
+        root_template_input_allowed: bool,
+        owner_instance: u64,
+        jump_mode_enabled: bool,
+        defer_effects: bool,
     ) {
         #[cfg(test)]
         self.last_rendered_indices.clear();
@@ -1666,31 +1963,172 @@ impl NotesDialog {
             self.test_edit_scroll_content_size = egui::Vec2::ZERO;
             self.test_edit_save_rect = None;
             self.test_edit_cancel_rect = None;
+            self.test_host_button_id = None;
+            self.test_host_button_rect = None;
+            self.test_host_button_clip_rect = None;
+            self.test_host_button_enabled = None;
         }
         if !self.open {
             self.close_menu_owner();
+            if defer_effects && self.host_state.presentation() == UtilityPresentation::Popout {
+                let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+                let host = self.host_state.identity();
+                let mut callback_observed = false;
+                let mut callback_class = egui::ViewportClass::Root;
+                let mut owner_pass = None;
+                let mut owner_viewport_id = egui::ViewportId::ROOT;
+                let mut native_viewport = None;
+                let mut owner_pass_accepted = false;
+                ctx.show_viewport_immediate(
+                    quick_notes_viewport_id(),
+                    quick_notes_viewport_builder(),
+                    |child, class| {
+                        callback_observed = true;
+                        callback_class = class;
+                        let child_ctx = child.ctx().clone();
+                        let independent = class == egui::ViewportClass::Immediate
+                            && child_ctx.viewport_id() == quick_notes_viewport_id();
+                        let pass_accepted = child.current_pass_index() == 0
+                            && !ctx.will_discard()
+                            && !child.will_discard();
+                        owner_pass_accepted = pass_accepted;
+                        if independent {
+                            owner_viewport_id = quick_notes_viewport_id();
+                            native_viewport = Some(child.input(|input| input.viewport().clone()));
+                            if pass_accepted {
+                                owner_pass = Some(ViewportPassProvenance::current(
+                                    &child_ctx,
+                                    quick_notes_viewport_id(),
+                                ));
+                            }
+                        }
+                    },
+                );
+                if callback_observed {
+                    self.pending_effects = Some(NotesFrameEffects {
+                        root_pass,
+                        host,
+                        owner_pass,
+                        owner_viewport_id,
+                        owner_pass_accepted,
+                        owner_instance,
+                        callback_observed,
+                        callback_class,
+                        native_viewport,
+                        embedded_root_layer: None,
+                        embedded_root_focused_id: None,
+                        host_request: None,
+                        focus_host: false,
+                        close_requested: true,
+                        os_close_requested: false,
+                        note_to_save: None,
+                        save_edit: false,
+                        remove_note_index: None,
+                        refresh_entries: false,
+                        rebuild_index: false,
+                        wrap_links_slug: None,
+                        open_note_panels: Vec::new(),
+                        open_unused_assets: false,
+                        activations: Vec::new(),
+                        external_open_paths: Vec::new(),
+                        clipboard_texts: Vec::new(),
+                        notices: Vec::new(),
+                        template_actions: Vec::new(),
+                        draft_checkpoint: None,
+                    });
+                }
+            } else if !defer_effects {
+                self.pending_effects = None;
+            }
             return;
         }
         if self.edit_idx.is_some() {
             self.close_menu_owner();
+        } else {
+            self.editor_context_menu_open = false;
         }
         self.maybe_refresh_derived(ctx, &app.note_settings);
         let mut close = false;
         let mut save_edit = false;
         let mut note_to_save: Option<PendingNoteSave> = None;
+        let mut remove_note_index = None;
         let mut rebuild_idx = false;
         let mut refresh_entries = false;
         let mut wrap_links_slug: Option<String> = None;
-        let mut window_open = self.open;
         let mut jump_visual_order = 0;
-        egui::Window::new("Quick Notes")
-
-            .resizable(true)
-            .default_size((360.0, 240.0))
-            .min_width(200.0)
-            .min_height(150.0)
-            .show_utility(ctx, "quick-notes", egui::Id::new("Quick Notes"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((360.0, 240.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(200.0, 150.0)), |ui| {
-                if let Some(idx) = self.edit_idx {
+        let root_pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let frame = root_pass.frame_nr;
+        let pass = root_pass.pass_nr;
+        let draft_checkpoint = if defer_effects {
+            let existing = self
+                .retained_draft_checkpoint
+                .as_ref()
+                .filter(|(checkpoint_frame, _, _)| *checkpoint_frame == frame)
+                .map(|(_, checkpoint_pass, checkpoint)| (*checkpoint_pass, checkpoint.clone()));
+            let (checkpoint_pass, checkpoint) = existing.unwrap_or_else(|| {
+                (pass, NotesDraftCheckpoint {
+                    edit_idx: self.edit_idx,
+                    text: self.text.clone(),
+                    search: self.search.clone(),
+                    editor_context_menu_open: self.editor_context_menu_open,
+                    template_manager: self.template_manager.clone(),
+                })
+            });
+            if pass > checkpoint_pass {
+                self.edit_idx = checkpoint.edit_idx;
+                self.text = checkpoint.text.clone();
+                self.search = checkpoint.search.clone();
+                self.editor_context_menu_open = checkpoint.editor_context_menu_open;
+                self.template_manager = checkpoint.template_manager.clone();
+            }
+            self.retained_draft_checkpoint = Some((frame, checkpoint_pass, checkpoint.clone()));
+            Some(checkpoint)
+        } else {
+            None
+        };
+        let host = self.host_state.identity();
+        let mut host_request = None;
+        let mut open_note_panels = Vec::new();
+        let mut open_unused_assets = false;
+        let mut activations = Vec::new();
+        let mut external_open_paths = Vec::new();
+        let mut clipboard_texts = Vec::new();
+        let mut notices = Vec::new();
+        let mut template_actions = Vec::new();
+        let mut native_jump_mode = std::mem::take(&mut self.native_jump_mode);
+        let mut native_jump_frame = self.native_jump_frame.take();
+        let mut owner_viewport_id = egui::ViewportId::ROOT;
+        let mut owner_pass = None;
+        let mut owner_pass_accepted = false;
+        let mut callback_observed = false;
+        let mut callback_class = egui::ViewportClass::Root;
+        let mut native_viewport = None;
+        let mut os_close_requested = false;
+        let mut focus_host = false;
+        let mut close_by_title = false;
+        let mut embedded_root_layer = None;
+        let mut embedded_root_focused_id = None;
+        let dialog_open = self.open;
+        let bootstrap_pending = self.host_state.bootstrap_pending();
+        let focus_host_pending = self.host_state.focus_pending();
+        let jump_generation = self.jump_mode_target_generation();
+        let nested_owner_open = self.jump_mode_unsupported_nested_owner_open();
+        let mut body_close = false;
+        let mut draw_contents = |this: &mut NotesDialog,
+                                 ui: &mut egui::Ui,
+                                 body_ctx: &egui::Context,
+                                 body_scope: Option<&JumpModeScope>,
+                                 body_input_allowed: bool,
+                                 host_control_allowed: bool,
+                                 template_input_allowed: bool,
+                                 popup_input_allowed: bool| {
+            let ctx = body_ctx;
+            let jump_scope = body_scope;
+            ui.scope_builder(
+                egui::UiBuilder::new().id(egui::Id::new(QUICK_NOTES_BODY_ID)),
+                |ui| {
+                    ui.add_enabled_ui(body_input_allowed, |ui| {
+                if let Some(idx) = this.edit_idx {
                     widgets::compact_section_heading(ui, "Edit note", None);
                     let footer_height = edit_footer_button_height(ui);
                     let footer_gap = ui.spacing().item_spacing.y;
@@ -1701,7 +2139,7 @@ impl NotesDialog {
                         .min_scrolled_height(editor_max_height.min(64.0))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let note_identity = self
+                            let note_identity = this
                                 .entries
                                 .get(idx)
                                 .map(|note| note.slug.as_str())
@@ -1710,13 +2148,13 @@ impl NotesDialog {
                                 "jump-mode-note-editor",
                                 note_identity,
                             ));
-                            let output = egui::TextEdit::multiline(&mut self.text)
+                            let output = egui::TextEdit::multiline(&mut this.text)
                                 .id(editor_id)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(10)
                                 .show(ui);
                             register_jump_mode_target(
-                                jump_scope.as_ref(),
+                                jump_scope,
                                 ui,
                                 &output.response,
                                 "edit/content",
@@ -1731,17 +2169,20 @@ impl NotesDialog {
                             let mut insert_timestamp = false;
                             let mut insert_idx = None;
                             resp.context_menu(|ui| {
-                                if ui.button("Insert timestamp").clicked() {
-                                    insert_timestamp = true;
-                                    insert_idx = caret_char_idx;
-                                    ui.close();
-                                }
+                                ui.add_enabled_ui(popup_input_allowed, |ui| {
+                                    if ui.button("Insert timestamp").clicked() {
+                                        insert_timestamp = true;
+                                        insert_idx = caret_char_idx;
+                                        ui.close();
+                                    }
+                                });
                             });
+                            this.editor_context_menu_open = resp.context_menu_opened();
 
                             if insert_timestamp {
                                 let ts = format_note_timestamp_now();
                                 let idx = insert_idx.unwrap_or(usize::MAX);
-                                self.text = insert_at_char_boundary(&self.text, idx, &ts);
+                                this.text = insert_at_char_boundary(&this.text, idx, &ts);
                             }
 
                             if resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -1752,20 +2193,20 @@ impl NotesDialog {
                         });
                     #[cfg(test)]
                     {
-                        self.test_edit_scroll_rect = Some(_edit_scroll.inner_rect);
-                        self.test_edit_text_rect = Some(_edit_scroll.inner);
-                        self.test_edit_scroll_content_size = _edit_scroll.content_size;
+                        this.test_edit_scroll_rect = Some(_edit_scroll.inner_rect);
+                        this.test_edit_text_rect = Some(_edit_scroll.inner);
+                        this.test_edit_scroll_content_size = _edit_scroll.content_size;
                     }
                     ui.horizontal(|ui| {
                         let save_button = ui.button("Save");
                         #[cfg(test)]
                         {
-                            self.test_edit_save_rect = Some(save_button.rect);
+                            this.test_edit_save_rect = Some(save_button.rect);
                         }
                         let save_button =
                             widgets::with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
                         register_jump_mode_target(
-                            jump_scope.as_ref(),
+                            jump_scope,
                             ui,
                             &save_button,
                             "edit/save",
@@ -1774,16 +2215,16 @@ impl NotesDialog {
                             &mut jump_visual_order,
                         );
                         if save_button.clicked() {
-                            if self.text.trim().is_empty() {
-                                app.report_error_message("ui operation", "Text required");
+                            if this.text.trim().is_empty() {
+                                notices.push("Text required".to_owned());
                             } else {
-                                if idx >= self.entries.len() {
+                                if idx >= this.entries.len() {
                                     let title =
-                                        self.text.lines().next().unwrap_or("untitled").to_string();
+                                        this.text.lines().next().unwrap_or("untitled").to_string();
                                     note_to_save = Some(PendingNoteSave::New(Note {
                                         title,
                                         path: std::path::PathBuf::new(),
-                                        content: self.text.clone(),
+                                        content: this.text.clone(),
                                         tags: Vec::new(),
                                         links: Vec::new(),
                                         slug: String::new(),
@@ -1791,10 +2232,10 @@ impl NotesDialog {
                                         aliases: Vec::new(),
                                         entity_refs: Vec::new(),
                                     }));
-                                } else if let Some(existing) = self.entries.get(idx) {
+                                } else if let Some(existing) = this.entries.get(idx) {
                                     note_to_save = Some(PendingNoteSave::Existing {
                                         identity: existing.slug.clone(),
-                                        content: self.text.clone(),
+                                        content: this.text.clone(),
                                     });
                                 }
                                 save_edit = true;
@@ -1803,10 +2244,10 @@ impl NotesDialog {
                         let cancel_button = ui.button("Cancel");
                         #[cfg(test)]
                         {
-                            self.test_edit_cancel_rect = Some(cancel_button.rect);
+                            this.test_edit_cancel_rect = Some(cancel_button.rect);
                         }
                         register_jump_mode_target(
-                            jump_scope.as_ref(),
+                            jump_scope,
                             ui,
                             &cancel_button,
                             "edit/cancel",
@@ -1815,7 +2256,12 @@ impl NotesDialog {
                             &mut jump_visual_order,
                         );
                         if cancel_button.clicked() {
-                            self.edit_idx = None;
+                            this.edit_idx = None;
+                        }
+                        if let Some(requested) =
+                            this.host_button(ui, host.host, host_control_allowed)
+                        {
+                            host_request = Some(requested);
                         }
                     });
                 } else {
@@ -1824,7 +2270,7 @@ impl NotesDialog {
                         let add_note =
                             widgets::with_button_emphasis(ui, add_note, ButtonEmphasis::Primary);
                         register_jump_mode_target(
-                            jump_scope.as_ref(),
+                            jump_scope,
                             ui,
                             &add_note,
                             "add-note",
@@ -1833,12 +2279,12 @@ impl NotesDialog {
                             &mut jump_visual_order,
                         );
                         if add_note.clicked() {
-                            self.edit_idx = Some(self.entries.len());
-                            self.text.clear();
+                            this.edit_idx = Some(this.entries.len());
+                            this.text.clear();
                         }
                         let unused_assets = ui.button("Unused Assets");
                         register_jump_mode_target(
-                            jump_scope.as_ref(),
+                            jump_scope,
                             ui,
                             &unused_assets,
                             "unused-assets",
@@ -1847,12 +2293,12 @@ impl NotesDialog {
                             &mut jump_visual_order,
                         );
                         if unused_assets.clicked() {
-                            app.unused_assets_dialog.open();
+                            open_unused_assets = true;
                         }
                         if app.note_settings.templates_enabled {
                             let templates = ui.button("Templates");
                             register_jump_mode_target(
-                                jump_scope.as_ref(),
+                                jump_scope,
                                 ui,
                                 &templates,
                                 "templates",
@@ -1861,12 +2307,12 @@ impl NotesDialog {
                                 &mut jump_visual_order,
                             );
                             if templates.clicked() {
-                                self.template_manager.open();
+                                this.template_manager.open();
                             }
                         }
                         let close_button = ui.button("Close");
                         register_jump_mode_target(
-                            jump_scope.as_ref(),
+                            jump_scope,
                             ui,
                             &close_button,
                             "close",
@@ -1875,15 +2321,20 @@ impl NotesDialog {
                             &mut jump_visual_order,
                         );
                         if close_button.clicked() {
-                            close = true;
+                            body_close = true;
+                        }
+                        if let Some(requested) =
+                            this.host_button(ui, host.host, host_control_allowed)
+                        {
+                            host_request = Some(requested);
                         }
                     });
                     widgets::compact_section_heading(ui, "Search", None);
                     let search = ui.add(
-                        egui::TextEdit::singleline(&mut self.search).desired_width(f32::INFINITY),
+                        egui::TextEdit::singleline(&mut this.search).desired_width(f32::INFINITY),
                     );
                     register_jump_mode_target(
-                        jump_scope.as_ref(),
+                        jump_scope,
                         ui,
                         &search,
                         "search",
@@ -1892,18 +2343,18 @@ impl NotesDialog {
                         &mut jump_visual_order,
                     );
                     if update_filtered_projection(
-                        &self.search,
-                        &self.index,
-                        self.entries_generation,
-                        &mut self.filtered_indices,
-                        &mut self.projection_key,
+                        &this.search,
+                        &this.index,
+                        this.entries_generation,
+                        &mut this.filtered_indices,
+                        &mut this.projection_key,
                     ) {
-                        self.projection_generation =
-                            self.projection_generation.wrapping_add(1).max(1);
+                        this.projection_generation =
+                            this.projection_generation.wrapping_add(1).max(1);
                         #[cfg(test)]
                         {
-                            self.test_projection_rebuilds =
-                                self.test_projection_rebuilds.saturating_add(1);
+                            this.test_projection_rebuilds =
+                                this.test_projection_rebuilds.saturating_add(1);
                         }
                     }
                     let mut remove: Option<usize> = None;
@@ -1915,19 +2366,19 @@ impl NotesDialog {
                     let _output = egui::ScrollArea::both()
                         .max_height(area_height)
                         .show_viewport(ui, |ui, viewport| {
-                            let old_geometry = self.ensure_notes_geometry(
+                            let old_geometry = this.ensure_notes_geometry(
                                 ctx,
                                 ui.style(),
                                 viewport.width(),
                             );
-                            self.reconcile_menu_owner();
+                            this.reconcile_menu_owner();
                             let content_origin = ui.min_rect().min;
-                            let Some(geometry) = self.notes_geometry.as_ref() else {
+                            let Some(geometry) = this.notes_geometry.as_ref() else {
                                 return;
                             };
                             #[cfg(test)]
                             {
-                                self.test_content_origin = content_origin;
+                                this.test_content_origin = content_origin;
                             }
 
                             if let Some(old_geometry) = old_geometry.as_ref()
@@ -1960,7 +2411,7 @@ impl NotesDialog {
                                 .min(geometry.rows.len());
                             let mut render_positions =
                                 (first_visible..after_visible).collect::<Vec<_>>();
-                            if let Some(owner) = self
+                            if let Some(owner) = this
                                 .menu_owner
                                 .as_ref()
                                 .filter(|owner| owner.response.context_menu_opened())
@@ -1983,10 +2434,10 @@ impl NotesDialog {
                             for row_geometry in render_rows {
                                 let idx = row_geometry.original_index;
                                 let identity = row_geometry.identity.as_str();
-                                let Some(entry) = self.entries.get(idx) else {
+                                let Some(entry) = this.entries.get(idx) else {
                                     continue;
                                 };
-                                let Some(row) = self
+                                let Some(row) = this
                                     .row_metadata
                                     .get(idx)
                                     .filter(|row| row.original_index == idx)
@@ -2051,7 +2502,7 @@ impl NotesDialog {
                                                 .union(meta_response);
                                             if !entry.slug.is_empty() {
                                                 register_jump_mode_target(
-                                                    jump_scope.as_ref(),
+                                                    jump_scope,
                                                     ui,
                                                     &header_response,
                                                     format!("note/{}/header", entry.slug),
@@ -2080,7 +2531,7 @@ impl NotesDialog {
                                                         input.consume_key(modifiers, key);
                                                     });
                                                 }
-                                                app.open_note_panel(&entry.slug, None);
+                                                open_note_panels.push(entry.slug.clone());
                                             }
                                             #[cfg(test)]
                                             {
@@ -2100,67 +2551,48 @@ impl NotesDialog {
                                             };
                                             let idx_copy = idx;
                                             response.clone().context_menu(|ui| {
+                                                ui.add_enabled_ui(popup_input_allowed, |ui| {
                                                     if ui.button("Open").clicked() {
-                                                        app.open_note_panel(&entry.slug, None);
+                                                        open_note_panels.push(entry.slug.clone());
                                                         ui.close();
                                                     }
                                                     let edit_button = ui.button("Edit");
                                                     #[cfg(test)]
                                                     {
-                                                        self.test_menu_edit_rect =
+                                                        this.test_menu_edit_rect =
                                                             Some(edit_button.rect);
                                                     }
                                                     if edit_button.clicked() {
-                                                        self.edit_idx = Some(idx_copy);
-                                                        self.text = entry.content.clone();
+                                                        this.edit_idx = Some(idx_copy);
+                                                        this.text = entry.content.clone();
                                                         ui.close();
                                                     }
                                                     if ui.button("Open externally").clicked() {
-                                                        if let Err(e) = open::that(&entry.path) {
-                                                            app.report_error_message(
-                                                                "ui operation",
-                                                                format!(
-                                                                    "Failed to open note externally: {e}"
-                                                                ),
-                                                            );
-                                                        }
+                                                        external_open_paths.push(entry.path.clone());
                                                         ui.close();
                                                     }
                                                     if ui.button("Copy link").clicked() {
                                                         let link = format!("[[{}]]", entry.slug);
-                                                        if let Err(e) =
-                                                            crate::actions::clipboard::set_text(&link)
-                                                        {
-                                                            app.report_error_message(
-                                                                "ui operation",
-                                                                format!("Failed to copy note link: {e}"),
-                                                            );
-                                                        }
+                                                        clipboard_texts.push(link);
                                                         ui.close();
                                                     }
                                                     if ui.button("Copy slug").clicked() {
-                                                        if let Err(e) = crate::actions::clipboard::set_text(&entry.slug) {
-                                                            app.report_error_message(
-                                                                "ui operation",
-                                                                format!("Failed to copy note slug: {e}"),
-                                                            );
-                                                        }
+                                                        clipboard_texts.push(entry.slug.clone());
                                                         ui.close();
                                                     }
                                                     if app.note_settings.aliases_enabled
                                                         && ui.button("Manage aliases").clicked()
                                                     {
-                                                        app.open_note_panel(&entry.slug, None);
+                                                        open_note_panels.push(entry.slug.clone());
                                                         ui.close();
                                                     }
                                                     if app.note_settings.templates_enabled
                                                         && ui.button("Create note from template").clicked()
                                                     {
-                                                        app.activate_action(
-                                                            note_action("New note", "query:note templates"),
-                                                            None,
-                                                            ActivationSource::Click,
-                                                        );
+                                                        activations.push(note_action(
+                                                            "New note",
+                                                            "query:note templates",
+                                                        ));
                                                         ui.close();
                                                     }
                                                     ui.menu_button("Meta", |ui| {
@@ -2172,21 +2604,17 @@ impl NotesDialog {
                                                     let remove_button = ui.button("Remove Note");
                                                     #[cfg(test)]
                                                     {
-                                                        self.test_menu_remove_rect =
+                                                        this.test_menu_remove_rect =
                                                             Some(remove_button.rect);
                                                     }
                                                     if remove_button.clicked() {
                                                         if entry.slug.is_empty() {
                                                             remove = Some(idx_copy);
                                                         } else {
-                                                            app.activate_action(
-                                                                note_action(
-                                                                    "Remove note",
-                                                                    format!("note:remove:{}", entry.slug),
-                                                                ),
-                                                                None,
-                                                                ActivationSource::Click,
-                                                            );
+                                                            activations.push(note_action(
+                                                                "Remove note",
+                                                                format!("note:remove:{}", entry.slug),
+                                                            ));
                                                             if !app.require_confirm_destructive {
                                                                 refresh_entries = true;
                                                             }
@@ -2208,7 +2636,7 @@ impl NotesDialog {
                                                             .button(format!("@todo:{todo_id} {}", todo.text))
                                                             .clicked()
                                                         {
-                                                            if let Some(target) = self.entries.get(idx_copy) {
+                                                            if let Some(target) = this.entries.get(idx_copy) {
                                                                 note_to_save = Some(PendingNoteSave::Append {
                                                                     identity: target.slug.clone(),
                                                                     suffix: format!("\n@todo:{todo_id}"),
@@ -2217,6 +2645,7 @@ impl NotesDialog {
                                                             ui.close();
                                                         }
                                                     }
+                                                });
                                             });
                                             if response.context_menu_opened() {
                                                 open_menu_response = Some(response.clone());
@@ -2249,7 +2678,7 @@ impl NotesDialog {
                                 #[cfg(test)]
                                 let separator_response = _separator_response.inner;
                                 if let Some(response) = open_menu_response {
-                                    if let Some(owner) = self
+                                    if let Some(owner) = this
                                         .menu_owner
                                         .as_mut()
                                         .filter(|owner| owner.identity == identity)
@@ -2257,7 +2686,7 @@ impl NotesDialog {
                                         owner.original_index = idx;
                                         owner.response = response;
                                     } else {
-                                        self.menu_owner = Some(NoteMenuOwner {
+                                        this.menu_owner = Some(NoteMenuOwner {
                                             identity: identity.to_owned(),
                                             original_index: idx,
                                             response,
@@ -2273,14 +2702,14 @@ impl NotesDialog {
                                                 snapshot.painted_rows.saturating_add(1);
                                         });
                                     }
-                                    self.last_rendered_indices.push(idx);
-                                    self.last_rendered_header_ids
+                                    this.last_rendered_indices.push(idx);
+                                    this.last_rendered_header_ids
                                         .push((
                                             identity.to_owned(),
                                             row_header_response_id
                                                 .expect("the note row built a header response"),
                                         ));
-                                    self.last_rendered_row_rects.push((
+                                    this.last_rendered_row_rects.push((
                                         idx,
                                         RenderedNoteRowRects {
                                             outer: actual_outer_rect,
@@ -2300,46 +2729,694 @@ impl NotesDialog {
                         });
                     #[cfg(test)]
                     {
-                        self.test_scroll_area_id = Some(_output.id);
-                        self.test_scroll_area_offset = _output.state.offset;
-                        self.test_scroll_area_inner_rect = Some(_output.inner_rect);
-                        self.test_scroll_area_content_size = _output.content_size;
+                        this.test_scroll_area_id = Some(_output.id);
+                        this.test_scroll_area_offset = _output.state.offset;
+                        this.test_scroll_area_inner_rect = Some(_output.inner_rect);
+                        this.test_scroll_area_content_size = _output.content_size;
                     }
                     drop(rows_timer);
                     if let Some(idx) = remove {
-                        self.entries.remove(idx);
+                        remove_note_index = Some(idx);
                         rebuild_idx = true;
                     }
                 }
-            });
-        if let Some(slug) = wrap_links_slug {
-            app.activate_action(wrap_links_note_action(&slug), None, ActivationSource::Click);
+                    });
+                },
+            );
+            if app.note_settings.templates_enabled {
+                template_actions.extend(this.template_manager.ui(ctx, template_input_allowed));
+            } else {
+                this.template_manager.open = false;
+            }
+        };
+        match host.host {
+            UtilityPresentation::Docked => {
+                if root_visible || bootstrap_pending {
+                    let layer = crate::gui::jump_mode::ui::notes_dialog_layer_id();
+                    let id = egui::Id::new(Some("Quick Notes"));
+                    let mut window_open = dialog_open;
+                    let output = egui::Window::new("Quick Notes")
+                        .id(id)
+                        .enabled(root_input_allowed)
+                        .collapsible(false)
+                        .resizable(true)
+                        .default_size(QUICK_NOTES_DEFAULT_SIZE)
+                        .min_width(QUICK_NOTES_MINIMUM_SIZE.x)
+                        .min_height(QUICK_NOTES_MINIMUM_SIZE.y)
+                        .show_utility(
+                            ctx,
+                            "quick-notes",
+                            id,
+                            Some(&mut window_open),
+                            crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                                crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                                    QUICK_NOTES_DEFAULT_SIZE,
+                                ),
+                                egui::Vec2::ZERO,
+                                [None, None],
+                            )
+                            .with_minimum(QUICK_NOTES_MINIMUM_SIZE),
+                            |ui| {
+                                callback_observed = true;
+                                callback_class = egui::ViewportClass::Root;
+                                owner_viewport_id = egui::ViewportId::ROOT;
+                                let owner_pass_is_current = ui.current_pass_index() == 0
+                                    && !ctx.will_discard()
+                                    && !ui.ctx().will_discard();
+                                let pass_authorized = first_ui_pass && owner_pass_is_current;
+                                let modal_open = ui
+                                    .ctx()
+                                    .memory(|memory| memory.top_modal_layer().is_some());
+                                let popup_open = egui::Popup::is_any_open(ui.ctx());
+                                let focused = ui.ctx().input(|input| input.focused);
+                                let visible_body = ui.is_visible() && !ui.is_sizing_pass();
+                                let root_owner_current = root_input_allowed
+                                    && ui.ctx().viewport_id() == egui::ViewportId::ROOT
+                                    && focused
+                                    && !modal_open
+                                    && !popup_open
+                                    && crate::gui::jump_mode::ui::visible_top_middle_layer(
+                                        ui.ctx(),
+                                    ) == Some(layer)
+                                    && crate::gui::jump_mode::ui::focused_response_layer(ui.ctx())
+                                        .is_none_or(|focused_layer| focused_layer == layer);
+                                if !root_owner_current {
+                                    surrender_quick_notes_focus(ui.ctx(), layer);
+                                }
+                                let keyboard_close = pass_authorized
+                                    && root_owner_current
+                                    && !nested_owner_open
+                                    && ui.ctx().input_mut(|input| {
+                                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                            || input.consume_key(
+                                                egui::Modifiers::COMMAND,
+                                                egui::Key::W,
+                                            )
+                                    });
+                                if keyboard_close {
+                                    close = true;
+                                }
+                                // egui routes pointer input by hit layer. A docked
+                                // Notes editor must remain clickable while the
+                                // launcher query owns keyboard focus.
+                                let body_allowed = pass_authorized
+                                    && root_input_allowed
+                                    && focused
+                                    && !modal_open
+                                    && !popup_open
+                                    && visible_body
+                                    && !close;
+                                let popup_owner_open = self.editor_context_menu_open
+                                    || self
+                                        .menu_owner
+                                        .as_ref()
+                                        .is_some_and(|owner| owner.response.context_menu_opened());
+                                let template_owner_current =
+                                    self.template_manager.owns_input(ui.ctx());
+                                owner_pass_accepted = owner_pass_is_current;
+                                let body_ctx = ui.ctx().clone();
+                                draw_contents(
+                                    self,
+                                    ui,
+                                    &body_ctx,
+                                    root_jump_scope.as_ref(),
+                                    body_allowed,
+                                    body_allowed,
+                                    pass_authorized
+                                        && root_template_input_allowed
+                                        && template_owner_current,
+                                    pass_authorized
+                                        && root_input_allowed
+                                        && visible_body
+                                        && !close
+                                        && (root_owner_current
+                                            || (popup_open && popup_owner_open)),
+                                );
+                            },
+                        );
+                    close_by_title = output.is_some() && !window_open;
+                    close |= close_by_title;
+                    if callback_observed {
+                        embedded_root_layer = Some(layer);
+                        embedded_root_focused_id = ctx.memory(|memory| memory.focused());
+                    }
+                }
+            }
+            UtilityPresentation::Popout => {
+                ctx.show_viewport_immediate(
+                    quick_notes_viewport_id(),
+                    quick_notes_viewport_builder(),
+                    |child, class| {
+                        callback_observed = true;
+                        callback_class = class;
+                        let child_ctx = child.ctx().clone();
+                        let independent = class == egui::ViewportClass::Immediate
+                            && child_ctx.viewport_id() == quick_notes_viewport_id();
+                        owner_viewport_id = if independent {
+                            quick_notes_viewport_id()
+                        } else {
+                            egui::ViewportId::ROOT
+                        };
+                        let pass = ViewportPassProvenance::current(
+                            &child_ctx,
+                            child_ctx.viewport_id(),
+                        );
+                        let owner_pass_is_current = child.current_pass_index() == 0
+                            && !ctx.will_discard()
+                            && !child.will_discard();
+                        let pass_authorized = first_ui_pass && owner_pass_is_current;
+                        if independent {
+                            native_viewport = Some(child.input(|input| input.viewport().clone()));
+                        }
+                        let modal_open = child.memory(|memory| memory.top_modal_layer().is_some());
+                        let popup_open = egui::Popup::is_any_open(&child_ctx);
+                        let focused = child.input(|input| input.focused);
+                        let visible_body = independent
+                            || (child.is_visible() && !child.is_sizing_pass());
+                        let expected_layer = if independent {
+                            egui::LayerId::background()
+                        } else {
+                            child.layer_id()
+                        };
+                        let visible_layer =
+                            crate::gui::jump_mode::ui::visible_top_middle_layer(&child_ctx);
+                        let root_owner_current = !independent
+                            && root_input_allowed
+                            && child_ctx.viewport_id() == egui::ViewportId::ROOT
+                            && focused
+                            && !modal_open
+                            && !popup_open
+                            && visible_layer == Some(expected_layer)
+                            && crate::gui::jump_mode::ui::focused_response_layer(&child_ctx)
+                                .is_none_or(|focused_layer| focused_layer == expected_layer);
+                        if !independent && !root_owner_current {
+                            surrender_quick_notes_focus(&child_ctx, expected_layer);
+                        }
+                        let binding = independent.then_some(NavigationViewportBinding {
+                            viewport: quick_notes_viewport_id(),
+                            owner: NavigationOwner::Notes {
+                                instance: owner_instance,
+                            },
+                            base_layer: egui::LayerId::background(),
+                        });
+                        native_jump_mode.set_enabled(jump_mode_enabled);
+                        if independent {
+                            let frame_number = child_ctx.cumulative_frame_nr();
+                            if native_jump_frame != Some(frame_number) {
+                                native_jump_mode.begin_frame();
+                                native_jump_frame = Some(frame_number);
+                            }
+                        }
+                        let navigation_owner = binding.map_or(NavigationOwner::Blocked, |binding| {
+                            native_jump_mode.update_navigation_owner_for_viewport(
+                                &child_ctx,
+                                binding,
+                                application_input_allowed && jump_mode_enabled,
+                            )
+                        });
+                        let jump_owner_current = binding.is_some_and(|binding| {
+                            navigation_owner == binding.owner
+                                && native_jump_mode.frame_navigation_owner() == binding.owner
+                        });
+                        if independent {
+                            native_jump_mode.handle_viewport_input(
+                                &child_ctx,
+                                jump_owner_current,
+                                pass_authorized,
+                                quick_notes_viewport_id(),
+                            );
+                        }
+                        let native_owner_current = if independent {
+                            application_input_allowed
+                                && child_ctx.viewport_id() == quick_notes_viewport_id()
+                                && focused
+                                && !modal_open
+                                && !popup_open
+                                && visible_layer.is_none()
+                                && crate::gui::jump_mode::ui::focused_response_layer(&child_ctx)
+                                    .is_none_or(|focused_layer| focused_layer == expected_layer)
+                        } else {
+                            root_owner_current
+                        };
+                        let native_close = independent
+                            && owner_pass_is_current
+                            && child.input(|input| input.viewport().close_requested());
+                        let keyboard_close = pass_authorized
+                            && native_owner_current
+                            && !nested_owner_open
+                            && native_jump_mode.active_session().is_none()
+                            && child.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                    || input.consume_key(
+                                        egui::Modifiers::COMMAND,
+                                        egui::Key::W,
+                                    )
+                            });
+                        os_close_requested = native_close;
+                        if native_close || keyboard_close {
+                            close = true;
+                        }
+                        focus_host = focus_host_pending
+                            && owner_pass_is_current
+                            && visible_body
+                            && !modal_open;
+                        owner_pass_accepted = owner_pass_is_current;
+                        if independent && owner_pass_is_current {
+                            owner_pass = Some(pass);
+                        }
+                        if independent {
+                            native_jump_mode.begin_ui_pass();
+                            let native_scope = if jump_owner_current {
+                                binding.and_then(|binding| {
+                                    native_jump_mode.scope_for_viewport_binding(
+                                        crate::gui::jump_mode::SurfaceId::dialog(
+                                            "notes",
+                                            owner_instance,
+                                        ),
+                                        jump_generation,
+                                        "quick-notes",
+                                        binding,
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                            if !native_owner_current {
+                                surrender_quick_notes_focus(&child_ctx, expected_layer);
+                            }
+                            let popup_owner_open = self.editor_context_menu_open
+                                || self
+                                    .menu_owner
+                                    .as_ref()
+                                    .is_some_and(|owner| owner.response.context_menu_opened());
+                            let template_owner_current =
+                                self.template_manager.owns_input(&child_ctx);
+                            egui::CentralPanel::default().show(child, |ui| {
+                                draw_contents(
+                                    self,
+                                    ui,
+                                    &child_ctx,
+                                    native_scope.as_ref(),
+                                    pass_authorized
+                                        && native_owner_current
+                                        && visible_body
+                                        && !close,
+                                    pass_authorized
+                                        && native_owner_current
+                                        && visible_body
+                                        && !close,
+                                    pass_authorized
+                                        && application_input_allowed
+                                        && focused
+                                        && visible_body
+                                        && template_owner_current,
+                                    pass_authorized
+                                        && application_input_allowed
+                                        && focused
+                                        && visible_body
+                                        && !modal_open
+                                        && (native_owner_current
+                                            || (popup_open && popup_owner_open)),
+                                );
+                            });
+                            native_jump_mode.finish_ui_pass();
+                            let after_owner = binding.map_or(NavigationOwner::Blocked, |binding| {
+                                native_jump_mode.update_navigation_owner_for_viewport(
+                                    &child_ctx,
+                                    binding,
+                                    application_input_allowed && jump_mode_enabled,
+                                )
+                            });
+                            if let Some(binding) = binding {
+                                if native_jump_mode.prepare_pass_for_viewport(
+                                    &child_ctx,
+                                    binding,
+                                    after_owner,
+                                    application_input_allowed,
+                                ) {
+                                    crate::gui::jump_mode::paint::paint(
+                                        &child_ctx,
+                                        &native_jump_mode,
+                                    );
+                                }
+                                if !child_ctx.will_discard() {
+                                    native_jump_mode.complete_frame_for_viewport(
+                                        &child_ctx,
+                                        binding,
+                                        after_owner,
+                                        application_input_allowed,
+                                    );
+                                }
+                            }
+                        } else {
+                            // egui already supplies the EmbeddedWindow shell. Draw the same
+                            // body directly into that callback and retain its actual layer.
+                            let popup_owner_open = self.editor_context_menu_open
+                                || self
+                                    .menu_owner
+                                    .as_ref()
+                                    .is_some_and(|owner| owner.response.context_menu_opened());
+                            let template_owner_current =
+                                self.template_manager.owns_input(&child_ctx);
+                            let body_allowed = pass_authorized
+                                && root_input_allowed
+                                && focused
+                                && !modal_open
+                                && !popup_open
+                                && visible_body
+                                && !close;
+                            draw_contents(
+                                self,
+                                child,
+                                &child_ctx,
+                                root_jump_scope.as_ref(),
+                                body_allowed,
+                                body_allowed,
+                                pass_authorized
+                                    && root_template_input_allowed
+                                    && template_owner_current,
+                                pass_authorized
+                                    && root_input_allowed
+                                    && visible_body
+                                    && !close
+                                    && (root_owner_current
+                                        || (popup_open && popup_owner_open)),
+                            );
+                            if root_owner_current && !close {
+                                focus_host = focus_host_pending && owner_pass_is_current;
+                            }
+                            if owner_pass_is_current {
+                                embedded_root_layer = Some(child.layer_id());
+                                embedded_root_focused_id =
+                                    child_ctx.memory(|memory| memory.focused());
+                            }
+                        }
+                    },
+                );
+            }
         }
-        if refresh_entries {
+
+        drop(draw_contents);
+        if !app.note_settings.templates_enabled {
+            self.template_manager.open = false;
+        }
+        close |= body_close || close_by_title || os_close_requested;
+
+        if defer_effects {
+            if callback_observed {
+                self.pending_effects = Some(NotesFrameEffects {
+                    root_pass,
+                    host,
+                    owner_pass,
+                    owner_viewport_id,
+                    owner_pass_accepted,
+                    owner_instance,
+                    callback_observed,
+                    callback_class,
+                    native_viewport,
+                    embedded_root_layer,
+                    embedded_root_focused_id,
+                    host_request,
+                    focus_host,
+                    close_requested: close,
+                    os_close_requested,
+                    note_to_save,
+                    save_edit,
+                    remove_note_index,
+                    refresh_entries,
+                    rebuild_index: rebuild_idx,
+                    wrap_links_slug,
+                    open_note_panels,
+                    open_unused_assets,
+                    activations,
+                    external_open_paths,
+                    clipboard_texts,
+                    notices,
+                    template_actions,
+                    draft_checkpoint,
+                });
+            }
+            self.native_jump_mode = native_jump_mode;
+            self.native_jump_frame = native_jump_frame;
+        } else {
+            if refresh_entries {
+                self.refresh_entries_from_notes();
+            }
+            if rebuild_idx && remove_note_index.is_none() {
+                self.rebuild_index();
+            }
+            if let Some(idx) = remove_note_index {
+                if idx < self.entries.len() {
+                    self.entries.remove(idx);
+                    self.rebuild_index();
+                }
+            }
+            if let Some(note) = note_to_save
+                && self.save_note_draft(note, app)
+                && save_edit
+            {
+                self.edit_idx = None;
+                self.text.clear();
+                self.refresh_entries_from_notes();
+            }
+            for notice in notices {
+                app.report_error_message("ui operation", notice);
+            }
+            for text in clipboard_texts {
+                if let Err(error) = crate::actions::clipboard::set_text(&text) {
+                    app.report_error_message(
+                        "ui operation",
+                        format!("Failed to copy note text: {error}"),
+                    );
+                }
+            }
+            for path in external_open_paths {
+                if let Err(error) = open::that(&path) {
+                    app.report_error_message(
+                        "ui operation",
+                        format!("Failed to open note externally: {error}"),
+                    );
+                }
+            }
+            for slug in open_note_panels {
+                app.open_note_panel(&slug, None);
+            }
+            if open_unused_assets {
+                app.unused_assets_dialog.open();
+            }
+            if let Some(slug) = wrap_links_slug {
+                activations.push(wrap_links_note_action(&slug));
+            }
+            for action in activations {
+                app.activate_action(action, None, ActivationSource::Click);
+            }
+            for action in template_actions {
+                self.template_manager.apply_action(action, app);
+            }
+            if close {
+                self.open = false;
+                self.close_menu_owner();
+            }
+            if let Some(requested) = host_request
+                && requested != self.host_state.presentation()
+            {
+                if self.host_state.transition(requested)
+                    && requested == UtilityPresentation::Docked
+                {
+                    self.show_root_after_host_change = true;
+                }
+            }
+            self.native_jump_mode = native_jump_mode;
+            self.native_jump_frame = native_jump_frame;
+        }
+    }
+
+    pub(crate) fn on_ui_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+    ) -> NotesFrameCompletion {
+        let Some(effects) = self.pending_effects.take() else {
+            return NotesFrameCompletion {
+                closed: false,
+                show_root: self.take_show_root_after_host_change(),
+                open_note_panels: Vec::new(),
+                open_unused_assets: false,
+                activations: Vec::new(),
+                external_open_paths: Vec::new(),
+                clipboard_texts: Vec::new(),
+            };
+        };
+        let owner_pass_retained = effects.owner_pass_accepted
+            && effects.callback_observed
+            && match effects.owner_pass {
+                Some(pass) => {
+                    effects.host.host == UtilityPresentation::Popout
+                        && effects.owner_viewport_id == pass.viewport_id
+                        && pass.viewport_id == quick_notes_viewport_id()
+                        && pass.was_retained(ctx)
+                }
+                None => effects.owner_viewport_id == egui::ViewportId::ROOT,
+            };
+        if !effects.root_pass.was_retained(ctx)
+            || effects.host != self.host_state.identity()
+            || !owner_pass_retained
+        {
+            if let Some(checkpoint) = effects.draft_checkpoint {
+                self.edit_idx = checkpoint.edit_idx;
+                self.text = checkpoint.text.clone();
+                self.search = checkpoint.search.clone();
+                self.editor_context_menu_open = checkpoint.editor_context_menu_open;
+                self.template_manager = checkpoint.template_manager.clone();
+                self.retained_draft_checkpoint = None;
+            }
+            if effects.os_close_requested {
+                ctx.send_viewport_cmd_to(
+                    quick_notes_viewport_id(),
+                    egui::ViewportCommand::CancelClose,
+                );
+            }
+            return NotesFrameCompletion {
+                closed: false,
+                show_root: false,
+                open_note_panels: Vec::new(),
+                open_unused_assets: false,
+                activations: Vec::new(),
+                external_open_paths: Vec::new(),
+                clipboard_texts: Vec::new(),
+            };
+        }
+        if self
+            .retained_draft_checkpoint
+            .as_ref()
+            .is_some_and(|(frame, _, _)| *frame == effects.root_pass.frame_nr)
+        {
+            self.retained_draft_checkpoint = None;
+        }
+        if effects.os_close_requested {
+            ctx.send_viewport_cmd_to(
+                quick_notes_viewport_id(),
+                egui::ViewportCommand::CancelClose,
+            );
+        }
+        self.host_state.complete_bootstrap(
+            effects.host,
+            effects.embedded_root_layer,
+            effects.embedded_root_focused_id,
+        );
+        if effects.focus_host {
+            if effects.callback_class == egui::ViewportClass::Immediate {
+                ctx.send_viewport_cmd_to(
+                    quick_notes_viewport_id(),
+                    egui::ViewportCommand::Focus,
+                );
+            } else if let Some(layer) = effects.embedded_root_layer {
+                ctx.move_to_top(layer);
+            }
+            self.host_state.complete_focus(effects.host);
+        }
+        let mut native_identity = quick_notes_native_identity(effects.host, effects.owner_instance);
+        if let (Some(identity), Some(viewport_info)) =
+            (native_identity, effects.native_viewport.as_ref())
+            && effects.callback_class == egui::ViewportClass::Immediate
+            && !effects.os_close_requested
+            && effects.host_request != Some(UtilityPresentation::Docked)
+            && !effects.close_requested
+        {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                effects.callback_class,
+                true,
+                "Quick Notes",
+                identity,
+                viewport_info,
+                QUICK_NOTES_DEFAULT_SIZE,
+                Some(QUICK_NOTES_MINIMUM_SIZE),
+                None,
+            );
+        }
+        if effects.refresh_entries {
             self.refresh_entries_from_notes();
         }
-        if rebuild_idx {
+        if effects.rebuild_index && effects.remove_note_index.is_none() {
             self.rebuild_index();
         }
-        if let Some(note) = note_to_save
-            && self.save_note_draft(note, app)
-            && save_edit
+        if let Some(idx) = effects.remove_note_index
+            && idx < self.entries.len()
+        {
+            self.entries.remove(idx);
+            self.rebuild_index();
+        }
+        for notice in effects.notices {
+            app.report_error_message("ui operation", notice);
+        }
+        if let Some(note) = effects.note_to_save
+            && self.save_note_draft_with_focus(
+                note,
+                app,
+                effects.host.host == UtilityPresentation::Docked,
+            )
+            && effects.save_edit
         {
             self.edit_idx = None;
             self.text.clear();
             self.refresh_entries_from_notes();
         }
-        if close {
-            window_open = false;
+        for action in effects.template_actions {
+            self.template_manager.apply_action(action, app);
         }
-        if !window_open {
+        let mut activations = effects.activations;
+        if let Some(slug) = effects.wrap_links_slug {
+            activations.push(wrap_links_note_action(&slug));
+        }
+        let closed = effects.close_requested || effects.os_close_requested;
+        if closed {
+            self.open = false;
             self.close_menu_owner();
+            if let Some(identity) = native_identity.take() {
+                super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            }
+            ctx.send_viewport_cmd_to(quick_notes_viewport_id(), egui::ViewportCommand::Close);
+            self.host_state.retire_to_docked();
+            self.native_jump_mode.cancel_all();
+            self.native_jump_frame = None;
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        } else if let Some(requested) = effects.host_request
+            && requested != self.host_state.presentation()
+        {
+            if requested == UtilityPresentation::Docked {
+                if let Some(identity) = native_identity.take() {
+                    super::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                }
+                ctx.send_viewport_cmd_to(quick_notes_viewport_id(), egui::ViewportCommand::Close);
+            }
+            if self.host_state.transition(requested) {
+                self.native_jump_mode.cancel_all();
+                self.native_jump_frame = None;
+                if requested == UtilityPresentation::Docked {
+                    self.show_root_after_host_change = true;
+                    if let Some(layer) = self.host_layer_if_root() {
+                        ctx.move_to_top(layer);
+                    }
+                }
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                if requested == UtilityPresentation::Popout {
+                    ctx.request_repaint_of(quick_notes_viewport_id());
+                }
+            }
         }
-        self.open = window_open;
-        if app.note_settings.templates_enabled {
-            self.template_manager.ui(ctx, app);
-        } else {
-            self.template_manager.open = false;
+        NotesFrameCompletion {
+            closed,
+            show_root: self.take_show_root_after_host_change()
+                || !effects.open_note_panels.is_empty()
+                || effects.open_unused_assets,
+            open_note_panels: effects.open_note_panels,
+            open_unused_assets: effects.open_unused_assets,
+            activations,
+            external_open_paths: effects.external_open_paths,
+            clipboard_texts: effects.clipboard_texts,
         }
     }
 }
@@ -2362,6 +3439,19 @@ fn register_jump_mode_target(
         kind,
         visual_order,
     );
+}
+
+fn surrender_quick_notes_focus(ctx: &egui::Context, layer: egui::LayerId) {
+    if ctx.viewport_id() != egui::ViewportId::ROOT {
+        return;
+    }
+    if let Some(focused) = ctx.memory(|memory| memory.focused())
+        && ctx
+            .read_response(focused)
+            .is_some_and(|response| response.layer_id == layer)
+    {
+        ctx.memory_mut(|memory| memory.surrender_focus(focused));
+    }
 }
 
 #[cfg(test)]

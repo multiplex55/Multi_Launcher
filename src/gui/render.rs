@@ -1921,7 +1921,7 @@ impl LauncherApp {
         allow_ordinary_tools: bool,
     ) -> bool {
         use crate::gui::jump_mode::ui::{
-            focused_response_layer, notes_dialog_layer_id, visible_top_middle_layer,
+            focused_response_layer, visible_top_middle_layer,
         };
 
         let ordinary_context = allow_ordinary_tools
@@ -1982,7 +1982,7 @@ impl LauncherApp {
         }
 
         let passive_ordinary_layer = |layer| {
-            (self.notes_dialog.open && layer == notes_dialog_layer_id())
+            (self.notes_dialog.host_layer_if_root() == Some(layer))
                 || self
                     .note_panels
                     .iter()
@@ -1996,7 +1996,9 @@ impl LauncherApp {
         let focused_id = ctx.memory(|memory| memory.focused());
         let focused_layer = focused_response_layer(ctx);
         let focused_notes_layer = allow_focused_notes
-            && (focused_layer == Some(notes_dialog_layer_id()) && self.notes_dialog.open
+            && (focused_layer.is_some_and(|layer| {
+                self.notes_dialog.host_layer_if_root() == Some(layer)
+            })
                 || self
                     .note_panels
                     .iter()
@@ -2088,7 +2090,6 @@ impl LauncherApp {
             || !self.note_panels.is_empty()
             || !self.image_panels.is_empty())
         .then_some(super::QueryFocusOrdinaryContext {
-            notes_dialog_open: self.notes_dialog.open,
             note_panel_layers,
             ordinary_panel_layers,
         })
@@ -2127,7 +2128,7 @@ impl LauncherApp {
             Panel::HotkeyDirectoryDialog => NavigationDialogKind::HotkeyDirectory.layer_id(),
             Panel::FavDialog => middle(egui::Id::new(Some("Favorites"))),
             Panel::FileSearchDialog => NavigationDialogKind::FileSearch.layer_id(),
-            Panel::NotesDialog => Some(crate::gui::jump_mode::ui::notes_dialog_layer_id()),
+            Panel::NotesDialog => self.notes_dialog.host_layer_if_root(),
             Panel::NoteGraphDialog => middle(egui::Id::new(Some("Note Graph"))),
             Panel::UnusedAssetsDialog => middle(egui::Id::new(Some("Unused Note Assets"))),
             Panel::ScreenshotEditor => middle(egui::Id::new("Screenshot Editor")),
@@ -2201,8 +2202,7 @@ impl LauncherApp {
                 let is_open_ordinary = ordinary_context.as_ref().is_some_and(|context| {
                     context.ordinary_panel_layers.contains(layer)
                         || context.note_panel_layers.contains(layer)
-                        || (context.notes_dialog_open
-                            && *layer == crate::gui::jump_mode::ui::notes_dialog_layer_id())
+                        || self.notes_dialog.host_layer_if_root() == Some(*layer)
                 });
                 let visible = memory.areas().visible_last_frame(layer) || is_open_ordinary;
                 if !visible {
@@ -2406,6 +2406,7 @@ impl LauncherApp {
                 .root_window_bridge
                 .is_current(root_identity.0, root_identity.1)
             && self.notes_dialog.open
+            && self.notes_dialog.host_layer_if_root() == Some(notes_layer)
             && self.jump_mode_ui.notes_instance() == instance
             && self.jump_mode_ui.frame_navigation_owner() == owner
             && visible_top_middle_layer(ctx) == Some(notes_layer)
@@ -2593,9 +2594,9 @@ impl LauncherApp {
         focused_layer == Some(geometry.layer_id)
             || ordinary_context.as_ref().is_some_and(|context| {
                 focused_layer.is_some_and(|layer| context.ordinary_panel_layers.contains(&layer))
-                    || (context.notes_dialog_open
-                        && focused_layer
-                            == Some(crate::gui::jump_mode::ui::notes_dialog_layer_id()))
+                    || focused_layer.is_some_and(|layer| {
+                        self.notes_dialog.host_layer_if_root() == Some(layer)
+                    })
             })
     }
 
@@ -2793,7 +2794,7 @@ impl LauncherApp {
             .root_identity
             .is_none_or(|(hwnd, generation)| self.root_window_bridge.is_current(hwnd, generation))
             && self.root_window_bridge.is_current(identity.0, identity.1)
-            && (ordinary_context.notes_dialog_open
+            && (self.notes_dialog.host_layer_if_root().is_some()
                 || !ordinary_context.note_panel_layers.is_empty())
     }
 
@@ -4822,7 +4823,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 10] {
+    fn viewport_bootstrap_state(&self) -> [bool; 11] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4835,6 +4836,7 @@ impl LauncherApp {
             self.file_lock_dialog.needs_root_ui_when_hidden(),
             self.recording_dialog
                 .needs_compact_viewport_bootstrap(&self.recording_controller),
+            self.notes_dialog.needs_root_ui_when_hidden(),
         ]
     }
 
@@ -4847,7 +4849,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 10],
+        previously_pending: [bool; 11],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -4973,6 +4975,55 @@ impl LauncherApp {
                 root_visible,
                 self.native_ui_host_input_allowed(ctx, root_visible),
             );
+        }
+    }
+
+    fn show_quick_notes(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+        root_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+    ) {
+        if root_visible || self.notes_dialog.needs_root_ui_when_hidden() {
+            let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+            let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+            let template_delete_layer = egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new(Some("Delete Template?")),
+            );
+            let root_template_input_allowed = root_visible
+                && self.visible_flag.load(Ordering::Relaxed)
+                && !self.pin_list_open
+                && !self.ocr_surface_visible()
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open()
+                && application_input_allowed
+                && ctx.viewport_id() == egui::ViewportId::ROOT
+                && ctx.input(|input| input.focused)
+                && ctx.memory(|memory| {
+                    memory
+                        .top_modal_layer()
+                        .is_none_or(|layer| layer == template_delete_layer)
+                });
+            let owner_instance = self.jump_mode_ui.notes_instance();
+            let jump_mode_enabled = self.jump_mode_enabled()
+                && !self.mouse_gestures_dialog.recorder_canvas_active();
+            let mut notes = std::mem::take(&mut self.notes_dialog);
+            notes.ui_with_host(
+                ctx,
+                self,
+                root_scope,
+                first_ui_pass,
+                application_input_allowed,
+                root_visible,
+                root_input_allowed,
+                root_template_input_allowed,
+                owner_instance,
+                jump_mode_enabled,
+                true,
+            );
+            self.notes_dialog = notes;
         }
     }
 
@@ -6165,8 +6216,7 @@ impl LauncherApp {
         };
         ordinary_context.ordinary_panel_layers.contains(&top_layer)
             && !ordinary_context.note_panel_layers.contains(&top_layer)
-            && !(ordinary_context.notes_dialog_open
-                && top_layer == crate::gui::jump_mode::ui::notes_dialog_layer_id())
+            && self.notes_dialog.host_layer_if_root() != Some(top_layer)
             && self.query_focus_mouse_session_has_keyboard_authority(
                 ctx,
                 root_visible,
@@ -6448,7 +6498,8 @@ impl LauncherApp {
                     (NavigationOwner::Blocked, combo_popup)
                 }
                 NavigationOwner::Notes { .. }
-                    if self.notes_dialog.jump_mode_unsupported_nested_owner_open()
+                    if self.notes_dialog.host_layer_if_root().is_none()
+                        || self.notes_dialog.jump_mode_unsupported_nested_owner_open()
                         || self.unused_assets_dialog.open =>
                 {
                     (NavigationOwner::Blocked, combo_popup)
@@ -7048,6 +7099,7 @@ impl LauncherApp {
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
+            self.show_quick_notes(&ctx, first_ui_pass, false, None);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -8008,6 +8060,7 @@ impl LauncherApp {
                     && !self
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
+                    && !self.notes_dialog.owns_root_input(&ctx)
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     #[cfg(test)]
@@ -8089,6 +8142,7 @@ impl LauncherApp {
                     && !self
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
+                    && !self.notes_dialog.owns_root_input(&ctx)
                     && self.close_front_dialog()
                 {
                     let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
@@ -10045,7 +10099,9 @@ impl LauncherApp {
         let notes_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
         let notes_scope = match notes_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Notes { instance } => {
+            crate::gui::jump_mode::ui::NavigationOwner::Notes { instance }
+                if self.notes_dialog.host_layer_if_root().is_some() =>
+            {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("notes", instance),
                     self.notes_dialog.jump_mode_target_generation(),
@@ -10055,6 +10111,7 @@ impl LauncherApp {
                     false,
                 )
             }
+            crate::gui::jump_mode::ui::NavigationOwner::Notes { .. } => None,
             crate::gui::jump_mode::ui::NavigationOwner::Root
             | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
@@ -10074,9 +10131,12 @@ impl LauncherApp {
             | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
             | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
         };
-        let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
-        notes_dlg.ui_with_jump_mode(&ctx, self, notes_scope);
-        self.notes_dialog = notes_dlg;
+        self.show_quick_notes(
+            &ctx,
+            first_ui_pass,
+            frame_logic.should_be_visible,
+            notes_scope,
+        );
         let mut graph_dlg = std::mem::take(&mut self.note_graph_dialog);
         let dashboard_snapshot = self.dashboard_data_cache.snapshot();
         graph_dlg.ui(
@@ -11195,6 +11255,47 @@ impl LauncherApp {
         effects
     }
 
+    fn complete_quick_notes_dialog(&mut self, ctx: &egui::Context) {
+        let mut notes = std::mem::take(&mut self.notes_dialog);
+        let completion = notes.on_ui_frame_complete(ctx, self);
+        self.notes_dialog = notes;
+        if completion.closed {
+            self.panel_states.notes_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::NotesDialog);
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+        for slug in completion.open_note_panels {
+            self.open_note_panel(&slug, None);
+        }
+        if completion.open_unused_assets {
+            self.unused_assets_dialog.open();
+            self.focus_panel(super::Panel::UnusedAssetsDialog);
+            self.request_launcher_visibility(true);
+        }
+        for text in completion.clipboard_texts {
+            if let Err(error) = crate::actions::clipboard::set_text(&text) {
+                self.report_error_message(
+                    "ui operation",
+                    format!("Failed to copy note text: {error}"),
+                );
+            }
+        }
+        for path in completion.external_open_paths {
+            if let Err(error) = open::that(&path) {
+                self.report_error_message(
+                    "ui operation",
+                    format!("Failed to open note externally: {error}"),
+                );
+            }
+        }
+        for action in completion.activations {
+            self.activate_action(action, None, ActivationSource::Click);
+        }
+    }
+
     fn dispatch_root_dialog_effects(
         &mut self,
         _ctx: &egui::Context,
@@ -11345,6 +11446,7 @@ impl eframe::App for LauncherApp {
         self.needs_viewport_bootstrap()
             || self.pin_windows_need_hidden_root_ui()
             || self.screenshot_countdown.is_busy()
+            || self.notes_dialog.needs_root_ui_when_hidden()
             || self.markdown_studio_dialog.needs_root_ui_when_hidden()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
@@ -11394,6 +11496,7 @@ impl eframe::App for LauncherApp {
             _ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         self.complete_markdown_diagram_handoff(_ctx);
+        self.complete_quick_notes_dialog(_ctx);
         self.regex_tester_dialog.on_ui_frame_complete(_ctx);
         let effects = self.complete_retained_tool_dialogs(_ctx);
         self.dispatch_root_dialog_effects(_ctx, effects);
@@ -11615,6 +11718,7 @@ impl LauncherApp {
             }
         }
         self.complete_markdown_diagram_handoff(ctx);
+        self.complete_quick_notes_dialog(ctx);
         self.regex_tester_dialog.on_ui_frame_complete(ctx);
         let effects = self.complete_retained_tool_dialogs(ctx);
         self.dispatch_root_dialog_effects(ctx, effects);
@@ -15824,6 +15928,100 @@ mod tests {
         input.events = events;
         app.run_root_frame_for_test(ctx, input, discard_after_render)
             .0
+    }
+
+    #[test]
+    fn quick_notes_visible_host_buttons_move_the_same_draft_and_discard_stale_host_intent() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.notes_dialog.test_set_edit_draft("Unsaved Quick Notes draft");
+        let original_draft = app.notes_dialog.test_edit_draft().to_owned();
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                .drop_without_applying_deltas();
+        }
+
+        let (was_popout, original_generation) = app.notes_dialog.test_host_identity();
+        assert!(!was_popout);
+        let (_, root_button, root_clip, root_enabled) = app.notes_dialog.test_host_button();
+        assert!(root_enabled, "the docked host button is enabled");
+        assert!(root_clip.contains_rect(root_button));
+        assert_eq!(
+            ctx.layer_id_at(root_button.center()),
+            Some(crate::gui::jump_mode::ui::notes_dialog_layer_id()),
+            "the host control is a real button on the existing Quick Notes window"
+        );
+
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(root_button, true),
+            false,
+        )
+        .drop_without_applying_deltas();
+        run_tool_dialog_frame(
+            &ctx,
+            &mut app,
+            tool_dialog_pointer_events(root_button, false),
+            true,
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.notes_dialog.test_host_identity(),
+            (false, original_generation),
+            "a discarded Pop Out intent leaves the accepted host unchanged"
+        );
+        assert_eq!(app.notes_dialog.test_edit_draft(), original_draft);
+
+        for _ in 0..2 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                .drop_without_applying_deltas();
+        }
+        let (_, root_button, root_clip, root_enabled) = app.notes_dialog.test_host_button();
+        assert!(root_enabled);
+        assert!(root_clip.contains_rect(root_button));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(root_button, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        let (is_popout, popout_generation) = app.notes_dialog.test_host_identity();
+        assert!(is_popout, "the accepted visible click pops Notes out");
+        assert!(popout_generation > original_generation);
+        assert_eq!(app.notes_dialog.test_edit_draft(), original_draft);
+        assert!(app.notes_dialog.test_is_editing());
+
+        run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+            .drop_without_applying_deltas();
+        let (_, child_button, child_clip, child_enabled) = app.notes_dialog.test_host_button();
+        assert!(child_enabled, "the accepted child owns the visible Dock control");
+        assert!(child_clip.contains_rect(child_button));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events(
+                tool_dialog_pointer_events(child_button, pressed),
+                || {
+                    run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false)
+                        .drop_without_applying_deltas()
+                },
+            );
+        }
+
+        let (is_popout, docked_generation) = app.notes_dialog.test_host_identity();
+        assert!(!is_popout, "the accepted child click docks Notes");
+        assert!(docked_generation > popout_generation);
+        assert_eq!(app.notes_dialog.test_edit_draft(), original_draft);
+        assert!(app.notes_dialog.test_is_editing());
+        assert!(
+            app.visible_flag.load(Ordering::SeqCst),
+            "Dock restores the launcher root"
+        );
+        drop(_workspace);
     }
 
     fn run_note_panel_key(

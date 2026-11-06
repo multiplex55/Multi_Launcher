@@ -436,7 +436,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::DuplicateFinder
                     | NavigationDialogKind::RadialDesigner,
                 ..
-            } | NavigationOwner::XmlOverwriteConfirmation { .. }
+            } | NavigationOwner::Notes { .. }
+                | NavigationOwner::XmlOverwriteConfirmation { .. }
                 | NavigationOwner::RadialDesignerChild { .. }
         )
     }
