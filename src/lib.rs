@@ -42,6 +42,7 @@ pub(crate) mod duplicate_finder;
 pub mod explorer_tabs;
 pub mod file_operations;
 pub mod file_search;
+pub mod folder_size;
 pub mod help_window;
 pub mod history;
 pub mod hotkey;
