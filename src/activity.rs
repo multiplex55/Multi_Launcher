@@ -27,6 +27,7 @@ pub enum ActivityOwner {
     Ocr,
     LivePin,
     Macro,
+    FolderSize,
 }
 
 impl ActivityOwner {
@@ -46,6 +47,7 @@ impl ActivityOwner {
             Self::Ocr => "OCR",
             Self::LivePin => "Live pin capture",
             Self::Macro => "Macro playback",
+            Self::FolderSize => "Folder Size",
         }
     }
 }
@@ -140,6 +142,7 @@ pub enum ActivityOperation {
     CaptureOcr,
     CaptureLivePin,
     PlayMacro,
+    MeasureFolderSize,
 }
 
 impl ActivityOperation {
@@ -175,6 +178,7 @@ impl ActivityOperation {
             Self::CaptureOcr => "Recognize selected text",
             Self::CaptureLivePin => "Capture live pin",
             Self::PlayMacro => "Play macro",
+            Self::MeasureFolderSize => "Measure folder size",
         }
     }
 }
@@ -182,7 +186,9 @@ impl ActivityOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityOutcome {
     Completed,
+    Partial,
     Cancelled,
+    Superseded,
     Failed,
 }
 
@@ -191,7 +197,9 @@ impl ActivityOutcome {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Completed => "Completed",
+            Self::Partial => "Partial",
             Self::Cancelled => "Cancelled",
+            Self::Superseded => "Superseded",
             Self::Failed => "Failed",
         }
     }
@@ -295,6 +303,8 @@ pub enum ActivityDiagnostic {
     Retiring,
     ResultUnavailable,
     CancelRequestFailed,
+    PartialResult,
+    Superseded,
 }
 
 impl ActivityDiagnostic {
@@ -308,6 +318,8 @@ impl ActivityDiagnostic {
             Self::Retiring => "Worker is retiring",
             Self::ResultUnavailable => "Result unavailable",
             Self::CancelRequestFailed => "Cancel request failed",
+            Self::PartialResult => "Some entries could not be measured",
+            Self::Superseded => "Replaced by a newer scan",
         }
     }
 }

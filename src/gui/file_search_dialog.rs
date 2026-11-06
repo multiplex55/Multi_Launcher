@@ -330,6 +330,7 @@ pub enum FileSearchContextMenuAction {
     OpenFileOrDirectory,
     RevealInExplorer,
     OpenContainingDirectory,
+    AnalyzeFolderSize,
     CopyFullPath,
     CopyFilename,
     CalculateHash,
@@ -343,6 +344,7 @@ pub enum FileSearchContextMenuAction {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileSearchUiCommand {
     OpenHash(PathBuf),
+    OpenFolderSize(PathBuf),
     ConfigureRipgrep(PathBuf),
     PersistPreferences(FileSearchUiPreferences),
 }
@@ -423,6 +425,7 @@ pub(crate) enum FileSearchTestPopupControl {
     ColumnsAnchor,
     SizeColumnToggle,
     ModifiedColumnToggle,
+    AnalyzeFolderSize,
     NestedContentSearch,
     ExportAnchor,
 }
@@ -2687,7 +2690,9 @@ impl FileSearchDialogState {
             FileSearchContextMenuAction::CopyFullPath,
             FileSearchContextMenuAction::CopyFilename,
         ];
-        if !is_directory {
+        if is_directory {
+            actions.push(FileSearchContextMenuAction::AnalyzeFolderSize);
+        } else {
             actions.push(FileSearchContextMenuAction::CalculateHash);
         }
         if content_match.is_some() {
@@ -2801,6 +2806,24 @@ impl FileSearchDialogState {
                 open_path(&dir)
             });
             ui.close();
+        }
+        if is_directory {
+            let analyze_folder_size = ui.button("Analyze folder size…");
+            #[cfg(test)]
+            if analyze_folder_size
+                .rect
+                .intersect(ui.clip_rect())
+                .is_positive()
+            {
+                self.test_native_popup_control_rects.insert(
+                    FileSearchTestPopupControl::AnalyzeFolderSize,
+                    analyze_folder_size.interact_rect.intersect(ui.clip_rect()),
+                );
+            }
+            if analyze_folder_size.clicked() {
+                commands.push(FileSearchUiCommand::OpenFolderSize(path.to_path_buf()));
+                ui.close();
+            }
         }
         if ui.button("Copy full path").clicked() {
             self.run_result_action("copy full path", || {
@@ -4106,6 +4129,52 @@ mod tests {
             !FileSearchDialogState::context_menu_intents_for_row(&row)
                 .iter()
                 .any(|intent| intent.action == FileSearchContextMenuAction::CalculateHash)
+        );
+    }
+
+    #[test]
+    fn file_search_folder_size_context_action_is_directory_only() {
+        let mut row = FileSearchResultRow {
+            id: FileSearchResultRowId {
+                search_id: SearchId(7),
+                result_key: FileSearchResultKey::Filename {
+                    path: PathIdentity::from_path(std::path::Path::new("/tmp/project")),
+                },
+                match_index: None,
+                path: "project".into(),
+                line_number: None,
+                column: None,
+            },
+            payload: FileSearchRowPayload::Filename {
+                path: PathBuf::from("/tmp/project"),
+                display_filename: "project".into(),
+                parent_directory_display: "/tmp".into(),
+                kind: FileKind::Directory,
+                size: None,
+                modified: None,
+                rank: crate::file_search::model::FilenameRank::ExactFilename,
+                match_quality: crate::file_search::model::FilenameRank::ExactFilename,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+            },
+        };
+
+        let directory_intent = FileSearchDialogState::context_menu_intents_for_row(&row)
+            .into_iter()
+            .find(|intent| intent.action == FileSearchContextMenuAction::AnalyzeFolderSize)
+            .expect("directory filename rows expose folder-size analysis");
+        assert_eq!(directory_intent.path, PathBuf::from("/tmp/project"));
+        assert!(directory_intent.is_directory);
+
+        if let FileSearchRowPayload::Filename { kind, path, .. } = &mut row.payload {
+            *kind = FileKind::File;
+            *path = PathBuf::from("/tmp/project/file.txt");
+        }
+        assert!(
+            !FileSearchDialogState::context_menu_intents_for_row(&row)
+                .iter()
+                .any(|intent| intent.action == FileSearchContextMenuAction::AnalyzeFolderSize),
+            "regular files do not expose folder-size analysis"
         );
     }
 

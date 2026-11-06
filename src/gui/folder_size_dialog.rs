@@ -22,6 +22,7 @@ const ROW_COLUMN_GAP: f32 = 10.0;
 pub(crate) enum FolderSizeDialogEffect {
     CopyPath(String),
     OpenPath(PathBuf),
+    FocusPanel,
 }
 
 #[derive(Clone)]
@@ -223,13 +224,22 @@ fn sorted_child_indices(rows: &[FolderSizeRow]) -> Vec<Vec<usize>> {
     }
     for child_indices in &mut children {
         child_indices.sort_by(|left, right| {
-            rows[*left]
-                .sort_key
-                .cmp(&rows[*right].sort_key)
+            row_sort_measurement(&rows[*right])
+                .cmp(&row_sort_measurement(&rows[*left]))
+                .then_with(|| rows[*left].sort_key.cmp(&rows[*right].sort_key))
+                .then_with(|| rows[*left].name.cmp(&rows[*right].name))
                 .then_with(|| left.cmp(right))
         });
     }
     children
+}
+
+fn row_sort_measurement(row: &FolderSizeRow) -> Option<u64> {
+    match row.kind {
+        FolderSizeEntryKind::Directory => Some(row.subtree_logical_bytes),
+        FolderSizeEntryKind::File => row.logical_bytes,
+        FolderSizeEntryKind::Omitted(_) => None,
+    }
 }
 
 fn visible_child_indices(
@@ -254,11 +264,7 @@ fn projection_contains_row(
 }
 
 fn row_measurement(row: &FolderSizeRow, total_logical_bytes: u64) -> (Option<u64>, Option<f64>) {
-    let row_bytes = match row.kind {
-        FolderSizeEntryKind::Directory => Some(row.subtree_logical_bytes),
-        FolderSizeEntryKind::File => row.logical_bytes,
-        FolderSizeEntryKind::Omitted(_) => None,
-    };
+    let row_bytes = row_sort_measurement(row);
     let share = (total_logical_bytes > 0)
         .then_some(row_bytes)
         .flatten()
@@ -315,6 +321,7 @@ fn project_row(
 #[derive(Clone)]
 enum FolderSizeAction {
     ChooseFolder,
+    Prefill(PathBuf),
     SetRecursive(bool),
     Scan {
         root: ExplicitDirectoryRoot,
@@ -381,12 +388,33 @@ pub(crate) struct FolderSizeDialogState {
 
 impl FolderSizeDialogState {
     pub(crate) fn new(ctx: &egui::Context) -> Self {
+        Self::build(ctx, None)
+    }
+
+    pub(crate) fn new_with_activity_center(
+        ctx: &egui::Context,
+        activity_center: crate::activity::ActivityCenter,
+    ) -> Self {
+        Self::build(ctx, Some(activity_center))
+    }
+
+    fn build(
+        ctx: &egui::Context,
+        activity_center: Option<crate::activity::ActivityCenter>,
+    ) -> Self {
         let wake_context = ctx.clone();
-        Self {
-            open: false,
-            session: FolderSizeSession::new(move || {
+        let session = match activity_center {
+            Some(activity_center) => FolderSizeSession::new_with_activity_center(
+                move || wake_context.request_repaint_of(egui::ViewportId::ROOT),
+                activity_center,
+            ),
+            None => FolderSizeSession::new(move || {
                 wake_context.request_repaint_of(egui::ViewportId::ROOT);
             }),
+        };
+        Self {
+            open: false,
+            session,
             selected_root: None,
             scan_root: None,
             recursive: true,
@@ -413,6 +441,12 @@ impl FolderSizeDialogState {
     pub(crate) fn request_close(&mut self, ctx: &egui::Context) {
         if self.open {
             self.stage(ctx, vec![FolderSizeAction::Close]);
+        }
+    }
+
+    pub(crate) fn stage_prefill(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if ctx.viewport_id() == egui::ViewportId::ROOT {
+            self.stage(ctx, vec![FolderSizeAction::Prefill(path)]);
         }
     }
 
@@ -670,17 +704,7 @@ impl FolderSizeDialogState {
                     if let Some(path) = self.pick_folder() {
                         match ExplicitDirectoryRoot::new(path) {
                             Ok(root) => {
-                                if self.selected_root.as_ref() != Some(&root) {
-                                    if current.is_busy() {
-                                        let _ = self.session.cancel();
-                                    }
-                                    self.scan_root = None;
-                                    self.selected_root = Some(root);
-                                    self.current_directory = None;
-                                    self.current_directory_path = None;
-                                    self.selected_entry = None;
-                                    self.projection = None;
-                                }
+                                self.apply_selected_root(root, &current);
                                 self.notice = None;
                             }
                             Err(error) => {
@@ -689,6 +713,20 @@ impl FolderSizeDialogState {
                             }
                         }
                     }
+                }
+                FolderSizeAction::Prefill(path) => {
+                    match ExplicitDirectoryRoot::new(path) {
+                        Ok(root) => {
+                            if self.selected_root.as_ref() != Some(&root) {
+                                self.apply_selected_root(root, &current);
+                            }
+                        }
+                        Err(error) => {
+                            self.notice =
+                                Some(format!("The File Search folder is not usable: {error:?}."));
+                        }
+                    }
+                    effects.push(FolderSizeDialogEffect::FocusPanel);
                 }
                 FolderSizeAction::SetRecursive(recursive) => {
                     self.recursive = recursive;
@@ -815,6 +853,28 @@ impl FolderSizeDialogState {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         effects
+    }
+
+    fn apply_selected_root(
+        &mut self,
+        root: ExplicitDirectoryRoot,
+        current: &crate::folder_size::FolderSizeSessionView,
+    ) {
+        if self.selected_root.as_ref() != Some(&root) {
+            if matches!(
+                current.status(),
+                FolderSizeSessionStatus::Scanning | FolderSizeSessionStatus::RefreshQueued
+            ) {
+                let _ = self.session.cancel();
+            }
+            self.scan_root = None;
+            self.selected_root = Some(root);
+            self.current_directory = None;
+            self.current_directory_path = None;
+            self.selected_entry = None;
+            self.projection = None;
+            self.notice = None;
+        }
     }
 
     pub(crate) fn copy_completed(&mut self, result: Result<(), String>) {
@@ -1302,11 +1362,21 @@ mod tests {
                 Some(11),
                 0,
             ),
-            row("beta.bin", Some(0), FolderSizeEntryKind::File, Some(0), 0),
+            row("beta.bin", Some(0), FolderSizeEntryKind::File, Some(5), 0),
+            row(
+                "unknown.bin",
+                Some(0),
+                FolderSizeEntryKind::Omitted(FolderSizeOmission::Inaccessible),
+                None,
+                0,
+            ),
         ];
         let children = sorted_child_indices(&rows);
 
-        assert_eq!(visible_child_indices(&children, None, Some(0)), &[2, 4, 1]);
+        assert_eq!(
+            visible_child_indices(&children, None, Some(0)),
+            &[2, 4, 1, 5]
+        );
         assert_eq!(visible_child_indices(&children, Some(2), Some(0)), &[3]);
         assert!(visible_child_indices(&children, Some(usize::MAX), Some(0)).is_empty());
 

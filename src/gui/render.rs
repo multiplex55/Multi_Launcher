@@ -9694,11 +9694,11 @@ impl LauncherApp {
         );
         if first_ui_pass && file_search_is_current_owner {
             for command in file_search_commands {
-                self.handle_file_search_ui_command(command);
+                self.handle_file_search_ui_command(command, &ctx);
             }
         }
         if first_ui_pass && file_search_was_open && !self.file_search_dialog.open {
-            self.save_file_search_ui_preferences_if_dirty();
+            self.save_file_search_ui_preferences_if_dirty(&ctx);
         }
         self.file_search_dialog
             .preview_dialog
@@ -10237,6 +10237,7 @@ impl LauncherApp {
             self.force_close_panel(super::Panel::ActivityDialog);
             let panel = match owner {
                 crate::activity::ActivityOwner::FileSearch => Some(super::Panel::FileSearchDialog),
+                crate::activity::ActivityOwner::FolderSize => Some(super::Panel::FolderSizeDialog),
                 crate::activity::ActivityOwner::Table => Some(super::Panel::TableUtilityDialog),
                 crate::activity::ActivityOwner::DuplicateFinder => {
                     Some(super::Panel::DuplicateFinderDialog)
@@ -10984,6 +10985,15 @@ impl LauncherApp {
                 }
                 super::FolderSizeDialogEffect::OpenPath(path) => {
                     effects.push(RootDialogEffect::OpenPath(path));
+                }
+                super::FolderSizeDialogEffect::FocusPanel => {
+                    self.focus_panel(super::Panel::FolderSizeDialog);
+                    if let Some(layer) =
+                        self.query_focus_panel_layer(super::Panel::FolderSizeDialog)
+                    {
+                        ctx.move_to_top(layer);
+                    }
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
                 }
             }
         }
@@ -14782,6 +14792,126 @@ mod tests {
         );
         drop(app);
         drop(scan_root);
+        drop(workspace);
+    }
+
+    fn expose_folder_size_context_action(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        workspace_root: &std::path::Path,
+        directory: &std::path::Path,
+    ) -> egui::Rect {
+        use crate::gui::file_search_dialog::FileSearchTestPopupControl as PopupControl;
+
+        app.set_jump_mode_enabled(true);
+        app.test_skip_history_persistence = true;
+        prepare_actual_query_frame(ctx, app);
+        prepare_actual_file_search_dialog(ctx, app, workspace_root);
+        std::fs::create_dir_all(directory).expect("directory result is isolated");
+        seed_actual_file_search_directory_result(
+            app,
+            crate::file_search::model::SearchId(931),
+            directory,
+        );
+        for _ in 0..2 {
+            app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
+        }
+
+        let result = app
+            .jump_mode_ui
+            .retained_registry()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == "Filename result")
+            .expect("the directory result has a visible File Search response");
+        let result_rect = result.clipped_rect();
+        assert!(result_rect.is_positive());
+        click_file_search_at(
+            ctx,
+            app,
+            result_rect.center(),
+            egui::PointerButton::Secondary,
+        );
+        app.run_root_frame_for_test(ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(egui::Popup::is_any_open(ctx));
+        assert!(app.file_search_native_ui_owner_current(ctx, true));
+
+        app.file_search_dialog
+            .test_native_popup_control_rect(PopupControl::AnalyzeFolderSize)
+            .expect("the directory menu has the real Analyze folder size item")
+    }
+
+    #[test]
+    fn file_search_folder_size_retained_prefill_focuses_without_scanning() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        let directory = workspace.root().join("folder-size-target");
+        let action_rect =
+            expose_folder_size_context_action(&ctx, &mut app, workspace.root(), &directory);
+
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            action_rect.center(),
+            egui::PointerButton::Primary,
+        );
+
+        assert!(app.folder_size_dialog.open);
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::Panel::FolderSizeDialog),
+            "accepted File Search prefill focuses the existing typed panel"
+        );
+        assert_eq!(
+            app.folder_size_dialog
+                .selected_root_for_test()
+                .map(|root| root.as_path()),
+            Some(directory.as_path())
+        );
+        let view = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(view.generation(), 0);
+        assert_eq!(
+            view.status(),
+            crate::folder_size::FolderSizeSessionStatus::Idle,
+            "prefill never starts a scan"
+        );
+        assert!(!view.is_busy());
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn file_search_folder_size_discarded_prefill_is_ignored() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        let directory = workspace.root().join("discarded-folder-size-target");
+        let action_rect =
+            expose_folder_size_context_action(&ctx, &mut app, workspace.root(), &directory);
+
+        click_file_search_at_with_discard(
+            &ctx,
+            &mut app,
+            action_rect.center(),
+            egui::PointerButton::Primary,
+            true,
+        );
+
+        assert!(!app.folder_size_dialog.open);
+        assert!(app.folder_size_dialog.selected_root_for_test().is_none());
+        let view = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(view.generation(), 0);
+        assert_eq!(
+            view.status(),
+            crate::folder_size::FolderSizeSessionStatus::Idle
+        );
+        assert!(!view.is_busy());
+        drop(app);
         drop(workspace);
     }
 
@@ -34693,6 +34823,16 @@ mod tests {
         position: egui::Pos2,
         button: egui::PointerButton,
     ) {
+        click_file_search_at_with_discard(ctx, app, position, button, false);
+    }
+
+    fn click_file_search_at_with_discard(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        position: egui::Pos2,
+        button: egui::PointerButton,
+        discard_release: bool,
+    ) {
         for pressed in [true, false] {
             let mut events = if pressed {
                 vec![egui::Event::PointerMoved(position)]
@@ -34711,7 +34851,7 @@ mod tests {
                     events,
                     ..actual_query_input(true)
                 },
-                false,
+                !pressed && discard_release,
             )
             .0
             .drop_without_applying_deltas();
@@ -37134,6 +37274,44 @@ mod tests {
                 }),
             });
         }
+        state.apply_event(SearchEvent::Completed { id: search_id });
+    }
+
+    fn seed_actual_file_search_directory_result(
+        app: &mut LauncherApp,
+        search_id: crate::file_search::model::SearchId,
+        path: &std::path::Path,
+    ) {
+        use crate::file_search::model::{
+            FileKind, FilenameRank, FilenameResult, SearchEvent, SearchResult,
+        };
+
+        let state = &mut app.file_search_dialog;
+        state.selected_mode = crate::gui::file_search_dialog::FileSearchMode::Filename;
+        state.active_search_id = Some(search_id);
+        state.current_status = crate::file_search::model::SearchStatus::Running;
+        state.clear_results_and_selection();
+        state.active_search_id = Some(search_id);
+        state.apply_event(SearchEvent::Result {
+            id: search_id,
+            result: SearchResult::Filename(FilenameResult {
+                path: path.to_path_buf(),
+                file_name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                parent_directory: path.parent().map(std::path::Path::to_path_buf),
+                kind: FileKind::Directory,
+                size: None,
+                modified: None,
+                rank: FilenameRank::ExactFilename,
+                match_quality: FilenameRank::ExactFilename,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+                arrival_index: 0,
+            }),
+        });
         state.apply_event(SearchEvent::Completed { id: search_id });
     }
 

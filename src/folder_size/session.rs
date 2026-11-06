@@ -1,8 +1,13 @@
+use crate::activity::{
+    ActivityCenter, ActivityDiagnostic, ActivityIncarnation, ActivityOperation, ActivityOutcome,
+    ActivityOwner, ActivityProgress, ActivityProgressUnit, ActivityRetirement, ActivitySlot,
+    ActivityTask,
+};
 use crate::batch_rename::ExplicitDirectoryRoot;
 use crate::file_operations::ScanCancellation;
 use crate::thread_reaper::{self, ReapPermit};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 
 use super::model::{FolderSizeProgress, FolderSizeResult};
@@ -61,6 +66,56 @@ struct ScanRequest {
 struct ActiveScan {
     generation: u64,
     cancellation: ScanCancellation,
+    activity: Option<ActivityTask>,
+    completion: Option<ActivityCompletion>,
+}
+
+#[derive(Clone, Copy)]
+struct ActivityCompletion {
+    outcome: ActivityOutcome,
+    diagnostic: Option<ActivityDiagnostic>,
+}
+
+struct ActivityRetirementTicket {
+    activity: Option<ActivityTask>,
+    fallback: Option<ActivityCompletion>,
+}
+
+impl ActivityRetirementTicket {
+    fn new(activity: Option<ActivityTask>, fallback: Option<ActivityCompletion>) -> Self {
+        Self { activity, fallback }
+    }
+
+    fn after_join(mut self, panicked: bool) {
+        if let Some(activity) = self.activity.take() {
+            if panicked {
+                activity.finish(
+                    ActivityOutcome::Failed,
+                    Some(ActivityDiagnostic::WorkerFailed),
+                    ActivityRetirement::Pending,
+                );
+            }
+            activity.retirement_confirmed();
+        }
+    }
+}
+
+impl Drop for ActivityRetirementTicket {
+    fn drop(&mut self) {
+        if let Some(activity) = self.activity.take() {
+            if let Some(completion) = self.fallback {
+                activity.finish(
+                    completion.outcome,
+                    completion.diagnostic.or(Some(ActivityDiagnostic::Retiring)),
+                    ActivityRetirement::Unavailable,
+                );
+                activity.retirement_unavailable();
+            } else {
+                activity.set_diagnostic(Some(ActivityDiagnostic::Retiring));
+                activity.retirement_unavailable();
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -79,12 +134,14 @@ struct SessionShared {
     state: Mutex<SessionState>,
     wake: Arc<dyn Fn() + Send + Sync + 'static>,
     job: Arc<dyn FolderSizeScanJob>,
+    activity_center: Option<ActivityCenter>,
 }
 
 struct WorkerOwner {
     join: JoinHandle<()>,
     reap_permit: ReapPermit,
     generation: u64,
+    activity: Option<ActivityTask>,
 }
 
 trait FolderSizeScanJob: Send + Sync + 'static {
@@ -172,18 +229,38 @@ impl FolderSizeSessionView {
 
 impl FolderSizeSession {
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self::with_job_and_wake(Arc::new(NativeFolderSizeScanJob), Arc::new(wake))
+        Self::with_job_wake_and_activity(Arc::new(NativeFolderSizeScanJob), Arc::new(wake), None)
+    }
+
+    pub fn new_with_activity_center(
+        wake: impl Fn() + Send + Sync + 'static,
+        activity_center: ActivityCenter,
+    ) -> Self {
+        Self::with_job_wake_and_activity(
+            Arc::new(NativeFolderSizeScanJob),
+            Arc::new(wake),
+            Some(activity_center),
+        )
     }
 
     fn with_job_and_wake(
         job: Arc<dyn FolderSizeScanJob>,
         wake: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Self {
+        Self::with_job_wake_and_activity(job, wake, None)
+    }
+
+    fn with_job_wake_and_activity(
+        job: Arc<dyn FolderSizeScanJob>,
+        wake: Arc<dyn Fn() + Send + Sync + 'static>,
+        activity_center: Option<ActivityCenter>,
+    ) -> Self {
         Self {
             shared: Arc::new(SessionShared {
                 state: Mutex::new(SessionState::default()),
                 wake,
                 job,
+                activity_center,
             }),
             worker: Mutex::new(None),
         }
@@ -197,7 +274,7 @@ impl FolderSizeSession {
         root: ExplicitDirectoryRoot,
         recursive: bool,
     ) -> Result<u64, FolderSizeSessionError> {
-        let (generation, replaced_pending) = {
+        let (generation, replaced_pending, superseded_activity) = {
             let mut state = self.shared.state.lock().unwrap();
             if state.closed {
                 return Err(FolderSizeSessionError::Closed);
@@ -207,9 +284,19 @@ impl FolderSizeSession {
                 .checked_add(1)
                 .ok_or(FolderSizeSessionError::GenerationExhausted)?;
             state.generation = generation;
-            if let Some(active) = state.active.as_ref() {
-                active.cancellation.cancel();
-            }
+            let superseded_activity = state.active.as_mut().and_then(|active| {
+                let activity = active.activity.clone();
+                if active.completion.is_none() {
+                    active.cancellation.cancel();
+                    active.completion = Some(ActivityCompletion {
+                        outcome: ActivityOutcome::Superseded,
+                        diagnostic: Some(ActivityDiagnostic::Superseded),
+                    });
+                    activity
+                } else {
+                    None
+                }
+            });
             // A result belongs to the generation that produced it. Keeping it
             // visible while a replacement scan is active invites callers to
             // treat a stale tree as the current selection and retains two
@@ -224,8 +311,12 @@ impl FolderSizeSession {
                 recursive,
                 cancellation: ScanCancellation::new(),
             });
-            (generation, replaced_pending)
+            (generation, replaced_pending, superseded_activity)
         };
+        if let Some(activity) = superseded_activity {
+            activity.mark_cancelling();
+            activity.clear_cancel_handler();
+        }
         if let Some(replaced) = replaced_pending {
             replaced.cancellation.cancel();
         }
@@ -237,27 +328,17 @@ impl FolderSizeSession {
     /// Invalidate live publication immediately. The latest progress snapshot
     /// is frozen with its verified subtotal while a blocked native call settles.
     pub fn cancel(&self) -> Result<bool, FolderSizeSessionError> {
-        let (cancelled, pending) = {
+        let (cancelled, pending, activity) = {
             let mut state = self.shared.state.lock().unwrap();
-            if state.closed {
-                return Err(FolderSizeSessionError::Closed);
-            }
-            if state.active.is_none() && state.pending.is_none() {
-                return Ok(false);
-            }
-            let generation = state
-                .generation
-                .checked_add(1)
-                .ok_or(FolderSizeSessionError::GenerationExhausted)?;
-            state.generation = generation;
-            let pending = state.pending.take();
-            if let Some(active) = state.active.as_ref() {
-                active.cancellation.cancel();
-            }
-            state.cancelled = true;
-            state.error = None;
-            (true, pending)
+            cancel_locked(&mut state, None)?
         };
+        if !cancelled {
+            return Ok(false);
+        }
+        if let Some(activity) = activity {
+            activity.mark_cancelling();
+            activity.clear_cancel_handler();
+        }
         if let Some(pending) = pending {
             pending.cancellation.cancel();
         }
@@ -269,23 +350,39 @@ impl FolderSizeSession {
     /// native call remains owned until return and is joined asynchronously on
     /// drop rather than blocking the caller.
     pub fn close(&self) {
-        let mut state = self.shared.state.lock().unwrap();
-        if state.closed {
-            return;
+        let activity = {
+            let mut state = self.shared.state.lock().unwrap();
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            state.generation = state.generation.saturating_add(1);
+            let activity = state.active.as_mut().and_then(|active| {
+                let activity = active.activity.clone();
+                if active.completion.is_none() {
+                    active.cancellation.cancel();
+                    active.completion = Some(ActivityCompletion {
+                        outcome: ActivityOutcome::Cancelled,
+                        diagnostic: None,
+                    });
+                    activity
+                } else {
+                    None
+                }
+            });
+            if let Some(pending) = state.pending.take() {
+                pending.cancellation.cancel();
+            }
+            state.accepted_result = None;
+            state.progress = None;
+            state.error = None;
+            state.cancelled = false;
+            activity
+        };
+        if let Some(activity) = activity {
+            activity.mark_cancelling();
+            activity.clear_cancel_handler();
         }
-        state.closed = true;
-        state.generation = state.generation.saturating_add(1);
-        if let Some(active) = state.active.as_ref() {
-            active.cancellation.cancel();
-        }
-        if let Some(pending) = state.pending.take() {
-            pending.cancellation.cancel();
-        }
-        state.accepted_result = None;
-        state.progress = None;
-        state.error = None;
-        state.cancelled = false;
-        drop(state);
         (self.shared.wake)();
     }
 
@@ -351,9 +448,13 @@ impl FolderSizeSession {
             };
             let worker_generation = worker.generation;
             let wake = Arc::clone(&self.shared.wake);
+            let ticket = ActivityRetirementTicket::new(worker.activity.clone(), None);
             let transfer = worker
                 .reap_permit
-                .reap_with_callback(worker.join, move |_| wake());
+                .reap_with_callback(worker.join, move |panicked| {
+                    ticket.after_join(panicked);
+                    wake();
+                });
             if let Err(error) = transfer {
                 let failure = FolderSizeSessionError::WorkerCapacity(format!(
                     "folder-size worker could not transfer its settled handle: {error}"
@@ -386,6 +487,16 @@ impl FolderSizeSession {
             let worker_generation = worker.generation;
             let panicked = worker.join.join().is_err();
             drop(worker.reap_permit);
+            if let Some(activity) = worker.activity {
+                if panicked {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerFailed),
+                        ActivityRetirement::Pending,
+                    );
+                }
+                activity.retirement_confirmed();
+            }
             if panicked {
                 let mut state = self.shared.state.lock().unwrap();
                 if state
@@ -454,31 +565,77 @@ impl FolderSizeSession {
             state.active = Some(ActiveScan {
                 generation: request.generation,
                 cancellation: request.cancellation.clone(),
+                activity: None,
+                completion: None,
             });
             request
         };
+        let generation = request.generation;
+        let activity = self.shared.activity_center.as_ref().and_then(|center| {
+            center.start(
+                ActivityOwner::FolderSize,
+                ActivitySlot::Primary,
+                ActivityIncarnation::new(1),
+                ActivityOperation::MeasureFolderSize,
+            )
+        });
+        if let Some(activity) = activity.as_ref() {
+            let weak = Arc::downgrade(&self.shared);
+            activity.set_cancel_handler(move || {
+                cancel_activity_generation(weak.clone(), generation);
+            });
+            activity.mark_running();
+            let cancelled_before_spawn = {
+                let mut state = self.shared.state.lock().unwrap();
+                let current = state
+                    .active
+                    .as_mut()
+                    .filter(|active| active.generation == generation);
+                if let Some(active) = current {
+                    active.activity = Some(activity.clone());
+                    state.closed || state.cancelled || state.generation != generation
+                } else {
+                    true
+                }
+            };
+            if cancelled_before_spawn {
+                activity.mark_cancelling();
+                activity.clear_cancel_handler();
+            }
+        }
         let shared = Arc::clone(&self.shared);
         let job = Arc::clone(&self.shared.job);
         let wake = Arc::clone(&self.shared.wake);
-        let generation = request.generation;
+        let worker_activity = activity.clone();
         let join = thread::Builder::new()
             .name("folder-size-scan".into())
             .spawn(move || {
                 let completion = completion;
                 let run = catch_unwind(AssertUnwindSafe(|| {
                     let mut publish_progress = |progress: FolderSizeProgress| {
+                        let progress_count =
+                            u64::try_from(progress.entries_seen()).unwrap_or(u64::MAX);
                         let mut state = shared.state.lock().unwrap();
-                        if progress.generation() == generation
+                        let accepted = if progress.generation() == generation
                             && !state.closed
                             && state.generation == generation
                             && state.active.as_ref().is_some_and(|active| {
                                 active.generation == generation
                                     && !active.cancellation.is_cancelled()
-                            })
-                        {
+                            }) {
                             state.progress = Some(progress);
-                        }
+                            true
+                        } else {
+                            false
+                        };
                         drop(state);
+                        if accepted && let Some(activity) = worker_activity.as_ref() {
+                            activity.set_progress(Some(ActivityProgress::new(
+                                progress_count,
+                                None,
+                                ActivityProgressUnit::Items,
+                            )));
+                        }
                         (shared.wake)();
                     };
                     job.run(request, &mut publish_progress)
@@ -488,25 +645,104 @@ impl FolderSizeSession {
                     .active
                     .as_ref()
                     .is_some_and(|active| active.generation == generation);
+                let active_retirement = state
+                    .active
+                    .as_ref()
+                    .filter(|active| active.generation == generation)
+                    .and_then(|active| active.completion);
+                let mut activity_completion = if let Some(completion) = active_retirement {
+                    completion
+                } else if state.closed || state.cancelled {
+                    ActivityCompletion {
+                        outcome: ActivityOutcome::Cancelled,
+                        diagnostic: None,
+                    }
+                } else if state.generation != generation {
+                    ActivityCompletion {
+                        outcome: ActivityOutcome::Superseded,
+                        diagnostic: Some(ActivityDiagnostic::Superseded),
+                    }
+                } else {
+                    ActivityCompletion {
+                        outcome: ActivityOutcome::Failed,
+                        diagnostic: Some(ActivityDiagnostic::WorkerFailed),
+                    }
+                };
                 if active_matches {
-                    if state.generation == generation && !state.closed {
+                    if state.generation == generation && !state.closed && !state.cancelled {
                         match run {
                             Ok(result) if result.generation() == generation => {
+                                activity_completion = match result.status() {
+                                    super::model::FolderSizeStatus::Complete => {
+                                        ActivityCompletion {
+                                            outcome: ActivityOutcome::Completed,
+                                            diagnostic: None,
+                                        }
+                                    }
+                                    super::model::FolderSizeStatus::Partial => ActivityCompletion {
+                                        outcome: ActivityOutcome::Partial,
+                                        diagnostic: Some(ActivityDiagnostic::PartialResult),
+                                    },
+                                    super::model::FolderSizeStatus::Cancelled => {
+                                        ActivityCompletion {
+                                            outcome: ActivityOutcome::Cancelled,
+                                            diagnostic: None,
+                                        }
+                                    }
+                                    super::model::FolderSizeStatus::Failed => ActivityCompletion {
+                                        outcome: ActivityOutcome::Failed,
+                                        diagnostic: Some(ActivityDiagnostic::ResultUnavailable),
+                                    },
+                                };
                                 state.accepted_result = Some(Arc::new(result));
                                 state.progress = None;
                                 state.error = None;
+                                if let Some(active) = state.active.as_mut() {
+                                    if active.generation == generation {
+                                        active.completion = Some(activity_completion);
+                                    }
+                                }
                             }
                             Ok(_) => {
                                 state.error = Some(FolderSizeSessionError::InvalidWorkerResult);
+                                activity_completion = ActivityCompletion {
+                                    outcome: ActivityOutcome::Failed,
+                                    diagnostic: Some(ActivityDiagnostic::ResultUnavailable),
+                                };
                             }
                             Err(_) => {
                                 state.error = Some(FolderSizeSessionError::WorkerPanicked);
+                                activity_completion = ActivityCompletion {
+                                    outcome: ActivityOutcome::Failed,
+                                    diagnostic: Some(ActivityDiagnostic::WorkerFailed),
+                                };
                             }
                         }
                     }
-                    state.active = None;
+                    if let Some(active) = state.active.as_mut() {
+                        if active.generation == generation && active.completion.is_none() {
+                            active.completion = Some(activity_completion);
+                        }
+                    }
                 }
                 drop(state);
+                if let Some(activity) = worker_activity.as_ref() {
+                    activity.finish(
+                        activity_completion.outcome,
+                        activity_completion.diagnostic,
+                        ActivityRetirement::Pending,
+                    );
+                }
+                {
+                    let mut state = shared.state.lock().unwrap();
+                    if state
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.generation == generation)
+                    {
+                        state.active = None;
+                    }
+                }
                 drop(completion);
                 (wake)();
             })
@@ -535,38 +771,145 @@ impl FolderSizeSession {
                     }
                     state.error = Some(failure.clone());
                 }
+                drop(state);
+                if let Some(activity) = activity.as_ref() {
+                    activity.finish(
+                        ActivityOutcome::Failed,
+                        Some(ActivityDiagnostic::WorkerUnavailable),
+                        ActivityRetirement::Confirmed,
+                    );
+                }
                 failure
             })?;
         *worker_slot = Some(WorkerOwner {
             join,
             reap_permit,
             generation,
+            activity,
         });
         Ok(())
     }
 }
 
+fn cancel_activity_generation(shared: Weak<SessionShared>, generation: u64) {
+    let Some(shared) = shared.upgrade() else {
+        return;
+    };
+    let cancellation = {
+        let mut state = shared.state.lock().unwrap();
+        cancel_locked(&mut state, Some(generation)).ok()
+    };
+    if let Some((cancelled, pending, activity)) = cancellation
+        && cancelled
+    {
+        if let Some(pending) = pending {
+            pending.cancellation.cancel();
+        }
+        if let Some(activity) = activity {
+            activity.mark_cancelling();
+            activity.clear_cancel_handler();
+        }
+        (shared.wake)();
+    }
+}
+
+fn cancel_locked(
+    state: &mut SessionState,
+    expected_active_generation: Option<u64>,
+) -> Result<(bool, Option<ScanRequest>, Option<ActivityTask>), FolderSizeSessionError> {
+    if state.closed {
+        return Err(FolderSizeSessionError::Closed);
+    }
+    if let Some(expected_generation) = expected_active_generation
+        && (state.generation != expected_generation
+            || !state.active.as_ref().is_some_and(|active| {
+                active.generation == expected_generation && active.completion.is_none()
+            }))
+    {
+        return Ok((false, None, None));
+    }
+    let active_is_live = state
+        .active
+        .as_ref()
+        .is_some_and(|active| active.completion.is_none());
+    if !active_is_live && state.pending.is_none() {
+        return Ok((false, None, None));
+    }
+    let generation = state
+        .generation
+        .checked_add(1)
+        .ok_or(FolderSizeSessionError::GenerationExhausted)?;
+    state.generation = generation;
+    let pending = if expected_active_generation.is_none() {
+        state.pending.take()
+    } else {
+        None
+    };
+    let activity = state.active.as_mut().and_then(|active| {
+        if active.completion.is_none() {
+            active.cancellation.cancel();
+            active.completion = Some(ActivityCompletion {
+                outcome: ActivityOutcome::Cancelled,
+                diagnostic: None,
+            });
+            active.activity.clone()
+        } else {
+            None
+        }
+    });
+    state.cancelled = true;
+    state.error = None;
+    Ok((true, pending, activity))
+}
+
 impl Drop for FolderSizeSession {
     fn drop(&mut self) {
-        {
+        let activity_completion = {
             let mut state = self.shared.state.lock().unwrap();
             if !state.closed {
                 state.closed = true;
                 state.generation = state.generation.saturating_add(1);
             }
-            if let Some(active) = state.active.as_ref() {
-                active.cancellation.cancel();
-            }
+            let activity = state.active.as_mut().and_then(|active| {
+                if active.completion.is_none() {
+                    active.cancellation.cancel();
+                    active.completion = Some(ActivityCompletion {
+                        outcome: ActivityOutcome::Cancelled,
+                        diagnostic: None,
+                    });
+                }
+                active
+                    .activity
+                    .clone()
+                    .and_then(|task| active.completion.map(|completion| (task, completion)))
+            });
             if let Some(pending) = state.pending.take() {
                 pending.cancellation.cancel();
             }
             state.accepted_result = None;
             state.progress = None;
+            activity
+        };
+        let fallback = activity_completion
+            .as_ref()
+            .map(|(_, completion)| *completion);
+        if let Some((activity, completion)) = activity_completion.as_ref() {
+            if matches!(
+                completion.outcome,
+                ActivityOutcome::Cancelled | ActivityOutcome::Superseded
+            ) {
+                activity.mark_cancelling();
+            }
+            activity.clear_cancel_handler();
         }
-        if let Some(worker) = self.worker.get_mut().unwrap().take()
-            && let Err(error) = worker.reap_permit.reap(worker.join)
-        {
-            tracing::error!(%error, "failed to transfer folder-size worker to join reaper");
+        if let Some(worker) = self.worker.get_mut().unwrap().take() {
+            let ticket = ActivityRetirementTicket::new(worker.activity.clone(), fallback);
+            let transfer = worker
+                .reap_permit
+                .reap_with_callback(worker.join, move |panicked| ticket.after_join(panicked));
+            if let Err(error) = transfer {
+                tracing::error!(%error, "failed to transfer folder-size worker to join reaper");
+            }
         }
     }
 }
@@ -699,6 +1042,223 @@ mod tests {
 
     fn explicit_root(path: &std::path::Path) -> ExplicitDirectoryRoot {
         ExplicitDirectoryRoot::new(path.to_path_buf()).unwrap()
+    }
+
+    fn wait_for_activity_row(
+        center: &ActivityCenter,
+        key: crate::activity::ActivityKey,
+        predicate: impl Fn(&crate::activity::ActivityRow) -> bool,
+    ) -> crate::activity::ActivityRow {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(row) = center
+                .snapshot()
+                .rows
+                .into_iter()
+                .find(|row| row.key == key)
+                && predicate(&row)
+            {
+                return row;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Folder Size activity did not settle"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn latest_folder_size_activity_key(center: &ActivityCenter) -> crate::activity::ActivityKey {
+        center
+            .snapshot()
+            .rows
+            .into_iter()
+            .filter(|row| row.key.owner() == ActivityOwner::FolderSize)
+            .max_by_key(|row| row.key.operation_id().get())
+            .expect("a promoted Folder Size scan has an activity row")
+            .key
+    }
+
+    #[test]
+    fn folder_size_activity_starts_on_promotion_tracks_progress_and_supersedes() {
+        let first_root = crate::folder_size::disposable_scan_fixture_root();
+        let superseded_root = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::write(first_root.path().join("payload.bin"), b"x").unwrap();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let (completed_tx, _completed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let job = Arc::new(HoldAfterProgressJob {
+            hold_generation: 1,
+            progress_generations: progress_tx,
+            completed_runs: completed_tx,
+            release: Mutex::new(release_rx),
+        });
+        let center = ActivityCenter::new();
+        let session = FolderSizeSession::with_job_wake_and_activity(
+            job,
+            Arc::new(|| {}),
+            Some(center.clone()),
+        );
+
+        let first_generation = session
+            .refresh(explicit_root(first_root.path()), true)
+            .unwrap();
+        assert_eq!(
+            progress_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            first_generation
+        );
+        let first_row =
+            wait_for_activity_row(&center, latest_folder_size_activity_key(&center), |row| {
+                row.lifecycle == crate::activity::ActivityLifecycle::Running
+                    && row.progress.is_some_and(|progress| progress.completed > 0)
+            });
+        assert_eq!(first_row.operation, ActivityOperation::MeasureFolderSize);
+        assert_eq!(
+            first_row.lifecycle,
+            crate::activity::ActivityLifecycle::Running
+        );
+        let progress = first_row.progress.expect("scan progress is attached");
+        assert_eq!(progress.total, None);
+        assert_eq!(progress.unit, ActivityProgressUnit::Items);
+        assert!(progress.completed > 0);
+
+        let superseded_generation = session
+            .refresh(explicit_root(superseded_root.path()), true)
+            .unwrap();
+        assert!(superseded_generation > first_generation);
+        let latest_root = crate::folder_size::disposable_scan_fixture_root();
+        let latest_generation = session
+            .refresh(explicit_root(latest_root.path()), true)
+            .unwrap();
+        assert!(latest_generation > first_generation);
+        let rows_while_queued = center.snapshot().rows;
+        assert_eq!(rows_while_queued.len(), 1, "queued refresh has no task yet");
+        assert_eq!(
+            rows_while_queued[0].lifecycle,
+            crate::activity::ActivityLifecycle::Cancelling
+        );
+        assert_eq!(
+            center.request_cancel(first_row.key),
+            crate::activity::ActivityCancelResult::Unsupported,
+            "superseded scan has relinquished its cancellation capability"
+        );
+        cancel_activity_generation(Arc::downgrade(&session.shared), first_generation);
+        let after_stale_cancel = session.view();
+        assert_eq!(after_stale_cancel.generation(), latest_generation);
+        assert_eq!(
+            session
+                .shared
+                .state
+                .lock()
+                .unwrap()
+                .pending
+                .as_ref()
+                .map(|pending| pending.generation),
+            Some(latest_generation),
+            "a stale A cancellation cannot replace the queued C request"
+        );
+
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_latest_progress = false;
+        while !saw_latest_progress {
+            let _ = session.view();
+            saw_latest_progress = progress_rx
+                .recv_timeout(Duration::from_millis(25))
+                .is_ok_and(|generation| generation == latest_generation);
+            assert!(Instant::now() < deadline, "latest scan was not promoted");
+        }
+        let latest = wait_for_view(&session, |view| {
+            view.status() == FolderSizeSessionStatus::Complete && view.result_is_current()
+        });
+        assert_eq!(latest.result().unwrap().generation(), latest_generation);
+        assert_eq!(latest.result().unwrap().root(), latest_root.path());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (first_terminal, latest_row) = loop {
+            let _ = session.poll();
+            let rows = center.snapshot().rows;
+            assert_eq!(rows.len(), 2, "only running A and promoted C have tickets");
+            let first = rows.iter().find(|row| row.key == first_row.key);
+            let latest = rows.iter().find(|row| row.key != first_row.key);
+            if let (Some(first), Some(latest)) = (first, latest)
+                && first.lifecycle
+                    == crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Superseded)
+                && first.retirement == ActivityRetirement::Confirmed
+                && latest.lifecycle
+                    == crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Completed)
+                && latest.retirement == ActivityRetirement::Confirmed
+            {
+                break (first.clone(), latest.clone());
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Folder Size activity tickets did not retire"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(
+            first_terminal.diagnostic,
+            Some(ActivityDiagnostic::Superseded)
+        );
+        assert_eq!(latest_row.key.owner(), ActivityOwner::FolderSize);
+        assert_ne!(latest_row.key.operation_id(), first_row.key.operation_id());
+    }
+
+    #[test]
+    fn folder_size_activity_cancel_is_generation_fenced_and_drop_retires_worker() {
+        let root = crate::folder_size::disposable_scan_fixture_root();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let (completed_tx, _completed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let job = Arc::new(HoldAfterProgressJob {
+            hold_generation: 1,
+            progress_generations: progress_tx,
+            completed_runs: completed_tx,
+            release: Mutex::new(release_rx),
+        });
+        let center = ActivityCenter::new();
+        let session = FolderSizeSession::with_job_wake_and_activity(
+            job,
+            Arc::new(|| {}),
+            Some(center.clone()),
+        );
+        let generation = session.refresh(explicit_root(root.path()), true).unwrap();
+        assert_eq!(
+            progress_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            generation
+        );
+        let key = center
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.key.owner() == ActivityOwner::FolderSize)
+            .unwrap()
+            .key;
+
+        assert_eq!(
+            center.request_cancel(key),
+            crate::activity::ActivityCancelResult::Requested
+        );
+        let cancelled_generation = session.view().generation();
+        assert!(cancelled_generation > generation);
+        cancel_activity_generation(Arc::downgrade(&session.shared), generation);
+        assert_eq!(session.view().generation(), cancelled_generation);
+        assert_eq!(
+            center.request_cancel(key),
+            crate::activity::ActivityCancelResult::Unsupported
+        );
+
+        drop(session);
+        let pending_retirement = center.snapshot().rows[0].retirement;
+        assert_eq!(pending_retirement, ActivityRetirement::Pending);
+        release_tx.send(()).unwrap();
+        let terminal = wait_for_activity_row(&center, key, |row| {
+            row.lifecycle.is_terminal() && row.retirement == ActivityRetirement::Confirmed
+        });
+        assert_eq!(
+            terminal.lifecycle,
+            crate::activity::ActivityLifecycle::Terminal(ActivityOutcome::Cancelled)
+        );
     }
 
     #[test]

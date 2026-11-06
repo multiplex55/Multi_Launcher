@@ -2600,17 +2600,29 @@ impl LauncherApp {
         self.replace_operation_pending = false;
     }
 
-    pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self) {
+    pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self, ctx: &egui::Context) {
         if self.file_search_dialog.ui_preferences_dirty {
-            self.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(
-                self.file_search_dialog.ui_preferences.clone(),
-            ));
+            self.handle_file_search_ui_command(
+                FileSearchUiCommand::PersistPreferences(
+                    self.file_search_dialog.ui_preferences.clone(),
+                ),
+                ctx,
+            );
         }
     }
 
-    pub(crate) fn handle_file_search_ui_command(&mut self, command: FileSearchUiCommand) {
+    pub(crate) fn handle_file_search_ui_command(
+        &mut self,
+        command: FileSearchUiCommand,
+        ctx: &egui::Context,
+    ) {
         match command {
             FileSearchUiCommand::OpenHash(path) => self.open_hash_generator_for_file(path),
+            FileSearchUiCommand::OpenFolderSize(path) => {
+                if ctx.viewport_id() == egui::ViewportId::ROOT {
+                    self.folder_size_dialog.stage_prefill(ctx, path);
+                }
+            }
             FileSearchUiCommand::PersistPreferences(preferences) => {
                 match crate::settings::Settings::update(&self.settings_path, |settings| {
                     let mut cfg = settings
@@ -3878,7 +3890,10 @@ impl LauncherApp {
             ),
             image_compare_dialog: ImageCompareDialogState::new(ctx),
             duplicate_finder_dialog: DuplicateFinderDialogState::new(ctx),
-            folder_size_dialog: FolderSizeDialogState::new(ctx),
+            folder_size_dialog: FolderSizeDialogState::new_with_activity_center(
+                ctx,
+                activity_center.clone(),
+            ),
             activity_center: activity_center.clone(),
             activity_dialog: activity_dialog::ActivityDialogState::default(),
             qr_dialog: QrDialogState::default(),
@@ -7880,7 +7895,7 @@ mod tests {
         std::fs::write(&blocker, "unchanged").unwrap();
         app.settings_path = blocker.join("settings.json").to_string_lossy().into_owned();
 
-        app.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(candidate));
+        app.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(candidate), &ctx);
 
         assert_eq!(app.file_search_dialog.ui_preferences, committed_preferences);
         assert_eq!(
