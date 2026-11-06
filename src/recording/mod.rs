@@ -1,4 +1,6 @@
+mod gif;
 mod model;
+mod output;
 mod session;
 mod windows;
 

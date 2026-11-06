@@ -3200,6 +3200,7 @@ dependencies = [
  "figlet-rs",
  "fst",
  "fuzzy-matcher",
+ "gif",
  "hashlink",
  "hex",
  "image 0.24.9",

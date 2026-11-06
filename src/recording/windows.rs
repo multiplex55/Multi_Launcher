@@ -1206,10 +1206,12 @@ mod tests {
     mod native_smoke {
         use super::*;
         use crate::platform::windows_capture_test_support::{OwnedSourceFixture, SourceReady};
+        use crate::recording::gif::GifRecording;
         use crate::recording::{
             CaptureTarget, FrameRate, RecorderClock, RecorderState, RecordingEndReason,
             RecordingFormat, RecordingOptions, RecordingRequest, RecordingSession,
         };
+        use std::io::Cursor;
         use std::sync::Arc;
         use std::thread;
         use std::time::{Duration, Instant, SystemTime};
@@ -1240,6 +1242,17 @@ mod tests {
                 'B' => [[35, 240, 70, 255], [250, 90, 15, 255]],
                 _ => unreachable!(),
             }
+        }
+
+        const GIF_ANCHOR_RGB_TOLERANCE: u8 = 24;
+
+        fn anchors_match_with_gif_tolerance(actual: [[u8; 4]; 2], expected: [[u8; 4]; 2]) -> bool {
+            actual.iter().zip(expected).all(|(actual, expected)| {
+                actual[3] == 255
+                    && (0..3).all(|channel| {
+                        actual[channel].abs_diff(expected[channel]) <= GIF_ANCHOR_RGB_TOLERANCE
+                    })
+            })
         }
 
         fn anchors(frame: &RgbaFrame) -> [[u8; 4]; 2] {
@@ -1442,6 +1455,197 @@ mod tests {
             assert!(!retired.worker_busy());
             assert!(retired.accepted_frames() >= 2);
             assert!(retired.frames_written() >= 2);
+            session.close();
+            fixture.finish().unwrap();
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop with Windows Graphics Capture support"]
+        fn native_owned_hwnd_capture_writes_decodable_gif() {
+            use image::{AnimationDecoder, GenericImageView};
+
+            let nonce = fixture_nonce();
+            let mut fixture = OwnedSourceFixture::spawn(&nonce)
+                .unwrap_or_else(|error| panic!("could not launch owned HWND fixture: {error}"));
+            let ready = fixture
+                .wait_ready(&nonce)
+                .unwrap_or_else(|error| panic!("owned HWND fixture was not ready: {error}"));
+            verify_fixture_identity(&ready, &fixture);
+            fixture.command("PAINT A").unwrap();
+
+            let frame_rate = FrameRate::new(30).unwrap();
+            let options = RecordingOptions::new(
+                RecordingFormat::Gif,
+                frame_rate,
+                Duration::from_secs(10),
+                false,
+            )
+            .unwrap();
+            let target =
+                CaptureTarget::window(ready.hwnd, ready.process_id, ready.thread_id, ready.bounds)
+                    .unwrap();
+            let request = RecordingRequest::new(target, ready.bounds, options).unwrap();
+            let clock = Arc::new(FixtureClock(Instant::now()));
+            let session = Arc::new(RecordingSession::new(
+                clock.clone(),
+                Arc::new(WindowsRecordingBackend),
+                || {},
+            ));
+            let generation = session.select(request).unwrap();
+            let output_directory = tempfile::tempdir().unwrap();
+            let destination = output_directory.path().join("owned-window.gif");
+            let mut recording =
+                GifRecording::create(Arc::clone(&session), generation, &destination).unwrap();
+            session.start().unwrap();
+
+            let expected_a = phase_anchors('A');
+            let phase_a_deadline = Instant::now() + Duration::from_secs(10);
+            let phase_a = loop {
+                session.poll().unwrap();
+                fail_if_session_failed(&session).unwrap();
+                let state = session.view().state().clone();
+                if !matches!(
+                    state,
+                    RecorderState::Recording { .. } | RecorderState::Finalizing { .. }
+                ) {
+                    assert!(
+                        Instant::now() < phase_a_deadline,
+                        "native GIF capture did not enter Recording"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                let mut frame_anchors = None;
+                let elapsed = recording
+                    .consume_latest_observing(|timed| {
+                        frame_anchors = Some(anchors(timed.frame()));
+                    })
+                    .unwrap();
+                if let (Some(elapsed), Some(frame_anchors)) = (elapsed, frame_anchors)
+                    && frame_anchors == expected_a
+                {
+                    break elapsed;
+                }
+                assert!(
+                    Instant::now() < phase_a_deadline,
+                    "native GIF capture did not consume phase A"
+                );
+                thread::sleep(Duration::from_millis(5));
+            };
+
+            // Cadence wait is measured from the wall instant when A's frame
+            // lease was accepted by the staged encoder.
+            let phase_a_ack_wall = Instant::now();
+            let cadence_boundary = phase_a_ack_wall + frame_rate.interval();
+            while Instant::now() < cadence_boundary {
+                session.poll().unwrap();
+                fail_if_session_failed(&session).unwrap();
+                recording.consume_latest().unwrap();
+                let remaining = cadence_boundary.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() {
+                    thread::sleep(remaining.min(Duration::from_millis(5)));
+                }
+            }
+
+            fixture.command("PAINT B").unwrap();
+            let expected_b = phase_anchors('B');
+            let phase_b_deadline = Instant::now() + Duration::from_secs(5);
+            let phase_b = loop {
+                session.poll().unwrap();
+                fail_if_session_failed(&session).unwrap();
+                let mut frame_anchors = None;
+                let elapsed = recording
+                    .consume_latest_observing(|timed| {
+                        frame_anchors = Some(anchors(timed.frame()));
+                    })
+                    .unwrap();
+                if let (Some(elapsed), Some(frame_anchors)) = (elapsed, frame_anchors)
+                    && frame_anchors == expected_b
+                    && elapsed >= phase_a + frame_rate.interval()
+                {
+                    break elapsed;
+                }
+                assert!(
+                    Instant::now() < phase_b_deadline,
+                    "native GIF capture did not consume phase B after cadence"
+                );
+                thread::sleep(Duration::from_millis(5));
+            };
+            assert!(phase_b >= phase_a + frame_rate.interval());
+
+            // Keep B visible long enough to receive at least one GIF tick;
+            // a zero-duration trailing update is intentionally omitted.
+            let hold_b_until = Instant::now() + Duration::from_millis(40);
+            while Instant::now() < hold_b_until {
+                session.poll().unwrap();
+                fail_if_session_failed(&session).unwrap();
+                recording.consume_latest().unwrap();
+                let remaining = hold_b_until.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() {
+                    thread::sleep(remaining.min(Duration::from_millis(5)));
+                }
+            }
+
+            assert!(
+                session.stop().unwrap(),
+                "user Stop should own this terminal"
+            );
+            let terminal_deadline = Instant::now() + Duration::from_secs(5);
+            let terminal = loop {
+                session.poll().unwrap();
+                fail_if_session_failed(&session).unwrap();
+                recording.consume_latest().unwrap();
+                let view = session.view();
+                if let Some(terminal) = view.terminal()
+                    && matches!(view.state(), RecorderState::Finalizing { .. })
+                    && !view.worker_busy()
+                    && recording.consume_latest().unwrap().is_none()
+                {
+                    break terminal;
+                }
+                assert!(
+                    Instant::now() < terminal_deadline,
+                    "capture worker did not retire before GIF finalization"
+                );
+                thread::sleep(Duration::from_millis(5));
+            };
+            assert_eq!(terminal.generation(), generation);
+            assert_eq!(terminal.reason(), RecordingEndReason::UserStopped);
+            let published = recording.finish_and_publish().unwrap();
+            assert_eq!(published, destination);
+            assert!(matches!(
+                session.view().state(),
+                RecorderState::Completed(_)
+            ));
+
+            let bytes = std::fs::read(&published).unwrap();
+            let decoded = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
+                .unwrap()
+                .into_frames()
+                .collect_frames()
+                .unwrap();
+            assert!(!decoded.is_empty(), "published GIF contains no images");
+            let mut observed_a = false;
+            let mut observed_b = false;
+            let mut total_delay_ms = 0_u128;
+            for frame in &decoded {
+                assert_eq!(frame.buffer().dimensions(), (360, 240));
+                let pixel = |x: u32, y: u32| frame.buffer().get_pixel(x, y).0;
+                let samples = [pixel(51, 65), pixel(86, 89)];
+                observed_a |= anchors_match_with_gif_tolerance(samples, expected_a);
+                observed_b |= anchors_match_with_gif_tolerance(samples, expected_b);
+                let (numerator, denominator) = frame.delay().numer_denom_ms();
+                assert_ne!(denominator, 0);
+                total_delay_ms += u128::from(numerator) / u128::from(denominator);
+            }
+            assert!(observed_a, "decoded GIF omitted fixture paint phase A");
+            assert!(observed_b, "decoded GIF omitted fixture paint phase B");
+            assert!(
+                total_delay_ms.abs_diff(terminal.elapsed().as_millis()) <= 5,
+                "decoded GIF duration {total_delay_ms}ms differs from terminal {}ms",
+                terminal.elapsed().as_millis()
+            );
+
             session.close();
             fixture.finish().unwrap();
         }

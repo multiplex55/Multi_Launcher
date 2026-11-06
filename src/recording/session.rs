@@ -164,6 +164,7 @@ pub struct FinalizationPermit {
     shared: Arc<SessionShared>,
     generation: u64,
     claim_id: u64,
+    frames_written: u64,
     settled: bool,
 }
 
@@ -172,8 +173,13 @@ impl FinalizationPermit {
         self.generation
     }
 
+    /// The acknowledged consumer count frozen atomically with this claim.
+    pub const fn frames_written(&self) -> u64 {
+        self.frames_written
+    }
+
     /// Reports a sink/publication failure for this exact claimed generation.
-    /// The unclaimed `RecordingSession::fail_finalization` path cannot revoke
+    /// The unclaimed `RecordingSession::fail_sink` path cannot revoke
     /// a consumer after its publication claim.
     pub fn fail(&mut self, message: impl Into<String>) -> Result<(), RecordingSessionError> {
         let failure = RecordingFailure::Sink(message.into());
@@ -848,10 +854,13 @@ impl RecordingSession {
         &self,
         generation: u64,
     ) -> Result<FinalizationPermit, RecordingSessionError> {
-        let (claim_id, terminal_error) = {
+        let (claim_id, frames_written, terminal_error) = {
             let mut inner = self.shared.inner.lock().unwrap();
             if inner.closed || inner.generation != generation {
                 return Err(RecordingSessionError::StaleGeneration);
+            }
+            if inner.worker.is_some() {
+                return Err(RecordingSessionError::Busy);
             }
             let terminal = inner
                 .terminal
@@ -871,26 +880,27 @@ impl RecordingSession {
             }
             if terminal.accepted_frames() == 0 || inner.frames_written == 0 {
                 inner.state = RecorderState::Failed(RecordingFailure::NoFrames);
-                (None, Some(RecordingSessionError::NoFramesWritten))
+                (None, None, Some(RecordingSessionError::NoFramesWritten))
             } else if let Some(claim_id) = inner.next_finalization_claim_id.checked_add(1) {
                 inner.next_finalization_claim_id = claim_id;
                 inner.finalization_claim_id = Some(claim_id);
-                (Some(claim_id), None)
+                (Some(claim_id), Some(inner.frames_written), None)
             } else {
                 inner.state = RecorderState::Failed(RecordingFailure::InvalidFinalizationReceipt);
-                (None, Some(RecordingSessionError::GenerationExhausted))
+                (None, None, Some(RecordingSessionError::GenerationExhausted))
             }
         };
         (self.shared.wake)();
-        let claim_id = match (claim_id, terminal_error) {
-            (Some(claim_id), None) => claim_id,
-            (None, Some(error)) => return Err(error),
+        let (claim_id, frames_written) = match (claim_id, frames_written, terminal_error) {
+            (Some(claim_id), Some(frames_written), None) => (claim_id, frames_written),
+            (None, None, Some(error)) => return Err(error),
             _ => return Err(RecordingSessionError::InvalidTransition),
         };
         Ok(FinalizationPermit {
             shared: Arc::clone(&self.shared),
             generation,
             claim_id,
+            frames_written,
             settled: false,
         })
     }
@@ -959,7 +969,10 @@ impl RecordingSession {
         }
     }
 
-    pub fn fail_finalization(
+    /// Fences an unclaimed sink failure while capture may still be active.
+    /// Cancellation is signalled atomically, but the worker slot remains
+    /// owned until the source has dropped and the handle has been reaped.
+    pub fn fail_sink(
         &self,
         generation: u64,
         message: impl Into<String>,
@@ -968,13 +981,21 @@ impl RecordingSession {
         if inner.closed || inner.generation != generation {
             return Err(RecordingSessionError::StaleGeneration);
         }
-        if inner.terminal.is_none() || !matches!(&inner.state, RecorderState::Finalizing { .. }) {
-            return Err(RecordingSessionError::NotFinalizing);
-        }
         if inner.finalization_claim_id.is_some() {
             return Err(RecordingSessionError::InvalidTransition);
         }
+        if !matches!(
+            &inner.state,
+            RecorderState::Recording { .. } | RecorderState::Finalizing { .. }
+        ) {
+            return Err(RecordingSessionError::InvalidTransition);
+        }
+        if let Some(token) = inner.stop_token.as_ref() {
+            token.cancel();
+        }
         inner.mailbox = None;
+        inner.pending_terminal = None;
+        inner.terminal = None;
         inner.state = RecorderState::Failed(RecordingFailure::Sink(message.into()));
         drop(inner);
         (self.shared.wake)();
@@ -1632,6 +1653,12 @@ fn publish_worker_outcome(shared: &SessionShared, generation: u64, outcome: Work
     if inner.closed || inner.generation != generation {
         return;
     }
+    if matches!(
+        &inner.state,
+        RecorderState::Failed(RecordingFailure::Sink(_))
+    ) {
+        return;
+    }
     if inner
         .stop_token
         .as_ref()
@@ -2011,6 +2038,13 @@ mod tests {
         })
     }
 
+    fn wait_finalizing_and_retired(session: &RecordingSession) -> RecordingSessionView {
+        wait_for(session, |view| {
+            (matches!(view.state(), RecorderState::Finalizing { .. }) && !view.worker_busy())
+                || matches!(view.state(), RecorderState::Failed(_))
+        })
+    }
+
     fn acknowledge_latest(session: &RecordingSession, generation: u64) {
         let frame = session
             .take_latest_frame(generation)
@@ -2051,7 +2085,7 @@ mod tests {
         );
         let generation = session.view().generation();
         session.start().unwrap();
-        let view = wait_finalizing(&session);
+        let view = wait_finalizing_and_retired(&session);
         assert!(matches!(view.state(), RecorderState::Finalizing { .. }));
         assert_eq!(view.accepted_frames(), 3);
         assert_eq!(view.mailbox_replacements(), 2);
@@ -2110,6 +2144,7 @@ mod tests {
                 }
                 let view = consumer_session.view();
                 if matches!(view.state(), RecorderState::Finalizing { .. })
+                    && !view.worker_busy()
                     && consumer_session
                         .take_latest_frame(generation)
                         .unwrap()
@@ -2176,7 +2211,7 @@ mod tests {
         assert!(!session.stop().unwrap(), "the first Stop is immutable");
         release_tx.send(()).unwrap();
 
-        let view = wait_finalizing(&session);
+        let view = wait_finalizing_and_retired(&session);
         let terminal = view.terminal().expect("terminal is retained for consumer");
         assert_eq!(terminal.reason(), RecordingEndReason::UserStopped);
         assert_eq!(terminal.elapsed(), Duration::from_millis(100));
@@ -2324,7 +2359,7 @@ mod tests {
         );
         let generation = session.view().generation();
         session.start().unwrap();
-        let view = wait_finalizing(&session);
+        let view = wait_finalizing_and_retired(&session);
         assert!(matches!(view.state(), RecorderState::Finalizing { .. }));
         acknowledge_latest(&session, generation);
         (session, generation)
@@ -2378,7 +2413,7 @@ mod tests {
         let (session, generation) = one_frame_finalizing_session();
         let permit = session.claim_finalization(generation).unwrap();
         assert_eq!(
-            session.fail_finalization(generation, "unclaimed failure"),
+            session.fail_sink(generation, "unclaimed failure"),
             Err(RecordingSessionError::InvalidTransition)
         );
         drop(permit);
@@ -2388,6 +2423,60 @@ mod tests {
             }
             state => panic!("abandoned permit left unexpected state {state:?}"),
         }
+    }
+
+    #[test]
+    fn recording_session_output_failure_during_capture_stops_source_and_keeps_sink_error() {
+        let clock = Arc::new(FakeClock::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_slot = Arc::new(Mutex::new(Some(release_rx)));
+        let source_release = Arc::clone(&release_slot);
+        let backend = backend(move |size, generation| {
+            Box::new(GatedFrameSource {
+                generation,
+                size,
+                poll_count: 0,
+                entered: entered_tx.clone(),
+                release: source_release
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one recording uses the source once"),
+            })
+        });
+        let session = session(clock, backend);
+        let generation = session.select(request(Duration::from_secs(2))).unwrap();
+        session.start().unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("capture source should block in its second poll");
+
+        let frame = session
+            .take_latest_frame(generation)
+            .unwrap()
+            .expect("capture should publish its initial frame");
+        frame.acknowledge_written().unwrap();
+        session
+            .fail_sink(generation, "encoder rejected a frame")
+            .unwrap();
+        let failed = session.view();
+        assert!(matches!(
+            failed.state(),
+            RecorderState::Failed(RecordingFailure::Sink(message))
+                if message == "encoder rejected a frame"
+        ));
+        assert!(failed.worker_busy(), "the source stays owned until reaped");
+        assert!(!failed.finalization_claimed());
+
+        release_tx.send(()).unwrap();
+        let retired = wait_for(&session, |view| !view.worker_busy());
+        assert!(matches!(
+            retired.state(),
+            RecorderState::Failed(RecordingFailure::Sink(message))
+                if message == "encoder rejected a frame"
+        ));
+        assert_eq!(retired.frames_written(), 1);
     }
 
     #[test]
