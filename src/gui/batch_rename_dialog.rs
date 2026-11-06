@@ -14,6 +14,7 @@ use egui_extras::{Column, TableBuilder};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 const WINDOW_ID: &str = "batch_rename_preview_dialog";
 const PREVIEW_ROW_HEIGHT: f32 = 25.0;
@@ -28,6 +29,16 @@ pub(crate) enum BatchRenameUiCommand {
     UndoConfirmed(String),
     CancelOperation,
     Closed,
+}
+
+#[derive(Default)]
+pub(crate) struct BatchRenameHostActions {
+    pub(crate) commands: Vec<BatchRenameUiCommand>,
+    pub(crate) host_request: Option<bool>,
+    pub(crate) picker_requested: bool,
+    pub(crate) session_epoch: u64,
+    #[cfg(test)]
+    pub(crate) host_button: Option<(egui::Rect, egui::Rect, bool)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +101,7 @@ struct RuleDraft {
     rule: RenameRule,
 }
 
+#[derive(Clone)]
 struct PreviewDisplayRow {
     entry_ref: SnapshotEntryRef,
     relative_path: PathBuf,
@@ -112,6 +124,7 @@ struct FolderNode {
 /// `RenameScanCoordinator` and `VerifiedRenameSnapshot`.
 pub(crate) struct BatchRenameDialogState {
     pub open: bool,
+    combo_anchors: Vec<egui::Id>,
     root_path: Option<PathBuf>,
     recursive: bool,
     scan_banner: ScanBanner,
@@ -120,9 +133,9 @@ pub(crate) struct BatchRenameDialogState {
     scan_generation: Option<RenameScanGeneration>,
     ticket_session_epoch: u64,
     session_epoch: u64,
-    snapshot: Option<VerifiedRenameSnapshot>,
-    verified_preview: Option<VerifiedRenamePreview>,
-    pending_intent: Option<VerifiedRenamePlan>,
+    snapshot: Option<Arc<VerifiedRenameSnapshot>>,
+    verified_preview: Option<Arc<VerifiedRenamePreview>>,
+    pending_intent: Option<Arc<VerifiedRenamePlan>>,
     apply_confirmation_open: bool,
     undo_confirmation: Option<String>,
     next_confirmation_instance: u64,
@@ -134,11 +147,11 @@ pub(crate) struct BatchRenameDialogState {
     rules_revision: u64,
     extension_policy: ExtensionPolicy,
     new_rule_kind: NewRuleKind,
-    selected_by_ref: HashMap<SnapshotEntryRef, bool>,
-    included_by_ref: HashMap<SnapshotEntryRef, bool>,
+    selected_by_ref: Arc<HashMap<SnapshotEntryRef, bool>>,
+    included_by_ref: Arc<HashMap<SnapshotEntryRef, bool>>,
     folder_tree: Vec<FolderNode>,
-    display_rows: Vec<PreviewDisplayRow>,
-    visible_rows: Vec<usize>,
+    display_rows: Arc<Vec<PreviewDisplayRow>>,
+    visible_rows: Arc<Vec<usize>>,
     filter: String,
     visual_sort: VisualSort,
     row_view_revision: u64,
@@ -155,11 +168,102 @@ pub(crate) struct BatchRenameDialogState {
     filter_widget_id: Option<egui::Id>,
 }
 
+/// Reversible interaction state; the scan ticket and session owner stay live.
+#[derive(Clone)]
+pub(crate) struct BatchRenameInteractionCheckpoint {
+    session_epoch: u64,
+    scan_generation: Option<RenameScanGeneration>,
+    recursive: bool,
+    snapshot: Option<Arc<VerifiedRenameSnapshot>>,
+    verified_preview: Option<Arc<VerifiedRenamePreview>>,
+    pending_intent: Option<Arc<VerifiedRenamePlan>>,
+    apply_confirmation_open: bool,
+    undo_confirmation: Option<String>,
+    next_confirmation_instance: u64,
+    apply_confirmation_instance: Option<u64>,
+    undo_confirmation_instance: Option<u64>,
+    rules: Vec<RuleDraft>,
+    next_rule_id: u64,
+    rules_revision: u64,
+    extension_policy: ExtensionPolicy,
+    new_rule_kind: NewRuleKind,
+    selected_by_ref: Arc<HashMap<SnapshotEntryRef, bool>>,
+    included_by_ref: Arc<HashMap<SnapshotEntryRef, bool>>,
+    display_rows: Arc<Vec<PreviewDisplayRow>>,
+    visible_rows: Arc<Vec<usize>>,
+    filter: String,
+    visual_sort: VisualSort,
+    row_view_revision: u64,
+    status_message: Option<String>,
+}
+
+impl BatchRenameInteractionCheckpoint {
+    pub(crate) fn capture(state: &BatchRenameDialogState) -> Self {
+        Self {
+            session_epoch: state.session_epoch,
+            scan_generation: state.scan_generation,
+            recursive: state.recursive,
+            snapshot: state.snapshot.clone(),
+            verified_preview: state.verified_preview.clone(),
+            pending_intent: state.pending_intent.clone(),
+            apply_confirmation_open: state.apply_confirmation_open,
+            undo_confirmation: state.undo_confirmation.clone(),
+            next_confirmation_instance: state.next_confirmation_instance,
+            apply_confirmation_instance: state.apply_confirmation_instance,
+            undo_confirmation_instance: state.undo_confirmation_instance,
+            rules: state.rules.clone(),
+            next_rule_id: state.next_rule_id,
+            rules_revision: state.rules_revision,
+            extension_policy: state.extension_policy,
+            new_rule_kind: state.new_rule_kind,
+            selected_by_ref: state.selected_by_ref.clone(),
+            included_by_ref: state.included_by_ref.clone(),
+            display_rows: state.display_rows.clone(),
+            visible_rows: state.visible_rows.clone(),
+            filter: state.filter.clone(),
+            visual_sort: state.visual_sort,
+            row_view_revision: state.row_view_revision,
+            status_message: state.status_message.clone(),
+        }
+    }
+
+    pub(crate) fn restore(self, state: &mut BatchRenameDialogState) {
+        if state.session_epoch != self.session_epoch
+            || state.scan_generation != self.scan_generation
+        {
+            return;
+        }
+        state.recursive = self.recursive;
+        state.snapshot = self.snapshot;
+        state.verified_preview = self.verified_preview;
+        state.pending_intent = self.pending_intent;
+        state.apply_confirmation_open = self.apply_confirmation_open;
+        state.undo_confirmation = self.undo_confirmation;
+        state.next_confirmation_instance = self.next_confirmation_instance;
+        state.apply_confirmation_instance = self.apply_confirmation_instance;
+        state.undo_confirmation_instance = self.undo_confirmation_instance;
+        state.rules = self.rules;
+        state.next_rule_id = self.next_rule_id;
+        state.rules_revision = self.rules_revision;
+        state.extension_policy = self.extension_policy;
+        state.new_rule_kind = self.new_rule_kind;
+        state.selected_by_ref = self.selected_by_ref;
+        state.included_by_ref = self.included_by_ref;
+        state.display_rows = self.display_rows;
+        state.visible_rows = self.visible_rows;
+        state.filter = self.filter;
+        state.visual_sort = self.visual_sort;
+        state.row_view_revision = self.row_view_revision;
+        state.status_message = self.status_message;
+    }
+}
+
 impl Default for BatchRenameDialogState {
     fn default() -> Self {
         Self {
             open: false,
             root_path: None,
+            combo_anchors: Vec::new(),
             recursive: false,
             scan_banner: ScanBanner::ChooseRoot,
             scan_result: None,
@@ -181,11 +285,11 @@ impl Default for BatchRenameDialogState {
             rules_revision: 0,
             extension_policy: ExtensionPolicy::Preserve,
             new_rule_kind: NewRuleKind::Prefix,
-            selected_by_ref: HashMap::new(),
-            included_by_ref: HashMap::new(),
+            selected_by_ref: Arc::default(),
+            included_by_ref: Arc::default(),
             folder_tree: Vec::new(),
-            display_rows: Vec::new(),
-            visible_rows: Vec::new(),
+            display_rows: Arc::default(),
+            visible_rows: Arc::default(),
             filter: String::new(),
             visual_sort: VisualSort::default(),
             row_view_revision: 0,
@@ -207,6 +311,20 @@ impl Default for BatchRenameDialogState {
 impl BatchRenameDialogState {
     pub fn open(&mut self) {
         self.open = true;
+    }
+
+    pub(super) fn owned_combo_layer(
+        &self,
+        ctx: &egui::Context,
+        parent: egui::LayerId,
+    ) -> Option<egui::LayerId> {
+        self.combo_anchors.iter().copied().find_map(|anchor| {
+            (egui::ComboBox::is_open(ctx, anchor)
+                && ctx
+                    .read_response(anchor)
+                    .is_some_and(|response| response.enabled() && response.layer_id == parent))
+            .then(|| egui::LayerId::new(egui::Order::Foreground, anchor.with("popup")))
+        })
     }
 
     pub(crate) fn jump_mode_target_generation(&self) -> u64 {
@@ -366,11 +484,13 @@ impl BatchRenameDialogState {
                             match result.accept(generation) {
                                 Ok(snapshot) => {
                                     self.root_path = Some(snapshot.canonical_root().to_path_buf());
-                                    self.snapshot = Some(snapshot);
+                                    self.snapshot = Some(Arc::new(snapshot));
                                     if let Some(result) = &self.scan_result {
                                         for row in result.rows() {
-                                            self.selected_by_ref.insert(row.entry_ref(), false);
-                                            self.included_by_ref.insert(row.entry_ref(), true);
+                                            Arc::make_mut(&mut self.selected_by_ref)
+                                                .insert(row.entry_ref(), false);
+                                            Arc::make_mut(&mut self.included_by_ref)
+                                                .insert(row.entry_ref(), true);
                                         }
                                     }
                                     self.folder_tree = self
@@ -413,11 +533,12 @@ impl BatchRenameDialogState {
     pub(crate) fn freeze_confirmed_plan(&mut self) -> Option<&VerifiedRenamePlan> {
         self.pending_intent = self
             .verified_preview
-            .as_ref()
+            .as_deref()
             .filter(|preview| preview.preview().readiness() == PreviewReadiness::Ready)
             .and_then(VerifiedRenamePreview::verified_plan)
-            .filter(|plan| !plan.plan().actions().is_empty());
-        self.pending_intent.as_ref()
+            .filter(|plan| !plan.plan().actions().is_empty())
+            .map(Arc::new);
+        self.pending_intent.as_deref()
     }
 
     fn allocate_confirmation_instance(&mut self) -> u64 {
@@ -432,11 +553,11 @@ impl BatchRenameDialogState {
     }
 
     pub(crate) fn pending_intent(&self) -> Option<&VerifiedRenamePlan> {
-        self.pending_intent.as_ref()
+        self.pending_intent.as_deref()
     }
 
     pub(crate) fn take_pending_intent(&mut self) -> Option<VerifiedRenamePlan> {
-        self.pending_intent.take()
+        self.pending_intent.take().map(Arc::unwrap_or_clone)
     }
 
     pub(crate) fn set_status_message(&mut self, message: String) {
@@ -579,11 +700,11 @@ impl BatchRenameDialogState {
         self.undo_confirmation = None;
         self.undo_confirmation_instance = None;
         self.row_view_revision = self.row_view_revision.wrapping_add(1);
-        self.selected_by_ref.clear();
-        self.included_by_ref.clear();
+        self.selected_by_ref = Arc::default();
+        self.included_by_ref = Arc::default();
         self.folder_tree.clear();
-        self.display_rows.clear();
-        self.visible_rows.clear();
+        self.display_rows = Arc::default();
+        self.visible_rows = Arc::default();
     }
 
     fn build_rules(&self) -> RenameRuleSet {
@@ -597,10 +718,10 @@ impl BatchRenameDialogState {
     fn rebuild_preview(&mut self) {
         self.row_view_revision = self.row_view_revision.wrapping_add(1);
         self.pending_intent = None;
-        self.display_rows.clear();
+        self.display_rows = Arc::default();
         let Some(snapshot) = &self.snapshot else {
             self.verified_preview = None;
-            self.visible_rows.clear();
+            self.visible_rows = Arc::default();
             return;
         };
         let preview = snapshot.preview(&self.build_rules());
@@ -612,24 +733,26 @@ impl BatchRenameDialogState {
             .filter(|row| row.kind() == SnapshotEntryKind::File)
             .map(|row| (row.entry_ref(), row.relative_path().to_path_buf()))
             .collect();
-        self.display_rows = preview
-            .preview()
-            .rows()
-            .iter()
-            .filter_map(|row| {
-                let relative_path = relative_by_ref.get(&row.entry_ref())?.clone();
-                Some(PreviewDisplayRow {
-                    entry_ref: row.entry_ref(),
-                    relative_path,
-                    source_path: row.source_path().to_path_buf(),
-                    source_name: row.source_name().to_os_string(),
-                    proposed_path: row.proposed_path().map(Path::to_path_buf),
-                    proposed_name: row.proposed_name().map(OsString::from),
-                    status: row.status().clone(),
+        self.display_rows = Arc::new(
+            preview
+                .preview()
+                .rows()
+                .iter()
+                .filter_map(|row| {
+                    let relative_path = relative_by_ref.get(&row.entry_ref())?.clone();
+                    Some(PreviewDisplayRow {
+                        entry_ref: row.entry_ref(),
+                        relative_path,
+                        source_path: row.source_path().to_path_buf(),
+                        source_name: row.source_name().to_os_string(),
+                        proposed_path: row.proposed_path().map(Path::to_path_buf),
+                        proposed_name: row.proposed_name().map(OsString::from),
+                        status: row.status().clone(),
+                    })
                 })
-            })
-            .collect();
-        self.verified_preview = Some(preview);
+                .collect(),
+        );
+        self.verified_preview = Some(Arc::new(preview));
         self.rebuild_visible_rows();
         #[cfg(test)]
         {
@@ -640,7 +763,7 @@ impl BatchRenameDialogState {
     fn rebuild_visible_rows(&mut self) {
         self.row_view_revision = self.row_view_revision.wrapping_add(1);
         let needle = self.filter.trim().to_lowercase();
-        self.visible_rows = self
+        let mut visible_rows: Vec<_> = self
             .display_rows
             .iter()
             .enumerate()
@@ -667,7 +790,7 @@ impl BatchRenameDialogState {
             })
             .collect();
         let sort = self.visual_sort;
-        self.visible_rows.sort_unstable_by(|left, right| {
+        visible_rows.sort_unstable_by(|left, right| {
             let a = &self.display_rows[*left];
             let b = &self.display_rows[*right];
             let ordering = match sort.column {
@@ -695,6 +818,7 @@ impl BatchRenameDialogState {
                 ordering
             }
         });
+        self.visible_rows = Arc::new(visible_rows);
     }
 
     fn apply_row_updates(
@@ -748,14 +872,14 @@ impl BatchRenameDialogState {
         };
         for (entry_ref, (selected, inclusion)) in changed_by_ref {
             if let Some(selected) = selected {
-                self.selected_by_ref.insert(entry_ref, selected);
+                Arc::make_mut(&mut self.selected_by_ref).insert(entry_ref, selected);
             }
             if let Some(inclusion) = inclusion {
-                self.included_by_ref
+                Arc::make_mut(&mut self.included_by_ref)
                     .insert(entry_ref, inclusion == EntryInclusion::Included);
             }
         }
-        self.snapshot = Some(updated);
+        self.snapshot = Some(Arc::new(updated));
         self.status_message = None;
         self.rebuild_preview();
         true
@@ -815,126 +939,259 @@ impl BatchRenameDialogState {
         parent_instance: Option<u64>,
         runtime: &RenameRuntimeSnapshot,
     ) -> Vec<BatchRenameUiCommand> {
+        let actions = self.show_host_inner(
+            ctx,
+            parent_scope,
+            child_scope,
+            jump_owner,
+            native_ui_owner,
+            native_confirmation_owner,
+            first_ui_pass,
+            parent_instance,
+            runtime,
+            None,
+            None,
+        );
+        actions.commands
+    }
+
+    pub(crate) fn ui_with_host(
+        &mut self,
+        ctx: &egui::Context,
+        parent_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        child_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        native_ui_owner: bool,
+        native_confirmation_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        first_ui_pass: bool,
+        parent_instance: Option<u64>,
+        runtime: &RenameRuntimeSnapshot,
+        child_ui: Option<&mut egui::Ui>,
+        is_popout: bool,
+    ) -> BatchRenameHostActions {
+        self.show_host_inner(
+            ctx,
+            parent_scope,
+            child_scope,
+            jump_owner,
+            native_ui_owner,
+            native_confirmation_owner,
+            first_ui_pass,
+            parent_instance,
+            runtime,
+            child_ui,
+            Some(is_popout),
+        )
+    }
+
+    /// Execute only after the launcher has retained both the root and owner pass.
+    pub(crate) fn complete_host_actions(
+        &mut self,
+        actions: BatchRenameHostActions,
+        owner_hwnd: Option<usize>,
+    ) -> Vec<BatchRenameUiCommand> {
+        if !self.open || self.session_epoch != actions.session_epoch {
+            return Vec::new();
+        }
+        let mut commands = actions.commands;
+        if actions.picker_requested {
+            #[cfg(target_os = "windows")]
+            let mut picker = match owner_hwnd
+                .and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize))
+            {
+                Some(hwnd) => rfd::FileDialog::new()
+                    .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)),
+                None => {
+                    self.status_message = Some(
+                        "The Batch Renamer window is not ready to own the folder picker.".into(),
+                    );
+                    return commands;
+                }
+            };
+            #[cfg(not(target_os = "windows"))]
+            let mut picker = {
+                let _ = owner_hwnd;
+                rfd::FileDialog::new()
+            };
+            if let Some(root) = self.root_path.as_deref() {
+                picker = picker.set_directory(root);
+            }
+            if let Some(root) = picker.pick_folder() {
+                commands.push(BatchRenameUiCommand::SelectRoot(root));
+            }
+        }
+        commands
+    }
+
+    fn show_host_inner(
+        &mut self,
+        ctx: &egui::Context,
+        parent_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        child_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        jump_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        native_ui_owner: bool,
+        native_confirmation_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        first_ui_pass: bool,
+        parent_instance: Option<u64>,
+        runtime: &RenameRuntimeSnapshot,
+        child_ui: Option<&mut egui::Ui>,
+        host_presentation: Option<bool>,
+    ) -> BatchRenameHostActions {
+        let mut actions = BatchRenameHostActions {
+            session_epoch: self.session_epoch,
+            ..Default::default()
+        };
         let mut commands = Vec::new();
         if !self.open {
-            return commands;
+            return actions;
         }
         let native_parent_instance = parent_instance.unwrap_or(self.session_epoch);
         let native_window_pass = native_ui_owner && first_ui_pass && ctx.current_pass_index() == 0;
         let mut visual_order = 0;
 
         let mut window_open = self.open;
-        egui::Window::new("Batch Renamer")
-            .id(egui::Id::new(WINDOW_ID))
-            .resizable(true)
-            .default_size(egui::vec2(1040.0, 760.0))
-            .min_size(egui::vec2(520.0, 360.0))
-            .vscroll(true)
-            .show_utility(
-                ctx,
-                "batch-rename",
-                egui::Id::new("Batch Renamer"),
-                Some(&mut window_open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
-                        1040.0, 760.0,
-                    )),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_minimum(egui::vec2(520.0, 360.0)),
-                |ui| {
-                    ui.add_enabled_ui(native_ui_owner, |ui| {
-                        // Window sizing/invisible passes expose a disabled content
-                        // UI. Only the first visible pass may commit ordinary
-                        // planning edits; the Close path retains its pre-existing
-                        // availability while a worker is active.
-                        let native_visible = native_window_pass
-                            && ui.is_visible()
-                            && !ui.is_sizing_pass()
-                            && ui.is_enabled();
-                        let process_interactions = native_visible
-                            && !runtime.operation_active
-                            && !self.apply_confirmation_open
-                            && self.undo_confirmation.is_none();
-                        self.draw_header(
-                            ui,
-                            &mut commands,
-                            process_interactions,
+        let mut draw_body = |ui: &mut egui::Ui| {
+            ui.add_enabled_ui(native_ui_owner, |ui| {
+                // Window sizing/invisible passes expose a disabled content
+                // UI. Only the first visible pass may commit ordinary
+                // planning edits; the Close path retains its pre-existing
+                // availability while a worker is active.
+                let native_visible = native_window_pass
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass()
+                    && ui.is_enabled();
+                let process_interactions = native_visible
+                    && !runtime.operation_active
+                    && !self.apply_confirmation_open
+                    && self.undo_confirmation.is_none();
+                if let Some(popout) = host_presentation {
+                    let presentation = if popout {
+                        super::utility_host::UtilityPresentation::Popout
+                    } else {
+                        super::utility_host::UtilityPresentation::Docked
+                    };
+                    let (response, requested) =
+                        super::utility_host::presentation_button(ui, presentation, native_visible);
+                    register_batch_target(
+                        parent_scope,
+                        ui,
+                        &response,
+                        "host",
+                        if popout { "Dock" } else { "Pop Out" },
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    #[cfg(test)]
+                    {
+                        actions.host_button =
+                            Some((response.rect, ui.clip_rect(), response.enabled()));
+                    }
+                    if response.clicked() && native_visible && !ctx.will_discard() {
+                        actions.host_request =
+                            Some(requested == super::utility_host::UtilityPresentation::Popout);
+                    }
+                }
+                self.draw_header(
+                    ui,
+                    &mut commands,
+                    &mut actions.picker_requested,
+                    host_presentation.is_some(),
+                    process_interactions,
+                    parent_scope,
+                    &mut visual_order,
+                );
+                ui.separator();
+                self.draw_rule_editor(ui, process_interactions, parent_scope, &mut visual_order);
+                ui.separator();
+                self.draw_preview(
+                    ui,
+                    &mut commands,
+                    process_interactions,
+                    host_presentation.is_some(),
+                    parent_scope,
+                    &mut visual_order,
+                );
+                ui.separator();
+                self.draw_operation_footer(
+                    ui,
+                    runtime,
+                    &mut commands,
+                    process_interactions,
+                    native_visible,
+                    parent_scope,
+                    native_parent_instance,
+                    self.session_epoch,
+                    &mut visual_order,
+                );
+                ui.horizontal(|ui| {
+                    let close = ui.button("Close");
+                    register_batch_target(
+                        parent_scope,
+                        ui,
+                        &close,
+                        "close",
+                        "Close Batch Renamer",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut visual_order,
+                    );
+                    if close.clicked() && native_visible {
+                        commands.push(BatchRenameUiCommand::Closed);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let preview =
+                            ui.add_enabled(self.snapshot.is_some(), egui::Button::new("Preview"));
+                        register_batch_target(
                             parent_scope,
+                            ui,
+                            &preview,
+                            "preview",
+                            "Preview rename plan",
+                            crate::gui::jump_mode::TargetKind::Button,
                             &mut visual_order,
                         );
-                        ui.separator();
-                        self.draw_rule_editor(
-                            ui,
-                            process_interactions,
-                            parent_scope,
-                            &mut visual_order,
-                        );
-                        ui.separator();
-                        self.draw_preview(
-                            ui,
-                            &mut commands,
-                            process_interactions,
-                            parent_scope,
-                            &mut visual_order,
-                        );
-                        ui.separator();
-                        self.draw_operation_footer(
-                            ui,
-                            runtime,
-                            &mut commands,
-                            process_interactions,
-                            native_visible,
-                            parent_scope,
-                            native_parent_instance,
-                            self.session_epoch,
-                            &mut visual_order,
-                        );
-                        ui.horizontal(|ui| {
-                            let close = ui.button("Close");
-                            register_batch_target(
-                                parent_scope,
-                                ui,
-                                &close,
-                                "close",
-                                "Close Batch Renamer",
-                                crate::gui::jump_mode::TargetKind::Button,
-                                &mut visual_order,
-                            );
-                            if close.clicked() && native_visible {
-                                commands.push(BatchRenameUiCommand::Closed);
-                            }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let preview = ui.add_enabled(
-                                    self.snapshot.is_some(),
-                                    egui::Button::new("Preview"),
-                                );
-                                register_batch_target(
-                                    parent_scope,
-                                    ui,
-                                    &preview,
-                                    "preview",
-                                    "Preview rename plan",
-                                    crate::gui::jump_mode::TargetKind::Button,
-                                    &mut visual_order,
-                                );
-                                if preview.clicked() && process_interactions {
-                                    self.rebuild_preview();
-                                }
-                            });
-                        });
+                        if preview.clicked() && process_interactions {
+                            self.rebuild_preview();
+                        }
                     });
-                },
-            );
+                });
+            });
+        };
+        if let Some(ui) = child_ui {
+            draw_body(ui);
+        } else {
+            egui::Window::new("Batch Renamer")
+                .id(egui::Id::new(WINDOW_ID))
+                .resizable(true)
+                .default_size(egui::vec2(1040.0, 760.0))
+                .min_size(egui::vec2(520.0, 360.0))
+                .vscroll(true)
+                .show_utility(
+                    ctx,
+                    "batch-rename",
+                    egui::Id::new("Batch Renamer"),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::vec2(1040.0, 760.0),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(520.0, 360.0)),
+                    draw_body,
+                );
+        }
 
         if native_window_pass && (!window_open || commands.contains(&BatchRenameUiCommand::Closed))
         {
-            self.end_session();
+            if host_presentation.is_none() {
+                self.end_session();
+            }
             if !commands.contains(&BatchRenameUiCommand::Closed) {
                 commands.push(BatchRenameUiCommand::Closed);
             }
-            return commands;
+            actions.commands = commands;
+            return actions;
         }
 
         let child_commit_pass = first_ui_pass && ctx.current_pass_index() == 0;
@@ -955,7 +1212,8 @@ impl BatchRenameDialogState {
             // a child. Remove it before the retained registry is reconciled.
             scope.discard_registered_targets();
         }
-        commands
+        actions.commands = commands;
+        actions
     }
 
     fn draw_operation_footer(
@@ -1370,6 +1628,8 @@ impl BatchRenameDialogState {
         &mut self,
         ui: &mut egui::Ui,
         commands: &mut Vec<BatchRenameUiCommand>,
+        picker_requested: &mut bool,
+        hosted: bool,
         process_interactions: bool,
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         visual_order: &mut u64,
@@ -1413,7 +1673,9 @@ impl BatchRenameDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 visual_order,
             );
-            if process_interactions && choose_root.clicked() {
+            if process_interactions && choose_root.clicked() && hosted {
+                *picker_requested = true;
+            } else if process_interactions && choose_root.clicked() {
                 let mut picker = rfd::FileDialog::new();
                 if let Some(root) = self.root_path.as_deref() {
                     picker = picker.set_directory(root);
@@ -1438,7 +1700,9 @@ impl BatchRenameDialogState {
             if process_interactions && recursive_changed {
                 self.recursive = recursive;
                 if self.root_path.is_some() {
-                    self.invalidate_for_new_scan();
+                    if !hosted {
+                        self.invalidate_for_new_scan();
+                    }
                     commands.push(BatchRenameUiCommand::RecursiveChanged);
                 }
             }
@@ -1565,6 +1829,7 @@ impl BatchRenameDialogState {
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         visual_order: &mut u64,
     ) {
+        self.combo_anchors.clear();
         ui.heading("Ordered filename rules");
         ui.label("Numbering follows the deterministic original path order, regardless of filtering or table sorting.");
         let mut rules = self.rules.clone();
@@ -1613,6 +1878,7 @@ impl BatchRenameDialogState {
                         visual_order,
                     );
                 });
+            self.combo_anchors.push(extension_response.response.id);
             register_batch_target(
                 scope,
                 ui,
@@ -1652,6 +1918,7 @@ impl BatchRenameDialogState {
                         );
                     }
                 });
+            self.combo_anchors.push(new_rule_response.response.id);
             register_batch_target(
                 scope,
                 ui,
@@ -1697,6 +1964,7 @@ impl BatchRenameDialogState {
                         rule_count,
                         scope,
                         visual_order,
+                        &mut self.combo_anchors,
                     )
                 })
                 .inner
@@ -1755,6 +2023,7 @@ impl BatchRenameDialogState {
         ui: &mut egui::Ui,
         commands: &mut Vec<BatchRenameUiCommand>,
         process_interactions: bool,
+        hosted: bool,
         scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         visual_order: &mut u64,
     ) {
@@ -1763,6 +2032,7 @@ impl BatchRenameDialogState {
             BatchRenameUiCommand::SelectRoot(root) => Some(root.clone()),
             _ => None,
         }) && process_interactions
+            && !hosted
         {
             self.prepare_explicit_root_scan(root);
         }
@@ -1867,7 +2137,7 @@ impl BatchRenameDialogState {
         let mut no_op = 0usize;
         let mut conflicted = 0usize;
         let mut excluded = 0usize;
-        for row in &self.display_rows {
+        for row in self.display_rows.iter() {
             match &row.status {
                 PreviewRowStatus::Ready => {
                     selected += 1;
@@ -2222,6 +2492,7 @@ fn draw_rule_row(
     total: usize,
     scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
     visual_order: &mut u64,
+    combo_anchors: &mut Vec<egui::Id>,
 ) -> (bool, RuleRowAction) {
     let mut changed = false;
     let mut action = RuleRowAction::None;
@@ -2448,6 +2719,7 @@ fn draw_rule_row(
                             visual_order,
                         );
                     });
+                combo_anchors.push(combo.response.id);
                 register_batch_target(
                     scope,
                     ui,
@@ -2764,6 +3036,33 @@ fn draw_folder_nodes(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosted_checkpoint_restores_interaction_without_retiring_session() {
+        let mut state = super::BatchRenameDialogState::default();
+        state.open();
+        state.filter = "before".into();
+        let checkpoint = super::BatchRenameInteractionCheckpoint::capture(&state);
+        state.filter = "after".into();
+        state.apply_confirmation_open = true;
+        checkpoint.restore(&mut state);
+        assert_eq!(state.filter, "before");
+        assert!(!state.apply_confirmation_open);
+        assert!(state.open);
+    }
+
+    #[test]
+    fn stale_host_actions_do_not_dispatch() {
+        let mut state = super::BatchRenameDialogState::default();
+        state.open();
+        let actions = super::BatchRenameHostActions {
+            session_epoch: state.session_epoch.wrapping_add(1),
+            commands: vec![super::BatchRenameUiCommand::Rescan],
+            ..Default::default()
+        };
+        assert!(state.complete_host_actions(actions, None).is_empty());
+        assert!(state.open);
+    }
+
     use super::*;
     use crate::gui::jump_mode::ui::JumpModeUi;
     use std::ffi::OsStr;
@@ -3481,22 +3780,24 @@ mod tests {
         let context = egui::Context::default();
         let size = egui::vec2(520.0, 360.0);
         let mut state = BatchRenameDialogState::default();
-        state.display_rows = (0..500)
-            .map(|index| {
-                let file_name = format!("file-{index:04}.txt");
-                let source_path = PathBuf::from(format!(r"C:\fixture\{file_name}"));
-                PreviewDisplayRow {
-                    entry_ref: SnapshotEntryRef(index),
-                    relative_path: PathBuf::from(&file_name),
-                    source_path: source_path.clone(),
-                    source_name: OsString::from(file_name),
-                    proposed_path: Some(source_path),
-                    proposed_name: None,
-                    status: PreviewRowStatus::Ready,
-                }
-            })
-            .collect();
-        state.visible_rows = (0..state.display_rows.len()).collect();
+        state.display_rows = Arc::new(
+            (0..500)
+                .map(|index| {
+                    let file_name = format!("file-{index:04}.txt");
+                    let source_path = PathBuf::from(format!(r"C:\fixture\{file_name}"));
+                    PreviewDisplayRow {
+                        entry_ref: SnapshotEntryRef(index),
+                        relative_path: PathBuf::from(&file_name),
+                        source_path: source_path.clone(),
+                        source_name: OsString::from(file_name),
+                        proposed_path: Some(source_path),
+                        proposed_name: None,
+                        status: PreviewRowStatus::Ready,
+                    }
+                })
+                .collect(),
+        );
+        state.visible_rows = Arc::new((0..state.display_rows.len()).collect());
         state.scan_generation = Some(RenameScanGeneration(9));
 
         let input = screen_input(size, Vec::new());

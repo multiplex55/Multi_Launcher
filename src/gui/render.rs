@@ -2142,7 +2142,7 @@ impl LauncherApp {
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
             Panel::DateTimeStudioDialog => middle(egui::Id::new("date-time-studio-window")),
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root(),
-            Panel::BatchRenameDialog => NavigationDialogKind::BatchRename.layer_id(),
+            Panel::BatchRenameDialog => self.batch_rename_host.root_layer(),
             Panel::SearchReplaceDialog => NavigationDialogKind::SearchReplace.layer_id(),
             Panel::XmlToolkitDialog => NavigationDialogKind::XmlToolkit.layer_id(),
             Panel::TableUtilityDialog => NavigationDialogKind::TableUtility.layer_id(),
@@ -4833,7 +4833,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 20] {
+    fn viewport_bootstrap_state(&self) -> [bool; 21] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4853,6 +4853,7 @@ impl LauncherApp {
             self.mouse_gestures_host.needs_root_ui_when_hidden(self.mouse_gestures_dialog.open),
             self.file_search_host.needs_root_ui_when_hidden(self.file_search_dialog.open),
             self.diff_dialog.needs_root_ui_when_hidden(),
+            self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open),
             self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
             self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
@@ -4868,7 +4869,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 20],
+        previously_pending: [bool; 21],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5342,6 +5343,104 @@ impl LauncherApp {
             && !self.pin_list_open;
         self.diff_dialog.show_hosted(
             ctx, &self.activity_center, first, root_visible, root_input, native_input,
+        );
+    }
+
+    fn show_batch_rename_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        let batch_rename_runtime = self.batch_rename_runtime_snapshot();
+        let batch_rename_owner =
+            if root_visible {
+                self.resolve_jump_mode_navigation_owner(ctx, true)
+            } else {
+                crate::gui::jump_mode::ui::NavigationOwner::Blocked
+            };
+        let batch_rename_scope = match batch_rename_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
+                instance,
+            } if self.jump_mode_enabled()
+                && self.batch_rename_dialog.jump_mode_parent_targets_allowed() =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("batch-rename", instance),
+                    crate::gui::jump_mode::TargetGeneration(
+                        self.batch_rename_dialog.jump_mode_target_generation(),
+                    ),
+                    "batch-rename/form",
+                    ctx.viewport_id(),
+                    batch_rename_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let batch_rename_parent_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename);
+        let batch_rename_confirmation_scope = match (
+            batch_rename_owner,
+            batch_rename_parent_instance,
+            self.batch_rename_dialog
+                .jump_mode_pending_confirmation_identity(),
+        ) {
+            (
+                crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind,
+                },
+                Some(current_parent_instance),
+                Some((current_confirmation_instance, current_kind)),
+            ) if self.jump_mode_enabled()
+                && parent_instance == current_parent_instance
+                && confirmation_instance == current_confirmation_instance
+                && kind == current_kind =>
+            {
+                let owner = batch_rename_owner;
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        kind.surface_kind(),
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog("batch-rename", parent_instance),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    "batch-rename/confirmation",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let batch_rename_native_owner =
+            self.batch_rename_native_ui_owner_current(ctx, root_visible);
+        let batch_rename_confirmation_native_owner = self
+            .batch_rename_confirmation_native_ui_owner_current(ctx, root_visible);
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let jump_enabled = self.jump_mode_enabled();
+        self.batch_rename_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        self.batch_rename_host.show(
+            ctx,
+            &mut self.batch_rename_dialog,
+            &batch_rename_runtime,
+            super::batch_rename_window_host::HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: batch_rename_owner,
+                parent_owner: batch_rename_native_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !self.pinned_panels.contains(&super::Panel::BatchRenameDialog),
+                confirmation_owner: batch_rename_confirmation_native_owner,
+                parent_instance: batch_rename_parent_instance.unwrap_or_default(),
+                root_scopes: (batch_rename_scope.as_ref(), batch_rename_confirmation_scope.as_ref()),
+            },
         );
     }
 
@@ -6988,21 +7087,31 @@ impl LauncherApp {
         )
     }
 
+    fn batch_rename_owns_root_input(&self, ctx: &egui::Context, visible: bool) -> bool {
+        self.batch_rename_native_ui_owner_current(ctx, visible)
+            || self.batch_rename_confirmation_native_ui_owner_current(ctx, visible)
+                != crate::gui::jump_mode::ui::NavigationOwner::Blocked
+    }
+
     fn batch_rename_native_ui_owner_current(
         &self,
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
+        let Some(layer) = self.batch_rename_host.root_layer() else {
+            return false;
+        };
+        let popup_layer = self.batch_rename_dialog.owned_combo_layer(ctx, layer);
         self.batch_rename_dialog.open
-            && !self
-                .batch_rename_dialog
-                .jump_mode_has_pending_confirmation()
+            && !self.batch_rename_dialog.jump_mode_has_pending_confirmation()
             && self.native_ui_host_input_allowed(ctx, root_visible)
-            && NavigationDialogKind::BatchRename
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && (!egui::Popup::is_any_open(ctx) || popup_layer.is_some())
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background || Some(focus) == popup_layer
+            })
     }
 
     fn batch_rename_confirmation_native_ui_owner_current(
@@ -7011,9 +7120,12 @@ impl LauncherApp {
         root_visible: bool,
     ) -> crate::gui::jump_mode::ui::NavigationOwner {
         use crate::gui::jump_mode::ui::{
-            NavigationDialogKind, NavigationOwner, resolve_batch_rename_confirmation_owner,
+            NavigationDialogKind, NavigationOwner, resolve_batch_rename_confirmation_owner_with_parent,
         };
 
+        let Some(parent_layer) = self.batch_rename_host.root_layer() else {
+            return NavigationOwner::Blocked;
+        };
         if !self.batch_rename_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
             return NavigationOwner::Blocked;
         }
@@ -7029,7 +7141,9 @@ impl LauncherApp {
         else {
             return NavigationOwner::Blocked;
         };
-        resolve_batch_rename_confirmation_owner(ctx, parent_instance, confirmation_instance, kind)
+        resolve_batch_rename_confirmation_owner_with_parent(
+            ctx, parent_instance, confirmation_instance, kind, Some(parent_layer),
+        )
     }
 
     fn mouse_gesture_settings_picker_native_ui_owner_current(
@@ -7175,6 +7289,7 @@ impl LauncherApp {
                 .batch_rename_dialog
                 .jump_mode_pending_confirmation_identity()
                 .is_some()
+                && self.batch_rename_host.root_layer().is_some()
             || self
                 .search_replace_dialog
                 .jump_mode_confirmation_identity()
@@ -7382,7 +7497,7 @@ impl LauncherApp {
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
-                self.batch_rename_dialog.open,
+                self.batch_rename_dialog.open && self.batch_rename_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::SearchReplace,
@@ -7455,6 +7570,7 @@ impl LauncherApp {
                     .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
                 dashboard_editor_layer: self.dashboard_editor.host_layer_if_root(),
                 file_search_layer: self.file_search_host.root_layer(),
+                file_operation_layers: [self.batch_rename_host.root_layer(), None],
                 mouse_form_layers: [
                     self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS),
                     self.mouse_gesture_settings_host.root_layer(super::mouse_form_host::GESTURE_SETTINGS),
@@ -7470,6 +7586,8 @@ impl LauncherApp {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
                         self.file_search_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::BatchRename {
+                        self.batch_rename_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MouseSettings {
                         self.mouse_settings_host.root_layer(super::mouse_form_host::MOUSE_SETTINGS).and(current)
                     } else if kind == NavigationDialogKind::MouseGestureSettings {
@@ -7686,29 +7804,26 @@ impl LauncherApp {
             && let Some(parent_instance) = self
                 .jump_mode_ui
                 .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename)
+            && let Some(parent_layer) = self.batch_rename_host.root_layer()
             && let Some((confirmation_instance, kind)) = self
                 .batch_rename_dialog
                 .jump_mode_pending_confirmation_identity()
         {
             use crate::gui::jump_mode::ui::{
-                NavigationDialogKind, NavigationOwner, batch_rename_confirmation_layer_id,
-                resolve_batch_rename_confirmation_owner, visible_top_middle_layer,
+                NavigationOwner, batch_rename_confirmation_layer_id,
+                resolve_batch_rename_confirmation_owner_with_parent, visible_top_middle_layer,
             };
 
             let child_layer =
                 batch_rename_confirmation_layer_id(parent_instance, confirmation_instance, kind);
-            let parent_layer = NavigationDialogKind::BatchRename.layer_id();
             match visible_top_middle_layer(ctx) {
                 Some(layer) if layer == child_layer => {
                     combo_popup = None;
-                    candidate = resolve_batch_rename_confirmation_owner(
-                        ctx,
-                        parent_instance,
-                        confirmation_instance,
-                        kind,
+                    candidate = resolve_batch_rename_confirmation_owner_with_parent(
+                        ctx, parent_instance, confirmation_instance, kind, Some(parent_layer),
                     );
                 }
-                Some(layer) if Some(layer) == parent_layer => {
+                Some(layer) if layer == parent_layer => {
                     // A pending child owns the transition immediately; the
                     // parent cannot keep targets live during its first paint.
                     candidate = NavigationOwner::Blocked;
@@ -8157,6 +8272,7 @@ impl LauncherApp {
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
             self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_diff_host(&ctx, first_ui_pass, false);
+            self.show_batch_rename_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             if first_ui_pass {
                 self.run_background_after_menu();
@@ -9032,7 +9148,7 @@ impl LauncherApp {
                         true
                     } else if exact_table_owner
                         && native_owner
-                        && self.close_front_dialog()
+                        && self.close_front_dialog_from_root_input()
                     {
                         let modifiers = ctx.input(|input| {
                             input.events.iter().rev().find_map(|event| match event {
@@ -9113,6 +9229,7 @@ impl LauncherApp {
                         egui::Popup::is_any_open(&ctx),
                     )
                     && !self.diff_dialog.owns_root_input(&ctx)
+                    && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -9167,7 +9284,7 @@ impl LauncherApp {
                         );
                     if !settings_owns_escape && !jump_session_escape_preempted {
                         if self.any_root_panel_open() {
-                            if self.close_front_dialog() {
+                            if self.close_front_dialog_from_root_input() {
                                 ctx.input_mut(|i| {
                                     i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                                 });
@@ -9193,6 +9310,7 @@ impl LauncherApp {
                     && close_panel_shortcut_modifiers.is_some()
                     && self.any_root_panel_open()
                     && !self.diff_dialog.owns_root_input(&ctx)
+                    && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -9209,7 +9327,7 @@ impl LauncherApp {
                     && !self.mkmacro_dialog.owns_root_input(&ctx)
                     && !self.dashboard_editor.owns_root_input(&ctx)
                     && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
-                    && self.close_front_dialog()
+                    && self.close_front_dialog_from_root_input()
                 {
                     let modifiers = close_panel_shortcut_modifiers.unwrap_or_default();
                     ctx.input_mut(|input| input.consume_key(modifiers, egui::Key::W));
@@ -10066,6 +10184,7 @@ impl LauncherApp {
             self.show_mouse_gestures_host(&ctx, first_ui_pass, false, false);
             self.show_file_search_host(&ctx, first_ui_pass, false);
             self.show_diff_host(&ctx, first_ui_pass, false);
+            self.show_batch_rename_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
@@ -10480,96 +10599,7 @@ impl LauncherApp {
         fav_dlg.ui(&ctx, self);
         self.fav_dialog = fav_dlg;
         self.show_file_search_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        let batch_rename_runtime = self.batch_rename_runtime_snapshot();
-        let batch_rename_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let batch_rename_scope = match batch_rename_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename,
-                instance,
-            } if self.jump_mode_enabled()
-                && self.batch_rename_dialog.jump_mode_parent_targets_allowed() =>
-            {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("batch-rename", instance),
-                    crate::gui::jump_mode::TargetGeneration(
-                        self.batch_rename_dialog.jump_mode_target_generation(),
-                    ),
-                    "batch-rename/form",
-                    ctx.viewport_id(),
-                    batch_rename_owner,
-                    false,
-                )
-            }
-            _ => None,
-        };
-        let batch_rename_parent_instance = self
-            .jump_mode_ui
-            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename);
-        let batch_rename_confirmation_scope = match (
-            batch_rename_owner,
-            batch_rename_parent_instance,
-            self.batch_rename_dialog
-                .jump_mode_pending_confirmation_identity(),
-        ) {
-            (
-                crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation {
-                    parent_instance,
-                    confirmation_instance,
-                    kind,
-                },
-                Some(current_parent_instance),
-                Some((current_confirmation_instance, current_kind)),
-            ) if self.jump_mode_enabled()
-                && parent_instance == current_parent_instance
-                && confirmation_instance == current_confirmation_instance
-                && kind == current_kind =>
-            {
-                let owner = batch_rename_owner;
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::popup(
-                        kind.surface_kind(),
-                        confirmation_instance,
-                        crate::gui::jump_mode::SurfaceId::dialog("batch-rename", parent_instance),
-                    ),
-                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
-                    "batch-rename/confirmation",
-                    ctx.viewport_id(),
-                    owner,
-                    false,
-                )
-            }
-            _ => None,
-        };
-        let batch_rename_native_owner =
-            self.batch_rename_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let batch_rename_confirmation_native_owner = self
-            .batch_rename_confirmation_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        if !batch_rename_native_owner
-            && let Some(focused) = ctx.memory(|memory| memory.focused())
-            && ctx.read_response(focused).is_some_and(|response| {
-                Some(response.layer_id)
-                    == crate::gui::jump_mode::ui::NavigationDialogKind::BatchRename.layer_id()
-            })
-        {
-            ctx.memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        let batch_rename_commands = self.batch_rename_dialog.ui_with_jump_mode(
-            &ctx,
-            batch_rename_scope.as_ref(),
-            batch_rename_confirmation_scope.as_ref(),
-            batch_rename_owner,
-            batch_rename_native_owner,
-            batch_rename_confirmation_native_owner,
-            first_ui_pass,
-            batch_rename_parent_instance,
-            &batch_rename_runtime,
-        );
-        if first_ui_pass {
-            for command in batch_rename_commands {
-                self.handle_batch_rename_ui_command(command);
-            }
-        }
+        self.show_batch_rename_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         // Batch Rename may have changed the visible foreground earlier this pass,
         // so Search & Replace must resolve its owner immediately before drawing.
         let search_replace_owner =
@@ -11744,6 +11774,14 @@ impl LauncherApp {
         }
         self.complete_mouse_settings_hosts(ctx);
         self.complete_file_search_host(ctx);
+        if let Some(completion) = self.batch_rename_host.complete(ctx, &mut self.batch_rename_dialog) {
+            for command in completion.commands {
+                self.handle_batch_rename_ui_command(command);
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
         if self.diff_dialog.on_host_frame_complete(ctx) {
             effects.push(RootDialogEffect::ShowRoot);
         }
@@ -12125,6 +12163,7 @@ impl eframe::App for LauncherApp {
             || self.markdown_studio_dialog.needs_root_ui_when_hidden()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
+            || self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open)
             || self
                 .recording_dialog
                 .needs_root_ui_when_hidden(&self.recording_controller)
@@ -44315,6 +44354,7 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
+                    file_operation_layers: [None; 2],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 },
             ),
@@ -44425,6 +44465,140 @@ mod tests {
             batch_rename_test_frame(ctx, &mut app, Vec::new());
         }
         (workspace, app, root, root_guard)
+    }
+
+    #[test]
+    fn batch_rename_real_host_buttons_retain_the_same_verified_preview() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app, root, _files) = prepare_batch_rename_generated_fixture(&ctx);
+        let entry = app
+            .batch_rename_dialog
+            .test_prepare_ready_apply_preview()
+            .expect("verified selected preview");
+        let session = app.batch_rename_dialog.jump_mode_target_generation();
+        let screen = egui::vec2(1440.0, 1100.0);
+        let root_frame = |app: &mut LauncherApp, events, discard| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, discard, screen)
+                .drop_without_applying_deltas();
+        };
+        root_frame(&mut app, Vec::new(), false);
+        let (button, clip, enabled) = app.batch_rename_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(button));
+        assert_eq!(ctx.layer_id_at(button.center()), app.batch_rename_host.root_layer());
+        root_frame(&mut app, tool_dialog_pointer_events(button, true), false);
+        root_frame(&mut app, tool_dialog_pointer_events(button, false), true);
+        assert!(app.batch_rename_host.root_layer().is_some());
+        root_frame(&mut app, Vec::new(), false);
+        let (button, clip, enabled) = app.batch_rename_host.test_button.expect("fresh Pop Out");
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            root_frame(&mut app, tool_dialog_pointer_events(button, pressed), false);
+        }
+        assert!(app.batch_rename_host.root_layer().is_none());
+        root_frame(
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let viewport = crate::gui::batch_rename_window_host::test_viewport(session);
+        let detached_frame = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                let output = app.run_root_frame_for_test(&ctx, actual_query_input(false), false).0;
+                assert!(
+                    output.viewport_output.contains_key(&viewport)
+                        || app.batch_rename_host.root_layer().is_some()
+                );
+                output.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..3 {
+            detached_frame(&mut app, Vec::new());
+        }
+        assert_eq!(app.batch_rename_dialog.jump_mode_target_generation(), session);
+        assert!(app.batch_rename_dialog.has_accepted_snapshot());
+        assert!(app.batch_rename_dialog.test_is_selected(entry));
+        let (button, clip, enabled) = app.batch_rename_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            detached_frame(&mut app, tool_dialog_pointer_events(button, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.batch_rename_host.root_layer().is_some());
+        assert_eq!(app.batch_rename_dialog.jump_mode_target_generation(), session);
+        assert!(app.batch_rename_dialog.has_accepted_snapshot());
+        assert!(app.batch_rename_dialog.test_is_selected(entry));
+        assert!(root.join("alpha.txt").is_file() && root.join("beta.txt").is_file());
+    }
+
+    #[test]
+    fn batch_rename_detached_confirmation_requires_a_retained_owner_pass() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app, root, _files) = prepare_batch_rename_generated_fixture(&ctx);
+        let entry = app.batch_rename_dialog.test_prepare_ready_apply_preview().unwrap();
+        let session = app.batch_rename_dialog.jump_mode_target_generation();
+        batch_rename_test_frame(&ctx, &mut app, Vec::new());
+        let (button, clip, enabled) = app.batch_rename_host.test_button.unwrap();
+        assert!(enabled && clip.contains_rect(button));
+        for pressed in [true, false] {
+            batch_rename_test_frame(&ctx, &mut app, tool_dialog_pointer_events(button, pressed));
+        }
+        assert!(app.batch_rename_host.root_layer().is_none());
+        batch_rename_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::batch_rename_window_host::test_viewport(session);
+        let frame = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        app.batch_rename_dialog.test_reveal_apply_target();
+        for _ in 0..4 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let apply = app.batch_rename_host
+            .test_native_target("Apply selected renames")
+            .expect("visible native Apply");
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(apply, pressed), false);
+        }
+        let confirmation = app.batch_rename_dialog.jump_mode_pending_confirmation_identity()
+            .expect("the native Apply opens its own confirmation");
+        for _ in 0..4 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let confirm = app.batch_rename_host.test_native_target("Confirm batch rename")
+            .expect("visible exact native confirmation");
+        frame(&mut app, tool_dialog_pointer_events(confirm, true), false);
+        frame(&mut app, tool_dialog_pointer_events(confirm, false), true);
+        assert_eq!(app.batch_rename_dialog.jump_mode_pending_confirmation_identity(), Some(confirmation));
+        assert!(app.batch_rename_runtime_snapshot().receipts.is_empty());
+        assert!(root.join("alpha.txt").is_file() && root.join("beta.txt").is_file());
+        for _ in 0..3 {
+            frame(&mut app, Vec::new(), false);
+        }
+        let cancel = app.batch_rename_host.test_native_target("Cancel batch rename")
+            .expect("native confirmation still owns Cancel");
+        for pressed in [true, false] {
+            frame(&mut app, tool_dialog_pointer_events(cancel, pressed), false);
+        }
+        assert!(app.batch_rename_dialog.jump_mode_pending_confirmation_identity().is_none());
+        assert!(app.batch_rename_dialog.test_is_selected(entry));
+        assert!(app.batch_rename_runtime_snapshot().receipts.is_empty());
     }
 
     fn batch_rename_target_by_label(
@@ -46095,6 +46269,7 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
+                    file_operation_layers: [None; 2],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
@@ -48663,6 +48838,7 @@ mod tests {
                     dashboard_editor_layer: None,
                     mouse_form_layers: [None; 3],
                     file_search_layer: None,
+                    file_operation_layers: [None; 2],
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),

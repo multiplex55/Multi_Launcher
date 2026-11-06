@@ -5,6 +5,7 @@ mod add_action_dialog;
 mod add_bookmark_dialog;
 mod alias_dialog;
 mod batch_rename_dialog;
+mod batch_rename_window_host;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calculation_pad_dialog;
@@ -1250,6 +1251,7 @@ pub struct LauncherApp {
     pub diff_dialog: DiffDialogState,
     file_search_coordinator: SearchCoordinator,
     batch_rename_dialog: BatchRenameDialogState,
+    batch_rename_host: batch_rename_window_host::BatchRenameWindowHost,
     batch_rename_coordinator: Option<crate::file_operations::RenameScanCoordinator>,
     search_replace_dialog: SearchReplaceDialogState,
     replace_search_coordinator: Option<crate::search_replace::SearchCoordinator>,
@@ -2348,6 +2350,7 @@ impl LauncherApp {
     }
 
     fn end_batch_rename_session(&mut self) {
+        self.batch_rename_host.retire(&self.egui_ctx);
         if let Some(coordinator) = self.batch_rename_coordinator.as_ref() {
             coordinator.cancel_operation();
         }
@@ -3892,6 +3895,7 @@ impl LauncherApp {
             file_search_host: Default::default(),
             file_search_coordinator: SearchCoordinator::from_settings(file_search_settings),
             batch_rename_dialog: BatchRenameDialogState::default(),
+            batch_rename_host: Default::default(),
             batch_rename_coordinator: None,
             search_replace_dialog: SearchReplaceDialogState::default(),
             replace_search_coordinator: None,
@@ -4829,6 +4833,7 @@ impl LauncherApp {
         match panel {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
+            Panel::BatchRenameDialog => self.batch_rename_host.root_layer().is_some(),
             Panel::MouseGesturesDialog => self.mouse_gestures_host
                 .root_layer(mouse_form_host::MOUSE_GESTURES).is_some(),
             Panel::MouseSettingsDialog => self.mouse_settings_host.root_layer(mouse_form_host::MOUSE_SETTINGS).is_some(),
@@ -4885,6 +4890,19 @@ impl LauncherApp {
 
     pub fn get_screenshot_use_editor(&self) -> bool {
         self.screenshot_use_editor
+    }
+
+    fn close_front_dialog_from_root_input(&mut self) -> bool {
+        if !self.pin_list_open
+            && !self.ocr_surface_visible()
+            && self.panel_stack.iter().rev()
+                .find(|panel| self.panel_has_root_presentation(**panel))
+                == Some(&Panel::BatchRenameDialog)
+        {
+            // Batch Rename stages keyboard close in its exact owner pass.
+            return false;
+        }
+        self.close_front_dialog()
     }
 
     /// Close the top-most open dialog if any is visible.
@@ -5767,6 +5785,9 @@ impl LauncherApp {
                 self.file_search_dialog.open();
             }
             self.file_search_host.request_focus();
+        } else if panel == Panel::BatchRenameDialog {
+            self.batch_rename_dialog.open();
+            self.batch_rename_host.request_focus();
         } else if panel == Panel::MouseGesturesDialog {
             self.mouse_gestures_dialog.open();
             self.mouse_gestures_host.request_focus();
