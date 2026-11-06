@@ -2705,6 +2705,7 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut open = d.action_catalog_visible;
     let mut close_clicked = false;
     egui::Window::new("Add Action")
+        .enabled(d.host_child_input_allowed())
         .default_width(520.0)
         .show_utility(
             ctx,

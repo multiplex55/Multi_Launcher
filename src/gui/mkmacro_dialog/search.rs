@@ -258,7 +258,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     };
     egui::Window::new(title)
         .id(egui::Id::new("mkmacro_step_search"))
-
+        .enabled(d.host_child_input_allowed())
         .collapsible(false)
         .default_width(if mode == SearchMode::Replace {
             820.0

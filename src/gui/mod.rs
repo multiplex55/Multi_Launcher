@@ -4799,6 +4799,7 @@ impl LauncherApp {
         match panel {
             Panel::NotesDialog => !self.notes_dialog.is_popped_out(),
             Panel::MarkdownStudioDialog => !self.markdown_studio_dialog.is_popped_out(),
+            Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root().is_some(),
             Panel::NotePanel => self
                 .note_panels
                 .iter()
@@ -4993,9 +4994,9 @@ impl LauncherApp {
                 self.panel_states.macro_dialog = false;
             }
             Panel::MkMacroDialog => {
-                self.mkmacro_dialog.action_editor.cancel();
-                self.mkmacro_dialog.open = false;
-                self.panel_states.mkmacro_dialog = false;
+                self.mkmacro_dialog.request_close();
+                self.panel_stack.insert(panel_index, Panel::MkMacroDialog);
+                self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
             Panel::MouseGesturesDialog => {
                 self.mouse_gestures_dialog.open = false;
@@ -5317,8 +5318,7 @@ impl LauncherApp {
                 self.panel_states.macro_dialog = false;
             }
             Panel::MkMacroDialog => {
-                self.mkmacro_dialog.action_editor.cancel();
-                self.mkmacro_dialog.open = false;
+                self.mkmacro_dialog.force_close(&self.egui_ctx);
                 self.panel_states.mkmacro_dialog = false;
             }
             Panel::MouseGesturesDialog => {
@@ -5589,7 +5589,11 @@ impl LauncherApp {
             Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
-            Panel::MkMacroDialog => self.mkmacro_dialog.open(),
+            Panel::MkMacroDialog => {
+                if !self.mkmacro_dialog.open {
+                    self.mkmacro_dialog.open();
+                }
+            }
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
             Panel::MouseSettingsDialog => self.open_mouse_settings_dialog(),
@@ -5688,6 +5692,8 @@ impl LauncherApp {
             self.date_time_studio_dialog.open();
         } else if panel == Panel::NotesDialog {
             self.notes_dialog.open();
+        } else if panel == Panel::MkMacroDialog {
+            self.mkmacro_dialog.open();
         } else if panel == Panel::DiagramStudioDialog {
             self.diagram_studio_dialog.open();
         } else if panel == Panel::MarkdownStudioDialog {

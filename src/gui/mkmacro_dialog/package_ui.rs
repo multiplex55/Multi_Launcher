@@ -10,7 +10,25 @@ use crate::{
 use eframe::egui;
 use std::{collections::BTreeSet, fs};
 
-#[derive(Default)]
+#[derive(Clone)]
+pub(super) enum PackageHostAction {
+    ExportSelected {
+        root: u64,
+        default_name: String,
+    },
+    Import,
+    ExportLibrary {
+        roots: Vec<u64>,
+    },
+    ApplyPlan(PackageImportPlan),
+    SaveTemplate {
+        macro_id: u64,
+        name: String,
+        description: String,
+    },
+}
+
+#[derive(Clone, Default)]
 pub(super) struct PackageUiState {
     modal: Option<PackageModal>,
     #[cfg(test)]
@@ -21,6 +39,7 @@ pub(super) struct PackageUiState {
     test_close_response: Option<(egui::Id, egui::Rect)>,
 }
 
+#[derive(Clone)]
 enum PackageModal {
     ExportLibrary {
         roots: BTreeSet<u64>,
@@ -54,6 +73,9 @@ impl PackageUiState {
 pub(super) fn show_toolbar_menu(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
     let selected = dialog.selected_macro_id;
     ui.menu_button("Reuse", |ui| {
+        if !dialog.host_child_input_allowed() {
+            ui.disable();
+        }
         if ui
             .add_enabled(
                 selected.is_some(),
@@ -61,7 +83,19 @@ pub(super) fn show_toolbar_menu(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
             )
             .clicked()
         {
-            export_selected(dialog);
+            if dialog.defer_host_effects {
+                if let Some(root) = selected {
+                    let default_name = dialog
+                        .selected_macro()
+                        .map(|macro_| package_filename(&macro_.name))
+                        .unwrap_or_else(|| "macro.mkmacro".into());
+                    dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                        PackageHostAction::ExportSelected { root, default_name },
+                    ));
+                }
+            } else {
+                export_selected(dialog);
+            }
             ui.close();
         }
         if ui
@@ -77,7 +111,13 @@ pub(super) fn show_toolbar_menu(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
             ui.close();
         }
         if ui.button("Import Library…").clicked() {
-            begin_import(dialog);
+            if dialog.defer_host_effects {
+                dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                    PackageHostAction::Import,
+                ));
+            } else {
+                begin_import(dialog);
+            }
             ui.close();
         }
         ui.separator();
@@ -262,6 +302,7 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
     };
     egui::Window::new(modal.title())
         .id(egui::Id::new("mkmacro_package_modal"))
+        .enabled(dialog.host_child_input_allowed())
         .collapsible(false)
         .resizable(true)
         .default_width(520.0)
@@ -343,38 +384,57 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
                 PackageModal::ExportLibrary { roots } => {
                     if ui.add_enabled(!roots.is_empty(), egui::Button::new("Export…")).clicked() {
                         let root_ids = roots.iter().copied().collect::<Vec<_>>();
-                        if let Some(path) = rfd::FileDialog::new()
+                        if dialog.defer_host_effects {
+                            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                                PackageHostAction::ExportLibrary { roots: root_ids },
+                            ));
+                        } else if let Some(path) = rfd::FileDialog::new()
                             .add_filter("MkMacro package", &["mkmacro"])
                             .set_file_name("macro-library.mkmacro")
                             .save_file()
                         {
                             let result = export_package(&dialog.store, &dialog.draft, &root_ids)
                                 .and_then(|bytes| save_atomic(&path, &bytes));
-                            if result.is_ok() {
-                                keep = false;
-                            }
+                            if result.is_ok() { keep = false; }
                             report(dialog, result.map(|_| ()), "export library");
                         }
                     }
                     if ui.button("Cancel").clicked() { keep = false; }
                 }
                 PackageModal::ImportPreview { plan, .. } => {
-                    if ui.button("Apply Import").clicked() && apply_plan(dialog, plan).is_ok() {
-                        keep = false;
+                    if ui.button("Apply Import").clicked() {
+                        if dialog.defer_host_effects {
+                            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                                PackageHostAction::ApplyPlan(plan.clone()),
+                            ));
+                        } else if apply_plan(dialog, plan).is_ok() {
+                            keep = false;
+                        }
                     }
                     if ui.button("Cancel").clicked() { keep = false; }
                 }
                 PackageModal::SaveTemplate { name, description } => {
                     let enabled = !name.trim().is_empty() && dialog.selected_macro_id.is_some();
                     if ui.add_enabled(enabled, egui::Button::new("Save Template")).clicked() {
-                        let result = dialog.store.save_macro_template(
-                            &dialog.draft,
-                            dialog.selected_macro_id.unwrap(),
-                            name,
-                            description,
-                        );
-                        if result.is_ok() { keep = false; }
-                        report(dialog, result.map(|_| ()), "save template");
+                        let macro_id = dialog.selected_macro_id.unwrap();
+                        if dialog.defer_host_effects {
+                            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                                PackageHostAction::SaveTemplate {
+                                    macro_id,
+                                    name: name.clone(),
+                                    description: description.clone(),
+                                },
+                            ));
+                        } else {
+                            let result = dialog.store.save_macro_template(
+                                &dialog.draft,
+                                macro_id,
+                                name,
+                                description,
+                            );
+                            if result.is_ok() { keep = false; }
+                            report(dialog, result.map(|_| ()), "save template");
+                        }
                     }
                     if ui.button("Cancel").clicked() { keep = false; }
                 }
@@ -394,10 +454,15 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
                                 Err(error) => dialog.command_error = Some(format!("Could not preview template: {error}")),
                             }
                         }
-                    } else if ui.button("Create Independent Copy").clicked()
-                        && apply_plan(dialog, preview.as_ref().unwrap()).is_ok()
-                    {
-                        keep = false;
+                    } else if ui.button("Create Independent Copy").clicked() {
+                        let plan = preview.as_ref().unwrap();
+                        if dialog.defer_host_effects {
+                            dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Package(
+                                PackageHostAction::ApplyPlan(plan.clone()),
+                            ));
+                        } else if apply_plan(dialog, plan).is_ok() {
+                            keep = false;
+                        }
                     }
                     if ui.button("Cancel").clicked() { keep = false; }
                 }
@@ -419,6 +484,140 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
     }
     if open && keep {
         dialog.package_ui.modal = Some(modal);
+    }
+}
+
+pub(super) fn host_action_is_current(dialog: &MkMacroDialog, action: &PackageHostAction) -> bool {
+    match action {
+        PackageHostAction::ExportSelected { root, .. } => {
+            dialog.selected_macro_id == Some(*root)
+                && dialog.draft.macros.iter().any(|macro_| macro_.id == *root)
+        }
+        PackageHostAction::Import => true,
+        PackageHostAction::ExportLibrary { roots } => {
+            !roots.is_empty()
+                && roots
+                    .iter()
+                    .all(|root| dialog.draft.macros.iter().any(|macro_| macro_.id == *root))
+        }
+        PackageHostAction::ApplyPlan(_) => matches!(
+            &dialog.package_ui.modal,
+            Some(PackageModal::ImportPreview { .. } | PackageModal::Templates { .. })
+        ),
+        PackageHostAction::SaveTemplate { macro_id, .. } => {
+            dialog.selected_macro_id == Some(*macro_id)
+                && dialog
+                    .draft
+                    .macros
+                    .iter()
+                    .any(|macro_| macro_.id == *macro_id)
+        }
+    }
+}
+
+pub(super) fn complete_host_action(
+    dialog: &mut MkMacroDialog,
+    action: PackageHostAction,
+) -> anyhow::Result<()> {
+    match action {
+        PackageHostAction::ExportSelected { root, default_name } => {
+            let Some(picker) = owned_file_dialog(dialog)? else {
+                return Ok(());
+            };
+            let Some(path) = picker
+                .add_filter("MkMacro package", &["mkmacro"])
+                .set_file_name(&default_name)
+                .save_file()
+            else {
+                return Ok(());
+            };
+            export_package(&dialog.store, &dialog.draft, &[root])
+                .and_then(|bytes| save_atomic(&path, &bytes))?;
+            Ok(())
+        }
+        PackageHostAction::Import => {
+            let Some(picker) = owned_file_dialog(dialog)? else {
+                return Ok(());
+            };
+            let Some(path) = picker
+                .add_filter("MkMacro package", &["mkmacro", "json"])
+                .pick_file()
+            else {
+                return Ok(());
+            };
+            let bytes = fs::read(&path)?;
+            let plan = plan_package_import(
+                &dialog.store,
+                &bytes,
+                &dialog.draft,
+                dialog.draft_revision,
+                &dialog.baseline,
+            )?;
+            dialog.package_ui.modal = Some(PackageModal::ImportPreview {
+                source: path.display().to_string(),
+                plan,
+            });
+            dialog.command_error = None;
+            Ok(())
+        }
+        PackageHostAction::ExportLibrary { roots } => {
+            let Some(picker) = owned_file_dialog(dialog)? else {
+                return Ok(());
+            };
+            let Some(path) = picker
+                .add_filter("MkMacro package", &["mkmacro"])
+                .set_file_name("macro-library.mkmacro")
+                .save_file()
+            else {
+                return Ok(());
+            };
+            export_package(&dialog.store, &dialog.draft, &roots)
+                .and_then(|bytes| save_atomic(&path, &bytes))?;
+            dialog.package_ui.close();
+            Ok(())
+        }
+        PackageHostAction::ApplyPlan(plan) => {
+            apply_plan(dialog, &plan)?;
+            dialog.package_ui.close();
+            Ok(())
+        }
+        PackageHostAction::SaveTemplate {
+            macro_id,
+            name,
+            description,
+        } => {
+            dialog
+                .store
+                .save_macro_template(&dialog.draft, macro_id, &name, &description)?;
+            dialog.package_ui.close();
+            Ok(())
+        }
+    }
+}
+
+fn owned_file_dialog(dialog: &MkMacroDialog) -> anyhow::Result<Option<rfd::FileDialog>> {
+    #[cfg(windows)]
+    {
+        let Some((ctx, identity)) = dialog.picker_owner.as_ref() else {
+            anyhow::bail!(
+                "Could not identify the MkMacro window for the file dialog. Focus the editor and try again."
+            );
+        };
+        let hwnd = crate::gui::utility_dialog_size::utility_picker_hwnd(ctx, *identity)
+            .and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize));
+        let Some(hwnd) = hwnd else {
+            anyhow::bail!(
+                "The MkMacro window is not ready to own the file dialog. Focus the editor and try again."
+            );
+        };
+        Ok(Some(rfd::FileDialog::new().set_parent(
+            &crate::gui::add_action_dialog::NativeDialogParent(hwnd),
+        )))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dialog;
+        Ok(Some(rfd::FileDialog::new()))
     }
 }
 

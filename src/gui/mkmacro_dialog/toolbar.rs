@@ -104,7 +104,8 @@ pub fn decide(
     }
 }
 pub fn state(dialog: &MkMacroDialog) -> ToolbarState {
-    let runtime = crate::mkmacro::runtime::snapshot()
+    let runtime = dialog
+        .host_runtime_snapshot()
         .map(|s| s.state)
         .unwrap_or(RuntimeState::Idle);
     decide(
@@ -113,10 +114,96 @@ pub fn state(dialog: &MkMacroDialog) -> ToolbarState {
         dialog.selection.ids.len(),
     )
 }
+
+fn recorder_target(dialog: &MkMacroDialog) -> Option<crate::mkmacro::RecordingTarget> {
+    crate::mkmacro::runtime::recorder_snapshot()
+        .and_then(|snapshot| snapshot.macro_id)
+        .map(|macro_id| crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        })
+        .or_else(|| dialog.recording_target())
+}
 fn report(dialog: &mut MkMacroDialog, result: anyhow::Result<()>) {
     if let Err(e) = result {
         dialog.command_error = Some(e.to_string());
     }
+}
+
+fn show_host_presentation(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
+    if !dialog.defer_host_effects {
+        return;
+    }
+    let (button, requested) = crate::gui::utility_host::presentation_button(
+        ui,
+        dialog.host_state.presentation(),
+        dialog.host_controls_allowed,
+    );
+    #[cfg(test)]
+    {
+        dialog.test_host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
+    }
+    if button.clicked() {
+        dialog.stage_host_presentation(requested);
+    }
+}
+
+fn request_run(
+    dialog: &mut MkMacroDialog,
+    debug: bool,
+    selection: super::RunSelection,
+) -> anyhow::Result<()> {
+    if dialog.defer_host_effects {
+        dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Run { debug, selection });
+        return Ok(());
+    }
+    match (debug, selection) {
+        (false, super::RunSelection::Whole) => dialog.run_selected_macro(),
+        (true, super::RunSelection::Whole) => dialog.debug_selected_macro(),
+        (false, super::RunSelection::From(step)) => dialog.run_from_step(step),
+        (true, super::RunSelection::From(step)) => dialog.debug_from_step(step),
+        (false, super::RunSelection::Selected) => dialog.run_selected_steps(),
+        (true, super::RunSelection::Selected) => dialog.debug_selected_steps(),
+    }
+}
+
+fn request_playback(dialog: &mut MkMacroDialog, command: super::PlaybackCommand) {
+    if dialog.defer_host_effects {
+        dialog.stage_host_playback_action(command);
+        return;
+    }
+    let result = match command {
+        super::PlaybackCommand::Pause => crate::mkmacro::runtime::pause(),
+        super::PlaybackCommand::Resume => crate::mkmacro::runtime::resume(),
+        super::PlaybackCommand::Stop => crate::mkmacro::runtime::stop(),
+    };
+    report(dialog, result);
+}
+
+fn request_recorder(
+    dialog: &mut MkMacroDialog,
+    command: super::RecorderCommand,
+    target: crate::mkmacro::RecordingTarget,
+    expected_state: RecorderRuntimeState,
+) {
+    if dialog.defer_host_effects {
+        dialog.stage_host_recorder_action(command, target, expected_state);
+        return;
+    }
+    let result = match command {
+        super::RecorderCommand::Record => crate::mkmacro::runtime::record_target(
+            target,
+            crate::mkmacro::NormalizationConfig::from(&dialog.draft.settings.recorder),
+        ),
+        super::RecorderCommand::Pause => crate::mkmacro::runtime::record_pause(),
+        super::RecorderCommand::Resume => crate::mkmacro::runtime::record_resume(),
+        super::RecorderCommand::Marker => crate::mkmacro::runtime::record_marker(),
+        super::RecorderCommand::StopForReview => {
+            crate::mkmacro::runtime::request_record_stop_for_review().map(|_| ())
+        }
+    };
+    report(dialog, result);
 }
 pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
     let mut visual_order = 0;
@@ -131,11 +218,13 @@ pub(super) fn show_with_jump_mode(
 ) {
     process_recorder_hotkey_capture(ui.ctx(), dialog);
     if dialog.recording_annotation_open {
+        show_host_presentation(ui, dialog);
         show_recording_annotation(ui.ctx(), dialog);
         return;
     }
     let state = state(dialog);
     ui.horizontal_wrapped(|ui| {
+        show_host_presentation(ui, dialog);
         let refresh = ui
             .button("Refresh checks")
             .on_hover_text("Check external image files and connected monitors");
@@ -154,7 +243,12 @@ pub(super) fn show_with_jump_mode(
         let save_button = ui.button("Save");
         let save = widgets::with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
         if save.clicked() {
-            let result = dialog.save();
+            let result = if dialog.defer_host_effects {
+                dialog.stage_host_toolbar_action(super::MkMacroHostActionKind::Save);
+                Ok(())
+            } else {
+                dialog.save()
+            };
             report(dialog, result);
         }
         ui.add_enabled_ui(
@@ -236,8 +330,12 @@ pub(super) fn show_with_jump_mode(
         } else {
             let run_button = ui.button("Run");
             let run = widgets::with_button_emphasis(ui, run_button, ButtonEmphasis::Primary);
+            #[cfg(test)]
+            {
+                dialog.test_run_button = Some((run.rect, ui.clip_rect(), run.enabled()));
+            }
             if run.clicked() {
-                let result = dialog.run_selected_macro();
+                let result = request_run(dialog, false, super::RunSelection::Whole);
                 report(dialog, result);
             }
         }
@@ -257,7 +355,7 @@ pub(super) fn show_with_jump_mode(
                 response
             };
             if response.clicked() {
-                let result = dialog.debug_selected_macro();
+                let result = request_run(dialog, true, super::RunSelection::Whole);
                 report(dialog, result);
             }
 
@@ -275,7 +373,7 @@ pub(super) fn show_with_jump_mode(
             if response.clicked()
                 && let Some(id) = dialog.selection.ids.iter().next().copied()
             {
-                let result = dialog.debug_from_step(id);
+                let result = request_run(dialog, true, super::RunSelection::From(id));
                 report(dialog, result);
             }
 
@@ -289,7 +387,7 @@ pub(super) fn show_with_jump_mode(
                 response
             };
             if response.clicked() {
-                let result = dialog.debug_selected_steps();
+                let result = request_run(dialog, true, super::RunSelection::Selected);
                 report(dialog, result);
             }
         });
@@ -300,7 +398,7 @@ pub(super) fn show_with_jump_mode(
             )
             .clicked()
         {
-            report(dialog, crate::mkmacro::runtime::pause());
+            request_playback(dialog, super::PlaybackCommand::Pause);
         }
         if ui
             .add_enabled(
@@ -309,7 +407,7 @@ pub(super) fn show_with_jump_mode(
             )
             .clicked()
         {
-            report(dialog, crate::mkmacro::runtime::resume());
+            request_playback(dialog, super::PlaybackCommand::Resume);
         }
         let stop_button = ui.add_enabled(
             state.command_enabled(ToolbarCommand::Stop),
@@ -317,7 +415,7 @@ pub(super) fn show_with_jump_mode(
         );
         let stop = widgets::with_button_emphasis(ui, stop_button, ButtonEmphasis::Destructive);
         if stop.clicked() {
-            report(dialog, crate::mkmacro::runtime::stop());
+            request_playback(dialog, super::PlaybackCommand::Stop);
         }
         let response = ui.add_enabled(
             state.command_enabled(ToolbarCommand::RunFrom),
@@ -331,7 +429,7 @@ pub(super) fn show_with_jump_mode(
         if response.clicked()
             && let Some(id) = dialog.selection.ids.iter().next().copied()
         {
-            let result = dialog.run_from_step(id);
+            let result = request_run(dialog, false, super::RunSelection::From(id));
             report(dialog, result)
         }
         let response = ui.add_enabled(
@@ -344,7 +442,7 @@ pub(super) fn show_with_jump_mode(
             response
         };
         if response.clicked() {
-            let result = dialog.run_selected_steps();
+            let result = request_run(dialog, false, super::RunSelection::Selected);
             report(dialog, result);
         }
         if ui
@@ -397,12 +495,11 @@ pub(super) fn show_with_jump_mode(
             .clicked()
             && let Some(target) = dialog.recording_target()
         {
-            report(
+            request_recorder(
                 dialog,
-                crate::mkmacro::runtime::record_target(
-                    target,
-                    crate::mkmacro::NormalizationConfig::from(&dialog.draft.settings.recorder),
-                ),
+                super::RecorderCommand::Record,
+                target,
+                RecorderRuntimeState::Idle,
             );
         }
         ui.menu_button("Record Options", |ui| {
@@ -475,7 +572,14 @@ pub(super) fn show_with_jump_mode(
                         .add_enabled(controls.pause, eframe::egui::Button::new("Pause Recording"))
                         .clicked()
                     {
-                        report(dialog, crate::mkmacro::runtime::record_pause())
+                        if let Some(target) = recorder_target(dialog) {
+                            request_recorder(
+                                dialog,
+                                super::RecorderCommand::Pause,
+                                target,
+                                recorder_state,
+                            );
+                        }
                     }
                 }
                 RecorderRuntimeState::Paused
@@ -486,7 +590,14 @@ pub(super) fn show_with_jump_mode(
                         )
                         .clicked() =>
                 {
-                    report(dialog, crate::mkmacro::runtime::record_resume())
+                    if let Some(target) = recorder_target(dialog) {
+                        request_recorder(
+                            dialog,
+                            super::RecorderCommand::Resume,
+                            target,
+                            recorder_state,
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -494,21 +605,38 @@ pub(super) fn show_with_jump_mode(
                 .add_enabled(controls.marker, eframe::egui::Button::new("Marker"))
                 .clicked()
             {
-                report(dialog, crate::mkmacro::runtime::record_marker());
+                if let Some(target) = recorder_target(dialog) {
+                    request_recorder(
+                        dialog,
+                        super::RecorderCommand::Marker,
+                        target,
+                        recorder_state,
+                    );
+                }
             }
             if ui
                 .add_enabled(controls.annotate, eframe::egui::Button::new("Annotate"))
                 .clicked()
             {
-                let result = dialog.begin_recording_annotation();
-                report(dialog, result);
+                if dialog.defer_host_effects {
+                    dialog.stage_host_annotation_begin(recorder_state, rec.macro_id);
+                } else {
+                    let result = dialog.begin_recording_annotation();
+                    report(dialog, result);
+                }
             }
             if ui
                 .add_enabled(controls.stop, eframe::egui::Button::new("Stop Recording"))
                 .clicked()
             {
-                let result = dialog.stop_recording_for_review();
-                report(dialog, result);
+                if let Some(target) = recorder_target(dialog) {
+                    request_recorder(
+                        dialog,
+                        super::RecorderCommand::StopForReview,
+                        target,
+                        recorder_state,
+                    );
+                }
             }
         });
     }
@@ -548,19 +676,36 @@ fn show_recording_annotation(ctx: &eframe::egui::Context, dialog: &mut MkMacroDi
     if !dialog.recording_annotation_open {
         return;
     }
-    if crate::mkmacro::runtime::recorder_snapshot().is_none_or(|snapshot| {
-        matches!(
-            snapshot.state,
-            RecorderRuntimeState::Idle | RecorderRuntimeState::Stopping
-        )
-    }) {
-        let _ = dialog.finish_recording_annotation(false);
+    let recorder_snapshot = crate::mkmacro::runtime::recorder_snapshot();
+    let recorder_state = recorder_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.state)
+        .unwrap_or(RecorderRuntimeState::Idle);
+    if matches!(
+        recorder_state,
+        RecorderRuntimeState::Idle | RecorderRuntimeState::Stopping
+    ) {
+        if dialog.defer_host_effects {
+            dialog.stage_host_annotation_finish(
+                false,
+                dialog.recording_annotation_text.clone(),
+                recorder_state,
+                dialog.recording_annotation_target,
+            );
+        } else {
+            let _ = dialog.finish_recording_annotation(false);
+        }
         return;
     }
     let mut open = true;
     let mut save = false;
     let mut cancel = false;
+    let input_allowed = dialog.host_child_input_allowed();
     eframe::egui::Window::new("Recording annotation")
+        .id(super::mkmacro_recording_annotation_id(
+            dialog.owner_instance,
+        ))
+        .enabled(input_allowed)
         .collapsible(false)
         .resizable(false)
         .open(&mut open)
@@ -578,9 +723,21 @@ fn show_recording_annotation(ctx: &eframe::egui::Context, dialog: &mut MkMacroDi
                 cancel = ui.button("Cancel").clicked();
             });
         });
-    if save || cancel || !open {
-        let result = dialog.finish_recording_annotation(save);
-        report(dialog, result);
+    if input_allowed && (save || cancel || !open) {
+        if dialog.defer_host_effects {
+            dialog.stage_host_annotation_finish(
+                save,
+                dialog.recording_annotation_text.clone(),
+                recorder_state,
+                recorder_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.macro_id)
+                    .or(dialog.recording_annotation_target),
+            );
+        } else {
+            let result = dialog.finish_recording_annotation(save);
+            report(dialog, result);
+        }
     }
 }
 

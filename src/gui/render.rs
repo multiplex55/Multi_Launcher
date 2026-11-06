@@ -2122,7 +2122,7 @@ impl LauncherApp {
             }
             Panel::HashGeneratorDialog => middle(egui::Id::new("hash_generator_dialog")),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
-            Panel::MkMacroDialog => Some(crate::gui::jump_mode::ui::mkmacro_dialog_layer_id()),
+            Panel::MkMacroDialog => self.mkmacro_dialog.host_layer_if_root(),
             Panel::MouseGesturesDialog => NavigationDialogKind::MouseGestures.layer_id(),
             Panel::MouseGestureSettingsDialog => {
                 NavigationDialogKind::MouseGestureSettings.layer_id()
@@ -4827,7 +4827,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 12] {
+    fn viewport_bootstrap_state(&self) -> [bool; 13] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4841,6 +4841,7 @@ impl LauncherApp {
             self.recording_dialog
                 .needs_compact_viewport_bootstrap(&self.recording_controller),
             self.notes_dialog.needs_root_ui_when_hidden(),
+            self.mkmacro_dialog.needs_root_ui_when_hidden(),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
         ]
     }
@@ -4854,7 +4855,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 12],
+        previously_pending: [bool; 13],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5030,6 +5031,53 @@ impl LauncherApp {
             );
             self.notes_dialog = notes;
         }
+    }
+
+    fn show_mkmacro_editor(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        if !root_visible && !self.mkmacro_dialog.needs_root_ui_when_hidden() {
+            return;
+        }
+        let capture_active = self.coordinate_pick_blocks_other_screen_actions();
+        self.mkmacro_dialog
+            .set_coordinate_capture_active(capture_active);
+        let root_scope = if root_visible {
+            let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+            if let crate::gui::jump_mode::ui::NavigationOwner::MkMacro { instance } = owner {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("mkmacro", instance),
+                    self.mkmacro_dialog.jump_mode_target_generation(),
+                    "mkmacro-dialog",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        let jump_mode_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let close_shortcut_allowed = !self.pinned_panels.contains(&super::Panel::MkMacroDialog);
+        self.mkmacro_dialog.show_with_host(
+            ctx,
+            root_scope,
+            first_ui_pass,
+            application_input_allowed,
+            root_visible,
+            root_input_allowed,
+            close_shortcut_allowed,
+            self.jump_mode_ui.mkmacro_instance(),
+            jump_mode_enabled,
+        );
     }
 
     fn show_note_panels(
@@ -6309,7 +6357,11 @@ impl LauncherApp {
                         | super::Panel::RadialEditor
                 )
             })
-            .any(|panel| self.is_panel_open(panel))
+            .any(|panel| {
+                self.is_panel_open(panel)
+                    && (panel != super::Panel::MkMacroDialog
+                        || self.mkmacro_dialog.host_layer_if_root().is_some())
+            })
     }
 
     fn jump_mode_navigation_owner_candidate(
@@ -6470,8 +6522,8 @@ impl LauncherApp {
                     .then_some(self.jump_mode_ui.paste_sequence_instance()),
                 mkmacro: self
                     .mkmacro_dialog
-                    .open
-                    .then_some(self.jump_mode_ui.mkmacro_instance()),
+                    .host_layer_if_root()
+                    .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
                 dialogs: NavigationDialogKind::ALL.map(|kind| {
                     let current = self.jump_mode_ui.dialog_instance(kind);
                     if kind == NavigationDialogKind::RegexTester {
@@ -7151,6 +7203,7 @@ impl LauncherApp {
             self.show_markdown_studio(&ctx, first_ui_pass, false);
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
             self.show_note_panels(&ctx, first_ui_pass, false, None);
+            self.show_mkmacro_editor(&ctx, first_ui_pass, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -8114,6 +8167,7 @@ impl LauncherApp {
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
                     && !self.notes_dialog.owns_root_input(&ctx)
+                    && !self.mkmacro_dialog.owns_root_input(&ctx)
                     && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
@@ -8197,6 +8251,7 @@ impl LauncherApp {
                         .markdown_studio_dialog
                         .owns_root_input(&ctx)
                     && !self.notes_dialog.owns_root_input(&ctx)
+                    && !self.mkmacro_dialog.owns_root_input(&ctx)
                     && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && self.close_front_dialog()
                 {
@@ -9586,74 +9641,7 @@ impl LauncherApp {
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(&ctx, self);
         self.macro_dialog = macro_dlg;
-        self.mkmacro_dialog
-            .set_coordinate_capture_active(self.coordinate_pick_blocks_other_screen_actions());
-        self.mkmacro_dialog.sync_external();
-        let mkmacro_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let mkmacro_scope = match mkmacro_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::MkMacro { instance } => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("mkmacro", instance),
-                    self.mkmacro_dialog.jump_mode_target_generation(),
-                    "mkmacro-dialog",
-                    ctx.viewport_id(),
-                    mkmacro_owner,
-                    false,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::Root
-            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-        };
-        self.mkmacro_dialog
-            .ui_with_jump_mode_synced(&ctx, mkmacro_scope);
-        if first_ui_pass
-            && let Some(preferences) = self
-                .mkmacro_dialog
-                .take_macro_properties_preferences_for_persist()
-        {
-            let settings_path = self.settings_path.clone();
-            if let Err(error) = crate::settings::Settings::update(&settings_path, |settings| {
-                settings.mkmacro_properties = preferences;
-                Ok(())
-            }) {
-                self.report_ui_error(crate::gui::UiErrorEvent::new(
-                    "mkmacro.properties.preferences",
-                    error,
-                ));
-            }
-        }
-        while first_ui_pass && let Some(notice) = self.mkmacro_dialog.take_ui_notice() {
-            if self.enable_toasts {
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: notice.into(),
-                        kind: ToastKind::Info,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-
-                        style: Default::default(),
-                    },
-                );
-            }
-        }
+        self.show_mkmacro_editor(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.crop_dialog.show(&ctx);
         let mouse_gesture_parent_instance = self
             .jump_mode_ui
@@ -11347,6 +11335,44 @@ impl LauncherApp {
         effects
     }
 
+    fn complete_mkmacro_dialog(&mut self, ctx: &egui::Context) {
+        let completion = self.mkmacro_dialog.on_host_frame_complete(ctx);
+        if completion.closed {
+            self.panel_states.mkmacro_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::MkMacroDialog);
+        }
+        if completion.show_root {
+            self.request_launcher_visibility(true);
+        }
+        if let Some(preferences) = completion.persisted_preferences {
+            let settings_path = self.settings_path.clone();
+            if let Err(error) = crate::settings::Settings::update(&settings_path, |settings| {
+                settings.mkmacro_properties = preferences;
+                Ok(())
+            }) {
+                self.report_ui_error(crate::gui::UiErrorEvent::new(
+                    "mkmacro.properties.preferences",
+                    error,
+                ));
+            }
+        }
+        if self.enable_toasts {
+            for notice in completion.notices {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: notice.into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                        style: Default::default(),
+                    },
+                );
+            }
+        }
+    }
+
     fn complete_quick_notes_dialog(&mut self, ctx: &egui::Context) {
         let mut notes = std::mem::take(&mut self.notes_dialog);
         let completion = notes.on_ui_frame_complete(ctx, self);
@@ -11589,6 +11615,7 @@ impl eframe::App for LauncherApp {
         }
         self.complete_markdown_diagram_handoff(_ctx);
         self.complete_quick_notes_dialog(_ctx);
+        self.complete_mkmacro_dialog(_ctx);
         self.regex_tester_dialog.on_ui_frame_complete(_ctx);
         let effects = self.complete_retained_tool_dialogs(_ctx);
         self.dispatch_root_dialog_effects(_ctx, effects);
@@ -11811,6 +11838,7 @@ impl LauncherApp {
         }
         self.complete_markdown_diagram_handoff(ctx);
         self.complete_quick_notes_dialog(ctx);
+        self.complete_mkmacro_dialog(ctx);
         self.regex_tester_dialog.on_ui_frame_complete(ctx);
         let effects = self.complete_retained_tool_dialogs(ctx);
         self.dispatch_root_dialog_effects(ctx, effects);
@@ -16619,6 +16647,48 @@ mod tests {
         assert!(!app.qr_dialog.open);
         assert!(app.markdown_studio_dialog.open);
         assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::MarkdownStudioDialog));
+    }
+
+    #[test]
+    fn root_escape_closes_the_underlying_dialog_and_keeps_detached_mkmacro_live() {
+        use super::super::Panel;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(Panel::QrDialog);
+        app.update_panel_stack();
+        app.focus_panel(Panel::MkMacroDialog);
+        app.update_panel_stack();
+        app.mkmacro_dialog.test_pop_out();
+        assert_eq!(app.panel_stack.last(), Some(&Panel::MkMacroDialog));
+
+        let press_escape = || egui::RawInput {
+            events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            ..actual_query_input(true)
+        };
+        app.run_root_frame_for_test(&ctx, press_escape(), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.qr_dialog.open);
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.mkmacro_dialog.open);
+
+        app.run_root_frame_for_test(&ctx, press_escape(), false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let output = app
+            .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0;
+        assert!(
+            output
+                .viewport_output
+                .contains_key(&app.mkmacro_dialog.test_viewport_id())
+        );
+        assert!(app.mkmacro_dialog.open);
+        output.drop_without_applying_deltas();
     }
 
     #[test]

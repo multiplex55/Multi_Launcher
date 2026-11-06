@@ -437,6 +437,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::RadialDesigner,
                 ..
             } | NavigationOwner::Notes { .. }
+                | NavigationOwner::MkMacro { .. }
                 | NavigationOwner::XmlOverwriteConfirmation { .. }
                 | NavigationOwner::RadialDesignerChild { .. }
         )
@@ -991,7 +992,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) todo: Option<u64>,
     pub(crate) timer: Option<u64>,
     pub(crate) paste_sequence: Option<u64>,
-    pub(crate) mkmacro: Option<u64>,
+    pub(crate) mkmacro: Option<(u64, egui::LayerId)>,
     pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
 }
 
@@ -1080,10 +1081,8 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             windows
                 .paste_sequence
                 .map(|instance| NavigationOwner::PasteSequence { instance })
-        } else if layer == mkmacro_dialog_layer_id() {
-            windows
-                .mkmacro
-                .map(|instance| NavigationOwner::MkMacro { instance })
+        } else if let Some((instance, _)) = windows.mkmacro.filter(|(_, owner)| *owner == layer) {
+            Some(NavigationOwner::MkMacro { instance })
         } else if let Some(kind) = NavigationDialogKind::for_layer(layer) {
             windows
                 .dialog_instance(kind)
@@ -6092,6 +6091,32 @@ mod tests {
             },
         );
         raw
+    }
+
+    #[test]
+    fn jump_mode_mkmacro_native_binding_is_admissible_only_in_its_viewport() {
+        let viewport = egui::ViewportId::from_hash_of("mkmacro owned viewport test");
+        let owner = NavigationOwner::MkMacro { instance: 17 };
+        let binding = NavigationViewportBinding {
+            viewport,
+            owner,
+            base_layer: egui::LayerId::background(),
+        };
+        let ctx = egui::Context::default();
+        ctx.run_ui(viewport_raw_input(viewport), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), binding, None),
+                owner
+            );
+        })
+        .drop_without_applying_deltas();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), binding, None),
+                NavigationOwner::Blocked,
+            );
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]
