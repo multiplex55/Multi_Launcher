@@ -2047,7 +2047,6 @@ impl LauncherApp {
     }
 
     fn query_focus_ordinary_context(&self) -> Option<super::QueryFocusOrdinaryContext> {
-        use crate::gui::jump_mode::ui::NavigationDialogKind;
         let note_panel_layers = self
             .note_panels
             .iter()
@@ -2057,11 +2056,7 @@ impl LauncherApp {
             .into_iter()
             .filter(|panel| self.is_panel_open(*panel))
             .filter_map(|panel| self.query_focus_panel_layer(panel))
-            .chain(
-                (self.show_dashboard_editor && self.dashboard_editor.open)
-                    .then_some(NavigationDialogKind::DashboardEditor)
-                    .and_then(NavigationDialogKind::layer_id),
-            )
+            .chain(self.dashboard_editor.host_layer_if_root())
             .chain(self.pin_list_open.then_some(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("screenshot-pin-list"),
@@ -2089,7 +2084,7 @@ impl LauncherApp {
         (Self::TRACKED_PANELS
             .into_iter()
             .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
-            || (self.show_dashboard_editor && self.dashboard_editor.open)
+            || self.dashboard_editor.host_layer_if_root().is_some()
             || self.show_plugins
             || !note_panel_layers.is_empty()
             || !self.image_panels.is_empty())
@@ -4827,7 +4822,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 13] {
+    fn viewport_bootstrap_state(&self) -> [bool; 14] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4842,6 +4837,7 @@ impl LauncherApp {
                 .needs_compact_viewport_bootstrap(&self.recording_controller),
             self.notes_dialog.needs_root_ui_when_hidden(),
             self.mkmacro_dialog.needs_root_ui_when_hidden(),
+            self.dashboard_editor.needs_root_ui_when_hidden(),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
         ]
     }
@@ -4855,7 +4851,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 13],
+        previously_pending: [bool; 14],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5031,6 +5027,168 @@ impl LauncherApp {
             );
             self.notes_dialog = notes;
         }
+    }
+
+    pub(crate) fn open_dashboard_editor(&mut self) {
+        let registry = self.dashboard.registry().clone();
+        self.dashboard_editor.open(&self.dashboard_path, &registry);
+        self.show_dashboard_editor = true;
+        if let Some(layer) = self.dashboard_editor.host_layer_if_root() {
+            self.egui_ctx.move_to_top(layer);
+        }
+    }
+
+    fn show_dashboard_editor_host(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        if root_visible && self.show_dashboard_editor && !self.dashboard_editor.open {
+            self.open_dashboard_editor();
+        }
+        if !self.show_dashboard_editor
+            || (!root_visible && !self.dashboard_editor.needs_root_ui_when_hidden())
+        {
+            return;
+        }
+        let registry = self.dashboard.registry().clone();
+        // Resolve both native and Jump ownership while the live dialog
+        // state is still installed on the app. `mem::take` below gives
+        // callbacks temporary ownership of the UI state; consulting the
+        // app field afterward would inspect a default, closed dialog and
+        // reject every real Dashboard Editor pass.
+        let native_ui_owner = self.dashboard_editor_native_ui_owner_current(ctx, root_visible);
+        let dashboard_owner = if root_visible {
+            self.jump_mode_ui.frame_navigation_owner()
+        } else {
+            crate::gui::jump_mode::ui::NavigationOwner::Blocked
+        };
+        let parent_instance = self
+            .jump_mode_ui
+            .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor);
+        let target_generation = self.dashboard_editor.target_generation();
+        let native_confirmation_owner =
+            self.dashboard_editor_confirmation_native_ui_owner_current(ctx, root_visible);
+        let pending_confirmation = self
+            .dashboard_editor
+            .jump_mode_pending_confirmation_identity();
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let root_input_allowed = self.native_ui_host_input_allowed(ctx, root_visible);
+        let jump_mode_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let mut dlg = std::mem::take(&mut self.dashboard_editor);
+        let editor_is_popped_out = dlg.is_popped_out();
+        let plugin_infos = self.plugins.plugin_infos();
+        let plugin_commands = self.plugins.commands();
+        let dashboard_snapshot = self.dashboard_data_cache.snapshot();
+        let dashboard_scope = match dashboard_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor,
+                instance,
+            } if native_ui_owner => self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("dashboard-editor", instance),
+                crate::gui::jump_mode::TargetGeneration(target_generation),
+                "dashboard-editor",
+                ctx.viewport_id(),
+                dashboard_owner,
+                true,
+            ),
+            _ => None,
+        };
+        let confirmation_scope = match (
+            dashboard_owner,
+            native_confirmation_owner,
+            pending_confirmation,
+        ) {
+            (
+                crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind,
+                },
+                owner,
+                Some((pending_instance, pending_kind)),
+            ) if owner
+                == (crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
+                    parent_instance,
+                    confirmation_instance,
+                    kind,
+                })
+                && pending_instance == confirmation_instance
+                && pending_kind == kind =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::popup(
+                        kind.surface_kind(),
+                        confirmation_instance,
+                        crate::gui::jump_mode::SurfaceId::dialog(
+                            "dashboard-editor",
+                            parent_instance,
+                        ),
+                    ),
+                    crate::gui::jump_mode::TargetGeneration(confirmation_instance),
+                    kind.surface_kind(),
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let dashboard_visual_order = std::cell::Cell::new(0_u64);
+        let property_identity_store = std::rc::Rc::clone(&dlg.property_identity_store);
+        let native_combo_anchors = std::cell::RefCell::new(if editor_is_popped_out {
+            Vec::new()
+        } else {
+            std::mem::take(&mut dlg.native_combo_anchors)
+        });
+        let settings_ctx = WidgetSettingsContext {
+            plugins: Some(&self.plugins),
+            plugin_infos: Some(&plugin_infos),
+            plugin_commands: Some(&plugin_commands),
+            actions: Some(self.actions.as_slice()),
+            favorites: Some(dashboard_snapshot.favorites.as_ref()),
+            usage: Some(&self.usage),
+            default_location: self.dashboard_default_location.as_deref(),
+            enabled_plugins: self.enabled_plugins.as_ref(),
+            jump_mode_scope: dashboard_scope.as_ref(),
+            jump_mode_visual_order: Some(&dashboard_visual_order),
+            property_identity_store: Some(property_identity_store.as_ref()),
+            native_combo_anchors: Some(&native_combo_anchors),
+            property_slot_token: None,
+            property_mutations_allowed: false,
+        };
+        dlg.show_with_host(
+            ctx,
+            &registry,
+            settings_ctx,
+            self.require_confirm_destructive,
+            parent_instance.unwrap_or_default(),
+            first_ui_pass,
+            root_visible,
+            application_input_allowed,
+            root_input_allowed,
+            native_ui_owner,
+            native_confirmation_owner != crate::gui::jump_mode::ui::NavigationOwner::Blocked,
+            jump_mode_enabled,
+            confirmation_scope.as_ref(),
+        );
+        if dlg.target_generation() != target_generation {
+            native_combo_anchors.borrow_mut().clear();
+        }
+        if !editor_is_popped_out {
+            dlg.native_combo_anchors = native_combo_anchors.into_inner();
+        }
+        if pending_confirmation.is_some() {
+            if let Some(scope) = dashboard_scope.as_ref() {
+                scope.discard_registered_targets();
+            }
+        } else if let Some(scope) = confirmation_scope.as_ref() {
+            scope.discard_registered_targets();
+        }
+        self.show_dashboard_editor = dlg.open;
+        self.dashboard_editor = dlg;
     }
 
     fn show_mkmacro_editor(
@@ -6009,7 +6167,7 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::visible_top_middle_layer;
 
         self.show_dashboard_editor
             && self.dashboard_editor.open
@@ -6019,8 +6177,9 @@ impl LauncherApp {
                 .is_none()
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
-            && NavigationDialogKind::DashboardEditor
-                .layer_id()
+            && self
+                .dashboard_editor
+                .host_layer_if_root()
                 .is_some_and(|layer| {
                     visible_top_middle_layer(ctx) == Some(layer)
                         && (!egui::Popup::is_any_open(ctx)
@@ -6057,8 +6216,12 @@ impl LauncherApp {
         else {
             return NavigationOwner::Blocked;
         };
+        let Some(parent_layer) = self.dashboard_editor.host_layer_if_root() else {
+            return NavigationOwner::Blocked;
+        };
         resolve_dashboard_editor_confirmation_owner(
             ctx,
+            parent_layer,
             parent_instance,
             confirmation_instance,
             kind,
@@ -6524,12 +6687,15 @@ impl LauncherApp {
                     .mkmacro_dialog
                     .host_layer_if_root()
                     .map(|layer| (self.jump_mode_ui.mkmacro_instance(), layer)),
+                dashboard_editor_layer: self.dashboard_editor.host_layer_if_root(),
                 dialogs: NavigationDialogKind::ALL.map(|kind| {
                     let current = self.jump_mode_ui.dialog_instance(kind);
                     if kind == NavigationDialogKind::RegexTester {
                         self.regex_tester_dialog.root_navigation_instance(current)
                     } else if kind == NavigationDialogKind::XmlToolkit {
                         self.xml_toolkit_dialog.root_navigation_instance(current)
+                    } else if kind == NavigationDialogKind::DashboardEditor {
+                        self.dashboard_editor.host_layer_if_root().and(current)
                     } else {
                         current
                     }
@@ -6696,6 +6862,7 @@ impl LauncherApp {
         }
         if !prompt_is_open
             && self.jump_mode_host_input_allowed(ctx, root_visible)
+            && let Some(parent_layer) = self.dashboard_editor.host_layer_if_root()
             && let Some(parent_instance) = self
                 .jump_mode_ui
                 .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor)
@@ -6704,7 +6871,7 @@ impl LauncherApp {
                 .jump_mode_pending_confirmation_identity()
         {
             use crate::gui::jump_mode::ui::{
-                NavigationDialogKind, NavigationOwner, dashboard_editor_confirmation_layer_id,
+                NavigationOwner, dashboard_editor_confirmation_layer_id,
                 resolve_dashboard_editor_confirmation_owner, visible_top_middle_layer,
             };
 
@@ -6713,18 +6880,18 @@ impl LauncherApp {
                 confirmation_instance,
                 kind,
             );
-            let parent_layer = NavigationDialogKind::DashboardEditor.layer_id();
             match visible_top_middle_layer(ctx) {
                 Some(layer) if layer == child_layer => {
                     combo_popup = None;
                     candidate = resolve_dashboard_editor_confirmation_owner(
                         ctx,
+                        parent_layer,
                         parent_instance,
                         confirmation_instance,
                         kind,
                     );
                 }
-                Some(layer) if Some(layer) == parent_layer => {
+                Some(layer) if layer == parent_layer => {
                     candidate = NavigationOwner::Blocked;
                     combo_popup = None;
                 }
@@ -7204,6 +7371,7 @@ impl LauncherApp {
             self.show_quick_notes(&ctx, first_ui_pass, false, None);
             self.show_note_panels(&ctx, first_ui_pass, false, None);
             self.show_mkmacro_editor(&ctx, first_ui_pass, false);
+            self.show_dashboard_editor_host(&ctx, first_ui_pass, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -8168,6 +8336,7 @@ impl LauncherApp {
                         .owns_root_input(&ctx)
                     && !self.notes_dialog.owns_root_input(&ctx)
                     && !self.mkmacro_dialog.owns_root_input(&ctx)
+                    && !self.dashboard_editor.owns_root_input(&ctx)
                     && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
@@ -8252,6 +8421,7 @@ impl LauncherApp {
                         .owns_root_input(&ctx)
                     && !self.notes_dialog.owns_root_input(&ctx)
                     && !self.mkmacro_dialog.owns_root_input(&ctx)
+                    && !self.dashboard_editor.owns_root_input(&ctx)
                     && !self.note_panels.iter().any(|panel| panel.owns_root_input(&ctx))
                     && self.close_front_dialog()
                 {
@@ -9297,136 +9467,7 @@ impl LauncherApp {
                 self.report_error_message("radial.designer.preferences", error.to_string());
             }
         }
-        if self.show_dashboard_editor && !self.dashboard_editor.open {
-            let registry = self.dashboard.registry().clone();
-            self.dashboard_editor.open(&self.dashboard_path, &registry);
-        }
-        if self.show_dashboard_editor {
-            let registry = self.dashboard.registry().clone();
-            // Resolve both native and Jump ownership while the live dialog
-            // state is still installed on the app. `mem::take` below gives
-            // callbacks temporary ownership of the UI state; consulting the
-            // app field afterward would inspect a default, closed dialog and
-            // reject every real Dashboard Editor pass.
-            let native_ui_owner =
-                self.dashboard_editor_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-            let dashboard_owner = self.jump_mode_ui.frame_navigation_owner();
-            let parent_instance = self
-                .jump_mode_ui
-                .dialog_instance(crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor);
-            let target_generation = self.dashboard_editor.target_generation();
-            let native_confirmation_owner = self
-                .dashboard_editor_confirmation_native_ui_owner_current(
-                    &ctx,
-                    frame_logic.should_be_visible,
-                );
-            let pending_confirmation = self
-                .dashboard_editor
-                .jump_mode_pending_confirmation_identity();
-            let mut dlg = std::mem::take(&mut self.dashboard_editor);
-            let plugin_infos = self.plugins.plugin_infos();
-            let plugin_commands = self.plugins.commands();
-            let dashboard_snapshot = self.dashboard_data_cache.snapshot();
-            let dashboard_scope = match dashboard_owner {
-                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::DashboardEditor,
-                    instance,
-                } if native_ui_owner => self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("dashboard-editor", instance),
-                    crate::gui::jump_mode::TargetGeneration(target_generation),
-                    "dashboard-editor",
-                    ctx.viewport_id(),
-                    dashboard_owner,
-                    true,
-                ),
-                _ => None,
-            };
-            let confirmation_scope = match (
-                dashboard_owner,
-                native_confirmation_owner,
-                pending_confirmation,
-            ) {
-                (
-                    crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
-                        parent_instance,
-                        confirmation_instance,
-                        kind,
-                    },
-                    owner,
-                    Some((pending_instance, pending_kind)),
-                ) if owner
-                    == (crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation {
-                        parent_instance,
-                        confirmation_instance,
-                        kind,
-                    })
-                    && pending_instance == confirmation_instance
-                    && pending_kind == kind =>
-                {
-                    self.jump_mode_ui.scope_for_navigation_owner(
-                        crate::gui::jump_mode::SurfaceId::popup(
-                            kind.surface_kind(),
-                            confirmation_instance,
-                            crate::gui::jump_mode::SurfaceId::dialog(
-                                "dashboard-editor",
-                                parent_instance,
-                            ),
-                        ),
-                        crate::gui::jump_mode::TargetGeneration(confirmation_instance),
-                        kind.surface_kind(),
-                        ctx.viewport_id(),
-                        owner,
-                        false,
-                    )
-                }
-                _ => None,
-            };
-            let dashboard_visual_order = std::cell::Cell::new(0_u64);
-            let property_identity_store = std::rc::Rc::clone(&dlg.property_identity_store);
-            let native_combo_anchors =
-                std::cell::RefCell::new(std::mem::take(&mut dlg.native_combo_anchors));
-            let settings_ctx = WidgetSettingsContext {
-                plugins: Some(&self.plugins),
-                plugin_infos: Some(&plugin_infos),
-                plugin_commands: Some(&plugin_commands),
-                actions: Some(self.actions.as_slice()),
-                favorites: Some(dashboard_snapshot.favorites.as_ref()),
-                usage: Some(&self.usage),
-                default_location: self.dashboard_default_location.as_deref(),
-                enabled_plugins: self.enabled_plugins.as_ref(),
-                jump_mode_scope: dashboard_scope.as_ref(),
-                jump_mode_visual_order: Some(&dashboard_visual_order),
-                property_identity_store: Some(property_identity_store.as_ref()),
-                native_combo_anchors: Some(&native_combo_anchors),
-                property_slot_token: None,
-                property_mutations_allowed: false,
-            };
-            let _ = dlg.ui_with_jump_mode(
-                &ctx,
-                &registry,
-                settings_ctx,
-                self.require_confirm_destructive,
-                parent_instance,
-                dashboard_scope.as_ref(),
-                confirmation_scope.as_ref(),
-                native_ui_owner,
-                native_confirmation_owner != crate::gui::jump_mode::ui::NavigationOwner::Blocked,
-                first_ui_pass,
-            );
-            if dlg.target_generation() != target_generation {
-                native_combo_anchors.borrow_mut().clear();
-            }
-            dlg.native_combo_anchors = native_combo_anchors.into_inner();
-            if pending_confirmation.is_some() {
-                if let Some(scope) = dashboard_scope.as_ref() {
-                    scope.discard_registered_targets();
-                }
-            } else if let Some(scope) = confirmation_scope.as_ref() {
-                scope.discard_registered_targets();
-            }
-            self.show_dashboard_editor = dlg.open;
-            self.dashboard_editor = dlg;
-        }
+        self.show_dashboard_editor_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
 
         let mut mm_dlg = std::mem::take(&mut self.multi_manager_dialog);
         mm_dlg.ui(&ctx, self);
@@ -11199,12 +11240,16 @@ impl LauncherApp {
 
     fn complete_retained_tool_dialogs(&mut self, ctx: &egui::Context) -> Vec<RootDialogEffect> {
         let mut effects = Vec::new();
-        if let Some(completion) = self.dashboard_editor.on_ui_frame_complete(
-            ctx,
-            self.dashboard.registry(),
-            &self.dashboard_path,
-        ) {
+        if self.show_dashboard_editor || self.dashboard_editor.needs_root_ui_when_hidden() {
+            let completion = self.dashboard_editor.on_host_frame_complete(
+                ctx,
+                self.dashboard.registry(),
+                &self.dashboard_path,
+            );
             self.show_dashboard_editor = completion.editor_open;
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
             if completion.dashboard_saved {
                 self.dashboard.reload();
                 if self.enable_toasts {
@@ -43368,6 +43413,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dashboard_editor_layer: None,
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 },
             ),
@@ -45144,6 +45190,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dashboard_editor_layer: None,
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
@@ -47693,6 +47740,7 @@ mod tests {
                     timer: None,
                     paste_sequence: None,
                     mkmacro: None,
+                    dashboard_editor_layer: None,
                     dialogs: [None; crate::gui::jump_mode::ui::NavigationDialogKind::ALL.len()],
                 }
             ),
@@ -56579,6 +56627,70 @@ mod tests {
         );
         drop(app);
         drop(workspace);
+    }
+
+    #[test]
+    fn dashboard_editor_detached_launcher_route_renders_hidden_and_docks_back() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let dashboard_path = workspace.root().join("dashboard.json");
+        let dashboard = crate::dashboard::config::DashboardConfig::default();
+        std::fs::write(&dashboard_path, serde_json::to_vec(&dashboard).unwrap()).unwrap();
+        app.dashboard_path = dashboard_path.to_string_lossy().into_owned();
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.open_dashboard_editor();
+        for _ in 0..4 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+        let (_, popout, clip, enabled) = app.dashboard_editor.test_host_button();
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx,
+                &mut app,
+                tool_dialog_pointer_events(popout, pressed),
+                false,
+            )
+            .drop_without_applying_deltas();
+        }
+        let viewport = app.dashboard_editor.test_viewport_id();
+        assert!(app.dashboard_editor.host_layer_if_root().is_none());
+
+        let mut input = actual_query_input(true);
+        input
+            .events
+            .push(key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        app.run_root_frame_for_test(&ctx, input, false)
+            .0
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            let output = app
+                .run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                .0;
+            assert!(output.viewport_output.contains_key(&viewport));
+            output.drop_without_applying_deltas();
+        }
+        assert!(app.show_dashboard_editor && app.dashboard_editor.open);
+
+        let (_, dock, clip, enabled) = app.dashboard_editor.test_host_button();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            super::with_immediate_viewport_test_events_for(
+                viewport,
+                tool_dialog_pointer_events(dock, pressed),
+                || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                        .0
+                        .drop_without_applying_deltas();
+                },
+            );
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.dashboard_editor.host_layer_if_root().is_some());
+        assert!(app.show_dashboard_editor && app.dashboard_editor.open);
     }
 
     #[test]

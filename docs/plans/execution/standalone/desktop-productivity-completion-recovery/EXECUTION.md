@@ -290,3 +290,21 @@ The correction matched the actual layers of the Action Editor and the other titl
 | MkMacro Editor | One editor across Dock and Pop Out, current-host focus, owned authoring children and pickers, preserved dirty draft and selection, and retained playback and recorder requests | Real host, Run, Apply and Cancel clicks, rejected pass checks, fake playback exactly once, Jump Mode, package import cancellation, production build | IMPLEMENTED_USER_VALIDATION_PENDING (N2) |
 
 M2-A is complete within R02. M2-B begins with Dashboard Editor on the same branch.
+
+### R02/M2-B.1 — Dashboard Editor
+
+Dashboard Editor covers the Dashboard portion of original IDs 16–18/C01 M3-A. It retains one config draft, selection, and slot identities across Dock and Pop Out. The launcher and Settings command share the opener. Host and viewport provenance fence Save, Close, and presentation writes alongside the existing dashboard path and target generation checks. The detached editor stays usable while the launcher is hidden. Native confirmation and combo input use the current editor's layers, and Dock returns to the launcher without publishing the draft.
+
+The administrative pause preserved the Dashboard worktree above `069e556ad1149684567521a2211183581b040d5f`. The first exact list exited 101 for three Settings-only `NavigationWindows` fixtures missing `dashboard_editor_layer` and ran no tests. Log SHA-256 0AA6E790D35D4B0031FE2D54BBF04012D47A678DFA527EAC6A955622627CDCE5. The user updated the implementer configuration in `9686ea0c6cafaddb6321d74ad3de0cd12459bb15`. The resumed implementer supplied `None` in those three fixtures and kept their owner assertions.
+
+The corrected exact list matched seven and the initial runtime passed 6/7, with 7444 skipped. The failed real-click test recorded target generation before the first draw initialized the fallback draft's slot identities. The fixture now records the generation after initialization and still requires exact preservation through Pop Out, failed Save, and Dock. Run SHA-256 4CDCF432CCBD74250B046E72659B47A820AC335BAEAF697BAADD546CFECA11D0. Independent review also found a focused combo option could be rejected by the embedded host. The correction accepts the recognized popup focus and leaves Escape to the popup. Re-review cleared the correction and the fixture baseline.
+
+The exact selectors are in `r02-m2-b1-filter-01.txt` and `r02-m2-b1-filter-03.txt` under the ignored recovery evidence directory. With `$f` set to the trimmed contents of each selector, `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched seven initially and three for the final affected set. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed the final set 3/3 with 7448 skipped. Final run SHA-256 33151AC805372FBB28191C17E533831E16A31A1E333A925F6C36D53A64D7B4EA. Formatting corrections were scoped to changed lines. `git diff --check` passed.
+
+`cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0. Log SHA-256 B2B84EB410C96C071AF0F9C99089B975B90178F6343D2CAE1FFA2603EFA4D979. Source scope is `src/gui/dashboard_editor_dialog.rs`, `src/gui/render.rs`, `src/gui/command_host.rs`, `src/gui/jump_mode/ui.rs`, and `src/settings_editor/render.rs`.
+
+| Surface | Implemented behavior | Verification | Native status |
+| --- | --- | --- | --- |
+| Dashboard Editor | One draft, owned confirmations and current combo focus across hosts, retained save and close, hidden launcher support, Dock restores launcher | Real host buttons, failed Save preserving the draft, hidden-launcher routing, exact confirmation binding, retained root effects, and production build | IMPLEMENTED_USER_VALIDATION_PENDING (N3) |
+
+Next is R02/M2-B.2 Main Settings on the same branch.

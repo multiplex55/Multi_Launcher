@@ -457,9 +457,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_dashboard_settings_dialog(&mut self) {
-        let registry = self.dashboard.registry().clone();
-        self.dashboard_editor.open(&self.dashboard_path, &registry);
-        self.show_dashboard_editor = true;
+        self.open_dashboard_editor();
     }
 
     fn open_theme_dialog(&mut self) {

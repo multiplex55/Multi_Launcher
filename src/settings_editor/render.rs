@@ -4209,7 +4209,7 @@ impl SettingsEditor {
             "Customize Dashboard...",
         );
         if targets.clicked(&customize) {
-            app.show_dashboard_editor = true;
+            app.open_dashboard_editor();
         }
     }
 

@@ -376,6 +376,7 @@ pub(crate) fn dashboard_editor_confirmation_layer_id(
 
 pub(crate) fn resolve_dashboard_editor_confirmation_owner(
     ctx: &egui::Context,
+    parent_layer: egui::LayerId,
     parent_instance: u64,
     confirmation_instance: u64,
     kind: DashboardEditorConfirmationKind,
@@ -387,7 +388,6 @@ pub(crate) fn resolve_dashboard_editor_confirmation_owner(
     };
     let child_layer =
         dashboard_editor_confirmation_layer_id(parent_instance, confirmation_instance, kind);
-    let parent_layer = NavigationDialogKind::DashboardEditor.layer_id();
     if ctx.viewport_id() == egui::ViewportId::ROOT
         && ctx.input(|input| input.focused)
         && ctx.memory(|memory| memory.top_modal_layer().is_none())
@@ -395,7 +395,7 @@ pub(crate) fn resolve_dashboard_editor_confirmation_owner(
         && visible_top_middle_layer(ctx) == Some(child_layer)
         && focused_response_layer(ctx).is_none_or(|focused| {
             focused == child_layer
-                || Some(focused) == parent_layer
+                || focused == parent_layer
                 || focused.order != egui::Order::Middle
         })
     {
@@ -434,11 +434,13 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::ImageCompare
                     | NavigationDialogKind::DuplicateFinder
+                    | NavigationDialogKind::DashboardEditor
                     | NavigationDialogKind::RadialDesigner,
                 ..
             } | NavigationOwner::Notes { .. }
                 | NavigationOwner::MkMacro { .. }
                 | NavigationOwner::XmlOverwriteConfirmation { .. }
+                | NavigationOwner::DashboardEditorConfirmation { .. }
                 | NavigationOwner::RadialDesignerChild { .. }
         )
     }
@@ -452,6 +454,19 @@ impl NavigationViewportBinding {
             } => {
                 self.base_layer
                     == xml_overwrite_confirmation_layer_id(parent_instance, confirmation_instance)
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::DashboardEditorConfirmation {
+                parent_instance,
+                confirmation_instance,
+                kind,
+            } => {
+                self.base_layer
+                    == dashboard_editor_confirmation_layer_id(
+                        parent_instance,
+                        confirmation_instance,
+                        kind,
+                    )
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::RadialDesignerChild {
@@ -487,8 +502,11 @@ impl NavigationViewportBinding {
         focused_response_layer(ctx).is_none_or(|layer| {
             layer == self.base_layer
                 || Some(layer) == popup_layer
-                || (matches!(self.owner, NavigationOwner::RadialDesignerChild { .. })
-                    && layer == egui::LayerId::background())
+                || (matches!(
+                    self.owner,
+                    NavigationOwner::RadialDesignerChild { .. }
+                        | NavigationOwner::DashboardEditorConfirmation { .. }
+                ) && layer == egui::LayerId::background())
         })
     }
 }
@@ -993,6 +1011,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) timer: Option<u64>,
     pub(crate) paste_sequence: Option<u64>,
     pub(crate) mkmacro: Option<(u64, egui::LayerId)>,
+    pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
     pub(crate) dialogs: [Option<u64>; NavigationDialogKind::ALL.len()],
 }
 
@@ -1083,7 +1102,14 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
                 .map(|instance| NavigationOwner::PasteSequence { instance })
         } else if let Some((instance, _)) = windows.mkmacro.filter(|(_, owner)| *owner == layer) {
             Some(NavigationOwner::MkMacro { instance })
-        } else if let Some(kind) = NavigationDialogKind::for_layer(layer) {
+        } else if let Some(kind) = if windows.dashboard_editor_layer == Some(layer) {
+            Some(NavigationDialogKind::DashboardEditor)
+        } else {
+            NavigationDialogKind::for_layer(layer).filter(|kind| {
+                *kind != NavigationDialogKind::DashboardEditor
+                    || windows.dashboard_editor_layer.is_none()
+            })
+        } {
             windows
                 .dialog_instance(kind)
                 .map(|instance| NavigationOwner::Dialog { kind, instance })
@@ -4259,6 +4285,7 @@ mod tests {
             timer: None,
             paste_sequence: None,
             mkmacro: None,
+            dashboard_editor_layer: None,
             dialogs: [None; NavigationDialogKind::ALL.len()],
         };
         render_supported_dialog_windows(&ctx, true, true, true, None);
@@ -6091,6 +6118,86 @@ mod tests {
             },
         );
         raw
+    }
+
+    #[test]
+    fn jump_mode_dashboard_native_confirmation_requires_exact_viewport_and_child_layer() {
+        let viewport = egui::ViewportId::from_hash_of("dashboard native owner test");
+        let parent = NavigationOwner::Dialog {
+            kind: NavigationDialogKind::DashboardEditor,
+            instance: 3,
+        };
+        let parent_binding = NavigationViewportBinding {
+            viewport,
+            owner: parent,
+            base_layer: egui::LayerId::background(),
+        };
+        let kind = DashboardEditorConfirmationKind::ResetWidgetSettings;
+        let child = NavigationOwner::DashboardEditorConfirmation {
+            parent_instance: 3,
+            confirmation_instance: 7,
+            kind,
+        };
+        let child_layer = dashboard_editor_confirmation_layer_id(3, 7, kind);
+        let child_binding = NavigationViewportBinding {
+            viewport,
+            owner: child,
+            base_layer: child_layer,
+        };
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        ctx.run_ui(viewport_raw_input(viewport), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), parent_binding, None),
+                parent
+            );
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), child_binding, None),
+                NavigationOwner::Blocked
+            );
+        })
+        .drop_without_applying_deltas();
+
+        for _ in 0..3 {
+            ctx.run_ui(viewport_raw_input(viewport), |ui| {
+                egui::Window::new("Dashboard confirmation")
+                    .id(child_layer.id)
+                    .show(ui.ctx(), |ui| {
+                        ui.label("Owned confirmation");
+                    });
+            })
+            .drop_without_applying_deltas();
+        }
+        ctx.run_ui(viewport_raw_input(viewport), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), child_binding, None),
+                child
+            );
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), parent_binding, None),
+                NavigationOwner::Blocked
+            );
+            let stale = NavigationViewportBinding {
+                owner: NavigationOwner::DashboardEditorConfirmation {
+                    parent_instance: 3,
+                    confirmation_instance: 6,
+                    kind,
+                },
+                ..child_binding
+            };
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), stale, None),
+                NavigationOwner::Blocked
+            );
+        })
+        .drop_without_applying_deltas();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert_eq!(
+                resolve_bound_viewport_navigation_owner(ui.ctx(), child_binding, None),
+                NavigationOwner::Blocked
+            );
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]
