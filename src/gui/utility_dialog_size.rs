@@ -5,10 +5,14 @@
 //! current offer while it is visible, and submits only a settled resize-grip
 //! gesture to the existing settings-save worker.
 
+use crate::gui::utility_window_geometry::{
+    NativeGeometryObservation, NativeGeometryObserver, NativeViewportIdentity, NativeWindowRect,
+    RootWindowIdentity,
+};
 use crate::settings::utility_dialog_sizes::UtilitySizeMutation;
 use crate::settings::{
-    PreferredWindowSize, UtilityDialogSizes, UtilitySizeAcknowledgement, UtilitySizePreference,
-    UtilitySizeRevision, UtilityToolKey,
+    NativeWindowGeometry, PreferredWindowSize, UtilityDialogSizes, UtilitySizeAcknowledgement,
+    UtilitySizePreference, UtilitySizeRevision, UtilityToolKey,
 };
 use crate::settings_save::SettingsSaveWorkerRegistry;
 use eframe::egui::{self, Context, Id, InnerResponse, Rect, Ui, Vec2, Window};
@@ -72,6 +76,139 @@ struct NativeWindowInstance {
     last_reset_revision: Option<UtilitySizeRevision>,
 }
 
+#[derive(Debug)]
+struct NativeGeometryInstance {
+    initial_restore_applied: bool,
+    last_preference: UtilitySizePreference,
+    last_reset_revision: Option<UtilitySizeRevision>,
+    factory_outer_size: Option<PreferredWindowSize>,
+    pending_placement: Option<NativePlacement>,
+}
+
+#[derive(Debug)]
+struct NativePlacement {
+    physical_position: egui::Pos2,
+    frames_remaining: u8,
+}
+
+impl NativePlacement {
+    fn observe(&mut self, outer_rect: Rect, scale: f32) -> Option<bool> {
+        let actual = outer_rect.min * scale;
+        if actual.distance(self.physical_position) <= 3.0 {
+            return Some(true);
+        }
+        self.frames_remaining = self.frames_remaining.saturating_sub(1);
+        (self.frames_remaining == 0).then_some(false)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NativeGeometryIntent {
+    Geometry {
+        geometry: NativeWindowGeometry,
+        position_sequence: u64,
+        size_sequence: u64,
+    },
+    Reset {
+        sequence: u64,
+    },
+}
+
+impl NativeGeometryIntent {
+    fn from_committed(geometry: Option<NativeWindowGeometry>) -> Self {
+        geometry.map_or(Self::Reset { sequence: 0 }, |geometry| Self::Geometry {
+            geometry,
+            position_sequence: 0,
+            size_sequence: 0,
+        })
+    }
+
+    fn geometry(self) -> Option<NativeWindowGeometry> {
+        match self {
+            Self::Geometry { geometry, .. } => Some(geometry),
+            Self::Reset { .. } => None,
+        }
+    }
+
+    fn followed_by(
+        self,
+        observation: NativeGeometryObservation,
+        factory_size: Option<PreferredWindowSize>,
+    ) -> Option<Self> {
+        if !observation.position.is_valid()
+            || !observation.position_scale.is_finite()
+            || observation.position_scale <= 0.0
+        {
+            return None;
+        }
+        let (previous, previous_position_sequence, previous_size_sequence, reset_sequence) =
+            match self {
+                Self::Geometry {
+                    geometry,
+                    position_sequence,
+                    size_sequence,
+                } => (Some(geometry), position_sequence, size_sequence, 0),
+                Self::Reset { sequence } => (None, sequence, sequence, sequence),
+            };
+        let position_is_new = observation.position_sequence > previous_position_sequence
+            && observation.position_sequence > reset_sequence;
+        let size_event = observation
+            .size_sequence
+            .filter(|sequence| *sequence > previous_size_sequence && *sequence > reset_sequence);
+        if !position_is_new && size_event.is_none() {
+            return None;
+        }
+
+        let scale = if position_is_new {
+            observation.position_scale
+        } else {
+            previous?.scale_factor
+        };
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let position = if position_is_new {
+            crate::settings::SavedWindowPosition::new(
+                observation.position.left as f32 / scale,
+                observation.position.top as f32 / scale,
+            )
+            .ok()?
+        } else {
+            previous?.position
+        };
+        let size = if let Some(_sequence) = size_event {
+            let rect = observation.size?;
+            if !rect.is_valid() {
+                return None;
+            }
+            PreferredWindowSize::new(rect.width() as f32 / scale, rect.height() as f32 / scale)
+                .ok()?
+        } else if let Some(previous) = previous {
+            if position_is_new {
+                PreferredWindowSize::new(
+                    previous.size.width * previous.scale_factor / scale,
+                    previous.size.height * previous.scale_factor / scale,
+                )
+                .ok()?
+            } else {
+                previous.size
+            }
+        } else {
+            factory_size?
+        };
+        let geometry = NativeWindowGeometry::new(position, size, scale).ok()?;
+        Some(Self::Geometry {
+            geometry,
+            position_sequence: if position_is_new {
+                observation.position_sequence
+            } else {
+                previous_position_sequence
+            },
+            size_sequence: size_event.unwrap_or(previous_size_sequence),
+        })
+    }
+}
+
 impl NativeWindowInstance {
     fn new(key: UtilityToolKey) -> Self {
         Self {
@@ -88,6 +225,7 @@ impl NativeWindowInstance {
 #[derive(Clone)]
 pub(crate) struct UtilityDialogSizeManager {
     state: Arc<Mutex<UtilityDialogSizeState>>,
+    native_geometry_observer: NativeGeometryObserver,
 }
 
 struct UtilityDialogSizeState {
@@ -97,10 +235,13 @@ struct UtilityDialogSizeState {
     frame: u64,
     instances: HashMap<Id, WindowInstance>,
     native_instances: HashMap<Id, NativeWindowInstance>,
+    native_geometry_instances: HashMap<NativeViewportIdentity, NativeGeometryInstance>,
+    native_geometry_intents: HashMap<UtilityToolKey, NativeGeometryIntent>,
     accepted_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
     waiting_for_ack: HashMap<UtilityToolKey, UtilitySizeRevision>,
     local_resize_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
     reset_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
+    accepted_reset_revisions: HashMap<UtilityToolKey, UtilitySizeRevision>,
     known_keys: HashSet<UtilityToolKey>,
     reported_failures: HashMap<UtilityToolKey, UtilitySizeRevision>,
 }
@@ -146,13 +287,17 @@ impl UtilityDialogSizeManager {
                 frame: 0,
                 instances: HashMap::new(),
                 native_instances: HashMap::new(),
+                native_geometry_instances: HashMap::new(),
+                native_geometry_intents: HashMap::new(),
                 accepted_revisions: HashMap::new(),
                 waiting_for_ack: HashMap::new(),
                 local_resize_revisions: HashMap::new(),
                 reset_revisions: HashMap::new(),
+                accepted_reset_revisions: HashMap::new(),
                 known_keys: HashSet::new(),
                 reported_failures: HashMap::new(),
             })),
+            native_geometry_observer: NativeGeometryObserver::default(),
         }
     }
 
@@ -160,6 +305,14 @@ impl UtilityDialogSizeManager {
         ctx.data_mut(|data| {
             data.insert_temp(Id::new(CONTEXT_CAPABILITY_ID), self.clone());
         });
+    }
+
+    pub(crate) fn set_native_root(&self, root: Option<RootWindowIdentity>) {
+        self.native_geometry_observer.set_root(root);
+    }
+
+    pub(crate) fn shutdown_native_geometry_observers(&self) {
+        self.native_geometry_observer.retire_all();
     }
 
     pub(crate) fn for_context(ctx: &Context) -> UtilityDialogSizeAccess {
@@ -201,7 +354,6 @@ impl UtilityDialogSizeManager {
         let mut state = self.lock();
         state.known_keys.insert(key);
         state.local_resize_revisions.insert(key, revision);
-        state.reset_revisions.remove(&key);
         state.waiting_for_ack.insert(key, revision);
         if let Some(id) = restore_after_ack
             && let Some(instance) = state.instances.get_mut(&id)
@@ -211,6 +363,33 @@ impl UtilityDialogSizeManager {
         if let Some(ctx) = ctx {
             ctx.request_repaint_after(ACK_POLL_INTERVAL);
         }
+        Ok(())
+    }
+
+    fn submit_native_geometry(
+        &self,
+        key: UtilityToolKey,
+        geometry: NativeWindowGeometry,
+        ctx: &Context,
+    ) -> Result<(), String> {
+        let (workers, path) = {
+            let state = self.lock();
+            (state.workers.clone(), state.settings_path.clone())
+        };
+        if let Err(error) =
+            workers.queue_utility_size_mutation(path, key, UtilitySizeMutation::SetNative(geometry))
+        {
+            tracing::warn!(tool = key.as_str(), %error, "could not queue utility native geometry");
+            ctx.request_repaint();
+            return Err(error);
+        }
+        let revision = workers
+            .utility_size_latest_revision(key)
+            .ok_or_else(|| "utility geometry write was queued without a revision".to_owned())?;
+        let mut state = self.lock();
+        state.known_keys.insert(key);
+        state.waiting_for_ack.insert(key, revision);
+        ctx.request_repaint_after(ACK_POLL_INTERVAL);
         Ok(())
     }
 
@@ -246,6 +425,34 @@ impl UtilityDialogSizeManager {
             ctx.request_repaint_after(ACK_POLL_INTERVAL);
         }
         Ok(())
+    }
+
+    pub(crate) fn drain_native_geometry_observations(&self, ctx: &Context) {
+        let observations = self.native_geometry_observer.drain();
+        for observation in observations {
+            let key = observation.identity.key;
+            let next_intent = {
+                let state = self.lock();
+                let current = state
+                    .native_geometry_intents
+                    .get(&key)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        NativeGeometryIntent::from_committed(state.sizes.native_geometry(key))
+                    });
+                let factory_size = state
+                    .native_geometry_instances
+                    .get(&observation.identity)
+                    .and_then(|instance| instance.factory_outer_size);
+                current.followed_by(observation, factory_size)
+            };
+            if let Some(next_intent) = next_intent
+                && let Some(geometry) = next_intent.geometry()
+                && self.submit_native_geometry(key, geometry, ctx).is_ok()
+            {
+                self.lock().native_geometry_intents.insert(key, next_intent);
+            }
+        }
     }
 
     /// Return each current persistence failure once. A newer genuine size
@@ -324,7 +531,7 @@ impl UtilityDialogSizeManager {
     ) -> Option<Vec2> {
         let mut state = self.lock();
         let preference = state.sizes.preference(key);
-        let accepted_revision = state.accepted_revisions.get(&key).copied();
+        let accepted_reset_revision = state.accepted_reset_revisions.get(&key).copied();
         let instance_id = native_instance_id(key);
         let instance = state
             .native_instances
@@ -337,27 +544,170 @@ impl UtilityDialogSizeManager {
             instance.initial_restore_applied = true;
             return None;
         }
-        let reset_revision = matches!(preference, UtilitySizePreference::Reset)
-            .then_some(accepted_revision)
-            .flatten();
-        let reset_acknowledged =
-            reset_revision.is_some() && reset_revision != instance.last_reset_revision;
+        let reset_acknowledged = accepted_reset_revision.is_some()
+            && accepted_reset_revision != instance.last_reset_revision;
         if instance.initial_restore_applied && !reset_acknowledged {
             return None;
         }
 
+        let restore_preference = if reset_acknowledged {
+            UtilitySizePreference::Reset
+        } else {
+            preference
+        };
         let applied = native_restore_inner_size(
             viewport_info,
-            preference,
+            restore_preference,
             factory_inner_size,
             minimum_inner_size,
             maximum_inner_size,
         )?;
         instance.initial_restore_applied = true;
-        if matches!(preference, UtilitySizePreference::Reset) {
-            instance.last_reset_revision = reset_revision;
-        }
+        instance.last_reset_revision = accepted_reset_revision;
         Some(applied)
+    }
+
+    fn restore_native_geometry(
+        &self,
+        identity: NativeViewportIdentity,
+        ctx: &Context,
+        viewport_info: &egui::ViewportInfo,
+        factory_inner_size: Vec2,
+        minimum_inner_size: Option<Vec2>,
+        maximum_inner_size: Option<Vec2>,
+    ) -> Option<(Option<egui::Pos2>, Vec2)> {
+        let mut state = self.lock();
+        let key = identity.key;
+        let factory_outer_size = native_factory_outer_size(viewport_info, factory_inner_size);
+        let preference = state.sizes.preference(key);
+        if matches!(preference, UtilitySizePreference::Unsupported) {
+            return None;
+        }
+        let native_geometry = state.sizes.native_geometry(key);
+        let accepted_reset_revision = state.accepted_reset_revisions.get(&key).copied();
+        let instance =
+            state
+                .native_geometry_instances
+                .entry(identity)
+                .or_insert(NativeGeometryInstance {
+                    initial_restore_applied: false,
+                    last_preference: UtilitySizePreference::Missing,
+                    last_reset_revision: None,
+                    factory_outer_size: None,
+                    pending_placement: None,
+                });
+        if factory_outer_size.is_some() {
+            instance.factory_outer_size = factory_outer_size;
+        }
+        let initial = !instance.initial_restore_applied;
+        let reset_acknowledged = accepted_reset_revision.is_some()
+            && accepted_reset_revision != instance.last_reset_revision;
+        let reset_transition = preference != instance.last_preference
+            && matches!(preference, UtilitySizePreference::Reset);
+
+        if (reset_acknowledged || reset_transition)
+            && (!initial || instance.pending_placement.is_some() || native_geometry.is_none())
+        {
+            let size = native_restore_inner_size(
+                viewport_info,
+                UtilitySizePreference::Reset,
+                factory_inner_size,
+                minimum_inner_size,
+                maximum_inner_size,
+            )?;
+            instance.initial_restore_applied = true;
+            instance.pending_placement = None;
+            instance.last_preference = preference;
+            instance.last_reset_revision = accepted_reset_revision;
+            return Some((None, size));
+        }
+        if initial {
+            let mut commands = None;
+            if let Some(geometry) = native_geometry {
+                let child_scale = viewport_info.native_pixels_per_point? * ctx.zoom_factor();
+                let outer_rect = viewport_info.outer_rect?;
+                let actual_position = outer_rect.min * child_scale;
+                let (position, size) = restore_native_geometry_commands(
+                    ctx,
+                    viewport_info,
+                    geometry,
+                    minimum_inner_size,
+                    maximum_inner_size,
+                )?;
+                if let Some(placement) = instance.pending_placement.as_mut() {
+                    match placement.observe(outer_rect, child_scale) {
+                        None => {
+                            ctx.request_repaint_of(identity.viewport_id);
+                            return None;
+                        }
+                        Some(true) => commands = Some((None, size)),
+                        Some(false) => {
+                            // The OS could not place the window there. Keep its
+                            // current desktop origin and clamp to its actual monitor.
+                            let desired = geometry.scale_factor / child_scale;
+                            let preferred = PreferredWindowSize::new(
+                                geometry.size.width * desired,
+                                geometry.size.height * desired,
+                            )
+                            .ok();
+                            commands = native_restore_inner_size(
+                                viewport_info,
+                                preferred.map_or(
+                                    UtilitySizePreference::Missing,
+                                    UtilitySizePreference::Preferred,
+                                ),
+                                factory_inner_size,
+                                minimum_inner_size,
+                                maximum_inner_size,
+                            )
+                            .map(|size| (None, size));
+                        }
+                    }
+                } else if let Some(position) = position
+                    && (position * child_scale).distance(actual_position) > 3.0
+                {
+                    instance.last_reset_revision = accepted_reset_revision;
+                    instance.last_preference = preference;
+                    instance.pending_placement = Some(NativePlacement {
+                        physical_position: position * child_scale,
+                        frames_remaining: 3,
+                    });
+                    // A move can synchronously change the native DPI. Read a
+                    // new retained child sample before applying an InnerSize.
+                    return Some((Some(position), size));
+                } else {
+                    commands = Some((None, size));
+                }
+            }
+            instance.initial_restore_applied = true;
+            instance.pending_placement = None;
+            instance.last_preference = preference;
+            instance.last_reset_revision = accepted_reset_revision;
+            return commands;
+        }
+        instance.last_preference = preference;
+        None
+    }
+
+    fn ensure_native_geometry_observer(
+        &self,
+        title: &str,
+        identity: NativeViewportIdentity,
+        zoom_factor: f32,
+        expected_bounds: super::utility_window_geometry::NativeWindowRect,
+    ) {
+        self.native_geometry_observer.ensure_attached(
+            title,
+            identity,
+            self.native_geometry_observer.root(),
+            zoom_factor,
+            expected_bounds,
+        );
+    }
+
+    fn retire_native_geometry(&self, identity: NativeViewportIdentity) {
+        self.lock().native_geometry_instances.remove(&identity);
+        self.native_geometry_observer.retire(identity);
     }
 
     fn close_native_viewport(&self, key: UtilityToolKey) {
@@ -668,6 +1018,7 @@ impl UtilityDialogSizeManager {
     }
 
     pub(crate) fn reset(&self, key: UtilityToolKey) -> Result<UtilitySizeRevision, String> {
+        let sequence = self.native_geometry_observer.next_sequence();
         let (workers, path) = {
             let mut state = self.lock();
             state.known_keys.insert(key);
@@ -679,6 +1030,9 @@ impl UtilityDialogSizeManager {
             .ok_or_else(|| "utility size reset was queued without a revision".to_owned())?;
         let mut state = self.lock();
         state.reset_revisions.insert(key, revision);
+        state
+            .native_geometry_intents
+            .insert(key, NativeGeometryIntent::Reset { sequence });
         state.local_resize_revisions.remove(&key);
         state.waiting_for_ack.insert(key, revision);
         Ok(revision)
@@ -953,6 +1307,43 @@ impl UtilityDialogSizeAccess {
         )
     }
 
+    fn restore_native_geometry(
+        &self,
+        identity: NativeViewportIdentity,
+        ctx: &Context,
+        viewport_info: &egui::ViewportInfo,
+        factory_inner_size: Vec2,
+        minimum_inner_size: Option<Vec2>,
+        maximum_inner_size: Option<Vec2>,
+    ) -> Option<(Option<egui::Pos2>, Vec2)> {
+        self.0.as_ref()?.restore_native_geometry(
+            identity,
+            ctx,
+            viewport_info,
+            factory_inner_size,
+            minimum_inner_size,
+            maximum_inner_size,
+        )
+    }
+
+    fn ensure_native_geometry_observer(
+        &self,
+        title: &str,
+        identity: NativeViewportIdentity,
+        zoom_factor: f32,
+        expected_bounds: super::utility_window_geometry::NativeWindowRect,
+    ) {
+        if let Some(manager) = &self.0 {
+            manager.ensure_native_geometry_observer(title, identity, zoom_factor, expected_bounds);
+        }
+    }
+
+    fn retire_native_geometry(&self, identity: NativeViewportIdentity) {
+        if let Some(manager) = &self.0 {
+            manager.retire_native_geometry(identity);
+        }
+    }
+
     fn close_native_viewport(&self, key: UtilityToolKey) {
         if let Some(manager) = &self.0 {
             manager.close_native_viewport(key);
@@ -1112,12 +1503,109 @@ pub(crate) fn apply_native_utility_size_restore(
     }
 }
 
+pub(crate) fn apply_native_utility_geometry_restore(
+    ctx: &Context,
+    class: egui::ViewportClass,
+    accepted_pass: bool,
+    title: &str,
+    identity: NativeViewportIdentity,
+    viewport_info: &egui::ViewportInfo,
+    factory_inner_size: Vec2,
+    minimum_inner_size: Option<Vec2>,
+    maximum_inner_size: Option<Vec2>,
+) {
+    if class != egui::ViewportClass::Immediate || !accepted_pass {
+        return;
+    }
+    let access = UtilityDialogSizeManager::for_context(ctx);
+    if let Some(bounds) = native_viewport_bounds(viewport_info, ctx.zoom_factor()) {
+        access.ensure_native_geometry_observer(title, identity, ctx.zoom_factor(), bounds);
+    }
+    if let Some((position, inner_size)) = access.restore_native_geometry(
+        identity,
+        ctx,
+        viewport_info,
+        factory_inner_size,
+        minimum_inner_size,
+        maximum_inner_size,
+    ) {
+        let command = if let Some(position) = position {
+            egui::ViewportCommand::OuterPosition(position)
+        } else {
+            egui::ViewportCommand::InnerSize(inner_size)
+        };
+        ctx.send_viewport_cmd_to(identity.viewport_id, command);
+    }
+}
+
+fn native_viewport_bounds(
+    viewport: &egui::ViewportInfo,
+    zoom: f32,
+) -> Option<super::utility_window_geometry::NativeWindowRect> {
+    let scale = viewport.native_pixels_per_point? * zoom;
+    let rect = viewport.outer_rect?;
+    if !scale.is_finite() || scale <= 0.0 || !finite_rect(rect) {
+        return None;
+    }
+    let bounds = super::utility_window_geometry::NativeWindowRect {
+        left: (rect.min.x * scale).round() as i32,
+        top: (rect.min.y * scale).round() as i32,
+        right: (rect.max.x * scale).round() as i32,
+        bottom: (rect.max.y * scale).round() as i32,
+    };
+    bounds.is_valid().then_some(bounds)
+}
+
+#[cfg(windows)]
+pub(super) fn utility_picker_hwnd(
+    ctx: &Context,
+    identity: Option<NativeViewportIdentity>,
+) -> Option<usize> {
+    UtilityDialogSizeManager::for_context(ctx)
+        .0?
+        .native_geometry_observer
+        .picker_hwnd(identity)
+}
+
+pub(crate) fn close_native_utility_geometry_viewport(
+    ctx: &Context,
+    identity: NativeViewportIdentity,
+) {
+    let access = UtilityDialogSizeManager::for_context(ctx);
+    if let Some(manager) = &access.0 {
+        manager.drain_native_geometry_observations(ctx);
+    }
+    access.retire_native_geometry(identity);
+}
+
 pub(crate) fn close_native_utility_size_window(ctx: &Context, key: UtilityToolKey) {
     UtilityDialogSizeManager::for_context(ctx).close_native_viewport(key);
 }
 
 fn native_instance_id(key: UtilityToolKey) -> Id {
     Id::new(("multi_launcher.native_utility_size", key))
+}
+
+fn native_factory_outer_size(
+    viewport_info: &egui::ViewportInfo,
+    factory_inner_size: Vec2,
+) -> Option<PreferredWindowSize> {
+    let inner_rect = viewport_info.inner_rect?;
+    let outer_rect = viewport_info.outer_rect?;
+    if !finite_rect(inner_rect)
+        || !finite_rect(outer_rect)
+        || !finite_positive_size(factory_inner_size)
+        || !finite_positive_size(inner_rect.size())
+        || !finite_positive_size(outer_rect.size())
+    {
+        return None;
+    }
+    let chrome = (outer_rect.size() - inner_rect.size()).max(Vec2::ZERO);
+    PreferredWindowSize::new(
+        factory_inner_size.x + chrome.x,
+        factory_inner_size.y + chrome.y,
+    )
+    .ok()
 }
 
 fn native_restore_inner_size(
@@ -1171,6 +1659,46 @@ fn native_restore_inner_size(
     Some(requested_inner.min(maximum).max(minimum))
 }
 
+fn restore_native_geometry_commands(
+    ctx: &Context,
+    viewport_info: &egui::ViewportInfo,
+    geometry: NativeWindowGeometry,
+    minimum_inner_size: Option<Vec2>,
+    maximum_inner_size: Option<Vec2>,
+) -> Option<(Option<egui::Pos2>, Vec2)> {
+    let inner_rect = viewport_info.inner_rect?;
+    let outer_rect = viewport_info.outer_rect?;
+    let child_scale = viewport_info.native_pixels_per_point? * ctx.zoom_factor();
+    if !finite_rect(inner_rect)
+        || !finite_rect(outer_rect)
+        || !child_scale.is_finite()
+        || child_scale <= 0.0
+    {
+        return None;
+    }
+    let chrome = (outer_rect.size() - inner_rect.size()).max(Vec2::ZERO);
+    let minimum = minimum_inner_size.unwrap_or(Vec2::ZERO).max(Vec2::ZERO);
+    let fallback_size = viewport_info
+        .monitor_size
+        .unwrap_or_else(|| ctx.content_rect().size());
+    let maximum = maximum_inner_size.unwrap_or(Vec2::splat(f32::MAX));
+    if !finite_size(minimum)
+        || !finite_positive_size(maximum)
+        || !finite_positive_size(fallback_size)
+    {
+        return None;
+    }
+    Some(crate::gui::radial_editor::restore_utility_geometry(
+        ctx,
+        geometry,
+        child_scale,
+        chrome,
+        minimum,
+        maximum,
+        fallback_size,
+    ))
+}
+
 fn finite_size(size: Vec2) -> bool {
     size.x.is_finite() && size.y.is_finite()
 }
@@ -1221,8 +1749,10 @@ impl UtilityDialogSizeState {
         let explicitly_reset = self
             .reset_revisions
             .get(&key)
-            .is_some_and(|reset_revision| *reset_revision <= revision);
-        if explicitly_reset {
+            .filter(|reset_revision| **reset_revision <= revision)
+            .copied();
+        if let Some(reset_revision) = explicitly_reset {
+            self.accepted_reset_revisions.insert(key, reset_revision);
             self.reset_revisions.remove(&key);
         }
 
@@ -1235,7 +1765,7 @@ impl UtilityDialogSizeState {
             if !instance.is_open || !instance.has_applied_restore || instance.restore_pending {
                 continue;
             }
-            if explicitly_reset
+            if explicitly_reset.is_some()
                 || (acknowledgement.affects_size && !locally_resized)
                 || instance.restore_after_size_ack
             {
@@ -1754,6 +2284,80 @@ mod tests {
             native_pixels_per_point: Some(2.0),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn native_restore_placement_waits_for_a_new_destination_scale_sample() {
+        let mut placement = NativePlacement {
+            physical_position: egui::pos2(-600.0, 120.0),
+            frames_remaining: 3,
+        };
+        let old = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(440.0, 360.0));
+        assert_eq!(placement.observe(old, 1.0), None);
+        let new = egui::Rect::from_min_size(egui::pos2(-400.0, 80.0), egui::vec2(400.0, 300.0));
+        assert_eq!(placement.observe(new, 1.5), Some(true));
+        assert_eq!(placement.observe(old, 1.0), None);
+        assert_eq!(placement.observe(old, 1.0), Some(false));
+    }
+
+    #[test]
+    fn native_geometry_intent_keeps_unacknowledged_resize_across_later_move() {
+        use crate::settings::SavedWindowPosition;
+
+        let key = key();
+        let identity = NativeViewportIdentity {
+            key,
+            viewport_id: egui::ViewportId::from_hash_of("native-geometry-intent-test"),
+            owner_generation: 1,
+            host_generation: 2,
+        };
+        let committed = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-400.0, 100.0).unwrap(),
+            PreferredWindowSize::new(700.0, 500.0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+        let resize_rect = NativeWindowRect {
+            left: -500,
+            top: 100,
+            right: 420,
+            bottom: 800,
+        };
+        let resized = NativeGeometryObservation {
+            identity,
+            position: resize_rect,
+            position_scale: 1.0,
+            position_sequence: 1,
+            size: Some(resize_rect),
+            size_sequence: Some(1),
+        };
+        let after_resize = NativeGeometryIntent::from_committed(Some(committed))
+            .followed_by(resized, None)
+            .expect("the resize is newer than the acknowledged geometry");
+        let clamped_move = NativeGeometryObservation {
+            identity,
+            position: NativeWindowRect {
+                left: -250,
+                top: 180,
+                right: 250,
+                bottom: 480,
+            },
+            position_scale: 1.0,
+            position_sequence: 2,
+            size: None,
+            size_sequence: None,
+        };
+        let after_move = after_resize
+            .followed_by(clamped_move, None)
+            .expect("the later move updates position while retaining resize intent");
+        let geometry = after_move.geometry().unwrap();
+
+        assert_eq!(geometry.position.x, -250.0);
+        assert_eq!(
+            geometry.size,
+            PreferredWindowSize::new(920.0, 700.0).unwrap()
+        );
+        assert!(after_move.followed_by(clamped_move, None).is_none());
     }
 
     fn raw_input_with_native_viewport(info: egui::ViewportInfo) -> RawInput {
@@ -3051,12 +3655,302 @@ mod tests {
             Some(egui::vec2(620.0, 700.0)),
             "reopening after reset restores the factory size once"
         );
+
         assert_eq!(workers.utility_size_latest_revision(key()), Some(revision));
         workers.join_all();
         assert_eq!(
             settings_file(&path).utility_dialog_sizes.preference(key()),
             UtilitySizePreference::Reset
         );
+    }
+
+    #[test]
+    fn utility_size_integration_native_geometry_reset_is_not_reapplied_by_later_ack() {
+        use crate::settings::utility_dialog_sizes::UtilitySizeMutation;
+        use crate::settings::{NativeWindowGeometry, SavedWindowPosition};
+
+        let (_directory, path, _settings, ctx, workers, manager) =
+            setup(Some(PreferredWindowSize::new(760.0, 540.0).unwrap()));
+        let identity = NativeViewportIdentity {
+            key: key(),
+            viewport_id: egui::ViewportId::from_hash_of("native-reset-geometry-instance"),
+            owner_generation: 1,
+            host_generation: 1,
+        };
+        let viewport = native_viewport_info(
+            egui::vec2(400.0, 300.0),
+            egui::vec2(20.0, 40.0),
+            egui::vec2(1200.0, 900.0),
+        );
+        let initial_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-640.0, -120.0).unwrap(),
+            PreferredWindowSize::new(900.0, 680.0).unwrap(),
+            1.5,
+        )
+        .unwrap();
+        manager
+            .lock()
+            .sizes
+            .set_native_geometry(key(), initial_geometry)
+            .unwrap();
+        assert!(
+            manager
+                .restore_native_geometry(
+                    identity,
+                    &ctx,
+                    &viewport,
+                    egui::vec2(620.0, 700.0),
+                    Some(egui::vec2(320.0, 420.0)),
+                    None,
+                )
+                .is_some()
+        );
+
+        let reset_revision = manager.reset(key()).unwrap();
+        manager
+            .submit_resize(
+                key(),
+                PreferredWindowSize::new(720.0, 520.0).unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+        let reset_with_size_revision = workers.utility_size_latest_revision(key()).unwrap();
+        assert!(reset_with_size_revision > reset_revision);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            ctx.run_ui(raw_input(egui::vec2(1000.0, 800.0), vec![], 1.0), |root| {
+                manager.begin_frame(root.ctx()).unwrap()
+            })
+            .drop_without_applying_deltas();
+            if manager.status(key()).acknowledged_revision == Some(reset_with_size_revision) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for reset-plus-docked-size acknowledgement"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert_eq!(
+            manager.restore_native_geometry(
+                identity,
+                &ctx,
+                &viewport,
+                egui::vec2(620.0, 700.0),
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            ),
+            Some((None, egui::vec2(620.0, 700.0))),
+            "an accepted reset remains an effect when a newer docked size shares its acknowledgement"
+        );
+        assert!(
+            manager
+                .restore_native_geometry(
+                    identity,
+                    &ctx,
+                    &viewport,
+                    egui::vec2(620.0, 700.0),
+                    Some(egui::vec2(320.0, 420.0)),
+                    None,
+                )
+                .is_none()
+        );
+
+        let native_resize = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-1280.0, -240.0).unwrap(),
+            PreferredWindowSize::new(1040.0, 800.0).unwrap(),
+            2.0,
+        )
+        .unwrap();
+        workers
+            .queue_utility_size_mutation(path, key(), UtilitySizeMutation::SetNative(native_resize))
+            .unwrap();
+        let native_revision = workers.utility_size_latest_revision(key()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            ctx.run_ui(raw_input(egui::vec2(1000.0, 800.0), vec![], 1.0), |root| {
+                manager.begin_frame(root.ctx()).unwrap()
+            })
+            .drop_without_applying_deltas();
+            if manager.status(key()).acknowledged_revision == Some(native_revision) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for native geometry acknowledgement after reset"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert!(
+            manager
+                .restore_native_geometry(
+                    identity,
+                    &ctx,
+                    &viewport,
+                    egui::vec2(620.0, 700.0),
+                    Some(egui::vec2(320.0, 420.0)),
+                    None,
+                )
+                .is_none(),
+            "a native-only acknowledgement cannot replay an already accepted reset"
+        );
+        workers.join_all();
+    }
+
+    #[test]
+    fn utility_size_integration_reset_then_move_before_ack_reopens_at_factory_size() {
+        use crate::settings::SavedWindowPosition;
+
+        let (_directory, _path, _settings, ctx, workers, manager) =
+            setup(Some(PreferredWindowSize::new(760.0, 540.0).unwrap()));
+        let identity = NativeViewportIdentity {
+            key: key(),
+            viewport_id: egui::ViewportId::from_hash_of("native-reset-move-before-ack"),
+            owner_generation: 3,
+            host_generation: 4,
+        };
+        let mut viewport = native_viewport_info(
+            egui::vec2(400.0, 300.0),
+            egui::vec2(20.0, 40.0),
+            egui::vec2(1200.0, 900.0),
+        );
+        // The saved geometry and reopened viewport describe the same physical scale.
+        viewport.native_pixels_per_point = Some(1.0);
+        let factory_inner_size = egui::vec2(620.0, 700.0);
+        let factory_outer_size = PreferredWindowSize::new(640.0, 740.0).unwrap();
+        let previous_geometry = NativeWindowGeometry::new(
+            SavedWindowPosition::new(-640.0, -120.0).unwrap(),
+            PreferredWindowSize::new(900.0, 680.0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+        manager
+            .lock()
+            .sizes
+            .set_native_geometry(key(), previous_geometry)
+            .unwrap();
+        assert!(
+            manager
+                .restore_native_geometry(
+                    identity,
+                    &ctx,
+                    &viewport,
+                    factory_inner_size,
+                    Some(egui::vec2(320.0, 420.0)),
+                    None,
+                )
+                .is_some()
+        );
+        assert_eq!(
+            manager
+                .lock()
+                .native_geometry_instances
+                .get(&identity)
+                .and_then(|instance| instance.factory_outer_size),
+            Some(factory_outer_size)
+        );
+
+        let reset_revision = manager.reset(key()).unwrap();
+        let position_sequence = manager.native_geometry_observer.next_sequence();
+        let move_observation = NativeGeometryObservation {
+            identity,
+            position: NativeWindowRect {
+                left: -500,
+                top: 100,
+                right: 400,
+                bottom: 780,
+            },
+            position_scale: 1.0,
+            position_sequence,
+            size: None,
+            size_sequence: None,
+        };
+        assert!(
+            NativeGeometryIntent::Reset {
+                sequence: position_sequence.saturating_sub(1),
+            }
+            .followed_by(move_observation, None)
+            .is_none(),
+            "without trustworthy factory metadata, a move does not persist the stale visible size"
+        );
+        let reset_intent = manager
+            .lock()
+            .native_geometry_intents
+            .get(&key())
+            .copied()
+            .expect("reset owns the unacknowledged geometry intent");
+        let candidate_intent = reset_intent
+            .followed_by(move_observation, Some(factory_outer_size))
+            .expect("a move after reset keeps the factory size");
+        let candidate_geometry = candidate_intent
+            .geometry()
+            .expect("the moved position plus factory size is complete geometry");
+        assert_eq!(candidate_geometry.position.x, -500.0);
+        assert_eq!(candidate_geometry.position.y, 100.0);
+        assert_eq!(candidate_geometry.size, factory_outer_size);
+        manager
+            .submit_native_geometry(key(), candidate_geometry, &ctx)
+            .unwrap();
+        manager
+            .lock()
+            .native_geometry_intents
+            .insert(key(), candidate_intent);
+
+        let accepted_revision = workers.utility_size_latest_revision(key()).unwrap();
+        assert!(accepted_revision > reset_revision);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            ctx.run_ui(raw_input(egui::vec2(1000.0, 800.0), vec![], 1.0), |root| {
+                manager.begin_frame(root.ctx()).unwrap()
+            })
+            .drop_without_applying_deltas();
+            if manager.status(key()).acknowledged_revision == Some(accepted_revision) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for reset-plus-move geometry acknowledgement"
+            );
+            std::thread::sleep(Duration::from_millis(4));
+        }
+
+        let persisted = manager.snapshot().native_geometry(key()).unwrap();
+        assert_eq!(persisted.position.x, -500.0);
+        assert_eq!(persisted.size, factory_outer_size);
+        let reopened_identity = NativeViewportIdentity {
+            host_generation: identity.host_generation.wrapping_add(1),
+            ..identity
+        };
+        let restored = manager
+            .restore_native_geometry(
+                reopened_identity,
+                &ctx,
+                &viewport,
+                factory_inner_size,
+                Some(egui::vec2(320.0, 420.0)),
+                None,
+            )
+            .expect("a reopened native window restores the accepted geometry");
+        let resized = if let Some(position) = restored.0 {
+            let delta = position - viewport.outer_rect.unwrap().min;
+            viewport.outer_rect = viewport.outer_rect.map(|rect| rect.translate(delta));
+            viewport.inner_rect = viewport.inner_rect.map(|rect| rect.translate(delta));
+            manager
+                .restore_native_geometry(
+                    reopened_identity,
+                    &ctx,
+                    &viewport,
+                    factory_inner_size,
+                    Some(egui::vec2(320.0, 420.0)),
+                    None,
+                )
+                .expect("the retained placement releases the size command")
+        } else {
+            restored
+        };
+        assert_eq!(resized, (None, factory_inner_size));
+        workers.join_all();
     }
 
     #[test]

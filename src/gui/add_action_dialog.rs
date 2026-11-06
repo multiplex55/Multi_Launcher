@@ -13,22 +13,22 @@ use rfd::FileDialog;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(target_os = "windows")]
-struct RepairDialogParent(std::num::NonZeroIsize);
+pub(super) struct NativeDialogParent(pub(super) std::num::NonZeroIsize);
 
 #[cfg(target_os = "windows")]
-impl raw_window_handle::HasWindowHandle for RepairDialogParent {
+impl raw_window_handle::HasWindowHandle for NativeDialogParent {
     fn window_handle(
         &self,
     ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
         let handle = raw_window_handle::Win32WindowHandle::new(self.0);
         // SAFETY: this adapter is created only from the live root HWND published
-        // by the current LauncherApp frame and is used synchronously by rfd.
+        // by LauncherApp or the current retained native utility host and used synchronously by rfd.
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(handle.into()) })
     }
 }
 
 #[cfg(target_os = "windows")]
-impl raw_window_handle::HasDisplayHandle for RepairDialogParent {
+impl raw_window_handle::HasDisplayHandle for NativeDialogParent {
     fn display_handle(
         &self,
     ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
@@ -249,7 +249,7 @@ impl AddActionDialog {
             })?;
             let hwnd = std::num::NonZeroIsize::new(hwnd as isize)
                 .ok_or_else(|| "The launcher window cannot own the repair picker.".to_owned())?;
-            FileDialog::new().set_parent(&RepairDialogParent(hwnd))
+            FileDialog::new().set_parent(&NativeDialogParent(hwnd))
         };
         #[cfg(not(target_os = "windows"))]
         let dialog = {

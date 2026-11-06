@@ -7,6 +7,7 @@ use crate::calculation_pad::{
     PadRecoverySnapshot, PadRecoveryStore, PadRecoveryWriteFailure, PadRecoveryWriter,
     PadStoreError, PendingTransition, SessionError, TransitionDecision, TransitionOutcome,
 };
+use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::platform::app_data::AppDataRoot;
 use eframe::egui;
 
@@ -15,6 +16,11 @@ const MIN_PAD_VIEWPORT_SIZE: [f32; 2] = [500.0, 380.0];
 
 fn pad_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("calculation_pad_native_viewport")
+}
+
+fn calculation_pad_tool_key() -> crate::settings::UtilityToolKey {
+    crate::settings::UtilityToolKey::parse("calculation-pad")
+        .expect("Calculation Pad is a registered utility window key")
 }
 
 fn pad_viewport_builder() -> egui::ViewportBuilder {
@@ -95,6 +101,8 @@ struct RootEffects {
 struct HostEffects {
     identity: PadHostIdentity,
     viewport_id: egui::ViewportId,
+    viewport_class: egui::ViewportClass,
+    viewport_info: Option<egui::ViewportInfo>,
     pass: Option<ViewportPassProvenance>,
     pass_accepted: bool,
     edited_source: Option<String>,
@@ -159,6 +167,8 @@ impl CalculationPadDialog {
         HostEffects {
             identity: self.host_identity(),
             viewport_id,
+            viewport_class: egui::ViewportClass::Root,
+            viewport_info: None,
             pass: None,
             pass_accepted: false,
             edited_source: None,
@@ -572,24 +582,36 @@ impl CalculationPadDialog {
                     .default_size(egui::vec2(900.0, 650.0))
                     .min_size(min_size)
                     .max_size(content_rect.size())
-                    .show(ctx, |ui| {
-                        let pass_authorized = first_ui_pass
-                            && !ctx.will_discard()
-                            && ui.is_visible()
-                            && !ui.is_sizing_pass();
-                        let modal_open = ctx.memory(|memory| memory.top_modal_layer().is_some());
-                        let surface_allowed = root_input_allowed && !modal_open;
-                        body_authorized = pass_authorized && surface_allowed;
-                        self.draw_host_contents(
-                            ui,
-                            ctx,
-                            identity,
-                            egui::ViewportId::ROOT,
-                            body_authorized,
-                            body_authorized,
-                            &mut effects,
-                        );
-                    });
+                    .show_utility(
+                        ctx,
+                        "calculation-pad",
+                        Self::root_host_layer_id().id,
+                        None,
+                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::outer(
+                            egui::vec2(900.0, 650.0),
+                        )
+                        .with_minimum(min_size)
+                        .with_maximum(content_rect.size()),
+                        |ui| {
+                            let pass_authorized = first_ui_pass
+                                && !ctx.will_discard()
+                                && ui.is_visible()
+                                && !ui.is_sizing_pass();
+                            let modal_open =
+                                ctx.memory(|memory| memory.top_modal_layer().is_some());
+                            let surface_allowed = root_input_allowed && !modal_open;
+                            body_authorized = pass_authorized && surface_allowed;
+                            self.draw_host_contents(
+                                ui,
+                                ctx,
+                                identity,
+                                egui::ViewportId::ROOT,
+                                body_authorized,
+                                body_authorized,
+                                &mut effects,
+                            );
+                        },
+                    );
 
                 #[cfg(test)]
                 {
@@ -653,6 +675,11 @@ impl CalculationPadDialog {
                         };
 
                         let mut effects = self.empty_host_effects(viewport_id);
+                        effects.viewport_class = class;
+                        if independent {
+                            effects.viewport_info =
+                                Some(child.input(|input| input.viewport().clone()));
+                        }
                         effects.native_close_requested = native_close_requested;
                         effects.close_requested = pass_authorized
                             && self.session.pending_transition().is_none()
@@ -1033,7 +1060,43 @@ impl CalculationPadDialog {
             && self.apply_host_request(ctx, requested_host)
             && requested_host == PadHost::Docked
         {
+            crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                ctx,
+                crate::gui::utility_window_geometry::NativeViewportIdentity {
+                    key: calculation_pad_tool_key(),
+                    viewport_id: host.viewport_id,
+                    owner_generation: 0,
+                    host_generation: host.identity.generation,
+                },
+            );
             delivered.push(CalculationPadDialogEffect::ShowRoot);
+        }
+
+        if self.host_identity() == host.identity
+            && host.identity.host == PadHost::Popout
+            && !host.close_requested
+            && !host.native_close_requested
+            && let Some(viewport_info) = host.viewport_info.as_ref()
+        {
+            crate::gui::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                host.viewport_class,
+                host.pass_accepted,
+                "Calculation Pad",
+                crate::gui::utility_window_geometry::NativeViewportIdentity {
+                    key: calculation_pad_tool_key(),
+                    viewport_id: host.viewport_id,
+                    owner_generation: 0,
+                    host_generation: host.identity.generation,
+                },
+                viewport_info,
+                egui::vec2(PAD_VIEWPORT_SIZE[0], PAD_VIEWPORT_SIZE[1]),
+                Some(egui::vec2(
+                    MIN_PAD_VIEWPORT_SIZE[0],
+                    MIN_PAD_VIEWPORT_SIZE[1],
+                )),
+                None,
+            );
         }
 
         if host.source_focus_requested {
@@ -1078,6 +1141,15 @@ impl CalculationPadDialog {
 
         let close_popout = host.identity.host == PadHost::Popout && !self.open;
         if close_popout {
+            crate::gui::utility_dialog_size::close_native_utility_geometry_viewport(
+                ctx,
+                crate::gui::utility_window_geometry::NativeViewportIdentity {
+                    key: calculation_pad_tool_key(),
+                    viewport_id: host.viewport_id,
+                    owner_generation: 0,
+                    host_generation: host.identity.generation,
+                },
+            );
             ctx.send_viewport_cmd_to(pad_viewport_id(), egui::ViewportCommand::Close);
             self.reset_host_to_docked();
         } else if host.native_close_requested {
@@ -1183,11 +1255,8 @@ impl CalculationPadDialog {
             if examples.clicked() {
                 *intent = Some(DialogIntent::OpenExamples);
             }
-            let (host_label, requested_host) = match host_identity.host {
-                PadHost::Docked => ("Pop out", PadHost::Popout),
-                PadHost::Popout => ("Dock back", PadHost::Docked),
-            };
-            let host_button = ui.button(host_label);
+            let (host_button, requested_host) =
+                super::utility_host::presentation_button(ui, host_identity.host, true);
             #[cfg(test)]
             if ui.is_visible() && !ui.is_sizing_pass() {
                 self.test_host_button_rect = Some(host_button.rect);

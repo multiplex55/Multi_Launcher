@@ -19,8 +19,9 @@ pub(crate) fn restore_geometry(
     saved_position_scale_factor: Option<f32>,
     current_zoom_factor: f32,
 ) -> WindowGeometry {
+    let fallback_size = viewport_size(ctx);
     if !valid_zoom_factor(current_zoom_factor) {
-        return clamp_window_size(geometry, viewport_size(ctx));
+        return clamp_window_size(geometry, fallback_size);
     }
     current_work_area(
         ctx,
@@ -32,7 +33,75 @@ pub(crate) fn restore_geometry(
         geometry_in_current_scale(geometry, saved_position_scale_factor, current_scale)
             .map(|geometry| clamp_window_geometry(geometry, work_area))
     })
-    .unwrap_or_else(|| clamp_window_size(geometry, viewport_size(ctx)))
+    .unwrap_or_else(|| clamp_window_size(geometry, fallback_size))
+}
+
+/// Return eframe commands in the current child viewport's logical units.
+pub(in crate::gui) fn restore_utility_geometry(
+    ctx: &egui::Context,
+    geometry: crate::settings::NativeWindowGeometry,
+    child_scale: f32,
+    chrome: egui::Vec2,
+    minimum: egui::Vec2,
+    maximum: egui::Vec2,
+    fallback_size: egui::Vec2,
+) -> (Option<egui::Pos2>, egui::Vec2) {
+    let desired = WindowGeometry {
+        position: Some(CanvasPoint::new(geometry.position.x, geometry.position.y)),
+        size: CanvasPoint::new(geometry.size.width, geometry.size.height),
+    };
+    let zoom = ctx.zoom_factor();
+    let resolved = current_work_area(ctx, desired.position, Some(geometry.scale_factor), zoom)
+        .and_then(|(area, target_scale)| {
+            geometry_in_current_scale(desired, Some(geometry.scale_factor), target_scale)
+                .map(|geometry| (geometry, area, target_scale))
+        });
+    if let Some((geometry, area, target_scale)) = resolved {
+        return utility_commands_for_work_area(
+            geometry,
+            area,
+            target_scale,
+            child_scale,
+            chrome,
+            minimum,
+            maximum,
+        );
+    }
+
+    let desired_outer =
+        egui::vec2(desired.size.x, desired.size.y) * (geometry.scale_factor / child_scale);
+    let maximum = maximum.min((fallback_size - chrome).max(egui::Vec2::splat(1.0)));
+    (
+        None,
+        (desired_outer - chrome)
+            .max(minimum.min(maximum))
+            .min(maximum),
+    )
+}
+
+fn utility_commands_for_work_area(
+    mut geometry: WindowGeometry,
+    area: WindowWorkArea,
+    target_scale: CanvasPoint,
+    child_scale: f32,
+    chrome: egui::Vec2,
+    minimum: egui::Vec2,
+    maximum: egui::Vec2,
+) -> (Option<egui::Pos2>, egui::Vec2) {
+    let target_to_child = egui::vec2(target_scale.x, target_scale.y) / child_scale;
+    let chrome_on_target = chrome / target_to_child;
+    let available = egui::vec2(area.size.x, area.size.y);
+    let maximum = maximum.min((available - chrome_on_target).max(egui::Vec2::splat(1.0)));
+    let inner = (egui::vec2(geometry.size.x, geometry.size.y) - chrome_on_target)
+        .max(minimum.min(maximum))
+        .min(maximum);
+    let outer = inner + chrome_on_target;
+    geometry.size = CanvasPoint::new(outer.x, outer.y);
+    let geometry = clamp_window_geometry(geometry, area);
+    let position = geometry
+        .position
+        .map(|point| egui::pos2(point.x * target_to_child.x, point.y * target_to_child.y));
+    (position, inner * target_to_child)
 }
 
 fn viewport_size(ctx: &egui::Context) -> CanvasPoint {
@@ -259,6 +328,28 @@ fn windows_work_area(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utility_restore_uses_current_child_scale_for_cross_monitor_commands() {
+        let (position, inner) = utility_commands_for_work_area(
+            WindowGeometry {
+                position: Some(CanvasPoint::new(-180.0, 620.0)),
+                size: CanvasPoint::new(100.0, 100.0),
+            },
+            WindowWorkArea {
+                origin: CanvasPoint::new(-1280.0, -80.0),
+                size: CanvasPoint::new(1280.0, 800.0),
+            },
+            CanvasPoint::new(1.5, 1.5),
+            1.0,
+            egui::vec2(12.0, 30.0),
+            egui::vec2(400.0, 300.0),
+            egui::Vec2::splat(f32::MAX),
+        );
+        // Minimum inner size plus chrome fits against the right and bottom edges.
+        assert_eq!(position, Some(egui::pos2(-612.0, 600.0)));
+        assert_eq!(inner, egui::vec2(600.0, 450.0));
+    }
 
     #[test]
     fn work_area_adapter_preserves_negative_origin_and_taskbar_extent() {

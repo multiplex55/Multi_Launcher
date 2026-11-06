@@ -69,6 +69,19 @@ impl UtilityHostState {
         }
     }
 
+    pub(super) fn popped_out() -> Self {
+        Self {
+            identity: HostIdentity {
+                host: UtilityPresentation::Popout,
+                generation: 0,
+            },
+            bootstrap_pending: false,
+            focus_pending: false,
+            embedded_root_layer: None,
+            embedded_root_focused_id: None,
+        }
+    }
+
     pub(super) fn identity(&self) -> HostIdentity {
         self.identity
     }
@@ -141,6 +154,18 @@ impl UtilityHostState {
             self.focus_pending = false;
         }
     }
+}
+
+pub(super) fn presentation_button(
+    ui: &mut egui::Ui,
+    presentation: UtilityPresentation,
+    allowed: bool,
+) -> (egui::Response, UtilityPresentation) {
+    let (label, requested) = match presentation {
+        UtilityPresentation::Docked => ("Pop Out", UtilityPresentation::Popout),
+        UtilityPresentation::Popout => ("Dock", UtilityPresentation::Docked),
+    };
+    (ui.add_enabled(allowed, egui::Button::new(label)), requested)
 }
 
 #[cfg(test)]

@@ -62,6 +62,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+pub(super) use work_area::restore_utility_geometry;
+
 pub(crate) fn radial_designer_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("radial-designer")
 }

@@ -3,7 +3,9 @@ use super::native_keyboard::reserve_windows_system_menu_alt_space;
 use super::utility_dialog_size::{UtilityDialogSizeWindowExt, UtilityWindowSizeRecipe};
 use super::utility_host::{
     HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+    presentation_button,
 };
+use super::utility_window_geometry::NativeViewportIdentity;
 use crate::diagram::{
     CanvasGuide, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping,
     CanvasMinimap, DEFAULT_LAYER_ID, DecodedVisualAsset, DiagramDocument,
@@ -89,6 +91,20 @@ fn viewer_viewport_builder() -> egui::ViewportBuilder {
         .with_visible(true)
 }
 
+fn native_geometry_identity(
+    key: &'static str,
+    viewport_id: egui::ViewportId,
+    owner_generation: u64,
+    host: HostIdentity,
+) -> Option<NativeViewportIdentity> {
+    (host.host == UtilityPresentation::Popout).then_some(NativeViewportIdentity {
+        key: crate::settings::UtilityToolKey::parse(key).ok()?,
+        viewport_id,
+        owner_generation,
+        host_generation: host.generation,
+    })
+}
+
 struct DiagramHost {
     title: &'static str,
     key: &'static str,
@@ -103,11 +119,15 @@ impl DiagramHost {
         self,
         ctx: &egui::Context,
         presentation: UtilityPresentation,
+        root_visible: bool,
         root_input_allowed: bool,
         mut body: impl FnMut(&mut egui::Ui, egui::ViewportClass),
     ) -> bool {
         if presentation == UtilityPresentation::Popout {
             ctx.show_viewport_immediate(self.viewport, self.builder, body);
+            return false;
+        }
+        if !root_visible {
             return false;
         }
         let available = ctx.content_rect().size();
@@ -140,24 +160,6 @@ impl DiagramHost {
 
 fn diagram_host_layer(key: &str) -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, egui::Id::new(key))
-}
-
-fn diagram_popout_host() -> UtilityHostState {
-    let mut host = UtilityHostState::docked();
-    host.transition(UtilityPresentation::Popout);
-    host
-}
-
-fn presentation_button(
-    ui: &mut egui::Ui,
-    presentation: UtilityPresentation,
-    allowed: bool,
-) -> egui::Response {
-    let label = match presentation {
-        UtilityPresentation::Docked => "Pop Out",
-        UtilityPresentation::Popout => "Dock",
-    };
-    ui.add_enabled(allowed, egui::Button::new(label))
 }
 
 fn transition_diagram_host(
@@ -898,6 +900,7 @@ struct PendingRootEffects {
     root_pass: ViewportPassProvenance,
     host: HostIdentity,
     change_host: bool,
+    native_viewport: Option<egui::ViewportInfo>,
     owner_generation: u64,
     owner_viewport_id: egui::ViewportId,
     owner_pass: Option<ViewportPassProvenance>,
@@ -939,6 +942,7 @@ struct PendingViewerEffects {
     root_pass: ViewportPassProvenance,
     host: HostIdentity,
     change_host: bool,
+    native_viewport: Option<egui::ViewportInfo>,
     owner_generation: u64,
     viewer_generation: u64,
     callback_viewport_id: egui::ViewportId,
@@ -957,6 +961,8 @@ pub(crate) struct DiagramStudioDialog {
     owner_host: UtilityHostState,
     viewer_host: UtilityHostState,
     show_root_after_host_change: bool,
+    #[cfg(all(windows, not(test)))]
+    picker_owner: Option<(egui::Context, Option<NativeViewportIdentity>)>,
     owner_generation: u64,
     viewport_bootstrap_pending: bool,
     focus_viewport: bool,
@@ -1142,9 +1148,11 @@ impl DiagramStudioDialog {
         Self {
             open: false,
             owner_generation: 0,
-            owner_host: diagram_popout_host(),
-            viewer_host: diagram_popout_host(),
+            owner_host: UtilityHostState::popped_out(),
+            viewer_host: UtilityHostState::popped_out(),
             show_root_after_host_change: false,
+            #[cfg(all(windows, not(test)))]
+            picker_owner: None,
             viewport_bootstrap_pending: false,
             focus_viewport: false,
             focus_source: false,
@@ -1345,7 +1353,8 @@ impl DiagramStudioDialog {
     }
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
-        self.viewport_bootstrap_pending
+        (self.open && self.owner_host.presentation() == UtilityPresentation::Popout)
+            || (self.viewer_open && self.viewer_host.presentation() == UtilityPresentation::Popout)
             || self.close_pending
             || self.viewer_bootstrap_pending
             || self.pending_viewer_effects.is_some()
@@ -1491,6 +1500,7 @@ impl DiagramStudioDialog {
         self.property_draft = None;
     }
 
+    #[cfg(test)]
     pub(crate) fn show(
         &mut self,
         ctx: &egui::Context,
@@ -1498,11 +1508,29 @@ impl DiagramStudioDialog {
         application_input_allowed: bool,
         root_input_allowed: bool,
     ) {
+        self.show_on_root(
+            ctx,
+            first_ui_pass,
+            application_input_allowed,
+            true,
+            root_input_allowed,
+        );
+    }
+
+    pub(super) fn show_on_root(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        application_input_allowed: bool,
+        root_visible: bool,
+        root_input_allowed: bool,
+    ) {
         #[cfg(feature = "qa-framebuffer-capture")]
         self.show_impl(
             ctx,
             first_ui_pass,
             application_input_allowed,
+            root_visible,
             root_input_allowed,
             None,
         );
@@ -1511,6 +1539,7 @@ impl DiagramStudioDialog {
             ctx,
             first_ui_pass,
             application_input_allowed,
+            root_visible,
             root_input_allowed,
         );
     }
@@ -1521,6 +1550,7 @@ impl DiagramStudioDialog {
         ctx: &egui::Context,
         first_ui_pass: bool,
         application_input_allowed: bool,
+        root_visible: bool,
         root_input_allowed: bool,
     ) -> Option<DiagramViewportObservation> {
         let mut observation = None;
@@ -1528,6 +1558,7 @@ impl DiagramStudioDialog {
             ctx,
             first_ui_pass,
             application_input_allowed,
+            root_visible,
             root_input_allowed,
             Some(&mut observation),
         );
@@ -1547,6 +1578,7 @@ impl DiagramStudioDialog {
         ctx: &egui::Context,
         first_ui_pass: bool,
         application_input_allowed: bool,
+        root_visible: bool,
         root_input_allowed: bool,
         #[cfg(feature = "qa-framebuffer-capture")] mut observation_slot: Option<
             &mut Option<DiagramViewportObservation>,
@@ -1586,6 +1618,7 @@ impl DiagramStudioDialog {
         let mut child_viewport_id = None;
         let mut owner_viewport_id = egui::ViewportId::ROOT;
         let mut owner_pass = None;
+        let mut native_viewport = None;
         let mut owner_pass_accepted = false;
         let owner_generation = self.owner_generation;
         let owner_host = self.owner_host.identity();
@@ -1607,9 +1640,12 @@ impl DiagramStudioDialog {
             size: DEFAULT_VIEWPORT_SIZE,
             minimum: MIN_VIEWPORT_SIZE,
         };
-        let docked_close = host.show(ctx, owner_host.host, root_input_allowed, |child, class| {
+        let docked_close = host.show(ctx, owner_host.host, root_visible || self.close_pending, root_input_allowed, |child, class| {
             callback_class = class;
             let independent = class == egui::ViewportClass::Immediate;
+            if independent {
+                native_viewport = Some(child.input(|input| input.viewport().clone()));
+            }
             let child_context = child.ctx().clone();
             child_viewport_id = Some(child_context.viewport_id());
             owner_viewport_id = if independent {
@@ -1729,7 +1765,7 @@ impl DiagramStudioDialog {
             if independent {
                 egui::CentralPanel::default().show(child, |ui| {
                     body_rendered = ui.is_visible() && !ui.is_sizing_pass();
-                    let control = presentation_button(
+                    let (control, _) = presentation_button(
                         ui,
                         owner_host.host,
                         actions_allowed && !close_requested && can_change_host,
@@ -1759,7 +1795,7 @@ impl DiagramStudioDialog {
                 });
             } else {
                 body_rendered = child.is_visible() && !child.is_sizing_pass();
-                let control = presentation_button(
+                let (control, _) = presentation_button(
                     child,
                     owner_host.host,
                     actions_allowed && !close_requested && can_change_host,
@@ -1925,6 +1961,7 @@ impl DiagramStudioDialog {
                 root_pass,
                 host: owner_host,
                 change_host: owner_effects_accepted && !close_requested && change_host,
+                native_viewport,
                 owner_generation,
                 owner_viewport_id,
                 owner_pass,
@@ -1993,6 +2030,7 @@ impl DiagramStudioDialog {
                 ctx,
                 first_ui_pass,
                 application_input_allowed,
+                root_visible,
                 root_input_allowed,
             );
         } else if first_ui_pass {
@@ -2006,6 +2044,7 @@ impl DiagramStudioDialog {
         ctx: &egui::Context,
         first_ui_pass: bool,
         application_input_allowed: bool,
+        root_visible: bool,
         root_input_allowed: bool,
     ) {
         let owner_generation = self.owner_generation;
@@ -2014,6 +2053,7 @@ impl DiagramStudioDialog {
         let mut change_host = false;
         let mut callback_viewport_id = None;
         let mut callback_pass = None;
+        let mut native_viewport = None;
         let mut callback_pass_accepted = false;
         let mut embedded_root_layer = None;
         let mut embedded_root_focused_id = None;
@@ -2039,12 +2079,15 @@ impl DiagramStudioDialog {
             size: VIEWER_VIEWPORT_SIZE,
             minimum: MIN_VIEWER_VIEWPORT_SIZE,
         };
-        let docked_close = host.show(ctx, viewer_host.host, root_input_allowed, |child, class| {
+        let docked_close = host.show(ctx, viewer_host.host, root_visible, root_input_allowed, |child, class| {
             let child_context = child.ctx().clone();
             let actual_viewport_id = child_context.viewport_id();
             callback_viewport_id = Some(actual_viewport_id);
             let independent = class == egui::ViewportClass::Immediate
                 && actual_viewport_id == viewer_viewport_id();
+            if independent {
+                native_viewport = Some(child.input(|input| input.viewport().clone()));
+            }
             let current_pass = child.current_pass_index() == 0;
             let modal_open = child.memory(|memory| memory.top_modal_layer().is_some());
             let (focused, close_requested_by_os) = child.input(|input| {
@@ -2082,7 +2125,7 @@ impl DiagramStudioDialog {
             if independent {
                 egui::CentralPanel::default().show(child, |ui| {
                     body_rendered = ui.is_visible() && !ui.is_sizing_pass();
-                    let control = presentation_button(ui, viewer_host.host, actions_allowed);
+                    let (control, _) = presentation_button(ui, viewer_host.host, actions_allowed);
                     self.record_host_action("viewer_presentation", ui, &control);
                     change_host = control.clicked();
                     close_requested |=
@@ -2093,7 +2136,7 @@ impl DiagramStudioDialog {
                 if actual_viewport_id == egui::ViewportId::ROOT {
                     embedded_root_layer = Some(child.layer_id());
                 }
-                let control = presentation_button(child, viewer_host.host, actions_allowed);
+                let (control, _) = presentation_button(child, viewer_host.host, actions_allowed);
                 self.record_host_action("viewer_presentation", child, &control);
                 change_host = control.clicked();
                 close_requested |=
@@ -2168,6 +2211,7 @@ impl DiagramStudioDialog {
                     viewer_generation,
                     host: viewer_host,
                     change_host: callback_pass_accepted && !close_requested && change_host,
+                    native_viewport,
                     callback_viewport_id,
                     callback_pass,
                     callback_pass_accepted,
@@ -2671,6 +2715,44 @@ impl DiagramStudioDialog {
         }
         let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
         let accepted_owner_viewport_id = effects.owner_viewport_id;
+        let owner_native = native_geometry_identity(
+            "diagram-studio",
+            viewport_id(),
+            effects.owner_generation,
+            effects.host,
+        );
+        let viewer_native = native_geometry_identity(
+            "diagram-viewer",
+            viewer_viewport_id(),
+            self.viewer_generation,
+            self.viewer_host.identity(),
+        );
+        if owner_pass_current
+            && let Some(info) = effects.native_viewport.as_ref()
+            && let Some(identity) = owner_native
+        {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                egui::ViewportClass::Immediate,
+                true,
+                "Diagram Studio",
+                identity,
+                info,
+                egui::Vec2::from(DEFAULT_VIEWPORT_SIZE),
+                Some(egui::Vec2::from(MIN_VIEWPORT_SIZE)),
+                None,
+            );
+        }
+        #[cfg(all(windows, not(test)))]
+        {
+            self.picker_owner = if !owner_pass_current {
+                None
+            } else if accepted_owner_viewport_id == egui::ViewportId::ROOT {
+                Some((ctx.clone(), None))
+            } else {
+                owner_native.map(|identity| (ctx.clone(), Some(identity)))
+            };
+        }
         if owner_pass_current && let Some(recent_panel) = effects.recent_panel.as_ref() {
             if let Some(open) = recent_panel.open {
                 self.recent_panel_open = open;
@@ -2861,6 +2943,19 @@ impl DiagramStudioDialog {
                 )
             });
         self.poll_drawio_work(ctx, accepted_owner_viewport_id, owner_pass_current);
+        #[cfg(all(windows, not(test)))]
+        {
+            self.picker_owner = None;
+        }
+        if (accepted_close
+            || effects.change_host
+                && owner_pass_current
+                && self.open
+                && self.can_change_owner_host())
+            && let Some(identity) = owner_native
+        {
+            super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+        }
         if effects.change_host
             && owner_pass_current
             && self.open
@@ -2911,6 +3006,9 @@ impl DiagramStudioDialog {
             ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::CancelClose);
         }
         if owner_closed_viewer {
+            if let Some(identity) = viewer_native {
+                super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            }
             ctx.send_viewport_cmd_to(viewer_viewport_id(), egui::ViewportCommand::Close);
         } else if let Some(viewer_effects) = viewer_effects {
             let same_root_pass = viewer_effects.root_pass == effects.root_pass;
@@ -2933,6 +3031,25 @@ impl DiagramStudioDialog {
                 && viewer_effects.callback_pass_accepted
                 && viewer_pass_current;
             if viewer_effects_accepted {
+                if let Some(identity) = viewer_native {
+                    if viewer_effects.close_requested || viewer_effects.change_host {
+                        super::utility_dialog_size::close_native_utility_geometry_viewport(
+                            ctx, identity,
+                        );
+                    } else if let Some(info) = viewer_effects.native_viewport.as_ref() {
+                        super::utility_dialog_size::apply_native_utility_geometry_restore(
+                            ctx,
+                            egui::ViewportClass::Immediate,
+                            true,
+                            "Diagram Viewer",
+                            identity,
+                            info,
+                            egui::Vec2::from(VIEWER_VIEWPORT_SIZE),
+                            Some(egui::Vec2::from(MIN_VIEWER_VIEWPORT_SIZE)),
+                            None,
+                        );
+                    }
+                }
                 self.viewer_bootstrap_pending = false;
                 self.viewer_embedded_root_layer = viewer_effects.embedded_root_layer;
                 self.viewer_embedded_root_focused_id = viewer_effects.embedded_root_focused_id;
@@ -3486,11 +3603,11 @@ impl DiagramStudioDialog {
                 return;
             }
         };
+        self.message = Some(StudioNotice::info(format!(
+            "{} export cancelled.",
+            export_format_name(format)
+        )));
         let Some(path) = self.pick_export_destination(format) else {
-            self.message = Some(StudioNotice::info(format!(
-                "{} export cancelled.",
-                export_format_name(format)
-            )));
             return;
         };
         if let Some(native_path) = self.documents.path() {
@@ -3538,6 +3655,30 @@ impl DiagramStudioDialog {
         }
     }
 
+    #[cfg(not(test))]
+    fn owned_file_dialog(&mut self) -> Option<rfd::FileDialog> {
+        let dialog = rfd::FileDialog::new();
+        #[cfg(windows)]
+        {
+            let hwnd = self
+                .picker_owner
+                .as_ref()
+                .and_then(|(ctx, identity)| {
+                    super::utility_dialog_size::utility_picker_hwnd(ctx, *identity)
+                })
+                .and_then(|hwnd| std::num::NonZeroIsize::new(hwnd as isize));
+            let Some(hwnd) = hwnd else {
+                self.message = Some(StudioNotice::error(
+                    "The current Diagram window is not available for the file dialog. Focus it and try again.",
+                ));
+                return None;
+            };
+            return Some(dialog.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)));
+        }
+        #[cfg(not(windows))]
+        Some(dialog)
+    }
+
     fn pick_mermaid_source(&mut self) -> Option<PathBuf> {
         #[cfg(test)]
         {
@@ -3546,8 +3687,9 @@ impl DiagramStudioDialog {
         }
         #[cfg(not(test))]
         {
+            let picker = self.owned_file_dialog()?;
             let directory = self.picker_directory();
-            let mut picker = rfd::FileDialog::new().add_filter("Mermaid source (*.mmd)", &["mmd"]);
+            let mut picker = picker.add_filter("Mermaid source (*.mmd)", &["mmd"]);
             if directory.is_dir() {
                 picker = picker.set_directory(directory);
             }
@@ -3567,9 +3709,9 @@ impl DiagramStudioDialog {
         }
         #[cfg(not(test))]
         {
+            let picker = self.owned_file_dialog()?;
             let directory = self.picker_directory();
-            let mut picker =
-                rfd::FileDialog::new().add_filter("draw.io diagram (*.drawio)", &["drawio"]);
+            let mut picker = picker.add_filter("draw.io diagram (*.drawio)", &["drawio"]);
             if directory.is_dir() {
                 picker = picker.set_directory(directory);
             }
@@ -3597,8 +3739,9 @@ impl DiagramStudioDialog {
         }
         #[cfg(not(test))]
         {
+            let picker = self.owned_file_dialog()?;
             let directory = self.picker_directory();
-            let mut picker = rfd::FileDialog::new()
+            let mut picker = picker
                 .add_filter("draw.io diagram (*.drawio)", &["drawio"])
                 .set_file_name(_suggested_name);
             if directory.is_dir() {
@@ -4176,6 +4319,7 @@ impl DiagramStudioDialog {
         }
         #[cfg(not(test))]
         {
+            let picker = self.owned_file_dialog()?;
             let directory = self.picker_directory();
             let default_name = self
                 .documents
@@ -4184,7 +4328,7 @@ impl DiagramStudioDialog {
                 .and_then(|name| name.to_str())
                 .unwrap_or("diagram");
             let file_name = format!("{default_name}.{}", format.extension());
-            let mut picker = rfd::FileDialog::new()
+            let mut picker = picker
                 .add_filter(export_filter_name(format), &[format.extension()])
                 .set_file_name(&file_name);
             if directory.is_dir() {
@@ -4267,14 +4411,15 @@ impl DiagramStudioDialog {
         }
         #[cfg(not(test))]
         {
+            let picker = self.owned_file_dialog()?;
             let current_directory = self
                 .documents
                 .path()
                 .and_then(Path::parent)
                 .filter(|directory| directory.is_dir());
             let directory = current_directory.unwrap_or(self.default_directory.as_path());
-            let mut picker = rfd::FileDialog::new()
-                .add_filter("Diagram Studio document", &[NATIVE_DIAGRAM_EXTENSION]);
+            let mut picker =
+                picker.add_filter("Diagram Studio document", &[NATIVE_DIAGRAM_EXTENSION]);
             if directory.is_dir() {
                 picker = picker.set_directory(directory);
             }
@@ -4311,7 +4456,8 @@ impl DiagramStudioDialog {
         }
         #[cfg(not(test))]
         {
-            let mut picker = rfd::FileDialog::new()
+            let picker = self.owned_file_dialog()?;
+            let mut picker = picker
                 .add_filter(
                     "Diagram Studio document (*.mld)",
                     &[NATIVE_DIAGRAM_EXTENSION],
@@ -4476,9 +4622,9 @@ impl DiagramStudioDialog {
         }
         #[cfg(not(test))]
         {
+            let picker = self.owned_file_dialog()?;
             let directory = self.picker_directory();
-            let mut picker =
-                rfd::FileDialog::new().add_filter("PNG or JPEG image", &["png", "jpg", "jpeg"]);
+            let mut picker = picker.add_filter("PNG or JPEG image", &["png", "jpg", "jpeg"]);
             if directory.is_dir() {
                 picker = picker.set_directory(directory);
             }
@@ -16622,6 +16768,44 @@ mod tests {
         assert_eq!(dialog.viewer_generation, viewer_generation);
         assert_eq!(dialog.viewer_camera.center, camera.center);
         assert_eq!(dialog.viewer_camera.zoom, camera.zoom);
+    }
+
+    #[test]
+    fn diagram_hidden_root_skips_docked_owner_but_keeps_native_viewer() {
+        let mut dialog = initialized_dialog();
+        let ctx = egui::Context::default();
+        open_viewer(&mut dialog, &ctx);
+        click_action(&mut dialog, &ctx, "owner_presentation");
+        assert_eq!(
+            dialog.owner_host.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert_eq!(
+            dialog.viewer_host.presentation(),
+            UtilityPresentation::Popout
+        );
+        assert!(dialog.needs_root_ui_when_hidden());
+
+        super::super::render::with_immediate_viewport_renderer(&ctx, || {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        TEST_VIEWPORT_SIZE,
+                    )),
+                    focused: false,
+                    ..Default::default()
+                },
+                |ui| {
+                    dialog.show_on_root(ui.ctx(), ui.current_pass_index() == 0, true, false, false)
+                },
+            );
+            output.drop_without_applying_deltas();
+            dialog.on_ui_frame_complete(&ctx);
+        });
+        assert!(!dialog.test_body_rendered);
+        assert!(dialog.test_viewer_body_rendered);
+        assert!(dialog.open && dialog.viewer_open);
     }
 
     #[test]

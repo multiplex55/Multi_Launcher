@@ -4333,6 +4333,14 @@ impl LauncherApp {
         if capture_root_identity {
             self.root_window_bridge.capture_frame(frame);
         }
+        let (hwnd, generation) = self.root_window_bridge.identity();
+        let verified_root = (self.launcher_hwnd == Some(hwnd)
+            && self.root_window_bridge.is_current(hwnd, generation))
+        .then_some(super::utility_window_geometry::RootWindowIdentity { hwnd, generation });
+        self.utility_dialog_size_manager
+            .set_native_root(verified_root);
+        self.utility_dialog_size_manager
+            .drain_native_geometry_observations(ctx);
         self.poll_screenshot_presentation(ctx, Instant::now());
 
         let plugin_search_generation = self.plugins.search_generation();
@@ -4935,6 +4943,22 @@ impl LauncherApp {
         );
     }
 
+    fn show_calculation_pad(
+        &mut self,
+        ctx: &egui::Context,
+        first_ui_pass: bool,
+        root_visible: bool,
+    ) {
+        if root_visible || self.calculation_pad_dialog.needs_root_ui_when_hidden() {
+            self.calculation_pad_dialog.show(
+                ctx,
+                first_ui_pass,
+                self.native_ui_application_input_allowed(ctx),
+                self.native_ui_host_input_allowed(ctx, root_visible),
+            );
+        }
+    }
+
     fn show_diagram_studio(
         &mut self,
         ctx: &egui::Context,
@@ -4949,6 +4973,7 @@ impl LauncherApp {
                 ctx,
                 first_ui_pass,
                 application_input_allowed,
+                root_visible,
                 root_input_allowed,
             );
             self.qa_framebuffer_after_diagram_show(
@@ -4959,10 +4984,11 @@ impl LauncherApp {
             );
             return;
         }
-        self.diagram_studio_dialog.show(
+        self.diagram_studio_dialog.show_on_root(
             ctx,
             first_ui_pass,
             application_input_allowed,
+            root_visible,
             root_input_allowed,
         );
     }
@@ -7003,6 +7029,7 @@ impl LauncherApp {
             // native-owner eligibility stay disabled in this branch.
             self.show_regex_tester(&ctx, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
+            self.show_calculation_pad(&ctx, first_ui_pass, false);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -10400,15 +10427,7 @@ impl LauncherApp {
         #[cfg(not(feature = "qa-framebuffer-capture"))]
         self.qr_dialog.show(&ctx);
         self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        let application_input_allowed = self.native_ui_application_input_allowed(&ctx);
-        let root_input_allowed =
-            self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible);
-        self.calculation_pad_dialog.show(
-            &ctx,
-            first_ui_pass,
-            application_input_allowed,
-            root_input_allowed,
-        );
+        self.show_calculation_pad(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.markdown_studio_dialog.show(&ctx, first_ui_pass);
         let calendar_editor_open = self.calendar_editor_open;
         let _ = self
@@ -11428,6 +11447,10 @@ impl eframe::App for LauncherApp {
         if let Err(error) = self.calculation_pad_dialog.shutdown_recovery() {
             self.report_error_message("calculation_pad.recovery.shutdown", error.to_string());
         }
+        self.utility_dialog_size_manager
+            .drain_native_geometry_observations(&self.egui_ctx);
+        self.utility_dialog_size_manager
+            .shutdown_native_geometry_observers();
         self.prepare_settings_save_shutdown();
         if let Some(mut client) = self.target_repair_client.take() {
             client.shutdown();
