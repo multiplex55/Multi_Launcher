@@ -61,7 +61,7 @@ pub use visual::{
     VisualAsset, VisualAssetFormat, VisualAssetId, VisualClipboardFragment, VisualColor, VisualConnector,
     VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument,
     VisualDocumentError, VisualLayer, VisualLayerId, VisualLineStyle, VisualObject,
-    VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualPreset,
+    VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualOwnedLabel, VisualPreset,
     VisualPresetDraft, VisualPresetId, VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene,
     VisualShadow, VisualStyle, VisualSwimlaneOrientation, VisualTransactionOutcome,
     VisualTransform,

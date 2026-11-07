@@ -2109,6 +2109,21 @@ mod tests {
             })])
             .unwrap()
             .created_objects[0];
+        let mut labeled = original
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == first)
+            .unwrap()
+            .clone();
+        labeled.owned_label = Some(crate::diagram::VisualOwnedLabel {
+            text: "Saved shape label".into(),
+            style: VisualStyle::default(),
+        });
+        original
+            .apply_visual_transaction(&[VisualOperation::ReplaceObject(labeled)])
+            .unwrap();
         assert!(original.is_dirty());
         original.save_as(&path).unwrap();
         assert!(!original.is_dirty());
@@ -2119,6 +2134,20 @@ mod tests {
             TransitionOutcome::Applied
         );
         assert_eq!(reopened.visual_scene().unwrap().objects.len(), 2);
+        assert_eq!(
+            reopened
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == first)
+                .unwrap()
+                .owned_label
+                .as_ref()
+                .unwrap()
+                .text,
+            "Saved shape label"
+        );
         assert!(reopened.can_undo());
         assert!(!reopened.is_dirty());
         assert!(reopened.undo().unwrap());
@@ -2126,6 +2155,7 @@ mod tests {
         assert!(reopened.can_redo());
         assert!(reopened.redo().unwrap());
         assert!(!reopened.is_dirty());
+        assert!(reopened.undo().unwrap());
         assert!(reopened.undo().unwrap());
         let next = reopened
             .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {

@@ -339,6 +339,15 @@ pub struct VisualConnector {
     pub label: String,
 }
 
+/// Text and style owned by one primitive, centered using that primitive's transform.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualOwnedLabel {
+    #[serde(deserialize_with = "deserialize_visual_text")]
+    pub text: String,
+    pub style: VisualStyle,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VisualObject {
@@ -347,6 +356,8 @@ pub struct VisualObject {
     pub transform: VisualTransform,
     pub style: VisualStyle,
     pub kind: VisualObjectKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_label: Option<VisualOwnedLabel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -412,6 +423,7 @@ impl VisualScene {
                 name: "Layer 1".into(),
             }],
             objects: vec![VisualObject {
+                owned_label: None,
                 id: TITLE_OBJECT_ID,
                 layer_id: DEFAULT_LAYER_ID,
                 transform: VisualTransform::default(),
@@ -558,6 +570,11 @@ impl VisualPresetDraft {
         }
         let mut bounds = None::<(f64, f64, f64, f64)>;
         for object in objects {
+            if object.owned_label.is_some() {
+                return Err(VisualDocumentError::InvalidState(
+                    "Labeled primitives cannot be converted to presets without losing their labels.".into(),
+                ));
+            }
             validate_transform(object.transform)?;
             validate_style(&object.style)?;
             let corners = visual_transform_corners(object.transform);
@@ -1507,6 +1524,7 @@ fn apply_visual_operation(
         VisualOperation::AddObject(draft) => {
             let id = allocate_object_id(allocator)?;
             let object = VisualObject {
+                owned_label: None,
                 id,
                 layer_id: draft.layer_id,
                 transform: draft.transform,
@@ -1533,6 +1551,7 @@ fn apply_visual_operation(
             }
             let id = allocate_object_id(allocator)?;
             let object = VisualObject {
+                owned_label: None,
                 id,
                 layer_id: *layer_id,
                 transform: *transform,
@@ -1667,6 +1686,7 @@ fn apply_visual_operation(
                 });
             let id = allocate_object_id(allocator)?;
             let object = VisualObject {
+                owned_label: None,
                 id,
                 layer_id: frame.layer_id,
                 transform: frame.transform,
@@ -2315,6 +2335,17 @@ fn validate_asset_id(value: &str) -> Result<(), VisualDocumentError> {
 fn validate_object(object: &VisualObject) -> Result<(), VisualDocumentError> {
     validate_transform(object.transform)?;
     validate_style(&object.style)?;
+    if let Some(label) = &object.owned_label {
+        if !matches!(object.kind, VisualObjectKind::Primitive { .. }) {
+            return Err(VisualDocumentError::InvalidState(
+                "Only primitive objects can own a label.".into(),
+            ));
+        }
+        if label.text.len() > MAX_VISUAL_TEXT_BYTES {
+            return Err(VisualDocumentError::TextTooLarge { max_bytes: MAX_VISUAL_TEXT_BYTES });
+        }
+        validate_style(&label.style)?;
+    }
     match &object.kind {
         VisualObjectKind::Primitive { .. } => {}
         VisualObjectKind::Text { text } => {
@@ -2687,6 +2718,98 @@ mod tests {
             style: VisualStyle::default(),
             kind,
         }
+    }
+
+    #[test]
+    fn visual_owned_label_follows_shape_persistence_clipboard_and_history() {
+        let mut document = VisualDiagramDocument::new();
+        let id = document
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let loose = document
+            .apply_transaction(&[VisualOperation::AddObject(draft(VisualObjectKind::Text {
+                text: "Legacy independent text".into(),
+            }))])
+            .unwrap()
+            .created_objects[0];
+        let old_wire = encode_document(DiagramFileDocumentRef::Visual(&document)).unwrap();
+        assert!(!String::from_utf8_lossy(&old_wire).contains("owned_label"));
+        let mut shape = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .clone();
+        shape.owned_label = Some(super::VisualOwnedLabel {
+            text: "東京\nLabel".into(),
+            style: VisualStyle {
+                font_size: 17.0,
+                ..VisualStyle::default()
+            },
+        });
+        assert!(VisualPresetDraft::from_primitives("Cannot lose label", &[shape.clone()]).is_err());
+        document
+            .apply_transaction(&[VisualOperation::ReplaceObject(shape.clone())])
+            .unwrap();
+        shape.transform.x += 60.0;
+        shape.transform.width *= 2.0;
+        shape.transform.rotation_degrees = 30.0;
+        document
+            .apply_transaction(&[VisualOperation::ReplaceObject(shape.clone())])
+            .unwrap();
+        let projection = crate::diagram::project_visual_scene(document.scene()).unwrap();
+        let label = projection
+            .items
+            .iter()
+            .find(|item| item.object_id == id && item.text.is_some())
+            .unwrap();
+        assert_eq!(label.transform.x, shape.transform.x);
+        assert_eq!(label.transform.rotation_degrees, 30.0);
+        let bytes = encode_document(DiagramFileDocumentRef::Visual(&document)).unwrap();
+        let DiagramFileDocument::Visual(mut reopened) = decode_document(&bytes).unwrap() else {
+            panic!("visual document expected")
+        };
+        assert_eq!(reopened.scene(), document.scene());
+        assert!(reopened.scene().objects.iter().any(|object| object.id == loose && object.owned_label.is_none() && matches!(&object.kind, VisualObjectKind::Text { text } if text == "Legacy independent text")));
+        let fragment =
+            super::VisualClipboardFragment::capture(reopened.scene(), &[id].into_iter().collect())
+                .unwrap();
+        let pasted = reopened
+            .apply_transaction(&[VisualOperation::InsertClipboard {
+                fragment,
+                offset: 24.0,
+            }])
+            .unwrap()
+            .created_objects[0];
+        let copy = reopened
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == pasted)
+            .unwrap();
+        assert_eq!(copy.owned_label, shape.owned_label);
+        assert_eq!(copy.transform.x, shape.transform.x + 24.0);
+        reopened
+            .apply_transaction(&[VisualOperation::DeleteSelection(vec![pasted])])
+            .unwrap();
+        assert!(reopened.undo().unwrap());
+        assert!(
+            reopened
+                .scene()
+                .objects
+                .iter()
+                .any(|object| object.id == pasted && object.owned_label == shape.owned_label)
+        );
+        assert!(matches!(
+            decode_document(&old_wire).unwrap(),
+            DiagramFileDocument::Visual(_)
+        ));
     }
 
     #[test]
@@ -3287,6 +3410,7 @@ mod tests {
     fn scene_with_object(id: u64) -> VisualScene {
         let mut scene = VisualScene::new("Untitled visual diagram");
         scene.objects.push(VisualObject {
+            owned_label: None,
             id: VisualObjectId(id),
             layer_id: DEFAULT_LAYER_ID,
             transform: VisualTransform::default(),
@@ -3944,6 +4068,7 @@ mod tests {
 
         let mut unknown_preset = VisualScene::new("Title");
         unknown_preset.objects.push(VisualObject {
+            owned_label: None,
             id: VisualObjectId(2),
             layer_id: DEFAULT_LAYER_ID,
             transform: VisualTransform::default(),
@@ -3986,6 +4111,7 @@ mod tests {
         let mut too_large = VisualScene::new("Title");
         for index in 0..140 {
             too_large.objects.push(VisualObject {
+                owned_label: None,
                 id: VisualObjectId(index + 2),
                 layer_id: DEFAULT_LAYER_ID,
                 transform: VisualTransform::default(),

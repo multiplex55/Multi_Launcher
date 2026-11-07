@@ -4201,6 +4201,69 @@ mod tests {
         )
     }
 
+    #[test]
+    fn visual_owned_label_exports_in_svg_and_png() {
+        let mut document = VisualDiagramDocument::new();
+        let mut title = document.scene().objects[0].clone();
+        title.kind = VisualObjectKind::Text {
+            text: String::new(),
+        };
+        document
+            .apply_transaction(&[VisualOperation::ReplaceObject(title)])
+            .unwrap();
+        let id = add_visual_object(
+            &mut document,
+            VisualTransform::default(),
+            VisualStyle::default(),
+            VisualObjectKind::Primitive {
+                shape: VisualPrimitiveShape::Rectangle,
+            },
+        );
+        let (without_label, _) = visual_export_snapshot(&document);
+        let without_label = without_label
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        let mut shape = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .clone();
+        shape.owned_label = Some(crate::diagram::VisualOwnedLabel {
+            text: "Owned label".into(),
+            style: VisualStyle {
+                border: VisualColor::rgba(0, 0, 0, 255),
+                ..VisualStyle::default()
+            },
+        });
+        document
+            .apply_transaction(&[VisualOperation::ReplaceObject(shape)])
+            .unwrap();
+        let (snapshot, projection) = visual_export_snapshot(&document);
+        assert!(
+            projection
+                .items
+                .iter()
+                .any(|item| item.object_id == id && item.text.is_some())
+        );
+        let svg = snapshot
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        assert_ne!(svg.bytes(), without_label.bytes());
+        let png = snapshot
+            .encode_png(DiagramVisualExportOptions::default())
+            .unwrap();
+        let pixels = image::load_from_memory(png.bytes()).unwrap().to_rgba8();
+        let label = projection
+            .items
+            .iter()
+            .find(|item| item.object_id == id && item.text.is_some())
+            .unwrap();
+        let transform = super::ExportTransform::new(projection.bounds, 1.0).unwrap();
+        assert!(dark_ink_bounds_in(&pixels, transform.rect(label.bounds)).is_some());
+    }
+
     fn visual_style(fill: VisualColor, border: VisualColor, opacity: f64) -> VisualStyle {
         VisualStyle {
             fill,

@@ -3,7 +3,7 @@
 use super::visual::{
     DEFAULT_LAYER_ID, VisualAnchor, VisualColor, VisualConnector, VisualConnectorDirection,
     VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError,
-    VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveShape, VisualScene, VisualStyle,
+    VisualObject, VisualObjectId, VisualObjectKind, VisualOwnedLabel, VisualPrimitiveShape, VisualScene, VisualStyle,
     VisualTransform,
 };
 
@@ -66,7 +66,7 @@ impl VisualAuthoringTemplate {
 
     /// Create a fresh unsaved visual document with deterministic identities and
     /// one accepted-content baseline. All templates use only current bounded
-    /// primitives, free text, and anchored connectors.
+    /// labeled primitives, title text, and anchored connectors.
     pub fn create_document(self) -> Result<VisualDiagramDocument, VisualDocumentError> {
         let (title, nodes, edges) = self.specification();
         let mut scene = VisualScene::new(title);
@@ -89,6 +89,16 @@ impl VisualAuthoringTemplate {
         for node in &nodes {
             let shape_id = allocate_id(&mut next_id);
             scene.objects.push(VisualObject {
+                owned_label: Some(VisualOwnedLabel {
+                    text: node.label.into(),
+                    style: VisualStyle {
+                        fill: VisualColor::rgba(0, 0, 0, 0),
+                        border: VisualColor::rgba(38, 48, 62, 255),
+                        border_width: 0.0,
+                        font_size: 17.0,
+                        ..VisualStyle::default()
+                    },
+                }),
                 id: shape_id,
                 layer_id: DEFAULT_LAYER_ID,
                 transform: VisualTransform {
@@ -106,28 +116,6 @@ impl VisualAuthoringTemplate {
                 },
                 kind: VisualObjectKind::Primitive { shape: node.shape },
             });
-            let label_id = allocate_id(&mut next_id);
-            scene.objects.push(VisualObject {
-                id: label_id,
-                layer_id: DEFAULT_LAYER_ID,
-                transform: VisualTransform {
-                    x: node.x,
-                    y: node.y,
-                    width: node.width - 24.0,
-                    height: node.height - 24.0,
-                    rotation_degrees: 0.0,
-                },
-                style: VisualStyle {
-                    fill: VisualColor::rgba(0, 0, 0, 0),
-                    border: VisualColor::rgba(38, 48, 62, 255),
-                    border_width: 0.0,
-                    font_size: 17.0,
-                    ..VisualStyle::default()
-                },
-                kind: VisualObjectKind::Text {
-                    text: node.label.into(),
-                },
-            });
             node_ids.push(shape_id);
         }
 
@@ -141,6 +129,7 @@ impl VisualAuthoringTemplate {
             let (from_anchor, to_anchor) = anchors(nodes[edge.from], nodes[edge.to]);
             let id = allocate_id(&mut next_id);
             scene.objects.push(VisualObject {
+                owned_label: None,
                 id,
                 layer_id: DEFAULT_LAYER_ID,
                 transform: VisualTransform::default(),
@@ -491,16 +480,12 @@ mod tests {
                 object.kind,
                 crate::diagram::VisualObjectKind::Connector { .. }
             )));
+            assert!(scene.objects.iter().any(|object| object.owned_label.is_some()));
             assert!(
                 scene
                     .objects
                     .iter()
-                    .filter_map(|object| match &object.kind {
-                        VisualObjectKind::Text { text } if object.id != TITLE_OBJECT_ID => {
-                            Some((text, object.style.border))
-                        }
-                        _ => None,
-                    })
+                    .filter_map(|object| object.owned_label.as_ref().map(|label| (&label.text, label.style.border)))
                     .all(|(_, color)| color.alpha > 0)
             );
             let projection = project_visual_scene(scene).unwrap();

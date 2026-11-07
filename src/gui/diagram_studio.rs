@@ -761,6 +761,21 @@ struct VisualPropertyDraft {
     object: VisualObject,
 }
 
+#[derive(Clone)]
+struct VisualInlineLabelDraft {
+    document: RenderDocumentIdentity,
+    revision: u64,
+    host: HostIdentity,
+    owner_generation: u64,
+    owner_viewport_id: egui::ViewportId,
+    object: VisualObjectId,
+    text: String,
+    style: VisualStyle,
+    needs_focus: bool,
+    needs_state_reset: bool,
+    editor_id: Option<egui::Id>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VisualSelectionState {
     objects: BTreeSet<VisualObjectId>,
@@ -805,6 +820,13 @@ enum VisualClipboardAction {
 }
 
 enum PendingMutation {
+    VisualInlineCommit {
+        object: VisualObject,
+        expected_document: RenderDocumentIdentity,
+        expected_revision: u64,
+        canvas_id: egui::Id,
+        viewport_id: egui::ViewportId,
+    },
     VisualClipboard {
         action: VisualClipboardAction,
         selection: BTreeSet<VisualObjectId>,
@@ -953,6 +975,7 @@ struct DrawBodyEffects {
     open_viewer_requested: bool,
     active_menu_scope: Option<MenuFocusScope>,
     visual_selection: Option<VisualSelectionState>,
+    visual_inline_label: Option<Option<VisualInlineLabelDraft>>,
     visual_canvas_editing_allowed: bool,
     visual_structural_editing_allowed: bool,
     visual_asset_picker_requested: Option<VisualAssetImportFence>,
@@ -991,6 +1014,7 @@ struct PendingRootEffects {
     menu_scope_observed: bool,
     active_menu_scope: Option<MenuFocusScope>,
     visual_selection: Option<VisualSelectionState>,
+    visual_inline_label: Option<Option<VisualInlineLabelDraft>>,
     visual_canvas_editing_allowed: bool,
     visual_structural_editing_allowed: bool,
     visual_asset_picker_requested: Option<VisualAssetImportFence>,
@@ -1223,6 +1247,7 @@ pub(crate) struct DiagramStudioDialog {
     visual_last_paste: Option<(u64, u32)>,
     visual_selected_preset: Option<crate::diagram::VisualPresetId>,
     visual_property_draft: Option<VisualPropertyDraft>,
+    visual_inline_label: Option<VisualInlineLabelDraft>,
     visual_gesture: Option<VisualGesture>,
     visual_canvas_press_authorized: Option<bool>,
     drag: Option<DragState>,
@@ -1433,6 +1458,7 @@ impl DiagramStudioDialog {
             visual_last_paste: None,
             visual_selected_preset: None,
             visual_property_draft: None,
+            visual_inline_label: None,
             visual_gesture: None,
             visual_canvas_press_authorized: None,
             drag: None,
@@ -1849,6 +1875,7 @@ impl DiagramStudioDialog {
         let mut visual_export_cancel_pointer_down = false;
         let mut active_menu_scope = None;
         let mut visual_selection_requested = None;
+        let mut visual_inline_label_requested = None;
         let mut visual_canvas_editing_allowed = false;
         let mut visual_structural_editing_allowed = false;
         let mut visual_asset_picker_requested = None;
@@ -1945,7 +1972,7 @@ impl DiagramStudioDialog {
             let keyboard_close = if keyboard_actions_allowed {
                 let (escape_pressed, close_shortcut) = child.input_mut(|input| {
                     (
-                        !popup_open && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                        !popup_open && self.visual_inline_label.is_none() && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
                         input.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
                     )
                 });
@@ -2036,6 +2063,7 @@ impl DiagramStudioDialog {
                     open_viewer_requested = effects.open_viewer_requested;
                     active_menu_scope = effects.active_menu_scope;
                     visual_selection_requested = effects.visual_selection;
+                    visual_inline_label_requested = effects.visual_inline_label;
                     visual_canvas_editing_allowed = effects.visual_canvas_editing_allowed;
                     visual_structural_editing_allowed = effects.visual_structural_editing_allowed;
                     visual_asset_picker_requested = effects.visual_asset_picker_requested;
@@ -2070,6 +2098,7 @@ impl DiagramStudioDialog {
                 open_viewer_requested = effects.open_viewer_requested;
                 active_menu_scope = effects.active_menu_scope;
                 visual_selection_requested = effects.visual_selection;
+                visual_inline_label_requested = effects.visual_inline_label;
                 visual_canvas_editing_allowed = effects.visual_canvas_editing_allowed;
                 visual_structural_editing_allowed = effects.visual_structural_editing_allowed;
                 visual_asset_picker_requested = effects.visual_asset_picker_requested;
@@ -2081,6 +2110,9 @@ impl DiagramStudioDialog {
                 && !modal_open
                 && !close_requested
             {
+                if visual_inline_label_requested.as_ref().is_some_and(Option::is_some) {
+                    self.deferred_canvas_focus = None;
+                }
                 if let Some((target_viewport, id)) = self.deferred_canvas_focus
                     && target_viewport == child_context.viewport_id()
                 {
@@ -2264,6 +2296,9 @@ impl DiagramStudioDialog {
                     .flatten(),
                 visual_selection: (child_pass_accepted && body_rendered)
                     .then_some(visual_selection_requested)
+                    .flatten(),
+                visual_inline_label: (child_pass_accepted && body_rendered)
+                    .then_some(visual_inline_label_requested)
                     .flatten(),
                 visual_canvas_editing_allowed: child_pass_accepted
                     && body_rendered
@@ -2987,6 +3022,7 @@ impl DiagramStudioDialog {
     }
 
     pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> bool {
+        let previous_inline_editor_id = self.visual_inline_label.as_ref().and_then(|draft| draft.editor_id);
         let viewer_effects = self.pending_viewer_effects.take();
         let Some(effects) = self.pending_root_effects.take() else {
             cancel_minimap_drag(&mut self.visual_editor_minimap_drag, &mut self.camera);
@@ -3187,6 +3223,52 @@ impl DiagramStudioDialog {
         if owner_pass_current && let Some(selection) = effects.visual_selection.as_ref() {
             self.set_visual_selection(selection.clone());
         }
+        let viewer_takes_focus = viewer_effects.as_ref().is_some_and(|viewer| {
+            let retained = if viewer.callback_viewport_id == viewer_viewport_id() {
+                viewer.callback_pass.is_some_and(|pass| {
+                    pass.viewport_id == viewer_viewport_id() && pass.was_retained(ctx)
+                })
+            } else {
+                viewer.callback_viewport_id == egui::ViewportId::ROOT
+                    && viewer.embedded_root_layer.is_some()
+                    && viewer.callback_pass.is_none()
+            };
+            viewer.root_pass == effects.root_pass
+                && viewer.owner_generation == self.owner_generation
+                && viewer.viewer_generation == self.viewer_generation
+                && viewer.host == self.viewer_host.identity()
+                && self.open
+                && self.viewer_open
+                && viewer.callback_pass_accepted
+                && retained
+                && (viewer.focus_viewer || viewer.canvas_focus_requested.is_some())
+        });
+        if self.visual_inline_label.as_ref().is_some_and(|draft| {
+            draft.document != self.render_document
+                || Some(draft.revision) != self.documents.visual_revision()
+                || draft.host != self.owner_host.identity()
+                || draft.owner_generation != self.owner_generation
+                || !self.documents.visual_scene().is_some_and(|scene| {
+                    scene.objects.iter().any(|object| {
+                        object.id == draft.object
+                            && matches!(object.kind, VisualObjectKind::Primitive { .. })
+                    })
+                })
+        }) || viewer_takes_focus
+            || (owner_pass_current
+                && (effects.change_host
+                    || effects.close_dialog
+                    || effects.close_viewport
+                    || effects.os_close_requested
+                    || effects.document_intent.is_some()
+                    || effects.open_viewer_requested))
+        {
+            self.visual_inline_label = None;
+        } else if owner_pass_current && let Some(draft) = effects.visual_inline_label.as_ref() {
+            self.visual_inline_label = draft.clone();
+        } else if owner_pass_current {
+            self.visual_inline_label = None;
+        }
 
         let bootstrap_completed =
             self.viewport_bootstrap_pending && effects.viewport_callback_observed;
@@ -3255,6 +3337,7 @@ impl DiagramStudioDialog {
             matches!(
                 mutation,
                 PendingMutation::ReplaceVisualLabel { .. }
+                    | PendingMutation::VisualInlineCommit { .. }
                     | PendingMutation::VisualClipboard { .. }
                     | PendingMutation::VisualTransaction { .. }
                     | PendingMutation::VisualAssetImport { .. }
@@ -3284,7 +3367,13 @@ impl DiagramStudioDialog {
                 }
                 _ => true,
             };
-            if visual_mutation_requested && (!owner_pass_current || !gesture_capture_is_current) {
+            let inline_invalidated = matches!(&mutation, PendingMutation::VisualInlineCommit { .. })
+                && (viewer_takes_focus || effects.change_host || effects.close_dialog || effects.close_viewport
+                    || effects.os_close_requested || effects.document_intent.is_some()
+                    || effects.open_viewer_requested);
+            if inline_invalidated && owner_pass_current {
+                true
+            } else if visual_mutation_requested && (!owner_pass_current || !gesture_capture_is_current) {
                 self.reject_stale_visual_intent()
             } else if source_cursor_mutation_requested && !owner_pass_current {
                 self.message = Some(StudioNotice::error(
@@ -3514,6 +3603,11 @@ impl DiagramStudioDialog {
         }
         if repaint_root {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        if let Some(id) = previous_inline_editor_id
+            && self.visual_inline_label.as_ref().and_then(|draft| draft.editor_id) != Some(id)
+        {
+            ctx.data_mut(|data| { data.remove::<egui::text_edit::TextEditState>(id); });
         }
         accepted_close
     }
@@ -6244,6 +6338,20 @@ impl DiagramStudioDialog {
 
     fn apply_pending(&mut self, pending: PendingMutation) -> bool {
         match pending {
+            PendingMutation::VisualInlineCommit { object, expected_document, expected_revision, canvas_id, viewport_id } => {
+                let id = object.id;
+                let accepted = self.apply_pending(PendingMutation::VisualTransaction {
+                    operations: vec![VisualOperation::ReplaceObject(object)],
+                    expected_document, expected_revision, select_after: Some(id),
+                });
+                if accepted {
+                    self.visual_inline_label = None;
+                    self.deferred_canvas_focus = Some((viewport_id, canvas_id));
+                } else if let Some(draft) = self.visual_inline_label.as_mut() {
+                    draft.needs_focus = true;
+                }
+                accepted
+            }
             PendingMutation::VisualClipboard {
                 action,
                 selection,
@@ -6494,6 +6602,7 @@ impl DiagramStudioDialog {
                 .replace_source(source)
                 .map(|changed| (changed, None)),
             PendingMutation::ReplaceVisualLabel { .. }
+            | PendingMutation::VisualInlineCommit { .. }
             | PendingMutation::VisualClipboard { .. }
             | PendingMutation::VisualTransaction { .. }
             | PendingMutation::VisualAssetImport { .. }
@@ -6582,6 +6691,7 @@ impl DiagramStudioDialog {
     }
 
     fn reset_document_presentation(&mut self) {
+        self.visual_inline_label = None;
         self.clear_visual_asset_state();
         self.retire_drawio_work();
         if let Some(renderer) = &self.renderer {
@@ -7987,10 +8097,18 @@ impl DiagramStudioDialog {
             && !closing_requested
             && pending_transition.is_none()
             && !egui::Popup::is_any_open(ui.ctx());
-        let visual_edits_allowed = document_actions_allowed && pending.is_none();
+        let visual_edits_allowed = document_actions_allowed && pending.is_none() && self.visual_inline_label.is_none();
+        let mut inline_label = self.visual_inline_label.clone().filter(|draft| {
+            draft.document == visual_identity
+                && draft.revision == visual_revision
+                && draft.host == self.owner_host.identity()
+                && draft.owner_generation == self.owner_generation
+                && draft.owner_viewport_id == ui.ctx().viewport_id()
+                && scene_snapshot.as_ref().is_some_and(|scene| scene.objects.iter().any(|object| object.id == draft.object && matches!(object.kind, VisualObjectKind::Primitive { .. })))
+        });
         let visual_draft_active = self.visual_property_draft.is_some();
-        let visual_canvas_editing_allowed = visual_edits_allowed && !visual_draft_active;
-        let structural_edits_allowed = visual_edits_allowed && !visual_draft_active;
+        let visual_canvas_editing_allowed = visual_edits_allowed && !visual_draft_active && inline_label.is_none();
+        let structural_edits_allowed = visual_edits_allowed && !visual_draft_active && inline_label.is_none();
         let mut effects = DrawBodyEffects::default();
         let mut selection_state = VisualSelectionState {
             objects: self
@@ -8044,6 +8162,8 @@ impl DiagramStudioDialog {
         let mut clear_visual_draft = false;
         let mut canvas_interaction_authorized = false;
         let mut clipboard_action = None;
+        let mut inline_commit = None;
+        let mut inline_error = None;
         let _visual_scroll = egui::ScrollArea::vertical()
             .id_salt("diagram-studio-visual-document-scroll")
             .show(ui, |ui| {
@@ -8650,6 +8770,62 @@ impl DiagramStudioDialog {
                         }
                     }
                 }
+                if visual_canvas_editing_allowed
+                    && widget_focus_allows_canvas
+                    && pointer_press_authorized
+                    && gesture.as_ref().is_none_or(|active| !active.did_move)
+                    && canvas_response.double_clicked_by(egui::PointerButton::Primary)
+                    && let (Some(scene), Some(projected), Some(pointer)) = (
+                        current_scene_for_hit,
+                        current_projection_for_hit,
+                        canvas_response.interact_pointer_pos(),
+                    )
+                    && mapping.contains_screen_point(scene_point_from_screen(pointer))
+                    && let CanvasHit::Object(id) = visual_canvas_hit_test(
+                        projected,
+                        base_painted_prefix,
+                        &[],
+                        mapping,
+                        scene_point_from_screen(pointer),
+                        9.0,
+                    )
+                    && let Some(object) = scene.objects.iter().find(|object| {
+                        object.id == id && matches!(object.kind, VisualObjectKind::Primitive { .. })
+                    })
+                {
+                    let mut style = object.style.clone();
+                    style.fill = crate::diagram::VisualColor::rgba(0, 0, 0, 0);
+                    style.border_width = 0.0;
+                    let label = object
+                        .owned_label
+                        .clone()
+                        .unwrap_or(crate::diagram::VisualOwnedLabel {
+                            text: String::new(),
+                            style,
+                        });
+                    inline_label = Some(VisualInlineLabelDraft {
+                        document: visual_identity.clone(),
+                        revision: visual_revision,
+                        host: self.owner_host.identity(),
+                        owner_generation: self.owner_generation,
+                        owner_viewport_id: ui.ctx().viewport_id(),
+                        object: id,
+                        text: label.text,
+                        style: label.style,
+                        needs_focus: true,
+                        needs_state_reset: true,
+                        editor_id: None,
+                    });
+                    pointer_selection = Some(VisualSelectionState {
+                        objects: [id].into_iter().collect(),
+                        primary: Some(id),
+                    });
+                    gesture = None;
+                    start_gesture = None;
+                    self.visual_canvas_press_authorized = None;
+                    *canvas_focus_requested = None;
+                }
+
                 if let Some(next_selection) = pointer_selection {
                     selection_state = next_selection;
                     selected_object = selection_state.primary;
@@ -8899,6 +9075,125 @@ impl DiagramStudioDialog {
                 {
                     paint_visual_minimap(&canvas_painter, rect, &minimap);
                 }
+                if let Some(draft) = inline_label.as_mut()
+                    && let Some(object) = scene_snapshot.as_ref().and_then(|scene| {
+                        scene
+                            .objects
+                            .iter()
+                            .find(|object| object.id == draft.object)
+                    })
+                {
+                    let center = mapping.world_to_screen(ScenePoint {
+                        x: object.transform.x,
+                        y: object.transform.y,
+                    });
+                    let rect = egui::Rect::from_center_size(
+                        egui::pos2(center.x as f32, center.y as f32),
+                        egui::vec2(
+                            (object.transform.width * mapping.zoom).clamp(120.0, 300.0) as f32,
+                            (object.transform.height * mapping.zoom).clamp(48.0, 140.0) as f32,
+                        ),
+                    )
+                    .intersect(canvas_painter.clip_rect());
+                    let editor_id = ui.make_persistent_id("visual-inline-label");
+                    if draft.needs_state_reset {
+                        ui.ctx().data_mut(|data| {
+                            data.remove::<egui::text_edit::TextEditState>(editor_id);
+                        });
+                        draft.needs_state_reset = false;
+                    }
+                    draft.editor_id = Some(editor_id);
+                    let focused = ui.memory(|memory| memory.has_focus(editor_id));
+                    let (accept, cancel) = if document_actions_allowed {
+                        ui.input_mut(|input| {
+                            let mut accept = false;
+                            let mut cancel = false;
+                            input.events.retain(|event| match event {
+                                egui::Event::Key {
+                                    key: egui::Key::Enter,
+                                    pressed: true,
+                                    modifiers,
+                                    ..
+                                } if focused && !modifiers.shift && !modifiers.command && !modifiers.alt => {
+                                    accept = true;
+                                    false
+                                }
+                                egui::Event::Key {
+                                    key: egui::Key::Escape,
+                                    pressed: true,
+                                    ..
+                                } => {
+                                    cancel = true;
+                                    false
+                                }
+                                egui::Event::Paste(text)
+                                    if text.len() > crate::diagram::MAX_VISUAL_TEXT_BYTES =>
+                                {
+                                    false
+                                }
+                                _ => true,
+                            });
+                            (accept, cancel)
+                        })
+                    } else {
+                        (false, false)
+                    };
+                    let pointer_transfer = focused
+                        && ui.input(|input| {
+                            input.pointer.any_pressed()
+                                && input
+                                    .pointer
+                                    .interact_pos()
+                                    .is_some_and(|point| canvas_rect.contains(point) && !rect.contains(point))
+                        });
+                    // Keep the widget registered on replay or an inactive surface,
+                    // while preventing it from consuming another owner's input.
+                    let withheld_events = (!document_actions_allowed)
+                        .then(|| ui.input_mut(|input| std::mem::take(&mut input.events)));
+                    let response = ui.put(
+                        rect,
+                        egui::TextEdit::multiline(&mut draft.text)
+                            .id(editor_id)
+                            .char_limit(crate::diagram::MAX_VISUAL_TEXT_BYTES),
+                    );
+                    if let Some(mut events) = withheld_events {
+                        ui.input_mut(|input| {
+                            events.append(&mut input.events);
+                            input.events = events;
+                        });
+                    }
+                    if draft.needs_focus && document_actions_allowed {
+                        response.request_focus();
+                        draft.needs_focus = false;
+                    }
+                    #[cfg(test)]
+                    {
+                        self.test_action_rects
+                            .push(("visual_inline_label".into(), rect, ui.clip_rect()));
+                        self.test_action_focus_ids
+                            .push(("visual_inline_label".into(), editor_id));
+                    }
+                    if document_actions_allowed
+                        && (accept || pointer_transfer || response.lost_focus())
+                        && !cancel
+                    {
+                        if draft.text.len() > crate::diagram::MAX_VISUAL_TEXT_BYTES {
+                            inline_error = Some("The label exceeds the text byte limit.".to_owned());
+                            response.request_focus();
+                        } else {
+                            let mut replacement = object.clone();
+                            replacement.owned_label = Some(crate::diagram::VisualOwnedLabel {
+                                text: draft.text.clone(),
+                                style: draft.style.clone(),
+                            });
+                            inline_commit = Some((replacement, canvas_response.id, ui.ctx().viewport_id()));
+                        }
+                    } else if document_actions_allowed && cancel {
+                        inline_label = None;
+                        *canvas_focus_requested = Some(canvas_response.id);
+                    }
+                }
+
                 self.visual_gesture = gesture;
                 self.camera = camera;
                 if let Some(Ok(projection)) = projection.as_ref()
@@ -9920,6 +10215,14 @@ impl DiagramStudioDialog {
                                 ));
                             }
                         }
+                        if let Some(label) = object.owned_label.as_mut() {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Label ink");
+                                edit_visual_color(ui, &mut label.style.border);
+                                ui.add(egui::DragValue::new(&mut label.style.font_size).prefix("Label size ").speed(0.5));
+                                visual_font_family_picker(ui, &mut label.style.font_family);
+                            });
+                        }
                         if !matches!(
                             &object.kind,
                             VisualObjectKind::PresetInstance { .. }
@@ -10091,7 +10394,19 @@ impl DiagramStudioDialog {
             }
         }
         if pending.is_none() && document_intent.is_none() {
-            if let Some(action) = clipboard_action {
+            if let Some(message) = inline_error {
+                *pending = Some(PendingMutation::VisualLayoutFailure {
+                    message, expected_document: visual_identity, expected_revision: visual_revision,
+                });
+            } else if let Some((object, canvas_id, viewport_id)) = inline_commit {
+                *pending = Some(PendingMutation::VisualInlineCommit {
+                    object,
+                    expected_document: visual_identity,
+                    expected_revision: visual_revision,
+                    canvas_id,
+                    viewport_id,
+                });
+            } else if let Some(action) = clipboard_action {
                 *pending = Some(PendingMutation::VisualClipboard {
                     action,
                     selection: selection_state.objects.clone(),
@@ -10127,6 +10442,7 @@ impl DiagramStudioDialog {
         #[cfg(test)]
         if effects.visual_export_scale_requested.is_none() { effects.visual_export_scale_requested = self.test_visual_export_scale_requested.take(); }
         effects.visual_selection = Some(selection_state);
+        effects.visual_inline_label = actions_allowed.then_some(inline_label);
         effects.visual_canvas_editing_allowed = canvas_interaction_authorized;
         effects.visual_structural_editing_allowed = structural_edits_allowed;
         effects.visual_asset_picker_requested = visual_asset_picker_requested;
@@ -14238,6 +14554,229 @@ mod tests {
         }
         frame(dialog, ctx);
         assert_eq!(super::super::render::immediate_viewport_test_focused_id(), Some((viewport_id(), dialog.test_visual_canvas_id)));
+    }
+
+    fn double_click_visual_point(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        point: egui::Pos2,
+    ) {
+        // Advance the simulated viewport clock beyond egui's multi-click window.
+        for _ in 0..40 {
+            frame(dialog, ctx);
+        }
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                frame_with_child_events(
+                    dialog,
+                    ctx,
+                    vec![
+                        egui::Event::PointerMoved(point),
+                        egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        }
+        frame(dialog, ctx);
+    }
+
+    fn frame_with_inactive_child_events(
+        dialog: &mut DiagramStudioDialog,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        super::super::render::with_immediate_viewport_test_events(events, || {
+            super::super::render::with_immediate_viewport_renderer(ctx, || {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        TEST_VIEWPORT_SIZE,
+                    )),
+                    focused: true,
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    dialog.show(ui.ctx(), ui.ctx().current_pass_index() == 0, false, false);
+                });
+                output.drop_without_applying_deltas();
+                dialog.on_ui_frame_complete(ctx);
+            });
+        });
+    }
+
+    #[test]
+    fn visual_owned_label_inline_edit_commit_reedit_cancel_and_stale() {
+        let mut dialog = initialized_visual_dialog();
+        let id = dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let point = visual_canvas_world_point(&dialog, ScenePoint { x: 0.0, y: 0.0 });
+        double_click_visual_point(&mut dialog, &ctx, point);
+        assert!(dialog.test_action_has_focus("visual_inline_label"));
+        let before_inactive = dialog.documents.visual_scene().unwrap().clone();
+        frame_with_inactive_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::Text("unowned".into())],
+        );
+        assert!(dialog.visual_inline_label.is_none());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before_inactive);
+        double_click_visual_point(&mut dialog, &ctx, point);
+        assert!(dialog.test_action_has_focus("visual_inline_label"));
+        assert!(
+            !dialog
+                .visual_inline_label
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("unowned")
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Text("First".into())]);
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Paste("+".into())]);
+        send_child_key(&mut dialog, &ctx, egui::Key::Enter, egui::Modifiers::SHIFT);
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Text("second".into())]);
+        send_child_key(&mut dialog, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let shape = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap();
+        assert_eq!(shape.owned_label.as_ref().unwrap().text, "First+\nsecond");
+        let first_revision = dialog.documents.visual_revision().unwrap();
+        double_click_visual_point(&mut dialog, &ctx, point);
+        assert!(dialog.test_action_has_focus("visual_inline_label"));
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Text("!".into())]);
+        assert!(
+            dialog
+                .visual_inline_label
+                .as_ref()
+                .is_some_and(|draft| draft.text.contains('!'))
+        );
+        focus_visual_canvas(&mut dialog, &ctx);
+        assert!(dialog.visual_inline_label.is_none());
+        assert_eq!(dialog.documents.visual_revision(), Some(first_revision + 1));
+        assert!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == id)
+                .unwrap()
+                .owned_label
+                .as_ref()
+                .unwrap()
+                .text
+                .contains('!')
+        );
+        let scene = dialog.documents.visual_scene().unwrap().clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        double_click_visual_point(&mut dialog, &ctx, point);
+        assert!(dialog.test_action_has_focus("visual_inline_label"));
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Text("ignored".into())]);
+        send_child_key(&mut dialog, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(dialog.open);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &scene);
+        double_click_visual_point(&mut dialog, &ctx, point);
+        assert!(dialog.visual_inline_label.is_some());
+        let reopened_text = dialog.visual_inline_label.as_ref().unwrap().text.clone();
+        send_child_key(&mut dialog, &ctx, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(
+            dialog.visual_inline_label.as_ref().unwrap().text,
+            reopened_text
+        );
+        dialog.visual_inline_label.as_mut().unwrap().text =
+            "界".repeat(crate::diagram::MAX_VISUAL_TEXT_BYTES / 3 + 1);
+        frame(&mut dialog, &ctx);
+        send_child_key(&mut dialog, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(
+            dialog
+                .visual_inline_label
+                .as_ref()
+                .is_some_and(|draft| draft.text.len() > crate::diagram::MAX_VISUAL_TEXT_BYTES)
+        );
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert!(dialog.message.is_some());
+        dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddLayer {
+                name: "New".into(),
+                to_index: 1,
+            }])
+            .unwrap();
+        frame(&mut dialog, &ctx);
+        assert!(dialog.visual_inline_label.is_none());
+        double_click_visual_point(&mut dialog, &ctx, point);
+        assert!(dialog.visual_inline_label.is_some());
+        let before_viewer = dialog.documents.visual_scene().unwrap().clone();
+        dialog.viewer_open = true;
+        frame(&mut dialog, &ctx);
+        click_viewer_canvas(&mut dialog, &ctx);
+        assert!(dialog.visual_inline_label.is_none());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before_viewer);
+    }
+
+    #[test]
+    fn visual_owned_label_same_frame_document_transition_discards_commit() {
+        let mut dialog = initialized_visual_dialog();
+        let id = dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        let before = dialog.documents.visual_scene().unwrap().clone();
+        let mut object = before
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .unwrap()
+            .clone();
+        object.owned_label = Some(crate::diagram::VisualOwnedLabel {
+            text: "not committed".into(),
+            style: VisualStyle::default(),
+        });
+        dialog.test_pending_mutation = Some(PendingMutation::VisualInlineCommit {
+            object,
+            expected_document: dialog.render_document.clone(),
+            expected_revision: dialog.documents.visual_revision().unwrap(),
+            canvas_id: egui::Id::new("canvas"),
+            viewport_id: viewport_id(),
+        });
+        dialog.test_stage_document_intent(DocumentIntent::NewVisual);
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        assert!(dialog.documents.pending_transition().is_some());
     }
 
     #[test]

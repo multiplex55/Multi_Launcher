@@ -12,7 +12,7 @@ use super::visual::{
     MAX_VISUAL_OBJECTS, MAX_VISUAL_TEXT_BYTES, MIN_VISUAL_DIMENSION, TITLE_OBJECT_ID, VisualAnchor,
     VisualColor, VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint,
     VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError, VisualLayer, VisualLayerId,
-    VisualLineStyle, VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveShape,
+    VisualLineStyle, VisualObject, VisualObjectId, VisualObjectKind, VisualOwnedLabel, VisualPrimitiveShape,
     VisualScene, VisualStyle, VisualSwimlaneOrientation, VisualTransform,
 };
 
@@ -630,6 +630,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                         _ => unreachable!(),
                     };
                     pending.push(PendingVisualObject::Ready(VisualObject {
+                        owned_label: None,
                         id,
                         layer_id,
                         transform,
@@ -640,6 +641,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                         let label_id = allocate_object_id(&mut next_object_id)?;
                         scene.parent_by_child.insert(label_id, id);
                         pending.push(PendingVisualObject::Ready(VisualObject {
+                            owned_label: None,
                             id: label_id,
                             layer_id,
                             transform,
@@ -652,6 +654,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                 } else if shape == VertexShape::Text {
                     let id = allocate_object_id(&mut next_object_id)?;
                     let object = VisualObject {
+                        owned_label: None,
                         id,
                         layer_id,
                         transform,
@@ -671,6 +674,10 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                 } else {
                     let shape_id = allocate_object_id(&mut next_object_id)?;
                     let primitive = VisualObject {
+                        owned_label: (!cell.value.is_empty()).then(|| VisualOwnedLabel {
+                            text: cell.value.clone(),
+                            style: style.text_style(),
+                        }),
                         id: shape_id,
                         layer_id,
                         transform,
@@ -689,25 +696,6 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                     }
                     source_transforms.insert(cell.id.clone(), transform);
                     pending.push(PendingVisualObject::Ready(primitive));
-                    if !cell.value.is_empty() {
-                        report.add(Some(&cell.id), "vertex-label-split-to-text");
-                        let label_id = allocate_object_id(&mut next_object_id)?;
-                        if let Some(parent) = ancestry.frames.last() {
-                            scene
-                                .parent_by_child
-                                .insert(label_id, source_object_ids[&parent.id]);
-                        }
-                        let label = VisualObject {
-                            id: label_id,
-                            layer_id,
-                            transform,
-                            style: style.text_style(),
-                            kind: VisualObjectKind::Text {
-                                text: cell.value.clone(),
-                            },
-                        };
-                        pending.push(PendingVisualObject::Ready(label));
-                    }
                 }
             }
             ParsedCellKind::Edge => {
@@ -762,6 +750,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
 
     {
         pending.push(PendingVisualObject::Ready(VisualObject {
+            owned_label: None,
             id: TITLE_OBJECT_ID,
             layer_id: DEFAULT_LAYER_ID,
             transform: inert_title_transform(),
@@ -1695,6 +1684,7 @@ fn resolve_connector(
         .target_anchor
         .unwrap_or_else(|| infer_compass_anchor(target_transform, source_transform));
     Ok(VisualObject {
+        owned_label: None,
         id: pending.id,
         layer_id: pending.layer_id,
         transform: VisualTransform::default(),
@@ -1882,6 +1872,10 @@ pub(crate) fn export_drawio_scene(
         }
         match &object.kind {
             VisualObjectKind::Primitive { shape } => {
+                if object.owned_label.as_ref().is_some_and(|label| label.text.is_empty()) {
+                    result.report.add(Some(&object_wire_id(object.id)), "empty-owned-label-not-exportable");
+                    continue;
+                }
                 let Some(shape) = primitive_to_wire(*shape) else {
                     result.report.add(
                         Some(&object_wire_id(object.id)),
@@ -1893,7 +1887,7 @@ pub(crate) fn export_drawio_scene(
                     &mut writer,
                     object,
                     shape,
-                    None,
+                    object.owned_label.as_ref().map(|label| label.text.as_str()),
                     parents[&object.id],
                     &objects,
                     &mut result.report,
@@ -2160,18 +2154,30 @@ fn vertex_style(
     if object.transform.rotation_degrees != 0.0 {
         properties.push(("rotation", object.transform.rotation_degrees.to_string()));
     }
-    let font_family = if font_family_uses_style_delimiter(&object.style.font_family) {
+    let label_style = object
+        .owned_label
+        .as_ref()
+        .map_or(&object.style, |label| &label.style);
+    if object.owned_label.is_some()
+        && (label_style.opacity != object.style.opacity || label_style.border.alpha != 255)
+    {
+        report.add(
+            Some(&object_wire_id(object.id)),
+            "independent-label-opacity-not-exported",
+        );
+    }
+    let font_family = if font_family_uses_style_delimiter(&label_style.font_family) {
         report.add(
             Some(&object_wire_id(object.id)),
             "font-family-not-representable",
         );
         "sans-serif"
     } else {
-        &object.style.font_family
+        &label_style.font_family
     };
     properties.push(("fontFamily", font_family.to_owned()));
-    properties.push(("fontSize", object.style.font_size.to_string()));
-    properties.push(("fontColor", color_value(object.style.border)));
+    properties.push(("fontSize", label_style.font_size.to_string()));
+    properties.push(("fontColor", color_value(label_style.border)));
     properties.push(("fontStyle", "0".to_owned()));
     if text {
         for (key, value) in &mut properties {
@@ -2896,6 +2902,7 @@ mod tests {
 
     fn primitive(id: u64, shape: VisualPrimitiveShape) -> VisualObject {
         VisualObject {
+            owned_label: None,
             id: VisualObjectId::from_raw(id),
             layer_id: DEFAULT_LAYER_ID,
             transform: VisualTransform {
@@ -2992,10 +2999,7 @@ mod tests {
         assert_eq!(scene.layers.len(), 2);
         assert_eq!(scene.layers[0].name, "Background");
         assert_eq!(scene.layers[1].name, "Labels");
-        assert!(imported.report.issues.iter().any(|issue| {
-            issue.source_id.as_deref() == Some("start")
-                && issue.property == "vertex-label-split-to-text"
-        }));
+        assert!(!imported.report.issues.iter().any(|issue| issue.property == "vertex-label-split-to-text"));
         assert!(
             imported
                 .report
@@ -3022,6 +3026,7 @@ mod tests {
         assert_eq!(start.style.fill, VisualColor::rgba(224, 240, 255, 255));
         assert_eq!(start.style.border, VisualColor::rgba(18, 52, 86, 255));
         assert_eq!(start.style.opacity, 0.85);
+        assert!(start.owned_label.as_ref().is_some_and(|label| !label.text.is_empty()));
 
         let free_text = scene
             .objects
@@ -3062,11 +3067,29 @@ mod tests {
         assert!(xml.contains("fontFamily=A&amp;B"));
         assert!(xml.contains("First&#13;&#10;東京 &amp; more &lt;&quot;"));
         assert!(xml.contains("value=\"A &amp; one\""));
-        assert!(xml.contains("source=\"v2\" target=\"v4\""));
+        assert!(xml.contains("source=\"v2\" target=\"v3\""));
 
         let second_document = import_drawio_xml(&first.bytes).unwrap().document;
         let second = export_drawio_xml(&second_document).unwrap();
         assert_eq!(first.bytes, second.bytes);
+
+        let mut empty_label_document = imported.document.clone();
+        let mut labeled = empty_label_document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.owned_label.is_some())
+            .unwrap()
+            .clone();
+        labeled.owned_label.as_mut().unwrap().text.clear();
+        empty_label_document
+            .apply_transaction(&[super::super::visual::VisualOperation::ReplaceObject(
+                labeled,
+            )])
+            .unwrap();
+        assert!(
+            matches!(export_drawio_xml(&empty_label_document), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.property == "empty-owned-label-not-exportable"))
+        );
 
         let direct_model = b"<mxGraphModel><root><mxCell id='0'/></root></mxGraphModel>";
         assert_eq!(

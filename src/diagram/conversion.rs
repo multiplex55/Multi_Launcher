@@ -63,8 +63,7 @@ pub fn mermaid_visual_copy(
     let object_count = graph
         .nodes
         .len()
-        .checked_mul(2)
-        .and_then(|count| count.checked_add(graph.edges.len()))
+        .checked_add(graph.edges.len())
         .and_then(|count| count.checked_add(1))
         .ok_or(MermaidVisualCopyError::TooManyObjects {
             required: usize::MAX,
@@ -107,6 +106,13 @@ pub fn mermaid_visual_copy(
         object_ids.insert(node.id.clone(), object_id);
         node_centers.insert(node.id.clone(), node.bounds.center());
         scene.objects.push(VisualObject {
+            owned_label: Some(super::visual::VisualOwnedLabel {
+                text: source_node.label.clone(),
+                style: VisualStyle {
+                    font_size: 12.8,
+                    ..VisualStyle::default()
+                },
+            }),
             id: object_id,
             layer_id: DEFAULT_LAYER_ID,
             transform: VisualTransform {
@@ -123,24 +129,6 @@ pub fn mermaid_visual_copy(
                     NodeShape::Rounded => VisualPrimitiveShape::RoundRect,
                     NodeShape::Diamond => VisualPrimitiveShape::Diamond,
                 },
-            },
-        });
-        scene.objects.push(VisualObject {
-            id: allocate_id(&mut next_id),
-            layer_id: DEFAULT_LAYER_ID,
-            transform: VisualTransform {
-                x: node.label_bounds.center().x,
-                y: node.label_bounds.center().y,
-                width: node.label_bounds.width().max(0.1),
-                height: node.label_bounds.height().max(0.1),
-                rotation_degrees: 0.0,
-            },
-            style: VisualStyle {
-                font_size: 12.8,
-                ..VisualStyle::default()
-            },
-            kind: VisualObjectKind::Text {
-                text: source_node.label.clone(),
             },
         });
     }
@@ -168,6 +156,7 @@ pub fn mermaid_visual_copy(
         })?;
         let (from_anchor, to_anchor) = anchors_between(source_center, target_center);
         scene.objects.push(VisualObject {
+            owned_label: None,
             id: allocate_id(&mut next_id),
             layer_id: DEFAULT_LAYER_ID,
             // Connector geometry is derived from endpoint references.
@@ -259,10 +248,12 @@ mod tests {
                 VisualPrimitiveShape::RoundRect
             ]
         );
-        assert!(scene.objects.iter().any(|object| matches!(
-            &object.kind,
-            VisualObjectKind::Text { text } if text == "東京\nCaption"
-        )));
+        assert!(scene.objects.iter().any(|object| {
+            object
+                .owned_label
+                .as_ref()
+                .is_some_and(|label| label.text == "東京\nCaption")
+        }));
         let projection = crate::diagram::project_visual_scene(scene).expect("project copy");
         for expected in ["東京", "Caption", "Choice", "Cached", "stores"] {
             assert!(
@@ -287,6 +278,20 @@ mod tests {
             .expect("labeled connector");
         assert_eq!(connector.direction, VisualConnectorDirection::Forward);
         assert_eq!(copy.validate(), Ok(()));
+
+        let long = "1234567890123456789012345678901234567890";
+        let long_session = self::session(&format!("flowchart TD\nA[\"{long}\"]\n"));
+        let long_copy = mermaid_visual_copy(&long_session).unwrap();
+        let projection = crate::diagram::project_visual_scene(long_copy.scene()).unwrap();
+        let label = projection.items.iter().find_map(|item| {
+            item.text
+                .as_ref()
+                .filter(|text| text.lines.iter().any(|line| line.text == long))
+        });
+        assert!(
+            label.is_some(),
+            "conversion must not wrap a fitting source label"
+        );
     }
 
     #[test]
@@ -314,7 +319,7 @@ mod tests {
     #[test]
     fn mermaid_visual_copy_refuses_object_limit_without_truncating() {
         let mut source = String::from("flowchart TD\n");
-        for index in 0..512 {
+        for index in 0..1024 {
             source.push_str(&format!("N{index:03}\n"));
         }
         let session = session(&source);

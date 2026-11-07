@@ -154,16 +154,34 @@ pub fn project_visual_scene(
                 continue;
             }
             let projected = match &object.kind {
-                VisualObjectKind::Primitive { shape } => vec![build_item(
-                    object.id,
-                    None,
-                    layer.id,
-                    VisualProjectedKind::Primitive(*shape),
-                    object.transform,
-                    object.style.clone(),
-                    None,
-                    false,
-                )?],
+                VisualObjectKind::Primitive { shape } => {
+                    let mut items = vec![build_item(
+                        object.id,
+                        None,
+                        layer.id,
+                        VisualProjectedKind::Primitive(*shape),
+                        object.transform,
+                        object.style.clone(),
+                        None,
+                        false,
+                    )?];
+                    if let Some(label) = &object.owned_label {
+                        let mut transform = object.transform;
+                        transform.width = (transform.width - 24.0).max(transform.width * 0.5);
+                        transform.height = (transform.height - 16.0).max(transform.height * 0.5);
+                        items.push(build_item(
+                            object.id,
+                            None,
+                            layer.id,
+                            VisualProjectedKind::Text,
+                            transform,
+                            label.style.clone(),
+                            Some(&label.text),
+                            false,
+                        )?);
+                    }
+                    items
+                }
                 VisualObjectKind::Text { text } => vec![build_item(
                     object.id,
                     None,
