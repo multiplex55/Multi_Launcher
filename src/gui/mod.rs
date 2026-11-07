@@ -1114,6 +1114,7 @@ pub struct LauncherApp {
     pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
     pub(crate) settings_save_reconciliation_required: bool,
     pub(crate) pending_calculation_pad_recovery_preference: Option<bool>,
+    pub(crate) pending_programmer_inspector_preference: Option<crate::settings::ProgrammerInspectorPreferences>,
     /// Persistence failure captured before GUI startup. A later recovery UI can
     /// consume this without re-reading or replacing the damaged settings file.
     pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
@@ -1315,7 +1316,7 @@ pub struct LauncherApp {
     pub(crate) archive_session: crate::archive::ArchiveSession,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
-    programmer_inspector_dialog: programmer_inspector_dialog::ProgrammerInspectorDialog,
+    pub(crate) programmer_inspector_dialog: programmer_inspector_dialog::ProgrammerInspectorDialog,
     programmer_inspector_host: utility_window_host::ProgrammerInspectorWindowHost,
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
     pub(crate) diagram_studio_dialog: DiagramStudioDialog,
@@ -3295,6 +3296,8 @@ impl LauncherApp {
         let mut calculation_pad_dialog = CalculationPadDialog::new(&data_root);
         calculation_pad_dialog
             .initialize_recovery_preference(settings.calculation_pad_remember_source);
+        let mut programmer_inspector_dialog = programmer_inspector_dialog::ProgrammerInspectorDialog::default();
+        programmer_inspector_dialog.initialize_preferences(settings.programmer_inspector);
         let convert_panel = ConvertPanel::with_data_root(&data_root);
         let diagram_studio_dialog = DiagramStudioDialog::new(&data_root);
         let markdown_studio_dialog = MarkdownStudioDialog::new(&data_root);
@@ -3816,6 +3819,7 @@ impl LauncherApp {
             pending_settings_save: None,
             settings_save_reconciliation_required: false,
             pending_calculation_pad_recovery_preference: None,
+            pending_programmer_inspector_preference: None,
             startup_settings_diagnostic: None,
             actions_persistence_diagnostic: None,
             startup_recovery: Default::default(),
@@ -4006,7 +4010,7 @@ impl LauncherApp {
             archive_session,
             regex_tester_dialog,
             calculation_pad_dialog,
-            programmer_inspector_dialog: Default::default(),
+            programmer_inspector_dialog,
             programmer_inspector_host: Default::default(),
             date_time_studio_dialog: DateTimeStudioDialog::default(),
             diagram_studio_dialog,

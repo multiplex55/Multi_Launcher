@@ -205,3 +205,29 @@ The evaluator checks these bounds before invoking expression or unit parsers:
 Lines that exceed a line-level bound receive a diagnostic; documents beyond
 the byte or line bound receive a document diagnostic without partial
 evaluation.
+
+## Programmer Inspector and comparison
+
+Open **Inspect bits…** beside an exact integer result. Bit 0 is the least
+significant bit. The working bits and optional labels are private until you
+choose **Insert at Pad selection**; Undo restores the previous source in one
+step. If the selected result changes, dirty work remains visible and must be
+refreshed explicitly before insertion. A checked cast validates the numeric
+value; reinterpretation preserves the low bit pattern and zero-extends when
+widening. Copy provides decimal, binary, octal and hexadecimal, with optional
+prefixes, width padding and digit grouping. Only these format preferences are
+saved; working bits, labels, expressions and comparison results are transient.
+
+For example, `123 >> 12` uses the default `u64` mode and yields zero;
+`i8(-1) >> 1` stays negative, and `u8(255) << 1` masks to 254. A value such
+as `u64(9007199254740993)` stays exact beyond floating-point integer precision.
+
+Choose **Select for comparison** on a Pad result, then **Use selected result**
+on either comparison side; alternatively, type an expression on that side.
+The Inspector compares the two inputs using
+one immutable snapshot of the current physical rows and named values. Neither
+side creates names for the other, and comparing does not change Pad text or
+history. A changed source or input marks the previous comparison stale until
+refreshed. Integer width/sign mismatches are explicit; compatible unit values
+are normalized and incompatible dimensions are reported. For example,
+`10 m` and `20 cm` are comparable, whereas `10 m` and `10 s` are not.

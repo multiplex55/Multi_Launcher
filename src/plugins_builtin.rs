@@ -61,7 +61,7 @@ impl Plugin for CalculatorPlugin {
         if trimmed.eq_ignore_ascii_case("calc pad") {
             return vec![Action {
                 label: "Open Calculation Pad".into(),
-                desc: "Open the multi-line pad for exact integers and unit arithmetic".into(),
+                desc: "Open the multi-line pad with exact integers, bit inspection, comparison, and unit arithmetic".into(),
                 action: "calc:pad".into(),
                 args: None,
             }];
@@ -124,7 +124,7 @@ impl Plugin for CalculatorPlugin {
     }
 
     fn description(&self) -> &str {
-        "Evaluate inline scalar expressions or open the multi-line pad for exact integers and unit arithmetic (prefix: `=`; `= history` to list)"
+        "Evaluate inline scalar expressions or open the pad for exact integers, bit inspection, comparisons, and units (prefix: `=`; `= history` to list)"
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -135,7 +135,7 @@ impl Plugin for CalculatorPlugin {
         vec![
             Action {
                 label: "calc pad".into(),
-                desc: "Open multi-line calculations with exact integers and unit arithmetic".into(),
+                desc: "Open multi-line calculations with exact integers, bit inspection, comparison, and unit arithmetic".into(),
                 action: "query:calc pad".into(),
                 args: None,
             },

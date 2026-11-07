@@ -1288,3 +1288,87 @@ mod tests {
         assert!(cancelled_approximation.is_approximate());
     }
 }
+
+/// Compare quantity values using their owned dimensions and normalized values.
+pub(super) fn compare_values(
+    left: &CalculationValue,
+    right: &CalculationValue,
+) -> Result<(std::cmp::Ordering, String, bool), QuantityError> {
+    fn normalized(value: &CalculationValue) -> Result<CalculatedQuantity, QuantityError> {
+        match value {
+            CalculationValue::DimensionalQuantity(quantity) => Ok(quantity.clone()),
+            CalculationValue::PhysicalQuantity {
+                value,
+                unit,
+                approximations,
+            } => match from_physical(*value, *unit, approximations)? {
+                EvalValue::Quantity(quantity) => Ok(quantity),
+                _ => Err(QuantityError::IncompatibleDimensions),
+            },
+            _ => Err(QuantityError::IncompatibleDimensions),
+        }
+    }
+    if let (
+        CalculationValue::PhysicalQuantity {
+            value: left_value,
+            unit: left_unit,
+            approximations: left_approx,
+        },
+        CalculationValue::PhysicalQuantity {
+            value: right_value,
+            unit: right_unit,
+            approximations: right_approx,
+        },
+    ) = (left, right)
+    {
+        if left_unit.category() != right_unit.category() {
+            return Err(QuantityError::IncompatibleDimensions);
+        }
+        if left_unit.linear_factor().is_none() || right_unit.linear_factor().is_none() {
+            // Reciprocal fuel-economy scales reverse ordering, so compare both
+            // sides in one category-owned canonical scale, independent of order.
+            let canonical = match left_unit.category() {
+                Category::Temperature => Unit::Kelvin,
+                Category::FuelEconomy => Unit::KilometerPerLiter,
+                _ => return Err(QuantityError::IncompatibleDimensions),
+            };
+            let left_normalized = unit_conversion::convert(*left_value, *left_unit, canonical)
+                .ok_or(QuantityError::IncompatibleDimensions)?;
+            let right_normalized = unit_conversion::convert(*right_value, *right_unit, canonical)
+                .ok_or(QuantityError::IncompatibleDimensions)?;
+            let left_normalized = checked_value(left_normalized)?;
+            let right_normalized = checked_value(right_normalized)?;
+            let difference = checked_value(left_normalized - right_normalized)?;
+            return Ok((
+                left_normalized
+                    .partial_cmp(&right_normalized)
+                    .ok_or(QuantityError::OutOfRange)?,
+                format!(
+                    "{} {}",
+                    format_number(difference).ok_or(QuantityError::OutOfRange)?,
+                    canonical.symbol()
+                ),
+                !left_approx.is_empty() || !right_approx.is_empty(),
+            ));
+        }
+    }
+    let left = normalized(left)?;
+    let right = normalized(right)?;
+    if left.dimension != right.dimension {
+        return Err(QuantityError::IncompatibleDimensions);
+    }
+    let difference = checked_value(left.base_value - right.base_value)?;
+    let ordering = left
+        .base_value
+        .partial_cmp(&right.base_value)
+        .ok_or(QuantityError::OutOfRange)?;
+    let mut result = left.clone();
+    result.base_value = difference;
+    merge_approximations(&mut result.approximations, right.approximations);
+    let approximate = result.is_approximate();
+    Ok((
+        ordering,
+        result.formatted_result().ok_or(QuantityError::OutOfRange)?,
+        approximate,
+    ))
+}

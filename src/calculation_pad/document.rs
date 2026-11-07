@@ -1634,65 +1634,105 @@ fn mark_duplicate_assignments(
 }
 
 fn resolve_references(lines: &mut [PreparedLine], definitions: &HashMap<String, Vec<usize>>) {
-    for line_index in 0..lines.len() {
-        let defer_scalar_diagnostic = defers_scalar_diagnostic(&lines[line_index]);
-        for reference_index in 0..lines[line_index].references.len() {
-            let reference_name = lines[line_index].references[reference_index].name.clone();
-            let target = match lines[line_index].references[reference_index].kind {
-                ReferenceKind::Row => lines[line_index].references[reference_index]
-                    .target_line
-                    .filter(|target| *target < lines.len()),
-                ReferenceKind::InvalidRow => {
+    let row_count = lines.len();
+    for line in lines {
+        resolve_line_references(line, definitions, row_count);
+    }
+}
+
+fn resolve_line_references(
+    line: &mut PreparedLine,
+    definitions: &HashMap<String, Vec<usize>>,
+    row_count: usize,
+) {
+    let defer_scalar_diagnostic = defers_scalar_diagnostic(line);
+    for reference_index in 0..line.references.len() {
+        let reference_name = line.references[reference_index].name.clone();
+        let target = match line.references[reference_index].kind {
+            ReferenceKind::Row => line.references[reference_index]
+                .target_line
+                .filter(|target| *target < row_count),
+            ReferenceKind::InvalidRow => {
+                if !defer_scalar_diagnostic {
+                    set_diagnostic_if_missing(
+                        line,
+                        DiagnosticKind::UnknownRowReference(reference_name),
+                    );
+                }
+                None
+            }
+            ReferenceKind::Named => match definitions.get(&reference_name) {
+                Some(locations) if locations.len() == 1 => Some(locations[0]),
+                Some(_) => {
                     if !defer_scalar_diagnostic {
                         set_diagnostic_if_missing(
-                            &mut lines[line_index],
-                            DiagnosticKind::UnknownRowReference(reference_name),
+                            line,
+                            DiagnosticKind::DuplicateName(reference_name),
                         );
                     }
                     None
                 }
-                ReferenceKind::Named => match definitions.get(&reference_name) {
-                    Some(locations) if locations.len() == 1 => Some(locations[0]),
-                    Some(_) => {
-                        if !defer_scalar_diagnostic {
-                            set_diagnostic_if_missing(
-                                &mut lines[line_index],
-                                DiagnosticKind::DuplicateName(reference_name),
-                            );
-                        }
-                        None
+                None => {
+                    if !defer_scalar_diagnostic {
+                        set_diagnostic_if_missing(
+                            line,
+                            DiagnosticKind::UnknownName(reference_name),
+                        );
                     }
-                    None => {
-                        if !defer_scalar_diagnostic {
-                            set_diagnostic_if_missing(
-                                &mut lines[line_index],
-                                DiagnosticKind::UnknownName(reference_name),
-                            );
-                        }
-                        None
-                    }
-                },
-            };
-
-            if lines[line_index].references[reference_index].kind == ReferenceKind::Row
-                && target.is_none()
-            {
-                let name = lines[line_index].references[reference_index].name.clone();
-                if !defer_scalar_diagnostic {
-                    set_diagnostic_if_missing(
-                        &mut lines[line_index],
-                        DiagnosticKind::UnknownRowReference(name),
-                    );
+                    None
                 }
-            }
-            lines[line_index].references[reference_index].target_line = target;
-            if let Some(target) = target {
-                lines[line_index].dependencies.push(target);
+            },
+        };
+        if line.references[reference_index].kind == ReferenceKind::Row && target.is_none() {
+            let name = line.references[reference_index].name.clone();
+            if !defer_scalar_diagnostic {
+                set_diagnostic_if_missing(line, DiagnosticKind::UnknownRowReference(name));
             }
         }
-        lines[line_index].dependencies.sort_unstable();
-        lines[line_index].dependencies.dedup();
+        line.references[reference_index].target_line = target;
+        if let Some(target) = target {
+            line.dependencies.push(target);
+        }
     }
+    line.dependencies.sort_unstable();
+    line.dependencies.dedup();
+}
+
+/// Evaluate an independent expression against already-evaluated physical rows.
+pub(super) fn evaluate_comparison_expression(
+    expression: &str,
+    rows: &[super::comparison::ComparisonRow],
+) -> LineOutcome {
+    if expression.contains(['\n', '\r']) || find_assignment_delimiter(expression).is_some() {
+        return LineOutcome::Error(Diagnostic::new(DiagnosticKind::InvalidExpression));
+    }
+    let mut identifiers = 0;
+    let mut prepared = prepare_line(0..expression.len(), expression, &mut identifiers);
+    let mut definitions = HashMap::<String, Vec<usize>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(name) = &row.assignment_name {
+            definitions.entry(name.clone()).or_default().push(index);
+        }
+    }
+    resolve_line_references(&mut prepared, &definitions, rows.len());
+    let outcomes = rows
+        .iter()
+        .map(|row| row.outcome.clone())
+        .collect::<Vec<_>>();
+    let values = rows
+        .iter()
+        .map(|row| match &row.outcome {
+            LineOutcome::Value(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    evaluate_line(
+        rows.len(),
+        &prepared,
+        &vec![false; rows.len() + 1],
+        &outcomes,
+        &values,
+    )
 }
 
 fn defers_scalar_diagnostic(line: &PreparedLine) -> bool {

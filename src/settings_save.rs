@@ -26,6 +26,7 @@ pub(crate) enum SettingsSaveSource {
     General,
     PluginSelection,
     CalculationPadRecovery,
+    ProgrammerInspector,
 }
 
 macro_rules! rollback_field {
@@ -99,6 +100,7 @@ define_general_settings_fields!(
     note_confirm_discard_unsaved_changes,
     note_always_overwrite,
     calculation_pad_remember_source,
+    programmer_inspector,
     note_images_as_links,
     note_show_details,
     note_more_limit,
@@ -148,6 +150,7 @@ enum SaveOwnership {
     },
     PluginSelection,
     CalculationPadRecovery,
+    ProgrammerInspector,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -220,6 +223,7 @@ pub(crate) struct SettingsSaveIntent {
     source: SettingsSaveSource,
     invocation_baseline: Option<InvocationSettingsBaseline>,
     calculation_pad_remember_source_baseline: Option<bool>,
+    programmer_inspector_baseline: Option<crate::settings::ProgrammerInspectorPreferences>,
 }
 
 impl SettingsSaveIntent {
@@ -246,6 +250,7 @@ impl SettingsSaveIntent {
             calculation_pad_remember_source_baseline: Some(
                 baseline.calculation_pad_remember_source,
             ),
+            programmer_inspector_baseline: Some(baseline.programmer_inspector),
         }
     }
 
@@ -262,6 +267,7 @@ impl SettingsSaveIntent {
             source: SettingsSaveSource::PluginSelection,
             invocation_baseline: None,
             calculation_pad_remember_source_baseline: None,
+            programmer_inspector_baseline: None,
         }
     }
 
@@ -274,6 +280,33 @@ impl SettingsSaveIntent {
             source: SettingsSaveSource::CalculationPadRecovery,
             invocation_baseline: None,
             calculation_pad_remember_source_baseline: None,
+            programmer_inspector_baseline: None,
+        }
+    }
+
+    pub(crate) fn programmer_inspector(
+        mut preferences: crate::settings::ProgrammerInspectorPreferences,
+    ) -> Self {
+        preferences.grouping = preferences.grouping.min(128);
+        let mut desired = Settings::default();
+        desired.programmer_inspector = preferences;
+        Self {
+            desired,
+            ownership: SaveOwnership::ProgrammerInspector,
+            source: SettingsSaveSource::ProgrammerInspector,
+            invocation_baseline: None,
+            calculation_pad_remember_source_baseline: None,
+            programmer_inspector_baseline: None,
+        }
+    }
+
+    fn owns_programmer_inspector(&self) -> bool {
+        match &self.ownership {
+            SaveOwnership::General { .. } => {
+                self.programmer_inspector_baseline != Some(self.desired.programmer_inspector)
+            }
+            SaveOwnership::ProgrammerInspector => true,
+            _ => false,
         }
     }
 
@@ -289,6 +322,7 @@ impl SettingsSaveIntent {
             }
             SaveOwnership::PluginSelection => false,
             SaveOwnership::CalculationPadRecovery => true,
+            SaveOwnership::ProgrammerInspector => false,
         }
     }
 
@@ -296,7 +330,11 @@ impl SettingsSaveIntent {
         match &self.ownership {
             SaveOwnership::General { plugin_settings } => {
                 let latest_recovery_preference = latest.calculation_pad_remember_source;
+                let latest_inspector = latest.programmer_inspector;
                 copy_general_fields(latest, &self.desired);
+                if !self.owns_programmer_inspector() {
+                    latest.programmer_inspector = latest_inspector;
+                }
                 if !self.owns_calculation_pad_recovery_preference() {
                     latest.calculation_pad_remember_source = latest_recovery_preference;
                 }
@@ -315,6 +353,9 @@ impl SettingsSaveIntent {
             SaveOwnership::CalculationPadRecovery => {
                 latest.calculation_pad_remember_source =
                     self.desired.calculation_pad_remember_source;
+            }
+            SaveOwnership::ProgrammerInspector => {
+                latest.programmer_inspector = self.desired.programmer_inspector;
             }
         }
     }
@@ -336,7 +377,11 @@ impl SettingsSaveIntent {
         match &self.ownership {
             SaveOwnership::General { plugin_settings } => {
                 let latest_recovery_preference = latest.calculation_pad_remember_source;
+                let latest_inspector = latest.programmer_inspector;
                 copy_general_fields(latest, committed);
+                if !self.owns_programmer_inspector() {
+                    latest.programmer_inspector = latest_inspector;
+                }
                 if !self.owns_calculation_pad_recovery_preference() {
                     latest.calculation_pad_remember_source = latest_recovery_preference;
                 }
@@ -355,6 +400,9 @@ impl SettingsSaveIntent {
             SaveOwnership::CalculationPadRecovery => {
                 latest.calculation_pad_remember_source = committed.calculation_pad_remember_source;
             }
+            SaveOwnership::ProgrammerInspector => {
+                latest.programmer_inspector = committed.programmer_inspector;
+            }
         }
         overlay_acknowledged_invocation(latest, committed);
     }
@@ -366,10 +414,14 @@ impl SettingsSaveIntent {
             SaveOwnership::General { .. } => GENERAL_SETTINGS_FIELDS,
             SaveOwnership::PluginSelection => &["enabled_plugins", "enabled_capabilities"],
             SaveOwnership::CalculationPadRecovery => &["calculation_pad_remember_source"],
+            SaveOwnership::ProgrammerInspector => &["programmer_inspector"],
         };
         let mut changed = Vec::new();
         if let (Some(latest_value), Some(committed_value)) = (latest_value, committed_value) {
             for field in fields {
+                if *field == "programmer_inspector" && !self.owns_programmer_inspector() {
+                    continue;
+                }
                 if *field == "calculation_pad_remember_source"
                     && !self.owns_calculation_pad_recovery_preference()
                 {
@@ -428,6 +480,9 @@ impl SettingsSaveIntent {
                     calculation_pad_remember_source,
                     conflicts
                 );
+            }
+            SaveOwnership::ProgrammerInspector => {
+                rollback_field!(latest, before, written, programmer_inspector, conflicts);
             }
         }
         conflicts
@@ -1135,6 +1190,31 @@ impl LauncherApp {
         self.start_pending_calculation_pad_recovery_preference_save(context);
     }
 
+    pub(crate) fn request_programmer_inspector_preference_save(
+        &mut self,
+        context: &egui::Context,
+        preferences: crate::settings::ProgrammerInspectorPreferences,
+    ) {
+        self.pending_programmer_inspector_preference = Some(preferences);
+        self.start_pending_programmer_inspector_preference_save(context);
+    }
+
+    fn start_pending_programmer_inspector_preference_save(&mut self, context: &egui::Context) {
+        if self.settings_save_pending() {
+            return;
+        }
+        let Some(preferences) = self.pending_programmer_inspector_preference.take() else {
+            return;
+        };
+        if self.settings_editor.baseline_settings.programmer_inspector == preferences {
+            return;
+        }
+        self.begin_settings_save(
+            context,
+            SettingsSaveIntent::programmer_inspector(preferences),
+        );
+    }
+
     fn start_pending_calculation_pad_recovery_preference_save(&mut self, context: &egui::Context) {
         if self.settings_save_pending() {
             return;
@@ -1229,22 +1309,32 @@ impl LauncherApp {
                     cancel_requested,
                 });
             }
-            Err(error) => self.report_ui_error(crate::gui::UiErrorEvent::new(
-                match source {
-                    SettingsSaveSource::General => "settings_editor.save",
-                    SettingsSaveSource::PluginSelection => "plugin_editor.save",
-                    SettingsSaveSource::CalculationPadRecovery => {
-                        "calculation_pad.recovery.preference"
-                    }
-                },
-                format!("Could not start settings save worker: {error}"),
-            )),
+            Err(error) => {
+                if source == SettingsSaveSource::ProgrammerInspector {
+                    self.programmer_inspector_dialog
+                        .preference_save_failed(&error.to_string());
+                }
+                self.report_ui_error(crate::gui::UiErrorEvent::new(
+                    match source {
+                        SettingsSaveSource::General => "settings_editor.save",
+                        SettingsSaveSource::PluginSelection => "plugin_editor.save",
+                        SettingsSaveSource::CalculationPadRecovery => {
+                            "calculation_pad.recovery.preference"
+                        }
+                        SettingsSaveSource::ProgrammerInspector => {
+                            "programmer_inspector.preferences"
+                        }
+                    },
+                    format!("Could not start settings save worker: {error}"),
+                ));
+            }
         }
     }
 
     pub(crate) fn drain_settings_save(&mut self, context: &egui::Context) {
         if self.pending_settings_save.is_none() {
             self.start_pending_calculation_pad_recovery_preference_save(context);
+            self.start_pending_programmer_inspector_preference_save(context);
         }
         let Some(pending) = self.pending_settings_save.as_ref() else {
             return;
@@ -1273,6 +1363,9 @@ impl LauncherApp {
                         SettingsSaveSource::CalculationPadRecovery => {
                             "calculation_pad.recovery.preference"
                         }
+                        SettingsSaveSource::ProgrammerInspector => {
+                            "programmer_inspector.preferences"
+                        }
                     },
                     message,
                 ));
@@ -1292,6 +1385,8 @@ impl LauncherApp {
                         self,
                         completion.settings.calculation_pad_remember_source,
                     );
+                } else if result.source == SettingsSaveSource::ProgrammerInspector {
+                    crate::settings_editor::SettingsEditor::apply_committed_programmer_inspector_preference(self, completion.settings.programmer_inspector);
                 } else {
                     crate::settings_editor::SettingsEditor::apply_saved_settings(
                         context,
@@ -1308,23 +1403,36 @@ impl LauncherApp {
                             SettingsSaveSource::CalculationPadRecovery => {
                                 "calculation_pad.recovery.preference"
                             }
+                            SettingsSaveSource::ProgrammerInspector => {
+                                "programmer_inspector.preferences"
+                            }
                         },
                         warning,
                     ));
                 }
             }
-            Err(message) => self.report_ui_error(crate::gui::UiErrorEvent::new(
-                match result.source {
-                    SettingsSaveSource::General => "settings_editor.save",
-                    SettingsSaveSource::PluginSelection => "plugin_editor.save",
-                    SettingsSaveSource::CalculationPadRecovery => {
-                        "calculation_pad.recovery.preference"
-                    }
-                },
-                message,
-            )),
+            Err(message) => {
+                if result.source == SettingsSaveSource::ProgrammerInspector {
+                    self.programmer_inspector_dialog
+                        .preference_save_failed(&message);
+                }
+                self.report_ui_error(crate::gui::UiErrorEvent::new(
+                    match result.source {
+                        SettingsSaveSource::General => "settings_editor.save",
+                        SettingsSaveSource::PluginSelection => "plugin_editor.save",
+                        SettingsSaveSource::CalculationPadRecovery => {
+                            "calculation_pad.recovery.preference"
+                        }
+                        SettingsSaveSource::ProgrammerInspector => {
+                            "programmer_inspector.preferences"
+                        }
+                    },
+                    message,
+                ));
+            }
         }
         self.start_pending_calculation_pad_recovery_preference_save(context);
+        self.start_pending_programmer_inspector_preference_save(context);
     }
 
     pub(crate) fn prepare_settings_save_shutdown(&mut self) {
@@ -1966,6 +2074,118 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         (context, app)
+    }
+
+    #[test]
+    fn inspector_preferences_owned_save_and_stale_editor_reconciliation() {
+        let baseline = Settings::default();
+        let general = SettingsSaveIntent::general(baseline.clone(), &baseline);
+        let chosen = crate::settings::ProgrammerInspectorPreferences {
+            prefix: true,
+            pad_to_width: true,
+            grouping: 4,
+        };
+        let mut latest = baseline.clone();
+        latest.programmer_inspector = chosen;
+        latest.theme.mode = crate::settings::ThemeMode::Light;
+        let theme = latest.theme.mode;
+        let mut committed = latest.clone();
+        general.apply(&mut committed);
+        assert_eq!(committed.programmer_inspector, chosen);
+        general.overlay_applied(&mut latest, &committed);
+        assert_eq!(latest.programmer_inspector, chosen);
+        let intent = SettingsSaveIntent::programmer_inspector(
+            crate::settings::ProgrammerInspectorPreferences {
+                grouping: 8,
+                ..chosen
+            },
+        );
+        let before = latest.clone();
+        intent.apply(&mut latest);
+        assert_eq!(latest.programmer_inspector.grouping, 8);
+        assert_eq!(latest.theme.mode, theme);
+        let written = latest.clone();
+        assert!(
+            intent
+                .rollback_owned(&mut latest, &before, &written)
+                .is_empty()
+        );
+        assert_eq!(latest.programmer_inspector, chosen);
+        assert_eq!(latest.theme.mode, theme);
+    }
+
+    #[test]
+    fn inspector_queued_newer_preference_survives_older_acknowledgement() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let (_ctx, mut app) = test_app(directory.path(), Settings::default());
+        let original = crate::settings::ProgrammerInspectorPreferences::default();
+        let older = crate::settings::ProgrammerInspectorPreferences {
+            prefix: true,
+            ..original
+        };
+        app.programmer_inspector_dialog
+            .initialize_preferences(original);
+        app.pending_programmer_inspector_preference = Some(original);
+        crate::settings_editor::SettingsEditor::apply_committed_programmer_inspector_preference(
+            &mut app, older,
+        );
+        assert!(!app.programmer_inspector_dialog.test_format_options().prefix);
+        assert_eq!(
+            app.settings_editor.baseline_settings.programmer_inspector,
+            older
+        );
+        assert_eq!(app.pending_programmer_inspector_preference, Some(original));
+        let intent = SettingsSaveIntent::programmer_inspector(original);
+        let mut latest = app.settings_editor.baseline_settings.clone();
+        intent.apply(&mut latest);
+        assert_eq!(latest.programmer_inspector, original);
+    }
+
+    #[test]
+    fn inspector_preference_runtime_failure_rolls_back_without_touching_unrelated_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let baseline = Settings::default();
+        baseline.save(&path).unwrap();
+        let desired = crate::settings::ProgrammerInspectorPreferences {
+            prefix: true,
+            grouping: 4,
+            ..Default::default()
+        };
+        let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
+        let (worker, _) = spawn_save(
+            path.clone(),
+            SettingsSaveIntent::programmer_inspector(desired),
+            SettingsSaveSource::ProgrammerInspector,
+            move |settings| client.prepare(settings),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+        let HotkeyRuntimeMessage::Prepare(request) = next_runtime_message(&owner) else {
+            panic!("expected preparation")
+        };
+        complete_prepare(request, 170);
+        let HotkeyRuntimeMessage::Apply(application) = next_runtime_message(&owner) else {
+            panic!("expected apply")
+        };
+        Settings::update(&path, |latest| {
+            latest.theme.mode = crate::settings::ThemeMode::Dark;
+            Ok(())
+        })
+        .unwrap();
+        application
+            .complete_restored(HotkeyReconfigurationError::RuntimeTransition(
+                "injected failure".into(),
+            ))
+            .unwrap();
+        assert!(worker.join().unwrap().0.is_err());
+        let persisted = Settings::load(&path).unwrap();
+        assert_eq!(
+            persisted.programmer_inspector,
+            baseline.programmer_inspector
+        );
+        assert_eq!(persisted.theme.mode, crate::settings::ThemeMode::Dark);
     }
 
     fn drain_until_complete(app: &mut LauncherApp, context: &egui::Context) {

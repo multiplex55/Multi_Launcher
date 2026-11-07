@@ -171,6 +171,15 @@ const EXAMPLES: &[CalculationExampleGroup] = &[
         title: "Exact programmer arithmetic",
         examples: &[
             CalculationExample {
+                title: "Shift a default u64 value",
+                source: "123 >> 12",
+                explanation: "Untyped programmer expressions use u64, and this shift produces zero.",
+                expected: ExampleExpectation::ExactInteger {
+                    mode: "u64",
+                    value: "0",
+                },
+            },
+            CalculationExample {
                 title: "Default unsigned shift",
                 source: "0xFF << 8",
                 explanation: "Programmer operators select exact u64 arithmetic when no typed value selects another width.",
@@ -390,6 +399,6 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 30);
+        assert_eq!(checked, 31);
     }
 }

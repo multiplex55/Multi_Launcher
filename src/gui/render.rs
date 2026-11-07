@@ -12640,9 +12640,10 @@ impl LauncherApp {
                     }
                     ProgrammerInspectorHostCommand::Apply(actions) => {
                         let source_context = std::sync::Arc::clone(&actions.context);
-                        let (copy, insert) = self.programmer_inspector_dialog.commit(actions, &current_inspector_context);
+                        let (copy, insert, preferences) = self.programmer_inspector_dialog.commit(actions, &current_inspector_context);
                         if let Some(text) = copy { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }); }
                         if let Some(request) = insert { self.calculation_pad_dialog.apply_inspector_insert(ctx, &source_context, request); }
+                        if let Some(preferences) = preferences { self.request_programmer_inspector_preference_save(ctx, preferences); }
                     }
                 }
             }
@@ -19111,6 +19112,352 @@ mod tests {
                 .is_some(),
             "a genuine editor click captures the new incarnation"
         );
+    }
+    #[test]
+    fn programmer_inspector_comparison_and_preferences_use_retained_host_receipts() {
+        use crate::calculation_pad::ComparisonRelation;
+        use crate::hotkey::reconfiguration::{
+            AppliedHotkeyReconfiguration, HotkeyRuntimeGeneration, HotkeyRuntimeMessage,
+            PreparedHotkeyReconfiguration,
+        };
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.settings_editor
+            .baseline_settings
+            .save(&app.settings_path)
+            .unwrap();
+        let (wake, _wake_rx) = std::sync::mpsc::channel();
+        let owner = crate::hotkey::reconfiguration::install_main_runtime(wake)
+            .expect("isolated main runtime");
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let root = egui::ViewportId::ROOT;
+        let source = "x = u64(8)\nx + 1";
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source(source);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (inspect, clip, enabled) = app
+            .calculation_pad_dialog
+            .test_inspect_button(1)
+            .expect("selected integer result");
+        assert!(enabled && clip.contains_rect(inspect));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(inspect, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let bit = inspector_visible_control(&ctx, &mut app, root, "bit-63");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(bit, pressed),
+                false,
+                false,
+            );
+        }
+        let working = app.programmer_inspector_dialog.test_value();
+        let select = inspector_visible_control(&ctx, &mut app, root, "select-Left");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(select, pressed),
+                false,
+                false,
+            );
+        }
+        let right = inspector_visible_control(&ctx, &mut app, root, "comparison-Right");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(right, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::Text("r1 + 4".into())],
+            false,
+            false,
+        );
+        let compare = inspector_visible_control(&ctx, &mut app, root, "compare");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(compare, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(compare, false),
+            true,
+            false,
+        );
+        assert!(app.programmer_inspector_dialog.test_comparison().is_none());
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let compare = inspector_visible_control(&ctx, &mut app, root, "compare");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(compare, pressed),
+                false,
+                false,
+            );
+        }
+        let result = app
+            .programmer_inspector_dialog
+            .test_comparison()
+            .expect("accepted comparison");
+        assert_eq!(result.left.formatted(), "9");
+        assert_eq!(result.right.formatted(), "12");
+        assert!(matches!(
+            result.relation,
+            ComparisonRelation::ExactInteger {
+                difference: 3,
+                negative_difference: true,
+                ..
+            }
+        ));
+        let result_identity = result as *const _;
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_comparison().unwrap() as *const _,
+            result_identity,
+            "idle frames reuse the frozen comparison"
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(source));
+        assert_eq!(app.programmer_inspector_dialog.test_value(), working);
+        let host = inspector_visible_control(&ctx, &mut app, root, "host-presentation");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        app.request_launcher_visibility(false);
+        let native =
+            super::super::utility_window_host::ProgrammerInspectorWindowHost::test_viewport(
+                app.programmer_inspector_dialog.epoch(),
+            );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let right = inspector_visible_control(&ctx, &mut app, native, "comparison-Right");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(right, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("r1 + 5".into()),
+            ],
+            false,
+            false,
+        );
+        let compare = inspector_visible_control(&ctx, &mut app, native, "compare");
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(compare, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(compare, false),
+                discard_root,
+                discard_child,
+            );
+            assert_eq!(
+                app.programmer_inspector_dialog
+                    .test_comparison()
+                    .unwrap()
+                    .right
+                    .formatted(),
+                "12"
+            );
+            for _ in 0..2 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let compare = inspector_visible_control(&ctx, &mut app, native, "compare");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(compare, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog
+                .test_comparison()
+                .unwrap()
+                .right
+                .formatted(),
+            "13"
+        );
+        let prefix = inspector_visible_control(&ctx, &mut app, native, "prefix");
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(prefix, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(prefix, false),
+                discard_root,
+                discard_child,
+            );
+            assert!(!app.programmer_inspector_dialog.test_format_options().prefix);
+            assert_eq!(
+                app.programmer_inspector_dialog.test_preference_requests(),
+                0
+            );
+            for _ in 0..2 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let prefix = inspector_visible_control(&ctx, &mut app, native, "prefix");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(prefix, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.programmer_inspector_dialog.test_format_options().prefix);
+        assert_eq!(
+            app.programmer_inspector_dialog.test_preference_requests(),
+            1
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.settings_save_pending() {
+            if let Some(message) = owner.try_recv().unwrap() {
+                match message {
+                    HotkeyRuntimeMessage::Prepare(request) => {
+                        let prepared = PreparedHotkeyReconfiguration {
+                            request_id: request.request_id(),
+                            generation: HotkeyRuntimeGeneration(1),
+                            shared_invocation: false,
+                        };
+                        request.complete(Ok(prepared)).unwrap();
+                    }
+                    HotkeyRuntimeMessage::Apply(request) => {
+                        let applied = AppliedHotkeyReconfiguration {
+                            request_id: request.request_id(),
+                            generation: request.generation(),
+                        };
+                        request.complete_applied(applied).unwrap();
+                    }
+                    HotkeyRuntimeMessage::Cancel(_) => {
+                        panic!("accepted preference save unexpectedly cancelled")
+                    }
+                }
+            }
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preference save completed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            app.settings_editor
+                .baseline_settings
+                .programmer_inspector
+                .prefix,
+            "preference ack missing: status={:?}; queue={:?}; pending={}",
+            app.programmer_inspector_dialog.test_preference_error(),
+            app.pending_programmer_inspector_preference,
+            app.settings_save_pending()
+        );
+        assert!(
+            crate::settings::Settings::load(&app.settings_path)
+                .unwrap()
+                .programmer_inspector
+                .prefix,
+            "accepted acknowledgement persisted the preference"
+        );
+        let copy = inspector_visible_control(&ctx, &mut app, native, "comparison-copy-Left");
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(copy, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }] if text == "9")
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(source));
+        assert_eq!(app.programmer_inspector_dialog.test_value(), working);
     }
     fn reveal_studio_host_control(
         ctx: &egui::Context,

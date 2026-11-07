@@ -3,6 +3,7 @@
 //! The expression grammar and evaluation limits are documented in this module's
 //! `README.md`.
 
+mod comparison;
 mod document;
 mod examples;
 mod inspector;
@@ -13,6 +14,10 @@ mod programmer;
 mod quantity;
 mod session;
 
+pub use comparison::{
+    ComparisonContext, ComparisonRelation, ComparisonRequest, ComparisonResult,
+    ComparisonResultRef, ComparisonRow, ComparisonSide, ComparisonSlot,
+};
 pub use document::{
     CalculationDocument, CalculationEvaluation, CalculationLineResult, CalculationValue,
     Diagnostic, DiagnosticKind, DocumentDiagnostic, EditError, LineOutcome, MAX_DEPENDENCIES,

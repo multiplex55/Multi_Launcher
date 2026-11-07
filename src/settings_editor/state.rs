@@ -199,6 +199,7 @@ pub struct SettingsEditor {
     pub(crate) note_confirm_discard_unsaved_changes: bool,
     pub(crate) note_always_overwrite: bool,
     pub(crate) calculation_pad_remember_source: bool,
+    pub(crate) programmer_inspector: crate::settings::ProgrammerInspectorPreferences,
     pub(crate) note_images_as_links: bool,
     pub(crate) note_show_details: bool,
     pub(crate) note_more_limit: usize,

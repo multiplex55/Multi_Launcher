@@ -418,6 +418,30 @@ impl CalculationPadSession {
         self.current.as_ref().map(|document| document.incarnation)
     }
 
+    /// Freeze the already-current cached physical rows without reevaluating the Pad.
+    pub fn comparison_context(&self) -> Option<super::comparison::ComparisonContext> {
+        let document = self.current.as_ref()?;
+        let evaluation = document.cached_evaluation.as_ref()?;
+        if evaluation.revision != document.revision || evaluation.diagnostic.is_some() {
+            return None;
+        }
+        let rows = evaluation
+            .lines
+            .iter()
+            .map(|line| super::comparison::ComparisonRow {
+                id: line.id,
+                assignment_name: line.assignment_name.clone(),
+                outcome: line.outcome.clone(),
+            })
+            .collect::<Vec<_>>();
+        Some(super::comparison::ComparisonContext {
+            incarnation: document.incarnation,
+            document_id: document.id,
+            revision: document.revision,
+            rows: rows.into(),
+        })
+    }
+
     /// Resolve only an already-current cached result; never evaluate as an observation.
     pub fn inspector_source(&self, line_id: LineId) -> Option<InspectorSourceSnapshot> {
         let current = self.current.as_ref()?;

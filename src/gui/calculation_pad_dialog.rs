@@ -152,9 +152,11 @@ pub(super) struct InspectorCaret {
     pub(super) generation: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct InspectorPadContext {
     pub(super) candidate: Option<InspectorSourceSnapshot>,
+    pub(super) comparison: Option<std::sync::Arc<crate::calculation_pad::ComparisonContext>>,
+    pub(super) selected_line: Option<LineId>,
     pub(super) caret: Option<InspectorCaret>,
     pub(super) selection_generation: u64,
     pub(super) editable: bool,
@@ -1355,12 +1357,22 @@ impl CalculationPadDialog {
                 .inspector_selection
                 .as_ref()
                 .map(|selection| selection.line);
-            if selected.is_some() {
-                self.session.evaluation();
-            }
+            self.session.evaluation();
             let candidate = selected.and_then(|line| self.session.inspector_source(line));
+            let comparison = self
+                .inspector_context
+                .comparison
+                .as_ref()
+                .filter(|context| {
+                    Some((context.incarnation, context.document_id)) == identity
+                        && Some(context.revision) == self.session.revision()
+                })
+                .cloned()
+                .or_else(|| self.session.comparison_context().map(std::sync::Arc::new));
             context = Some(InspectorPadContext {
                 candidate,
+                comparison,
+                selected_line: selected,
                 caret: self.inspector_caret.clone(),
                 selection_generation: self.inspector_selection_generation,
                 editable: self.session.pending_transition().is_none(),
@@ -1642,6 +1654,8 @@ impl CalculationPadDialog {
             ui.label("Precedence (tight to loose): calls/grouping, ^, unary + - ~ not, * idiv rem %, + -, shifts, &/and, xor, |/or. Binary operators associate left except right-associative ^.");
             ui.label("Left shifts discard bits above the width, signed right shifts extend the sign, and shift counts are 0 through width-1. Nonnegative rotl/rotr counts reduce modulo width; popcount, mask, and extract operate on exact bit patterns.");
             ui.label("Integer overflow, division by zero, invalid shifts, and mixed modes are errors. Decimal and 0x/0o/0b integer tokens are parsed exactly; explicit constructors are required to convert scalar references safely.");
+            ui.label("Select Inspect bits on an integer result to open the separate Inspector. Bit 0 is least significant. Edits stay private until Insert; Undo restores the source. Checked cast validates the numeric value; Reinterpret bits keeps low bits and zero-extends. Stale work requires Refresh before Insert. Copy options control prefixes, padding, and grouping.");
+            ui.label("Choose Select for comparison on a Pad result, then Use selected result in either Inspector comparison slot, or type an expression. Both sides use the same frozen Pad context; comparisons never edit the source. Compatible units are normalized, while incompatible dimensions and integer modes are reported.");
         });
         ui.collapsing("Dimensional unit arithmetic", |ui| {
             ui.label("Catalog units support compatible sums and differences, scalar scaling, linear products and quotients, and small integer powers. Examples: 10 m + 20 cm, (2 m) * (3 m), and (5 m) / (2 s).");
@@ -1855,6 +1869,9 @@ impl CalculationPadDialog {
                                         .formatted_result()
                                         .unwrap_or_else(|| "unavailable".into());
                                     ui.label(&formatted);
+                                    if ui.small_button("Select for comparison").clicked() {
+                                        *inspector_selection = Some(line.id);
+                                    }
                                     if matches!(value, crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. }) {
                                         let inspect = ui.small_button("Inspect bits…");
                                         #[cfg(test)]
