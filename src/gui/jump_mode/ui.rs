@@ -434,6 +434,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::BatchRename
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
+                    | NavigationDialogKind::Snippets
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::ImageCompare
@@ -451,6 +452,8 @@ impl NavigationViewportBinding {
                 | NavigationOwner::BatchRenameConfirmation { .. }
                 | NavigationOwner::SearchReplaceConfirmation { .. }
                 | NavigationOwner::ClipboardRemoval { .. }
+                | NavigationOwner::SnippetRemoval { .. }
+                | NavigationOwner::SnippetPrompt { .. }
                 | NavigationOwner::DashboardEditorConfirmation { .. }
                 | NavigationOwner::MouseGestureBinding { .. }
                 | NavigationOwner::MouseGestureDelete { .. }
@@ -465,7 +468,8 @@ impl NavigationViewportBinding {
                 kind: kind @ (NavigationDialogKind::FileSearch
                     | NavigationDialogKind::BatchRename
                     | NavigationDialogKind::SearchReplace
-                    | NavigationDialogKind::ClipboardHistory),
+                    | NavigationDialogKind::ClipboardHistory
+                    | NavigationDialogKind::Snippets),
                 ..
             } => {
                 Some(self.base_layer) == kind.layer_id() && visible_layer == Some(self.base_layer)
@@ -481,6 +485,14 @@ impl NavigationViewportBinding {
             }
             NavigationOwner::ClipboardRemoval { .. } => {
                 Some(self.base_layer) == NavigationDialogKind::ClipboardHistory.layer_id()
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::SnippetRemoval { .. } => {
+                Some(self.base_layer) == NavigationDialogKind::Snippets.layer_id()
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::SnippetPrompt { generation } => {
+                self.base_layer == snippet_prompt_layer_id(generation)
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::SearchReplaceConfirmation { kind, .. } => {
@@ -555,6 +567,9 @@ impl NavigationViewportBinding {
         focused_response_layer(ctx).is_none_or(|layer| {
             layer == self.base_layer
                 || Some(layer) == popup_layer
+                || (matches!(self.owner, NavigationOwner::SnippetPrompt { .. })
+                    && (Some(layer) == NavigationDialogKind::Snippets.layer_id()
+                        || layer.order != egui::Order::Middle))
                 || (matches!(self.owner, NavigationOwner::BatchRenameConfirmation { .. })
                     && (Some(layer) == NavigationDialogKind::BatchRename.layer_id()
                         || layer.order != egui::Order::Middle))
@@ -1774,14 +1789,23 @@ pub struct JumpModeScope {
     epoch: NavigationEpoch,
     root_owner_allowed: bool,
     navigation_owner: Option<NavigationOwner>,
+    apply_focus_intent: bool,
 }
 
 impl JumpModeScope {
+    pub(crate) fn registration_only(&self) -> Self {
+        Self {
+            apply_focus_intent: false,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn has_pending_focus_intent(&self) -> bool {
-        self.collector
-            .lock()
-            .ok()
-            .is_some_and(|collector| collector.pending_focus_intent.is_some())
+        self.apply_focus_intent
+            && self.collector
+                .lock()
+                .ok()
+                .is_some_and(|collector| collector.pending_focus_intent.is_some())
     }
 
     pub(crate) fn child_namespace(&self, child: impl AsRef<str>) -> Self {
@@ -2108,7 +2132,8 @@ impl JumpModeScope {
 
         let directive = match collector.pending_focus_intent.clone() {
             Some(intent)
-                if intent.target == id
+                if self.apply_focus_intent
+                    && intent.target == id
                     && intent.viewport == target.viewport
                     && intent.epoch == target.epoch =>
             {
@@ -2892,6 +2917,7 @@ impl JumpModeUi {
             epoch: self.navigation_epoch,
             root_owner_allowed,
             navigation_owner,
+            apply_focus_intent: true,
         })
     }
 

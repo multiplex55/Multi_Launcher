@@ -1,4 +1,5 @@
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
+use crate::gui::utility_window_host::{CompanionPass, UtilityWindowCompanion};
 use std::collections::HashMap;
 
 use crate::actions::Action;
@@ -30,6 +31,45 @@ pub(crate) enum SnippetPromptUiAction {
     Cancel,
 }
 
+pub(super) enum SnippetPromptKey {
+    Escape,
+    Submit,
+    Tab { backwards: bool },
+}
+
+pub(super) fn consume_prompt_key(ctx: &egui::Context) -> Option<SnippetPromptKey> {
+    let (key, modifiers, action) = ctx.input(|input| {
+        input.events.iter().find_map(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => {
+                let action = match key {
+                    egui::Key::Escape => SnippetPromptKey::Escape,
+                    egui::Key::Enter
+                        if modifiers.ctrl
+                            && !modifiers.shift
+                            && !modifiers.alt
+                            && !modifiers.mac_cmd =>
+                    {
+                        SnippetPromptKey::Submit
+                    }
+                    egui::Key::Tab => SnippetPromptKey::Tab {
+                        backwards: modifiers.shift,
+                    },
+                    _ => return None,
+                };
+                Some((*key, *modifiers, action))
+            }
+            _ => None,
+        })
+    })?;
+    ctx.input_mut(|input| input.consume_key(modifiers, key));
+    Some(action)
+}
+
 /// Transient, in-memory state for one prompted snippet invocation or editor preview.
 /// It intentionally has no `Debug` implementation because it owns user-entered values.
 #[derive(Default)]
@@ -42,8 +82,33 @@ pub(crate) struct SnippetPromptDialog {
     pending_focus: Option<PromptFocusTarget>,
     copy_widget_id: Option<egui::Id>,
     cancel_widget_id: Option<egui::Id>,
+    hosted_preview: Option<HostedPreviewFrame>,
     #[cfg(test)]
     pub(crate) last_layout: Option<SnippetPromptLayout>,
+}
+
+struct HostedPreviewFrame {
+    pass: CompanionPass,
+    generation: u64,
+    values: HashMap<String, String>,
+    feedback: Option<SnippetPromptError>,
+    focused_generation: Option<u64>,
+    pending_focus: Option<PromptFocusTarget>,
+    cancel: bool,
+}
+
+impl HostedPreviewFrame {
+    fn restore(self, dialog: &mut SnippetPromptDialog) {
+        if let Some(session) = dialog.session.as_mut()
+            && session.generation == self.generation
+            && matches!(session.mode, SnippetPromptMode::PreviewOnly { .. })
+        {
+            session.values = self.values;
+            dialog.feedback = self.feedback;
+            dialog.focused_generation = self.focused_generation;
+            dialog.pending_focus = self.pending_focus;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -946,6 +1011,7 @@ impl SnippetPromptDialog {
     /// Cancel and drop entered values. Preview mode returns the exact unsaved draft
     /// so the editor can resume with its pre-preview state.
     pub(crate) fn cancel(&mut self, ctx: &egui::Context) -> Option<SnippetEntry> {
+        self.hosted_preview = None;
         self.clear_widget_state(ctx);
         self.open = false;
         self.feedback = None;
@@ -960,6 +1026,32 @@ impl SnippetPromptDialog {
 
     pub(crate) fn shutdown(&mut self, ctx: &egui::Context) {
         let _ = self.cancel(ctx);
+    }
+
+    pub(super) fn complete_hosted_preview(
+        &mut self,
+        ctx: &egui::Context,
+        editor_session: Option<u64>,
+    ) -> bool {
+        let Some(frame) = self.hosted_preview.take() else {
+            return false;
+        };
+        if editor_session != Some(frame.pass.session)
+            || !frame.pass.first
+            || !frame.pass.root.was_retained(ctx)
+            || !frame.pass.owner.was_retained(ctx)
+            || self
+                .session
+                .as_ref()
+                .is_none_or(|session| session.generation != frame.generation)
+        {
+            frame.restore(self);
+            return false;
+        }
+        if frame.cancel {
+            ctx.request_repaint_of(frame.pass.owner.viewport_id);
+        }
+        frame.cancel
     }
 
     fn clear_widget_state(&self, ctx: &egui::Context) {
@@ -995,6 +1087,93 @@ impl SnippetPromptDialog {
                 data.remove::<egui::text_edit::TextEditState>(id);
             }
         });
+    }
+}
+
+impl UtilityWindowCompanion for SnippetPromptDialog {
+    fn binding(
+        &self,
+        viewport: egui::ViewportId,
+    ) -> Option<super::jump_mode::ui::NavigationViewportBinding> {
+        use super::jump_mode::ui::{
+            NavigationOwner, NavigationViewportBinding, snippet_prompt_layer_id,
+        };
+        if !self.open || !self.is_preview_only() {
+            return None;
+        }
+        let generation = self.session.as_ref()?.generation;
+        Some(NavigationViewportBinding {
+            viewport,
+            base_layer: snippet_prompt_layer_id(generation),
+            owner: NavigationOwner::SnippetPrompt { generation },
+        })
+    }
+
+    fn scope(
+        &self,
+        jump: &super::jump_mode::ui::JumpModeUi,
+        binding: super::jump_mode::ui::NavigationViewportBinding,
+    ) -> Option<super::jump_mode::ui::JumpModeScope> {
+        let generation = self.session.as_ref()?.generation;
+        jump.scope_for_viewport_binding(
+            super::jump_mode::SurfaceId::dialog("snippet-prompt", generation),
+            super::jump_mode::TargetGeneration(generation),
+            "snippet-prompt",
+            binding,
+        )
+    }
+
+    fn render(
+        &mut self,
+        ctx: &egui::Context,
+        scope: Option<super::jump_mode::ui::JumpModeScope>,
+        pass: CompanionPass,
+    ) {
+        if let Some(previous) = self.hosted_preview.take() {
+            previous.restore(self);
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let mut frame = HostedPreviewFrame {
+            pass,
+            generation: session.generation,
+            values: session.values.clone(),
+            feedback: self.feedback,
+            focused_generation: self.focused_generation,
+            pending_focus: self.pending_focus.clone(),
+            cancel: false,
+        };
+        let input = frame.pass.first && frame.pass.input_owned;
+        if input {
+            match consume_prompt_key(ctx) {
+                Some(SnippetPromptKey::Escape) => frame.cancel = true,
+                Some(SnippetPromptKey::Tab { backwards }) => self.queue_tab_focus(ctx, backwards),
+                _ => {}
+            }
+        }
+        let command_start = ctx.output(|output| output.commands.len());
+        let action = self.show_with_jump_mode(
+            ctx,
+            scope.filter(|_| input && !frame.cancel),
+            input && !frame.cancel,
+            frame.pass.first,
+            frame.pass.first && frame.pass.initial_focus,
+        );
+        ctx.output_mut(|output| {
+            let commands = output.commands.split_off(command_start);
+            output.commands.extend(
+                commands
+                    .into_iter()
+                    .filter(|command| !matches!(command, egui::OutputCommand::CopyText(_))),
+            );
+        });
+        if input && matches!(action, Some(SnippetPromptUiAction::Cancel)) {
+            frame.cancel = true;
+            // The editor owns this prompt until completion accepts the close.
+            self.open = true;
+        }
+        self.hosted_preview = Some(frame);
     }
 }
 

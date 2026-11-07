@@ -321,7 +321,7 @@ impl DialogCommandHost for LauncherApp {
     }
 
     fn open_snippet_dialog(&mut self) {
-        self.snippet_dialog.open();
+        self.focus_panel(super::Panel::SnippetDialog);
     }
 
     fn open_paste_sequence_dialog(&mut self) {
@@ -412,6 +412,7 @@ impl DialogCommandHost for LauncherApp {
 
     fn open_snippet_editor(&mut self, alias: &str) {
         self.snippet_dialog.open_edit(alias);
+        self.snippet_window_host.request_focus();
     }
 
     fn open_favorite_dialog(&mut self, label: &str) {
@@ -1586,31 +1587,9 @@ impl HeadlessCommandHost for LauncherApp {
         needs_clipboard: bool,
         needs_window_title: bool,
     ) -> crate::plugins::SnippetInvocationContext {
-        let timestamp = chrono::Local::now().fixed_offset();
-        let origin = if needs_window_title {
-            select_snippet_origin_window(
-                source,
-                self.visible_flag.load(Ordering::SeqCst),
-                crate::active_window::observe_foreground_window(),
-                self.snippet_origin_window.clone(),
-            )
-        } else {
-            None
-        };
-        let clipboard_text = needs_clipboard
-            .then(|| crate::actions::clipboard::get_text().ok())
-            .flatten();
-        let (foreground_hwnd, foreground_title) = if needs_window_title {
-            origin.map_or((None, None), |origin| (Some(origin.hwnd), origin.title))
-        } else {
-            (None, None)
-        };
-
-        crate::plugins::SnippetInvocationContext::new(
-            timestamp,
-            clipboard_text,
-            foreground_hwnd,
-            foreground_title,
+        self.capture_snippet_context_with_launcher_origin(
+            source, needs_clipboard, needs_window_title,
+            self.visible_flag.load(Ordering::SeqCst),
         )
     }
 
@@ -2118,6 +2097,41 @@ impl LauncherApp {
         Ok(())
     }
 
+    fn capture_snippet_context_with_launcher_origin(
+        &self,
+        source: crate::commands::ActivationSource,
+        needs_clipboard: bool,
+        needs_window_title: bool,
+        launcher_origin_available: bool,
+    ) -> crate::plugins::SnippetInvocationContext {
+        let timestamp = chrono::Local::now().fixed_offset();
+        let origin = if needs_window_title {
+            select_snippet_origin_window(
+                source,
+                launcher_origin_available,
+                crate::active_window::observe_foreground_window(),
+                self.snippet_origin_window.clone(),
+            )
+        } else {
+            None
+        };
+        let clipboard_text = needs_clipboard
+            .then(|| crate::actions::clipboard::get_text().ok())
+            .flatten();
+        let (foreground_hwnd, foreground_title) = if needs_window_title {
+            origin.map_or((None, None), |origin| (Some(origin.hwnd), origin.title))
+        } else {
+            (None, None)
+        };
+
+        crate::plugins::SnippetInvocationContext::new(
+            timestamp,
+            clipboard_text,
+            foreground_hwnd,
+            foreground_title,
+        )
+    }
+
     pub(crate) fn begin_snippet_preview(
         &mut self,
         draft: crate::plugins::snippets::SnippetEntry,
@@ -2132,11 +2146,11 @@ impl LauncherApp {
             }
         };
         let context = prepared.parsed.has_system_variables().then(|| {
-            crate::commands::HeadlessCommandHost::capture_snippet_invocation_context(
-                self,
+            self.capture_snippet_context_with_launcher_origin(
                 crate::commands::ActivationSource::Click,
                 prepared.parsed.uses_clipboard(),
                 prepared.parsed.uses_window_title(),
+                self.visible_flag.load(Ordering::SeqCst) || self.snippet_dialog.open,
             )
         });
         self.snippet_prompt_dialog.begin_preview_prepared(
@@ -2145,6 +2159,8 @@ impl LauncherApp {
             prepared,
             context,
         )?;
+        self.snippet_preview_editor_session = self.snippet_dialog.open
+            .then(|| self.snippet_dialog.host_session_epoch());
         self.focus_panel(super::Panel::SnippetPromptDialog);
         Ok(())
     }
@@ -2205,6 +2221,7 @@ impl LauncherApp {
         &mut self,
     ) -> Option<crate::plugins::snippets::SnippetEntry> {
         let was_preview = self.snippet_prompt_dialog.is_preview_only();
+        self.snippet_preview_editor_session = None;
         let was_sequence = self.snippet_prompt_dialog.is_sequence_preflight();
         let draft = self.snippet_prompt_dialog.cancel(&self.egui_ctx);
         if was_sequence {

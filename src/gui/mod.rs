@@ -1231,6 +1231,8 @@ pub struct LauncherApp {
     completion_dialog: TimerCompletionDialog,
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
+    snippet_window_host: utility_window_host::SnippetWindowHost,
+    snippet_preview_editor_session: Option<u64>,
     paste_sequence_dialog: PasteSequenceDialog,
     pub hash_generator_dialog: HashGeneratorDialogState,
     snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
@@ -3879,6 +3881,8 @@ impl LauncherApp {
             completion_dialog: TimerCompletionDialog::default(),
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
+            snippet_window_host: Default::default(),
+            snippet_preview_editor_session: None,
             paste_sequence_dialog: PasteSequenceDialog::default(),
             hash_generator_dialog: HashGeneratorDialogState::default(),
             snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
@@ -4839,6 +4843,8 @@ impl LauncherApp {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
+            Panel::SnippetDialog => self.snippet_window_host.root_layer().is_some(),
+            Panel::SnippetPromptDialog => self.snippet_prompt_has_root_presentation(),
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer().is_some(),
             Panel::SearchReplaceDialog => self.search_replace_host.root_layer().is_some(),
             Panel::MouseGesturesDialog => self.mouse_gestures_host
@@ -4899,6 +4905,28 @@ impl LauncherApp {
         self.screenshot_use_editor
     }
 
+    fn close_snippet_editor_session(&mut self) {
+        self.snippet_window_host.retire(&self.egui_ctx);
+        self.snippet_dialog.end_session();
+        self.panel_states.snippet_dialog = false;
+        self.panel_stack.retain(|panel| *panel != Panel::SnippetDialog);
+        if self.snippet_preview_editor_session.take().is_some() && self.snippet_prompt_dialog.is_preview_only() {
+            let _ = self.cancel_snippet_prompt();
+        }
+    }
+
+    fn hosted_snippet_preview_active(&self) -> bool {
+        self.snippet_dialog.open
+            && self.snippet_preview_editor_session == Some(self.snippet_dialog.host_session_epoch())
+            && self.snippet_prompt_dialog.is_open()
+            && self.snippet_prompt_dialog.is_preview_only()
+    }
+
+    fn snippet_prompt_has_root_presentation(&self) -> bool {
+        self.snippet_prompt_dialog.is_open()
+            && (!self.hosted_snippet_preview_active() || self.snippet_window_host.root_layer().is_some())
+    }
+
     fn close_clipboard_history_session(&mut self) {
         self.clipboard_history_host.retire(&self.egui_ctx);
         self.clipboard_dialog.open = false;
@@ -4911,7 +4939,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::SnippetDialog) || (*panel == Panel::SnippetPromptDialog && self.hosted_snippet_preview_active()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5058,8 +5086,7 @@ impl LauncherApp {
                 self.panel_states.shell_cmd_dialog = false;
             }
             Panel::SnippetDialog => {
-                self.snippet_dialog.end_session();
-                self.panel_states.snippet_dialog = false;
+                self.close_snippet_editor_session();
             }
             Panel::PasteSequenceDialog => {
                 self.paste_sequence_dialog.end_session();
@@ -5382,8 +5409,7 @@ impl LauncherApp {
                 self.panel_states.shell_cmd_dialog = false;
             }
             Panel::SnippetDialog => {
-                self.snippet_dialog.end_session();
-                self.panel_states.snippet_dialog = false;
+                self.close_snippet_editor_session();
             }
             Panel::PasteSequenceDialog => {
                 self.paste_sequence_dialog.end_session();
@@ -5797,6 +5823,9 @@ impl LauncherApp {
                 self.file_search_dialog.open();
             }
             self.file_search_host.request_focus();
+        } else if panel == Panel::SnippetDialog {
+            self.snippet_dialog.ensure_open();
+            self.snippet_window_host.request_focus();
         } else if panel == Panel::ClipboardDialog {
             self.clipboard_dialog.ensure_open();
             self.clipboard_history_host.request_focus();

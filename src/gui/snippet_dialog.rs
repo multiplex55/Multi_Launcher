@@ -50,8 +50,55 @@ enum CommitFailure {
 }
 
 #[derive(Default)]
+pub(super) struct SnippetHostActions {
+    pub(super) effects: SnippetHostEffects,
+    pub(super) host_request: Option<super::utility_host::UtilityPresentation>,
+    pub(super) close: bool,
+    #[cfg(test)]
+    pub(super) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+#[derive(Default)]
+pub(crate) struct SnippetHostEffects {
+    session_epoch: u64,
+    snapshot_generation: u64,
+    view_revision: u64,
+    body_session: u64,
+    save: bool,
+    remove: Option<(u64, usize)>,
+    close: bool,
+    preview: bool,
+    reveal_scroll: Option<(egui::Id, f32)>,
+    required: bool,
+    copies: Vec<String>,
+    copy_requires_reveal: bool,
+}
+
+impl SnippetHostEffects {
+    pub(super) fn needs_completion(&self) -> bool {
+        self.save
+            || self.remove.is_some()
+            || self.preview
+            || self.reveal_scroll.is_some()
+            || self.required
+            || !self.copies.is_empty()
+    }
+}
+#[derive(Clone, Copy)]
+struct SnippetPopupAnchor {
+    response_id: egui::Id,
+    popup_id: egui::Id,
+    layer: egui::LayerId,
+    viewport: egui::ViewportId,
+    session_epoch: u64,
+    view_revision: u64,
+    body_session: u64,
+}
+
+#[derive(Default)]
 pub struct SnippetDialog {
     pub open: bool,
+    host_session_epoch: u64,
+    native_popup_anchors: Vec<SnippetPopupAnchor>,
     entries: Vec<SnippetEntry>,
     snapshot_generation: u64,
     view_revision: u64,
@@ -184,6 +231,9 @@ fn show_field_definition_row(
     scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
     visual_order: &mut u64,
     authorized_owner_pass: bool,
+    popup_anchors: &mut Vec<SnippetPopupAnchor>,
+    host_session_epoch: u64,
+    view_revision: u64,
 ) -> bool {
     let mut field_shadow;
     let field = if authorized_owner_pass {
@@ -290,6 +340,17 @@ fn show_field_definition_row(
                 ),
             );
         });
+    if combo.response.rect.intersect(ui.clip_rect()).is_positive() {
+        popup_anchors.push(SnippetPopupAnchor {
+            response_id: combo.response.id,
+            popup_id: egui::Popup::default_response_id(&combo.response),
+            layer: combo.response.layer_id,
+            viewport: ui.ctx().viewport_id(),
+            session_epoch: host_session_epoch,
+            view_revision,
+            body_session: session,
+        });
+    }
     apply_select_focus(
         &combo.response,
         register_snippet_target(
@@ -384,12 +445,97 @@ fn is_load_failure(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Speculative interaction rollback; saved entries remain in the live owner.
+#[derive(Clone)]
+pub(crate) struct SnippetInteractionCheckpoint {
+    session_epoch: u64,
+    snapshot_generation: u64,
+    view_revision: u64,
+    removal_instance: u64,
+    selected_entry_index: Option<usize>,
+    edit_idx: Option<usize>,
+    body_edit_session: u64,
+    alias: String,
+    text: String,
+    hide_contents: bool,
+    body_revealed: bool,
+    prompt_for_fields: bool,
+    fields: Vec<SnippetFieldDefinition>,
+    tags: Vec<String>,
+    tag_input: String,
+    tag_error: Option<String>,
+    discovered_field_keys: Vec<String>,
+    template_error: Option<TemplateError>,
+    filter: String,
+    selected_tag_filters: Vec<String>,
+    inline_error: Option<String>,
+    pending_removal: Option<PendingRemoval>,
+}
+impl SnippetInteractionCheckpoint {
+    pub(crate) fn capture(dialog: &SnippetDialog) -> Self {
+        Self {
+            session_epoch: dialog.host_session_epoch,
+            snapshot_generation: dialog.snapshot_generation,
+            view_revision: dialog.view_revision.clone(),
+            removal_instance: dialog.removal_instance.clone(),
+            selected_entry_index: dialog.selected_entry_index.clone(),
+            edit_idx: dialog.edit_idx.clone(),
+            body_edit_session: dialog.body_edit_session.clone(),
+            alias: dialog.alias.clone(),
+            text: dialog.text.clone(),
+            hide_contents: dialog.hide_contents.clone(),
+            body_revealed: dialog.body_revealed.clone(),
+            prompt_for_fields: dialog.prompt_for_fields.clone(),
+            fields: dialog.fields.clone(),
+            tags: dialog.tags.clone(),
+            tag_input: dialog.tag_input.clone(),
+            tag_error: dialog.tag_error.clone(),
+            discovered_field_keys: dialog.discovered_field_keys.clone(),
+            template_error: dialog.template_error.clone(),
+            filter: dialog.filter.clone(),
+            selected_tag_filters: dialog.selected_tag_filters.clone(),
+            inline_error: dialog.inline_error.clone(),
+            pending_removal: dialog.pending_removal.clone(),
+        }
+    }
+    pub(crate) fn restore(self, dialog: &mut SnippetDialog) {
+        if dialog.host_session_epoch != self.session_epoch
+            || dialog.snapshot_generation != self.snapshot_generation
+        {
+            return;
+        }
+        dialog.view_revision = self.view_revision;
+        dialog.removal_instance = self.removal_instance;
+        dialog.selected_entry_index = self.selected_entry_index;
+        dialog.edit_idx = self.edit_idx;
+        dialog.body_edit_session = self.body_edit_session;
+        dialog.alias = self.alias;
+        dialog.text = self.text;
+        dialog.hide_contents = self.hide_contents;
+        dialog.body_revealed = self.body_revealed;
+        dialog.prompt_for_fields = self.prompt_for_fields;
+        dialog.fields = self.fields;
+        dialog.tags = self.tags;
+        dialog.tag_input = self.tag_input;
+        dialog.tag_error = self.tag_error;
+        dialog.discovered_field_keys = self.discovered_field_keys;
+        dialog.template_error = self.template_error;
+        dialog.filter = self.filter;
+        dialog.selected_tag_filters = self.selected_tag_filters;
+        dialog.inline_error = self.inline_error;
+        dialog.pending_removal = self.pending_removal;
+    }
+}
+
 impl SnippetDialog {
     pub fn open(&mut self) {
         self.open_from(SNIPPETS_FILE);
     }
 
     fn open_from(&mut self, path: &str) {
+        if !self.open {
+            self.host_session_epoch = self.host_session_epoch.wrapping_add(1).max(1);
+        }
         let _ = self.load_from(path);
         self.open = true;
         self.reset_editor();
@@ -429,6 +575,9 @@ impl SnippetDialog {
     }
 
     fn open_edit_from(&mut self, path: &str, alias: &str) {
+        if !self.open {
+            self.host_session_epoch = self.host_session_epoch.wrapping_add(1).max(1);
+        }
         self.pending_removal = None;
         self.inline_error = None;
         if self.load_from(path).is_err() {
@@ -749,6 +898,9 @@ impl SnippetDialog {
 
         secondary_help(ui, "Fields follow their first appearance in the text.");
         let body_edit_session = self.body_edit_session;
+        let host_session_epoch = self.host_session_epoch;
+        let view_revision = self.view_revision;
+        let mut popup_anchors = Vec::new();
         egui::Grid::new(("snippet_prompt_field_grid", body_edit_session))
             .striped(true)
             .show(ui, |ui| {
@@ -777,12 +929,16 @@ impl SnippetDialog {
                         scope,
                         visual_order,
                         authorized_owner_pass,
+                        &mut popup_anchors,
+                        host_session_epoch,
+                        view_revision,
                     );
                 }
                 if changed && authorized_owner_pass {
                     self.inline_error = None;
                 }
             });
+        self.native_popup_anchors.extend(popup_anchors);
         if self
             .fields
             .iter()
@@ -1124,7 +1280,7 @@ impl SnippetDialog {
         }
     }
 
-    fn finish_success(app: &mut LauncherApp, message: &str) {
+    fn finish_success(app: &mut LauncherApp, message: &str, restore_root_focus: bool) {
         if app.enable_toasts {
             push_toast(
                 &mut app.toasts,
@@ -1138,7 +1294,9 @@ impl SnippetDialog {
             );
         }
         app.search();
-        app.focus_input();
+        if restore_root_focus {
+            app.focus_input();
+        }
     }
 
     fn report_commit_failure(app: &mut LauncherApp, failure: &CommitFailure) {
@@ -1163,6 +1321,127 @@ impl SnippetDialog {
             self.end_session();
             return None;
         }
+        let actions = self.render_inner(
+            ctx,
+            jump_mode_scope.as_ref(),
+            native_ui_owner,
+            first_ui_pass,
+            None,
+            None,
+        );
+        self.apply_host_effects(actions.effects, app, true)
+    }
+
+    pub(crate) fn host_session_epoch(&self) -> u64 {
+        self.host_session_epoch
+    }
+
+    pub(super) fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        owner_current: bool,
+        first: bool,
+        pinned: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> SnippetHostActions {
+        let mut actions = self.render_inner(
+            ctx,
+            scope,
+            owner_current,
+            first,
+            child_ui,
+            Some(presentation),
+        );
+        if pinned {
+            actions.close = false;
+            actions.effects.close = false;
+        }
+        actions
+    }
+
+    fn render_inner(
+        &mut self,
+        ctx: &egui::Context,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        owner_current: bool,
+        first: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> SnippetHostActions {
+        let mut actions = SnippetHostActions::default();
+        if !self.open {
+            return actions;
+        }
+        let authorized = owner_current && first;
+        let session = self.host_session_epoch;
+        let mut required = false;
+        let mut reveal_scroll = None;
+        let copy_requires_reveal = self.hide_contents && self.body_revealed;
+        let copy_start = presentation
+            .is_some()
+            .then(|| ctx.output(|output| output.commands.len()));
+        let (window_open, save, remove, preview) = self.show_window_inner(
+            ctx,
+            scope,
+            owner_current,
+            authorized,
+            || required = true,
+            child_ui,
+            presentation,
+            &mut actions.host_request,
+            &mut reveal_scroll,
+            #[cfg(test)]
+            &mut actions.host_button,
+        );
+        let copies = copy_start
+            .map(|start| {
+                ctx.output_mut(|output| {
+                    let mut copies = Vec::new();
+                    for command in output.commands.split_off(start) {
+                        match command {
+                            egui::OutputCommand::CopyText(text) => copies.push(text),
+                            other => output.commands.push(other),
+                        }
+                    }
+                    copies
+                })
+            })
+            .unwrap_or_default();
+        actions.close = authorized && !window_open;
+        actions.effects = SnippetHostEffects {
+            session_epoch: session,
+            snapshot_generation: self.snapshot_generation,
+            view_revision: self.view_revision,
+            body_session: self.body_edit_session,
+            save: authorized && save,
+            remove: (authorized && remove)
+                .then(|| self.jump_mode_pending_removal_identity())
+                .flatten(),
+            close: actions.close,
+            preview: authorized && preview,
+            reveal_scroll,
+            required: authorized && required,
+            copies: if authorized { copies } else { Vec::new() },
+            copy_requires_reveal,
+        };
+        actions
+    }
+
+    pub(crate) fn apply_host_effects(
+        &mut self,
+        effects: SnippetHostEffects,
+        app: &mut LauncherApp,
+        restore_root_focus: bool,
+    ) -> Option<SnippetEntry> {
+        if !self.open
+            || self.host_session_epoch != effects.session_epoch
+            || self.snapshot_generation != effects.snapshot_generation
+            || self.view_revision != effects.view_revision
+        {
+            return None;
+        }
         #[cfg(test)]
         let persistence_path_override = self.persistence_path_override.clone();
         #[cfg(test)]
@@ -1171,43 +1450,85 @@ impl SnippetDialog {
             .unwrap_or(SNIPPETS_FILE);
         #[cfg(not(test))]
         let persistence_path = SNIPPETS_FILE;
-        let authorized_owner_pass = native_ui_owner && first_ui_pass;
-        let (window_open, save_request, confirm_removal, preview_request) = self
-            .show_window_with_jump_mode(
-                ctx,
-                jump_mode_scope.as_ref(),
-                native_ui_owner,
-                authorized_owner_pass,
-                || app.report_error_message("ui operation", "Both fields required"),
-            );
-
-        if save_request && authorized_owner_pass {
+        if let Some((id, offset)) = effects.reveal_scroll
+            && effects.body_session == self.body_edit_session
+            && let Some(mut state) = egui::scroll_area::State::load(&app.egui_ctx, id)
+        {
+            state.offset.y = offset;
+            state.store(&app.egui_ctx, id);
+        }
+        if effects.body_session == self.body_edit_session
+            && (!effects.copy_requires_reveal || self.body_revealed)
+        {
+            for copy in effects.copies {
+                if crate::actions::clipboard::set_text(&copy).is_err() {
+                    self.inline_error = Some("Clipboard copy failed.".into());
+                }
+            }
+        }
+        if effects.required {
+            self.inline_error = Some("Both fields required".into());
+            app.report_error_message("ui operation", "Both fields required");
+        }
+        if effects.save {
             match self.save_editor(persistence_path) {
-                Ok(()) => Self::finish_success(app, "Saved snippet"),
+                Ok(()) => Self::finish_success(app, "Saved snippet", restore_root_focus),
                 Err(failure) => Self::report_commit_failure(app, &failure),
             }
         }
-        if confirm_removal && authorized_owner_pass {
+        if effects.remove.is_some() && effects.remove == self.jump_mode_pending_removal_identity() {
             match self.confirm_removal(persistence_path) {
-                Ok(true) => Self::finish_success(app, "Removed snippet"),
+                Ok(true) => Self::finish_success(app, "Removed snippet", restore_root_focus),
                 Ok(false) => {}
                 Err(failure) => Self::report_commit_failure(app, &failure),
             }
         }
-        self.apply_window_open(if native_ui_owner {
-            if authorized_owner_pass {
-                window_open
-            } else {
-                self.open
-            }
-        } else {
-            self.open
-        });
-        if preview_request && authorized_owner_pass {
+        if effects.close {
+            self.apply_window_open(false);
+        }
+        if effects.preview {
             self.preview_editor_draft()
         } else {
             None
         }
+    }
+
+    pub(crate) fn owned_popup_layer(
+        &self,
+        ctx: &egui::Context,
+        parent: egui::LayerId,
+    ) -> Option<egui::LayerId> {
+        if !self.open
+            || self.edit_idx.is_none()
+            || !self.body_revealed
+            || self.pending_removal.is_some()
+            || !egui::Popup::is_any_open(ctx)
+        {
+            return None;
+        }
+        self.native_popup_anchors.iter().find_map(|anchor| {
+            if anchor.viewport != ctx.viewport_id()
+                || anchor.layer != parent
+                || anchor.session_epoch != self.host_session_epoch
+                || anchor.view_revision != self.view_revision
+                || anchor.body_session != self.body_edit_session
+            {
+                return None;
+            }
+            let response = ctx.read_response(anchor.response_id)?;
+            if !response.enabled()
+                || response.layer_id != parent
+                || !egui::Popup::is_id_open(ctx, anchor.popup_id)
+            {
+                return None;
+            }
+            let rect = ctx.memory(|memory| memory.area_rect(anchor.popup_id))?;
+            let layer = egui::LayerId::new(egui::Order::Foreground, anchor.popup_id);
+            let sizing = egui::containers::AreaState::load(ctx, anchor.popup_id)
+                .is_some_and(|state| !state.interactable);
+            (rect.is_positive() && (ctx.layer_id_at(rect.center()) == Some(layer) || sizing))
+                .then_some(layer)
+        })
     }
 
     fn show_window(
@@ -1226,11 +1547,46 @@ impl SnippetDialog {
         authorized_owner_pass: bool,
         mut report_required_fields: impl FnMut(),
     ) -> (bool, bool, bool, bool) {
+        let mut host_request = None;
+        let mut reveal_scroll = None;
+        #[cfg(test)]
+        let mut host_button = None;
+        self.show_window_inner(
+            ctx,
+            jump_mode_scope,
+            native_ui_owner,
+            authorized_owner_pass,
+            &mut report_required_fields,
+            None,
+            None,
+            &mut host_request,
+            &mut reveal_scroll,
+            #[cfg(test)]
+            &mut host_button,
+        )
+    }
+
+    fn show_window_inner(
+        &mut self,
+        ctx: &egui::Context,
+        jump_mode_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        native_ui_owner: bool,
+        authorized_owner_pass: bool,
+        mut report_required_fields: impl FnMut(),
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+        host_request: &mut Option<super::utility_host::UtilityPresentation>,
+        reveal_scroll: &mut Option<(egui::Id, f32)>,
+        #[cfg(test)] host_button: &mut Option<(egui::Rect, egui::Rect, bool)>,
+    ) -> (bool, bool, bool, bool) {
+        self.native_popup_anchors.clear();
         let mut window_open = self.open;
         let mut close = false;
         let mut save_request = false;
         let mut confirm_removal = false;
         let mut preview_request = false;
+        let mut reveal_requested = false;
+        let mut reveal_scroll_delta = None;
         let initial_view_revision = self.view_revision;
         let scoped_scope = jump_mode_scope
             .map(|scope| scope.child_namespace(format!("view/{}", self.view_revision)));
@@ -1241,14 +1597,33 @@ impl SnippetDialog {
             .then_some(scoped_scope.as_ref())
             .flatten();
         let mut visual_order = 0_u64;
-        egui::Window::new("Snippets")
-            .default_size((600.0, 500.0))
-            .min_width(160.0)
-            .min_height(160.0)
-            .resizable(true)
-
-            .show_utility(ctx, "snippets", egui::Id::new("Snippets"), Some(&mut window_open), crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::Vec2::from((600.0, 500.0))), egui::Vec2::ZERO, [None, None]).with_minimum(egui::vec2(160.0, 160.0)), |ui| {
-                ui.add_enabled_ui(native_ui_owner, |ui| {
+        let mut draw_body = |ui: &mut egui::Ui| {
+            let authorized_owner_pass =
+                authorized_owner_pass && ui.is_visible() && !ui.is_sizing_pass();
+            ui.add_enabled_ui(native_ui_owner, |ui| {
+                if let Some(current) = presentation {
+                    use super::utility_host::{UtilityPresentation, presentation_button};
+                    let allowed = self.pending_removal.is_none() && ui.is_visible() && !ui.is_sizing_pass();
+                    let (response, requested) = presentation_button(ui, current, allowed);
+                    let label = match current {
+                        UtilityPresentation::Docked => "Pop Out",
+                        UtilityPresentation::Popout => "Dock",
+                    };
+                    apply_select_focus(
+                        &response,
+                        register_snippet_target(
+                            scope, ui, &response, "host", label,
+                            crate::gui::jump_mode::TargetKind::Button, &mut visual_order,
+                        ),
+                    );
+                    #[cfg(test)]
+                    {
+                        *host_button = Some((response.rect, ui.clip_rect(), response.enabled()));
+                    }
+                    if response.clicked() && authorized_owner_pass && !ctx.will_discard() {
+                        *host_request = Some(requested);
+                    }
+                }
                 // Resize follows content in egui. Bound both axes here so overflow
                 // scrolls inside the user's chosen size instead of enlarging it.
                 let _contents = egui::ScrollArea::both()
@@ -1345,6 +1720,22 @@ impl SnippetDialog {
                     );
                     if hide_response.changed() && authorized_owner_pass {
                         self.set_hide_contents(hide_contents);
+                    }
+                    if !self.body_revealed {
+                        let reveal = ui.button("Reveal to Edit");
+                        apply_select_focus(
+                            &reveal,
+                            register_snippet_target(
+                                scope,
+                                ui,
+                                &reveal,
+                                "author/reveal-contents",
+                                "Reveal snippet contents",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut visual_order,
+                            ),
+                        );
+                        reveal_requested = reveal.clicked() && authorized_owner_pass;
                     }
                     secondary_help(
                         ui,
@@ -1566,22 +1957,10 @@ impl SnippetDialog {
                                 body_changed = response.changed();
                             });
                     } else {
-                        ui.label("Contents hidden");
-                        let reveal = ui.button("Reveal to Edit");
-                        apply_select_focus(
-                            &reveal,
-                            register_snippet_target(
-                                scope,
-                                ui,
-                                &reveal,
-                                "author/reveal-contents",
-                                "Reveal snippet contents",
-                                crate::gui::jump_mode::TargetKind::Button,
-                                &mut visual_order,
-                            ),
-                        );
-                        if reveal.clicked() && authorized_owner_pass {
-                            self.reveal_contents();
+                        let hidden = ui.label("Contents hidden");
+                        if reveal_requested {
+                            reveal_scroll_delta =
+                                Some(hidden.rect.center().y - ui.clip_rect().center().y);
                         }
                     }
                     if body_changed && authorized_owner_pass {
@@ -2053,12 +2432,43 @@ impl SnippetDialog {
                     }
                     }
                 });
+                if let Some(delta) = reveal_scroll_delta {
+                    *reveal_scroll = Some((_contents.id, (_contents.state.offset.y + delta).max(0.0)));
+                }
                 #[cfg(test)]
                 {
                     self.contents_scroll_id = Some(_contents.id);
                 }
                 });
-            });
+        };
+        if let Some(ui) = child_ui {
+            draw_body(ui);
+        } else {
+            egui::Window::new("Snippets")
+                .default_size((600.0, 500.0))
+                .min_width(160.0)
+                .min_height(160.0)
+                .resizable(true)
+                .show_utility(
+                    ctx,
+                    "snippets",
+                    egui::Id::new("Snippets"),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::Vec2::from((600.0, 500.0)),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(160.0, 160.0)),
+                    draw_body,
+                );
+        }
+        if reveal_requested {
+            self.reveal_contents();
+            ctx.request_repaint();
+        }
         if self.view_revision != initial_view_revision
             && let Some(scope) = jump_mode_scope
         {
@@ -2073,6 +2483,32 @@ impl SnippetDialog {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosted_checkpoint_restores_editor_and_confirmation_identity() {
+        let mut dialog = super::SnippetDialog {
+            open: true,
+            host_session_epoch: 7,
+            ..Default::default()
+        };
+        dialog.alias = "before".into();
+        dialog.body_edit_session = 4;
+        dialog.pending_removal = Some(super::PendingRemoval {
+            index: 0,
+            confirmation_instance: 12,
+            expected_entry: snippet("a", "b"),
+            expected_entries: Vec::new(),
+        });
+        let checkpoint = super::SnippetInteractionCheckpoint::capture(&dialog);
+        dialog.alias = "after".into();
+        dialog.pending_removal = None;
+        dialog.body_edit_session = 9;
+        checkpoint.restore(&mut dialog);
+        assert_eq!(dialog.alias, "before");
+        assert_eq!(dialog.body_edit_session, 4);
+        assert_eq!(dialog.jump_mode_pending_removal_identity(), Some((12, 0)));
+        assert_eq!(dialog.host_session_epoch(), 7);
+    }
+
     use super::{
         AliasValidation, CommitFailure, CommitRejection, SnippetDialog, body_editor_id_source,
         matches_snippet_filter, matching_snippet_indices, matching_snippet_indices_with_tags,

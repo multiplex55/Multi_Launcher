@@ -602,7 +602,10 @@ impl LauncherApp {
             }
             UniversalUiIntent::OpenFolderAlias { path } => self.alias_dialog.open(&path),
             UniversalUiIntent::OpenBookmarkAlias { url } => self.bookmark_alias_dialog.open(&url),
-            UniversalUiIntent::EditSnippet { alias } => self.snippet_dialog.open_edit(&alias),
+            UniversalUiIntent::EditSnippet { alias } => {
+                self.snippet_dialog.open_edit(&alias);
+                self.snippet_window_host.request_focus();
+            }
             UniversalUiIntent::OpenTempfileAlias { path } => self.tempfile_alias_dialog.open(&path),
             UniversalUiIntent::EditNote { slug } => self.open_note_panel(&slug, None),
             UniversalUiIntent::OpenNoteExternal { slug, editor } => match editor {
