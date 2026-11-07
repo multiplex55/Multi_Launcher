@@ -75,11 +75,10 @@ guides, Align, Distribute, layer and stack controls, and a minimap help
 arrange the scene.
 
 Use **Add image…** to embed a bounded local PNG or JPEG. **Create preset from
-selection** reuses a selection of supported primitives. Visual Canvas has no
-container or swimlane membership or built-in visual starter templates in this
-version. The existing Mermaid templates remain available in Mermaid documents.
-
-The rich visual PNG/SVG encoder is not exposed in Studio in this version.
+selection** reuses a selection of supported primitives. Visual Canvas supports
+containers, swimlanes and membership, and offers visual starter templates.
+The existing Mermaid templates remain available in Mermaid documents. Visual
+Canvas also offers PNG and SVG export from its committed scene.
 For supported visual documents, see [draw.io interchange](DIAGRAM_EXPORT.md#drawio-interchange).
 
 ## Native files and recent diagrams

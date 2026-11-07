@@ -691,8 +691,13 @@ enum DrawioWorkKind {
 }
 
 enum DrawioWorkResult {
-    Import(Result<DrawioImportResult, String>),
+    Import(Result<DrawioImportResult, DrawioImportError>),
     Export(Result<DrawioExportResult, DrawioWireError>),
+}
+
+enum DrawioImportError {
+    Read(String),
+    Wire(DrawioWireError),
 }
 
 struct PendingDrawioWork {
@@ -710,6 +715,11 @@ enum DrawioWorkflowReview {
         candidate: DrawioImportResult,
         copy_path: Option<PathBuf>,
     },
+    ImportUnsupported {
+        scope: DrawioWorkflowScope,
+        source_path: PathBuf,
+        report: DrawioReport,
+    },
     ExportReady {
         scope: DrawioWorkflowScope,
         result: DrawioExportResult,
@@ -725,6 +735,7 @@ impl DrawioWorkflowReview {
     fn scope(&self) -> &DrawioWorkflowScope {
         match self {
             Self::Import { scope, .. }
+            | Self::ImportUnsupported { scope, .. }
             | Self::ExportReady { scope, .. }
             | Self::ExportUnsupported { scope, .. } => scope,
         }
@@ -4313,12 +4324,14 @@ impl DiagramStudioDialog {
                 } else {
                     Some(
                         read_drawio_xml_source(&worker_source)
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| DrawioImportError::Read(error.to_string()))
                             .and_then(|bytes| {
                                 if worker_cancelled.load(Ordering::Acquire) {
-                                    return Err("draw.io import was cancelled".into());
+                                    return Err(DrawioImportError::Read(
+                                        "draw.io import was cancelled".into(),
+                                    ));
                                 }
-                                import_drawio_xml(&bytes).map_err(|error| error.to_string())
+                                import_drawio_xml(&bytes).map_err(DrawioImportError::Wire)
                             }),
                     )
                 };
@@ -4500,7 +4513,26 @@ impl DiagramStudioDialog {
                     "Draw.io candidate is ready for review; the source and active document are unchanged.",
                 ));
             }
+            (
+                DrawioWorkKind::Import { source_path },
+                DrawioWorkResult::Import(Err(DrawioImportError::Wire(
+                    DrawioWireError::UnsupportedContent(report),
+                ))),
+            ) => {
+                self.drawio_review = Some(DrawioWorkflowReview::ImportUnsupported {
+                    scope: work.scope,
+                    source_path,
+                    report,
+                });
+                self.message = Some(StudioNotice::error(
+                    "Draw.io import contains unsupported content; no candidate was created.",
+                ));
+            }
             (DrawioWorkKind::Import { source_path }, DrawioWorkResult::Import(Err(error))) => {
+                let error = match error {
+                    DrawioImportError::Read(error) => error,
+                    DrawioImportError::Wire(error) => error.to_string(),
+                };
                 self.message = Some(StudioNotice::error(format!(
                     "Could not import {}: {error}",
                     source_path.display()
@@ -13050,6 +13082,13 @@ fn draw_drawio_workflow_panel(
                         *document_intent = Some(DocumentIntent::DrawioPublishExport);
                     }
                 }
+                DrawioWorkflowReview::ImportUnsupported { source_path, .. } => {
+                    ui.strong("Draw.io import is not available for this file");
+                    ui.label(format!(
+                        "{} contains unsupported content; no candidate was created.",
+                        source_path.display()
+                    ));
+                }
                 DrawioWorkflowReview::ExportUnsupported {
                     reason,
                     ..
@@ -13073,6 +13112,9 @@ fn draw_drawio_workflow_panel(
             }
             DrawioWorkflowReview::ExportReady { result, .. } => {
                 draw_drawio_report(ui, &result.report)
+            }
+            DrawioWorkflowReview::ImportUnsupported { report, .. } => {
+                draw_drawio_report(ui, report)
             }
             DrawioWorkflowReview::ExportUnsupported { report, .. } => {
                 draw_drawio_report(ui, report)
@@ -13226,7 +13268,7 @@ mod tests {
         std::fs::write(path, bytes.into_inner()).unwrap();
     }
 
-    const DRAWIO_WORKFLOW_FIXTURE: &str = "<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"layer\" parent=\"0\" value=\"Layer\"/><mxCell id=\"box\" value=\"Imported box\" style=\"shape=rectangle;\" vertex=\"1\" parent=\"layer\"><mxGeometry x=\"10\" y=\"20\" width=\"100\" height=\"50\" as=\"geometry\"/></mxCell></root></mxGraphModel>";
+    const DRAWIO_WORKFLOW_FIXTURE: &str = "<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"layer\" parent=\"0\" value=\"Layer\"/><mxCell id=\"group\" style=\"group;\" vertex=\"1\" parent=\"layer\"><mxGeometry x=\"30\" y=\"40\" width=\"300\" height=\"200\" as=\"geometry\"/></mxCell><mxCell id=\"box\" value=\"Imported box\" style=\"shape=rectangle;\" vertex=\"1\" parent=\"group\"><mxGeometry x=\"10\" y=\"20\" width=\"100\" height=\"50\" as=\"geometry\"/></mxCell></root></mxGraphModel>";
 
     fn wait_for_drawio_review(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
         for _ in 0..200 {
@@ -20569,6 +20611,28 @@ mod tests {
     }
 
     #[test]
+    fn diagram_drawio_workflow_import_reports_unsupported_frame_without_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("unsupported.drawio");
+        let source = b"<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"layer\" parent=\"0\"/><mxCell id=\"bad-lane\" parent=\"layer\" vertex=\"1\" style=\"swimlane;startSize=40;\"><mxGeometry x=\"0\" y=\"0\" width=\"100\" height=\"100\" as=\"geometry\"/></mxCell></root></mxGraphModel>";
+        std::fs::write(&source_path, source).unwrap();
+        let mut dialog = initialized_dialog();
+        let before = dialog.test_session().draft().to_owned();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        dialog.test_set_next_file_picker_result(Some(source_path.clone()));
+        click_mermaid_drawio_import(&mut dialog, &ctx);
+        wait_for_drawio_review(&mut dialog, &ctx);
+        assert!(
+            matches!(dialog.drawio_review.as_ref(), Some(DrawioWorkflowReview::ImportUnsupported { report, .. }) if report.issues.iter().any(|issue| issue.source_id.as_deref() == Some("bad-lane") && issue.property == "swimlane appearance is not representable"))
+        );
+        assert_eq!(dialog.test_session().draft(), before);
+        assert_eq!(std::fs::read(&source_path).unwrap(), source);
+    }
+
+    #[test]
     fn diagram_drawio_workflow_import_copy_then_open_uses_dirty_transition() {
         let directory = tempfile::tempdir().expect("temporary draw.io workflow directory");
         let active_path = directory.path().join("working.mld");
@@ -20648,6 +20712,47 @@ mod tests {
             Some(crate::diagram::DiagramAuthoringKind::Visual)
         );
         assert!(dialog.documents.session().is_none());
+        let scene = dialog.documents.visual_scene().expect("opened visual copy");
+        let frame = scene
+            .objects
+            .iter()
+            .find(|object| matches!(object.kind, VisualObjectKind::Container { .. }))
+            .expect("imported group")
+            .clone();
+        assert!(
+            scene
+                .parent_by_child
+                .values()
+                .any(|parent| *parent == frame.id)
+        );
+        let mut edited_frame = frame.clone();
+        edited_frame.transform.x += 10.0;
+        dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::ReplaceObject(edited_frame.clone())])
+            .unwrap();
+        assert!(dialog.documents.undo().unwrap());
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == frame.id),
+            Some(&frame)
+        );
+        assert!(dialog.documents.redo().unwrap());
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == frame.id),
+            Some(&edited_frame)
+        );
         assert_eq!(std::fs::read(&active_path).unwrap(), saved_active_bytes);
         assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
     }
@@ -20745,7 +20850,25 @@ mod tests {
             .documents
             .replace_visual_label("Committed workflow scene")
             .expect("set export scene title");
-        dialog
+        let group_id = dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform {
+                    x: 40.0,
+                    y: 20.0,
+                    width: 240.0,
+                    height: 160.0,
+                    rotation_degrees: 0.0,
+                },
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Container {
+                    label: "Group frame".into(),
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        let member = dialog
             .documents
             .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
                 layer_id: DEFAULT_LAYER_ID,
@@ -20761,7 +20884,15 @@ mod tests {
                     shape: VisualPrimitiveShape::Rectangle,
                 },
             })])
-            .expect("add a supported visual object");
+            .expect("add a supported visual object")
+            .created_objects[0];
+        dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::SetParent {
+                child: member,
+                parent: Some(group_id),
+            }])
+            .unwrap();
         dialog
             .documents
             .save_as(&native_path)
@@ -20800,6 +20931,23 @@ mod tests {
                 }
             )
         }));
+        assert_eq!(imported.document.scene().parent_by_child.len(), 1);
+        let original_frame = committed_scene
+            .objects
+            .iter()
+            .find(|object| object.id == group_id)
+            .unwrap();
+        let imported_frame = imported
+            .document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| {
+                matches!(&object.kind, VisualObjectKind::Container { label } if label == "Group frame")
+            })
+            .expect("visible container kind and label survive export");
+        assert_eq!(imported_frame.transform, original_frame.transform);
+        assert_eq!(imported_frame.style, original_frame.style);
         assert_eq!(dialog.documents.visual_scene().unwrap(), &committed_scene);
         assert_eq!(dialog.documents.path(), Some(native_path.as_path()));
         assert_eq!(std::fs::read(&native_path).unwrap(), native_bytes);

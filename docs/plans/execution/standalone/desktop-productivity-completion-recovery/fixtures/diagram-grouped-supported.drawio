@@ -1,0 +1,8 @@
+<mxfile compressed="false"><diagram id="grouped-example" name="Grouped example"><mxGraphModel><root>
+<mxCell id="0"/><mxCell id="layer" parent="0" value="Layer"/>
+<mxCell id="group" value="Process" style="group;" vertex="1" parent="layer"><mxGeometry x="40" y="40" width="440" height="240" as="geometry"/></mxCell>
+<mxCell id="lane" value="Workflow" style="swimlane;horizontal=1;startSize=28;swimlaneFillColor=none;strokeColor=#000000;fontColor=#000000;" vertex="1" parent="group"><mxGeometry x="20" y="40" width="400" height="160" as="geometry"/></mxCell>
+<mxCell id="start" value="Start" style="shape=rectangle;" vertex="1" parent="lane"><mxGeometry x="30" y="70" width="100" height="40" as="geometry"/></mxCell>
+<mxCell id="finish" value="Finish" style="shape=ellipse;" vertex="1" parent="lane"><mxGeometry x="260" y="70" width="100" height="40" as="geometry"/></mxCell>
+<mxCell id="edge" value="Next" style="exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="lane" source="start" target="finish"><mxGeometry relative="1" as="geometry"/></mxCell>
+</root></mxGraphModel></diagram></mxfile>

@@ -952,3 +952,55 @@ Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; all o
 | r04-m4-c-run-1.log | 733A039B2E74D5FDF963B5562814B2CD76D423D835E917D1C7BF4DB4E366C017 |
 | r04-m4-c-run-2.log | 8B5F53CA907A7508C9E4759B4D83A96A0A1D9F1E68F34547DD6274198D41A48E |
 | r04-m4-c-run-3.log | 0DA7E0DF5E3967F147F2D0C9D71A64D31234D10B43883ED4D76FA5A08817D71C |
+
+
+### R04/M4-D — Faithful bounded grouped draw.io interchange
+
+The existing draw.io adapter now supports bounded nested transparent groups, compatible containers and both swimlane orientations alongside the accepted layers/primitives/text/connectors. A complete cell index and bounded ancestry resolution replace direct-layer/XML-order assumptions. IDs and tree order are deterministic; parent-local positions become world-space once, parents exist before child installation and endpoint IDs precede deferred edge resolution. Missing/self/cyclic/non-frame/deep ancestry and nonfinite/overflowing resolved geometry are refused before any candidate. Native membership still excludes connectors and the reserved title; no native schema/version expansion was needed.
+
+Invisible groups become transparent zero-stroke Container owners without visible headers/dividers, with nonempty group labels represented as editable member text. Visible frames must match current native header geometry, transparent body, text/border color and supported style/orientation. Export uses standard swimlane properties plus inert validated mlFrame=container only where needed to preserve native Container kind. Contradictory or unknown markers cannot bypass ordinary geometry/style checks. Rotated leaves are supported; rotated parents with descendants are explicitly refused rather than assuming unverified draw.io renderer inheritance. Relative vertex ports, custom offsets/waypoints, compressed/multipage/active/external resources, unsupported presets/images/shadows/styles and incompatible cross-layer/tree paint order remain explicit subset limits. No unsupported group is silently flattened, relayered or approximated.
+
+Export emits parent IDs and inverse parent-local coordinates, validates representability before exposing bytes and retains labels/styles/anchors/endpoints under deterministic ID remapping. Read-only review caught a local/world-bound asymmetry: valid opposite-extreme parent/member positions can require a larger local offset, and nested local terms can cancel. Wire-local parsing now has its own finite bounds; only complete ancestor translation is checked against native world limits, with every parent's final geometry independently validated. Opposite-extreme and nested-cancellation cases require real export/reimport; direct-layer overflow remains refused. Conservative tree-stack refusal is retained rather than inventing new global z-order semantics.
+
+Connector parent is a routing namespace, never native membership. Its supplied source parent is compared with indexed endpoint ancestry; only an actual non-NCA change emits a source-edge-specific nonfatal normalization note. Export derives the conventional common ancestor. The tested lane-to-outer-group edge requires the original note, preserves endpoint anchors and label, and has no note after canonical reimport. Same-lane edges are covered too; this does not claim a broader connector matrix. Unsupported-content reports retain structured source IDs/properties across the import worker into a read-only ImportUnsupported review, with no candidate/publish controls. Successful notes remain nonfatal.
+
+The accepted Studio route remains actual menu → import → review → Create .mld copy → optional Open copy → existing dirty decision, and actual grouped export → review → Save .drawio. Original source/native bytes remain unchanged until explicit separate-copy Open; Cancel preserves the old document, Discard opens the separate native copy, and group edit/Undo/Redo/reopen remains functional. Existing owned picker, M4-C busy-stage/no-clobber owner, retained ROOT/child/document/host checks, stale retirement and hidden-root scheduling stay authoritative. docs/DIAGRAM_EXPORT.md and DIAGRAM_STUDIO.md describe the supported profile and correct stale ungrouped-only/Visual-export text. Parent also corrected the current export reference's old best-effort publication description to match M4-C atomic staging; historical plans/stops were not rewritten.
+
+Before source edits, exact existing wire/workflow inventory listed 11 and passed 11/11 with 7568 skipped. Incremental exact importer 2, symmetric 5 and focused 7 selections listed and passed 2/2, 5/5, 7/7 respectively; they were intermediate seam evidence, not milestone completion. Read-only reviews refined world/local bounds and nested accumulation before acceptance. No additional native format or production dependency was introduced.
+
+Set `$f` to trimmed `r04-m4-d-final-filter.txt` under ignored evidence. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 24 full-qualified names. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 24/24 with 7560 skipped. This combines eleven affected baselines, five new wire/workflow cases and eight representative category-closure cases: frozen invalid v1 source without rewrite, deterministic v2 migration, v3 empty-membership wire, unknown/malformed/future codec refusal, failed pending Open, recents/dirty transitions, same-pass source export and current-image/picker freezing. It reuses accepted M4-A/B/C evidence rather than repeat their entire suites.
+
+Final oracle review then strengthened actual visible Container reimport to require kind, label, transform and style, not just shape/parent count, and added the non-NCA routing note. The exact five-case routing selection listed five and passed 4/5 with 7579 skipped. Its one failure was a malformed-marker oracle that expected generic vertex geometry while a combined branch reported orientation; review also showed the marker-free control's default border/text colors differed, independently triggering appearance refusal. The final control explicitly supplies matching black colors, transparent body and correct vertical extent 22 for width 100, requires marker-free import success, and expects an accurate source-ID/property-specific invalid-frame-marker refusal for the inconsistent discriminator. Exact marker list 2 matched one and marker run 2 passed 1/1 with 7583 skipped. Superseded diagnostic lists are preserved without runtime claims. This isolates the required guard rather than merely accepting any rejection.
+
+The sample is portable at fixtures/diagram-grouped-supported.drawio (also retained in ignored target). A final cfg(test)-only assertion added that exact tracked input to the existing grouped wire case: import → export → reimport must preserve transparent group/horizontal lane/member hierarchy, both endpoint shapes and connector identities/anchors/label in both scenes. Its exact list/run passed 1/1 with 7583 skipped, without changing production code or fixture bytes. The passing-name union remains 24, not a sum of repeated runs. All required new oracle cases now have passing evidence.
+
+Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with six existing Note Panel/Table warnings and existing dependency warnings, no new draw.io warning. Later edits were only the portable test assertion and documentation; production source is unchanged. Scoped formatting and git diff --check passed. Independent final hierarchy/geometry/profile/reporting/ownership/Container/marker/oracle reviews are clear.
+
+Parent independently parsed the fixture using .NET XmlReader/XmlDocument with DTD prohibited and no resolver: seven unique mxCell IDs, four vertices, one edge, and every declared parent/source/target resolves. This is separate XML syntax/reference proof, not independent draw.io semantic/rendering evidence. Local fixture SHA-256 is 5BE761849849A557A8C7DBB085527F3E0F34F0EB308E3D7D04E7800501116ED8. The fixture also passes the application wire path. No draw.io/diagrams.net CLI was on PATH, but that is not proof no GUI reader exists elsewhere; no independent reader was invoked. That reader check and full native N6/N7 remain IMPLEMENTED_USER_VALIDATION_PENDING for the single R06 packet. No user test is requested now.
+
+Source scope is diagram/drawio.rs and gui/diagram_studio.rs; reference updates are docs/DIAGRAM_EXPORT.md and DIAGRAM_STUDIO.md plus the small portable fixture. Parent is pushed M4-C d3f8bf3a9ca4a66be9e9428b3dc2c11801df04f8 on feat/productivity-diagram-completion. Actual checkpoint SHA/push is recorded outside tracked source after commit. Next is R04 category reporting and exact-tip R05/M0-A, not a branch from this pre-report source SHA. M5-A read-only handoff is ready; no R05 source has started. R05/R06 remain pending. Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; original diagnostic/failure logs retained):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r04-m4-d-baseline-list.log | CE4A12761D0B6AD2761AD009E8464D2DDB23B3C33AADFABB37F70FDB5F5BF96E |
+| r04-m4-d-baseline-run.log | FB9BCF61F3B2C205F8742E7A850A8346BDBBFDEDF49289FD774E67B98AFC8368 |
+| r04-m4-d-discriminator-list.log | 80176B2BE2508489BD74E50B87729DDB20A96D94A346F9D0D19EF2BFD1684A74 |
+| r04-m4-d-final-list.log | F9637B4293282BDE5E5C2AD2FD70CBD4CF30D656581B28A16D0CB438C3A5DD8A |
+| r04-m4-d-final-run.log | 679C166BF5BF63F74C398163C3B8404C56220BE6933783F19D695CDE3B15C1CC |
+| r04-m4-d-focused-list.log | C54C0294B16551394C6366FEED693227B40503623315146224708F53AED98BB3 |
+| r04-m4-d-focused-run.log | B1A764CB0457837CF5DD5ACC450C1CA3116470FE796CEC7F7AD01B156340622B |
+| r04-m4-d-import-list.log | CCD725D707E1D2F2050C7A6E6944CF1AF35FCBA2F5D97C20484675E696B8B574 |
+| r04-m4-d-import-run.log | F6FC7162B33DB39EE428871DBDDE0C008CBF3AC31EFE63885A45A17E3B64F4EA |
+| r04-m4-d-marker-list-2.log | 3D0FA59BC148AF84951D79F3811E5AB2AB3DC9AEBCBED3FB155006BD782D9924 |
+| r04-m4-d-marker-list.log | DD20E4627E4ADC97D6B7166A2AA0C64B966C1A3090C8DBD9C43C90E066751350 |
+| r04-m4-d-marker-run-2.log | EC9F7AA67327A59C143FB1FF3939D85638CF8E7901D0605A2FF51A4A00F91F2C |
+| r04-m4-d-portable-fixture-list.log | 273031ED01253D3C98664D9BA604526149E2D9F5F756D7ECE005A64B1E5D89C6 |
+| r04-m4-d-portable-fixture-run.log | 8F451A0DF69A0366F544BB8E90332800D70A57233A7716F3CA0062F51D5F0649 |
+| r04-m4-d-production-check.log | F4CA78329E2F63DA373214DE4EC75C864AE4E1BC1D3E8763B7503FCD051D5936 |
+| r04-m4-d-routing-list.log | 34CDF75E7F1DAD4E285E9263D84D93E2EEC6C93627415E84E98573487064FAAA |
+| r04-m4-d-routing-run.log | B422C5AA6773BAEF238461E8DADD77DCFB9ADB0525EE3B4135FB77120BEC6517 |
+| r04-m4-d-symmetric-list.log | 55A6510362CA20821C91B777B0E22E088172A0EE829243C581A46FA4811A49E2 |
+| r04-m4-d-symmetric-run.log | A2B4917B27B95FBA479AABEA4F18AD45C6769BCFB47FA8F3BDF81CC6A9C4944D |
+| r04-m4-d-independent-xml-check.json | 56796B438472F3902482CD979F67C7D3625388AF28D746CE2872D0C088CC0E0E |

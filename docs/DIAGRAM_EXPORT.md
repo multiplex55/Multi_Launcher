@@ -28,17 +28,24 @@ fixed local shapes, paths, clipping rectangles, and escaped text. XML control
 characters are rejected; no script, foreign object, external reference, or
 user-controlled markup is emitted.
 
-Mermaid export refuses the active native path and checks for an occupied
-destination immediately before the shared atomic writer. That check does
-not make publication race-free. Export never changes the Diagram session,
-native path, or saved content baseline.
+Mermaid export refuses the active native path. Image and source artifacts use
+a synced same-directory stage and atomic no-clobber publication, including
+refusal when a destination appears after staging. Export never changes the
+Diagram session, native path, or saved content baseline.
 
 ## Visual Canvas image export
 
-The rich Visual Canvas has a separate SVG/PNG encoder for its projected
-scene, including supported rotated geometry, text, and embedded raster
-images. It is not exposed in Studio's Export menu in this version. The
-image options above apply to Mermaid documents.
+In a Visual Canvas document, open **Visual export** to choose scale and a
+transparent, white, or custom RGBA background, then choose **Export SVG…** or
+**Export PNG…**. The current committed scene is captured independently of
+Viewer pan and zoom, including supported rotated geometry, text, frame headers,
+shadows, and embedded raster images.
+
+Encoding and staging run in the background. A current accepted owner pass
+publishes with the same atomic no-clobber protection. **Cancel export** is
+available while work or an unpublished stage is cancellable; another export
+waits until cancellation settles. Closing or replacing the document retires
+stale work. The native document, saved baseline, and Viewer camera stay intact.
 
 ## draw.io interchange
 
@@ -53,12 +60,24 @@ review the current scene, then choose **Save .drawio…**. Use an unoccupied
 destination. Unsupported content gives a refusal report and cannot publish
 a partial file.
 
-Use a single uncompressed `.drawio` page. XML is limited to 4 MiB. The subset covers direct layers,
-rectangles, rounded rectangles, ellipses, diamonds, text, basic supported
-styles, and labeled connectors with compass anchors. An imported label on
-a shape can become independent text. The review lists inferred anchors.
-Group and swimlane ownership, multiple or compressed pages, active HTML,
-external resources, and unsupported geometry or styles are refused. Visual
-exports also refuse embedded images, presets, shadows, and shapes outside
-the supported subset.
+Use a single uncompressed `.drawio` page. XML is limited to 4 MiB. The subset
+includes layers, nested transparent groups, compatible containers and horizontal
+or vertical swimlanes, rectangles, rounded rectangles, ellipses, diamonds, text,
+basic styles, and labeled connectors with compass anchors. Group labels and
+labels on shapes may become independent editable text. Frame headers must match
+the native header geometry, with a transparent body and matching text and
+border colors. The inert `mlFrame=container` style preserves native Container
+kind when standard swimlane styling is used; inconsistent markers are refused.
+The header extent must be `min(28, 0.28 × height)` for a
+horizontal frame or `min(28, 0.22 × width)` for a vertical frame. A rotated
+leaf is supported; a rotated parent with descendants is refused. Parent-local
+coordinates must resolve within native geometry bounds.
+
+The review identifies unsupported content, inferred anchors, and connector
+routing parents that will normalize to the endpoints' common frame. Cross-layer
+membership or connectors, frame stacking that cannot be represented by a tree, relative
+vertex ports, custom connector waypoints, multiple or compressed pages, active
+HTML, external resources, and other unsupported geometry or styles are refused.
+Visual exports also refuse embedded images, presets, shadows, and shapes outside
+the supported subset. No partial file is published on refusal.
 Independent draw.io reader verification is still outstanding.

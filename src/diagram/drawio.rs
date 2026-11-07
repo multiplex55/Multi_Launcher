@@ -7,13 +7,13 @@ use std::fmt;
 use std::str;
 
 use super::visual::{
-    DEFAULT_LAYER_ID, MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_COORDINATE_ABS,
-    MAX_VISUAL_DIMENSION, MAX_VISUAL_LAYERS, MAX_VISUAL_NAME_BYTES, MAX_VISUAL_OBJECTS,
-    MAX_VISUAL_TEXT_BYTES, MIN_VISUAL_DIMENSION, TITLE_OBJECT_ID, VisualAnchor, VisualColor,
-    VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute,
-    VisualDiagramDocument, VisualDocumentError, VisualLayer, VisualLayerId, VisualLineStyle,
-    VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveShape, VisualScene, VisualStyle,
-    VisualTransform,
+    DEFAULT_LAYER_ID, MAX_VISUAL_CONNECTOR_LABEL_BYTES, MAX_VISUAL_CONTAINMENT_DEPTH,
+    MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_DIMENSION, MAX_VISUAL_LAYERS, MAX_VISUAL_NAME_BYTES,
+    MAX_VISUAL_OBJECTS, MAX_VISUAL_TEXT_BYTES, MIN_VISUAL_DIMENSION, TITLE_OBJECT_ID, VisualAnchor,
+    VisualColor, VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint,
+    VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError, VisualLayer, VisualLayerId,
+    VisualLineStyle, VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveShape,
+    VisualScene, VisualStyle, VisualSwimlaneOrientation, VisualTransform,
 };
 
 pub const MAX_DRAWIO_XML_BYTES: usize = 4 * 1024 * 1024;
@@ -430,24 +430,16 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                 "cell marked as both vertex and edge",
             ));
         }
-        let style = parse_style_text(node.attr("style"))?;
+        let style = parse_style_text(node.attr("style")).map_err(|error| cell_error(id, error))?;
 
         if id == "0" {
             ensure_cell_attributes(node, &["id"])?;
-            if root_cell_seen
-                || !layers.is_empty()
-                || !parsed.is_empty()
-                || !node.children.is_empty()
-            {
+            if root_cell_seen || !node.children.is_empty() {
                 return Err(DrawioWireError::Unsupported("invalid root cell"));
             }
             root_cell_seen = true;
             continue;
         }
-        if !root_cell_seen {
-            return Err(DrawioWireError::Unsupported("root cell must be first"));
-        }
-
         if parent == Some("0") && !vertex && !edge {
             ensure_cell_attributes(node, &["id", "parent", "value", "style"])?;
             if !node.children.is_empty() || !style.is_empty() {
@@ -532,18 +524,28 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
             name: "Layer 1".into(),
         });
     }
+    let indexed = parsed
+        .iter()
+        .map(|cell| (cell.id.as_str(), cell))
+        .collect::<HashMap<_, _>>();
+    let positions = parsed
+        .iter()
+        .enumerate()
+        .map(|(i, cell)| (cell.id.as_str(), i))
+        .collect::<HashMap<_, _>>();
+    let mut ordered = Vec::with_capacity(parsed.len());
     for cell in &parsed {
-        let Some(parent) = cell.parent.as_deref() else {
-            return Err(DrawioWireError::Unsupported(
-                "graph cell is missing a layer parent",
-            ));
-        };
-        if !layer_id_by_source.contains_key(parent) {
-            return Err(DrawioWireError::Unsupported(
-                "cell parent is not a direct layer",
-            ));
-        }
+        let ancestry = resolve_cell_ancestry(cell, &indexed, &layer_id_by_source)
+            .map_err(|error| cell_error(&cell.id, error))?;
+        let mut order = ancestry
+            .frames
+            .iter()
+            .map(|frame| positions[frame.id.as_str()])
+            .collect::<Vec<_>>();
+        order.push(positions[cell.id.as_str()]);
+        ordered.push((order, cell, ancestry));
     }
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut scene = VisualScene {
         layers,
@@ -557,24 +559,97 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
     let mut source_transforms = HashMap::<String, VisualTransform>::new();
     let mut pending = Vec::<PendingVisualObject>::new();
 
-    for cell in &parsed {
-        let layer_source = cell.parent.as_deref().ok_or(DrawioWireError::Unsupported(
-            "graph cell is missing a layer parent",
-        ))?;
-        let layer_id =
-            *layer_id_by_source
-                .get(layer_source)
-                .ok_or(DrawioWireError::Unsupported(
-                    "cell parent is not a direct layer",
-                ))?;
-        let style = parse_cell_style(&cell.style, cell.kind, &cell.value)?;
+    for (_, cell, ancestry) in ordered {
+        let layer_id = ancestry.layer;
+        let style = parse_cell_style(&cell.style, cell.kind, &cell.value)
+            .map_err(|error| cell_error(&cell.id, error))?;
         match cell.kind {
             ParsedCellKind::Vertex => {
-                let transform = parse_vertex_transform(cell.node, style.rotation)?;
+                let transform = world_transform(cell.node, style.rotation, &ancestry)
+                    .map_err(|error| cell_error(&cell.id, error))?;
                 let shape = style
                     .shape
                     .ok_or(DrawioWireError::Unsupported("missing vertex shape"))?;
-                if shape == VertexShape::Text {
+                if matches!(
+                    shape,
+                    VertexShape::Group
+                        | VertexShape::Container
+                        | VertexShape::SwimlaneHorizontal
+                        | VertexShape::SwimlaneVertical
+                ) {
+                    if shape != VertexShape::Group {
+                        let vertical = shape == VertexShape::SwimlaneVertical;
+                        let extent = if vertical {
+                            (transform.width * 0.22).min(28.0)
+                        } else {
+                            (transform.height * 0.28).min(28.0)
+                        };
+                        let start = parse_number(
+                            cell.style.get("startSize").map(String::as_str),
+                            40.0,
+                            "startSize",
+                        )?;
+                        if (start - extent).abs() > 1.0e-6
+                            || cell
+                                .style
+                                .get("swimlaneFillColor")
+                                .is_some_and(|color| color != "none")
+                            || style.font_color != style.visual_style.border
+                        {
+                            return Err(cell_error(
+                                &cell.id,
+                                DrawioWireError::Unsupported(
+                                    "swimlane appearance is not representable",
+                                ),
+                            ));
+                        }
+                    }
+                    let id = allocate_object_id(&mut next_object_id)?;
+                    if let Some(parent) = ancestry.frames.last() {
+                        scene
+                            .parent_by_child
+                            .insert(id, source_object_ids[&parent.id]);
+                    }
+                    source_object_ids.insert(cell.id.clone(), id);
+                    source_transforms.insert(cell.id.clone(), transform);
+                    let kind = match shape {
+                        VertexShape::Group => VisualObjectKind::Container {
+                            label: String::new(),
+                        },
+                        VertexShape::Container => VisualObjectKind::Container {
+                            label: cell.value.clone(),
+                        },
+                        VertexShape::SwimlaneHorizontal => VisualObjectKind::Swimlane {
+                            orientation: VisualSwimlaneOrientation::Horizontal,
+                            label: cell.value.clone(),
+                        },
+                        VertexShape::SwimlaneVertical => VisualObjectKind::Swimlane {
+                            orientation: VisualSwimlaneOrientation::Vertical,
+                            label: cell.value.clone(),
+                        },
+                        _ => unreachable!(),
+                    };
+                    pending.push(PendingVisualObject::Ready(VisualObject {
+                        id,
+                        layer_id,
+                        transform,
+                        style: style.visual_style.clone(),
+                        kind,
+                    }));
+                    if shape == VertexShape::Group && !cell.value.is_empty() {
+                        let label_id = allocate_object_id(&mut next_object_id)?;
+                        scene.parent_by_child.insert(label_id, id);
+                        pending.push(PendingVisualObject::Ready(VisualObject {
+                            id: label_id,
+                            layer_id,
+                            transform,
+                            style: style.text_style(),
+                            kind: VisualObjectKind::Text {
+                                text: cell.value.clone(),
+                            },
+                        }));
+                    }
+                } else if shape == VertexShape::Text {
                     let id = allocate_object_id(&mut next_object_id)?;
                     let object = VisualObject {
                         id,
@@ -586,6 +661,11 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                         },
                     };
                     source_object_ids.insert(cell.id.clone(), id);
+                    if let Some(parent) = ancestry.frames.last() {
+                        scene
+                            .parent_by_child
+                            .insert(id, source_object_ids[&parent.id]);
+                    }
                     source_transforms.insert(cell.id.clone(), transform);
                     pending.push(PendingVisualObject::Ready(object));
                 } else {
@@ -602,11 +682,21 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
                         },
                     };
                     source_object_ids.insert(cell.id.clone(), shape_id);
+                    if let Some(parent) = ancestry.frames.last() {
+                        scene
+                            .parent_by_child
+                            .insert(shape_id, source_object_ids[&parent.id]);
+                    }
                     source_transforms.insert(cell.id.clone(), transform);
                     pending.push(PendingVisualObject::Ready(primitive));
                     if !cell.value.is_empty() {
                         report.add(Some(&cell.id), "vertex-label-split-to-text");
                         let label_id = allocate_object_id(&mut next_object_id)?;
+                        if let Some(parent) = ancestry.frames.last() {
+                            scene
+                                .parent_by_child
+                                .insert(label_id, source_object_ids[&parent.id]);
+                        }
                         let label = VisualObject {
                             id: label_id,
                             layer_id,
@@ -622,6 +712,32 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
             }
             ParsedCellKind::Edge => {
                 let connector_id = allocate_object_id(&mut next_object_id)?;
+                if let (Some(source), Some(target)) = (
+                    cell.node.attr("source").and_then(|id| indexed.get(id)),
+                    cell.node.attr("target").and_then(|id| indexed.get(id)),
+                ) {
+                    let source_owner = resolve_cell_ancestry(source, &indexed, &layer_id_by_source)
+                        .map_err(|error| cell_error(&cell.id, error))?;
+                    let target_owner = resolve_cell_ancestry(target, &indexed, &layer_id_by_source)
+                        .map_err(|error| cell_error(&cell.id, error))?;
+                    if source_owner.layer != layer_id || target_owner.layer != layer_id {
+                        return Err(cell_error(
+                            &cell.id,
+                            DrawioWireError::Unsupported("cross-layer connector"),
+                        ));
+                    }
+                    let common = source_owner
+                        .frames
+                        .iter()
+                        .zip(&target_owner.frames)
+                        .take_while(|(left, right)| left.id == right.id)
+                        .last()
+                        .map(|(frame, _)| frame.id.as_str());
+                    let supplied = ancestry.frames.last().map(|frame| frame.id.as_str());
+                    if supplied != common {
+                        report.add(Some(&cell.id), "edge-routing-parent-normalized");
+                    }
+                }
                 if style.source_anchor.is_none() {
                     report.add(Some(&cell.id), "source-anchor-inferred");
                 }
@@ -689,6 +805,102 @@ struct ParsedCell<'a> {
     node: &'a XmlNode,
 }
 
+fn cell_error(id: &str, error: DrawioWireError) -> DrawioWireError {
+    if let DrawioWireError::Unsupported(property) = error {
+        let mut report = DrawioReport::default();
+        report.add(Some(id), property);
+        DrawioWireError::UnsupportedContent(report)
+    } else {
+        error
+    }
+}
+
+/// A cell's containing layer and its frame ancestors, ordered outermost first.
+/// Resolving the complete index before constructing objects makes XML order
+/// independent of ancestry while keeping malformed graphs bounded.
+struct CellAncestry<'a> {
+    layer: VisualLayerId,
+    frames: Vec<&'a ParsedCell<'a>>,
+}
+
+fn resolve_cell_ancestry<'a>(
+    cell: &'a ParsedCell<'a>,
+    cells: &HashMap<&str, &'a ParsedCell<'a>>,
+    layers: &HashMap<String, VisualLayerId>,
+) -> Result<CellAncestry<'a>, DrawioWireError> {
+    let mut cursor = cell.parent.as_deref().ok_or(DrawioWireError::Unsupported(
+        "graph cell is missing a parent",
+    ))?;
+    let mut visited = HashSet::new();
+    visited.insert(cell.id.as_str());
+    let mut frames = Vec::new();
+    loop {
+        if let Some(layer) = layers.get(cursor) {
+            frames.reverse();
+            return Ok(CellAncestry {
+                layer: *layer,
+                frames,
+            });
+        }
+        if !visited.insert(cursor) {
+            return Err(DrawioWireError::Unsupported("cyclic cell hierarchy"));
+        }
+        if frames.len() >= MAX_VISUAL_CONTAINMENT_DEPTH {
+            return Err(DrawioWireError::LimitExceeded("cell hierarchy depth"));
+        }
+        let frame = cells
+            .get(cursor)
+            .copied()
+            .ok_or(DrawioWireError::Unsupported("missing cell parent"))?;
+        if frame.kind != ParsedCellKind::Vertex
+            || !matches!(
+                frame.style.get("shape").map(String::as_str),
+                Some("group" | "swimlane")
+            )
+        {
+            return Err(DrawioWireError::Unsupported(
+                "cell parent is not a supported frame",
+            ));
+        }
+        let rotation = parse_number(
+            frame.style.get("rotation").map(String::as_str),
+            0.0,
+            "rotation",
+        )?;
+        if rotation != 0.0 {
+            return Err(DrawioWireError::Unsupported(
+                "rotated parent with descendants",
+            ));
+        }
+        frames.push(frame);
+        cursor = frame
+            .parent
+            .as_deref()
+            .ok_or(DrawioWireError::Unsupported("frame is missing a parent"))?;
+    }
+}
+
+fn world_transform(
+    node: &XmlNode,
+    rotation: f64,
+    ancestry: &CellAncestry<'_>,
+) -> Result<VisualTransform, DrawioWireError> {
+    let mut transform = parse_vertex_transform(node, rotation)?;
+    for frame in &ancestry.frames {
+        let parent = parse_vertex_transform(frame.node, 0.0)?;
+        transform.x += parent.x - parent.width / 2.0;
+        transform.y += parent.y - parent.height / 2.0;
+    }
+    if !transform.x.is_finite()
+        || !transform.y.is_finite()
+        || transform.x.abs() > MAX_VISUAL_COORDINATE_ABS
+        || transform.y.abs() > MAX_VISUAL_COORDINATE_ABS
+    {
+        return Err(DrawioWireError::LimitExceeded("visual geometry"));
+    }
+    Ok(transform)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VertexShape {
     Rectangle,
@@ -696,6 +908,10 @@ enum VertexShape {
     Diamond,
     Ellipse,
     Text,
+    Group,
+    Container,
+    SwimlaneHorizontal,
+    SwimlaneVertical,
 }
 
 impl VertexShape {
@@ -705,7 +921,11 @@ impl VertexShape {
             Self::RoundRect => Some(VisualPrimitiveShape::RoundRect),
             Self::Diamond => Some(VisualPrimitiveShape::Diamond),
             Self::Ellipse => Some(VisualPrimitiveShape::Ellipse),
-            Self::Text => None,
+            Self::Text
+            | Self::Group
+            | Self::Container
+            | Self::SwimlaneHorizontal
+            | Self::SwimlaneVertical => None,
         }
     }
 }
@@ -900,8 +1120,10 @@ fn parse_style_text(value: Option<&str>) -> Result<HashMap<String, String>, Draw
     }
     let mut style = HashMap::new();
     for item in value.split(';').filter(|item| !item.is_empty()) {
-        let Some((key, value)) = item.split_once('=') else {
-            return Err(DrawioWireError::Unsupported("unrecognized style token"));
+        let (key, value) = match item.split_once('=') {
+            Some(pair) => pair,
+            None if item == "group" || item == "swimlane" => ("shape", item),
+            None => return Err(DrawioWireError::Unsupported("unrecognized style token")),
         };
         if key.is_empty() || key.len() > MAX_DRAWIO_ATTRIBUTE_NAME_BYTES {
             return Err(DrawioWireError::LimitExceeded("style-key-bytes"));
@@ -939,7 +1161,15 @@ fn parse_cell_style(
         "align",
         "verticalAlign",
     ];
-    const VERTEX: &[&str] = &["shape", "rounded", "rotation"];
+    const VERTEX: &[&str] = &[
+        "shape",
+        "rounded",
+        "rotation",
+        "horizontal",
+        "startSize",
+        "swimlaneFillColor",
+        "mlFrame",
+    ];
     const EDGE: &[&str] = &[
         "rounded",
         "edgeStyle",
@@ -1004,6 +1234,17 @@ fn parse_cell_style(
         visual_style.border_width,
         "stroke width",
     )?;
+    if values.get("shape").is_some_and(|shape| shape == "group") {
+        if !values.contains_key("fillColor") {
+            visual_style.fill.alpha = 0;
+        }
+        if !values.contains_key("strokeColor") {
+            visual_style.border.alpha = 0;
+        }
+        if !values.contains_key("strokeWidth") {
+            visual_style.border_width = 0.0;
+        }
+    }
     visual_style.line_style = match values.get("dashed").map(String::as_str) {
         None | Some("0") => VisualLineStyle::Solid,
         Some("1") => match values.get("dashPattern").map(String::as_str) {
@@ -1057,8 +1298,44 @@ fn parse_cell_style(
                 "ellipse" if rounded.is_none_or(|value| value == "0") => VertexShape::Ellipse,
                 "rhombus" if rounded.is_none_or(|value| value == "0") => VertexShape::Diamond,
                 "text" if rounded.is_none_or(|value| value == "0") => VertexShape::Text,
+                "group" if rounded.is_none_or(|value| value == "0") => VertexShape::Group,
+                "swimlane" if rounded.is_none_or(|value| value == "0") => match (
+                    values.get("horizontal").map(String::as_str),
+                    values.get("mlFrame").map(String::as_str),
+                ) {
+                    (None | Some("1"), Some("container")) => VertexShape::Container,
+                    (None | Some("1"), None) => VertexShape::SwimlaneHorizontal,
+                    (Some("0"), None) => VertexShape::SwimlaneVertical,
+                    (None | Some("0" | "1"), Some(_)) => {
+                        return Err(DrawioWireError::Unsupported("invalid frame marker"));
+                    }
+                    _ => return Err(DrawioWireError::Unsupported("invalid swimlane orientation")),
+                },
                 _ => return Err(DrawioWireError::Unsupported("unsupported vertex geometry")),
             };
+            if shape == VertexShape::Group
+                && (visual_style.fill.alpha != 0
+                    || visual_style.border.alpha != 0
+                    || visual_style.border_width != 0.0)
+            {
+                return Err(DrawioWireError::Unsupported(
+                    "group must be visually transparent",
+                ));
+            }
+            if !matches!(
+                shape,
+                VertexShape::Container
+                    | VertexShape::SwimlaneHorizontal
+                    | VertexShape::SwimlaneVertical
+            ) && (values.contains_key("horizontal")
+                || values.contains_key("startSize")
+                || values.contains_key("swimlaneFillColor")
+                || values.contains_key("mlFrame"))
+            {
+                return Err(DrawioWireError::Unsupported(
+                    "swimlane style on non-swimlane",
+                ));
+            }
             if shape == VertexShape::Text
                 && (values.get("fillColor").is_some_and(|value| value != "none")
                     || values
@@ -1332,8 +1609,8 @@ fn parse_vertex_transform(
     let center_y = y + height / 2.0;
     if !center_x.is_finite()
         || !center_y.is_finite()
-        || center_x.abs() > MAX_VISUAL_COORDINATE_ABS
-        || center_y.abs() > MAX_VISUAL_COORDINATE_ABS
+        || center_x.abs() > 2.0 * MAX_VISUAL_COORDINATE_ABS + MAX_VISUAL_DIMENSION
+        || center_y.abs() > 2.0 * MAX_VISUAL_COORDINATE_ABS + MAX_VISUAL_DIMENSION
         || !(MIN_VISUAL_DIMENSION..=MAX_VISUAL_DIMENSION).contains(&width)
         || !(MIN_VISUAL_DIMENSION..=MAX_VISUAL_DIMENSION).contains(&height)
         || !rotation.is_finite()
@@ -1481,8 +1758,98 @@ pub(crate) fn export_drawio_scene(
         bytes: Vec::new(),
         report: DrawioReport::default(),
     };
-    if !scene.parent_by_child.is_empty() {
-        result.report.add(None, "frame-membership-not-exported");
+    let objects = scene
+        .objects
+        .iter()
+        .map(|object| (object.id, object))
+        .collect::<HashMap<_, _>>();
+    let mut parents = HashMap::<VisualObjectId, Option<VisualObjectId>>::new();
+    for object in &scene.objects {
+        let parent = if let VisualObjectKind::Connector { connector } = &object.kind {
+            let from = objects.get(&connector.from.object_id);
+            let to = objects.get(&connector.to.object_id);
+            if from.is_none_or(|item| item.layer_id != object.layer_id)
+                || to.is_none_or(|item| item.layer_id != object.layer_id)
+            {
+                result
+                    .report
+                    .add(Some(&object_wire_id(object.id)), "cross-layer-connector");
+                None
+            } else {
+                let mut from_ancestors = HashSet::new();
+                let mut cursor = scene
+                    .parent_by_child
+                    .get(&connector.from.object_id)
+                    .copied();
+                while let Some(id) = cursor {
+                    from_ancestors.insert(id);
+                    cursor = scene.parent_by_child.get(&id).copied();
+                }
+                let mut cursor = scene.parent_by_child.get(&connector.to.object_id).copied();
+                while cursor.is_some_and(|id| !from_ancestors.contains(&id)) {
+                    cursor = cursor.and_then(|id| scene.parent_by_child.get(&id).copied());
+                }
+                cursor
+            }
+        } else {
+            scene.parent_by_child.get(&object.id).copied()
+        };
+        if let Some(parent_id) = parent {
+            let parent_object = objects[&parent_id];
+            if parent_object.layer_id != object.layer_id {
+                result
+                    .report
+                    .add(Some(&object_wire_id(object.id)), "cross-layer-membership");
+            }
+            if parent_object.transform.rotation_degrees != 0.0 {
+                result.report.add(
+                    Some(&object_wire_id(parent_id)),
+                    "rotated-parent-with-descendants",
+                );
+            }
+        }
+        parents.insert(object.id, parent);
+    }
+    // A tree can encode only contiguous frame subtrees in each layer's paint order.
+    let mut active = HashMap::<VisualLayerId, Vec<VisualObjectId>>::new();
+    let mut closed = HashSet::<VisualObjectId>::new();
+    let mut seen = HashSet::<VisualObjectId>::new();
+    for object in &scene.objects {
+        if is_inert_title(object) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut cursor = parents[&object.id];
+        while let Some(id) = cursor {
+            path.push(id);
+            cursor = scene.parent_by_child.get(&id).copied();
+        }
+        path.reverse();
+        if path
+            .iter()
+            .any(|id| !seen.contains(id) || closed.contains(id))
+        {
+            result
+                .report
+                .add(Some(&object_wire_id(object.id)), "interleaved-frame-stack");
+        }
+        let layer_path = active.entry(object.layer_id).or_default();
+        let common = layer_path
+            .iter()
+            .zip(&path)
+            .take_while(|(a, b)| a == b)
+            .count();
+        for id in layer_path.drain(common..) {
+            closed.insert(id);
+        }
+        layer_path.extend(path.iter().skip(common).copied());
+        if matches!(
+            object.kind,
+            VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. }
+        ) {
+            layer_path.push(object.id);
+        }
+        seen.insert(object.id);
     }
     let exportable_vertices = scene
         .objects
@@ -1522,10 +1889,26 @@ pub(crate) fn export_drawio_scene(
                     );
                     continue;
                 };
-                write_vertex(&mut writer, object, shape, None, &mut result.report)?;
+                write_vertex(
+                    &mut writer,
+                    object,
+                    shape,
+                    None,
+                    parents[&object.id],
+                    &objects,
+                    &mut result.report,
+                )?;
             }
             VisualObjectKind::Text { text } => {
-                write_vertex(&mut writer, object, "text", Some(text), &mut result.report)?;
+                write_vertex(
+                    &mut writer,
+                    object,
+                    "text",
+                    Some(text),
+                    parents[&object.id],
+                    &objects,
+                    &mut result.report,
+                )?;
             }
             VisualObjectKind::Connector { connector } => {
                 if !exportable_vertices.contains(&connector.from.object_id)
@@ -1537,7 +1920,13 @@ pub(crate) fn export_drawio_scene(
                     );
                     continue;
                 }
-                write_connector(&mut writer, object, connector, &mut result.report)?;
+                write_connector(
+                    &mut writer,
+                    object,
+                    connector,
+                    parents[&object.id],
+                    &mut result.report,
+                )?;
             }
             VisualObjectKind::PresetInstance { .. } => {
                 result.report.add(
@@ -1551,10 +1940,27 @@ pub(crate) fn export_drawio_scene(
                     "image-reference-not-exported",
                 );
             }
-            VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. } => {
-                result
-                    .report
-                    .add(Some(&object_wire_id(object.id)), "frame-not-exported");
+            VisualObjectKind::Container { label } | VisualObjectKind::Swimlane { label, .. } => {
+                let invisible = matches!(object.kind, VisualObjectKind::Container { .. })
+                    && label.is_empty()
+                    && object.style.fill.alpha == 0
+                    && object.style.border.alpha == 0
+                    && object.style.border_width == 0.0;
+                if !invisible && object.style.border.alpha != 255 {
+                    result.report.add(
+                        Some(&object_wire_id(object.id)),
+                        "frame-border-alpha-not-representable",
+                    );
+                }
+                write_vertex(
+                    &mut writer,
+                    object,
+                    if invisible { "group" } else { "swimlane" },
+                    Some(label),
+                    parents[&object.id],
+                    &objects,
+                    &mut result.report,
+                )?;
             }
         }
     }
@@ -1575,11 +1981,11 @@ fn is_exportable_vertex(object: &VisualObject) -> bool {
     }
     match &object.kind {
         VisualObjectKind::Primitive { shape } => primitive_to_wire(*shape).is_some(),
-        VisualObjectKind::Text { .. } => true,
+        VisualObjectKind::Text { .. }
+        | VisualObjectKind::Container { .. }
+        | VisualObjectKind::Swimlane { .. } => true,
         VisualObjectKind::PresetInstance { .. }
         | VisualObjectKind::ImageReference { .. }
-        | VisualObjectKind::Container { .. }
-        | VisualObjectKind::Swimlane { .. }
         | VisualObjectKind::Connector { .. } => false,
     }
 }
@@ -1630,6 +2036,8 @@ fn write_vertex(
     object: &VisualObject,
     shape: &str,
     text: Option<&str>,
+    parent: Option<VisualObjectId>,
+    objects: &HashMap<VisualObjectId, &VisualObject>,
     report: &mut DrawioReport,
 ) -> Result<(), DrawioWireError> {
     writer.push("<mxCell id=\"")?;
@@ -1639,13 +2047,45 @@ fn write_vertex(
         writer.push_attribute(text)?;
     }
     writer.push("\" style=\"")?;
-    writer.push_attribute(&vertex_style(object, shape, text.is_some(), report)?)?;
+    let mut style = vertex_style(object, shape, shape == "text", report)?;
+    if shape == "swimlane" {
+        let vertical = matches!(
+            object.kind,
+            VisualObjectKind::Swimlane {
+                orientation: VisualSwimlaneOrientation::Vertical,
+                ..
+            }
+        );
+        let extent = if vertical {
+            (object.transform.width * 0.22).min(28.0)
+        } else {
+            (object.transform.height * 0.28).min(28.0)
+        };
+        style.push_str(&format!(
+            "horizontal={};startSize={extent};swimlaneFillColor=none;",
+            if vertical { 0 } else { 1 }
+        ));
+        if matches!(object.kind, VisualObjectKind::Container { .. }) {
+            style.push_str("mlFrame=container;");
+        }
+    }
+    writer.push_attribute(&style)?;
     writer.push("\" vertex=\"1\" parent=\"")?;
-    writer.push(&layer_wire_id(object.layer_id))?;
+    writer.push(
+        &parent
+            .map(object_wire_id)
+            .unwrap_or_else(|| layer_wire_id(object.layer_id)),
+    )?;
+    let (origin_x, origin_y) = parent
+        .map(|id| {
+            let frame = objects[&id].transform;
+            (frame.x - frame.width / 2.0, frame.y - frame.height / 2.0)
+        })
+        .unwrap_or((0.0, 0.0));
     writer.push("\"><mxGeometry x=\"")?;
-    writer.push_number(object.transform.x - object.transform.width / 2.0)?;
+    writer.push_number(object.transform.x - object.transform.width / 2.0 - origin_x)?;
     writer.push("\" y=\"")?;
-    writer.push_number(object.transform.y - object.transform.height / 2.0)?;
+    writer.push_number(object.transform.y - object.transform.height / 2.0 - origin_y)?;
     writer.push("\" width=\"")?;
     writer.push_number(object.transform.width)?;
     writer.push("\" height=\"")?;
@@ -1758,6 +2198,7 @@ fn write_connector(
     writer: &mut BoundedXmlWriter,
     object: &VisualObject,
     connector: &VisualConnector,
+    parent: Option<VisualObjectId>,
     report: &mut DrawioReport,
 ) -> Result<(), DrawioWireError> {
     writer.push("<mxCell id=\"")?;
@@ -1767,7 +2208,11 @@ fn write_connector(
     writer.push("\" style=\"")?;
     writer.push_attribute(&connector_style(object, connector, report)?)?;
     writer.push("\" edge=\"1\" parent=\"")?;
-    writer.push(&layer_wire_id(object.layer_id))?;
+    writer.push(
+        &parent
+            .map(object_wire_id)
+            .unwrap_or_else(|| layer_wire_id(object.layer_id)),
+    )?;
     writer.push("\" source=\"")?;
     writer.push(&object_wire_id(connector.from.object_id))?;
     writer.push("\" target=\"")?;
@@ -2158,6 +2603,297 @@ mod tests {
         import_drawio_xml(xml.as_bytes())
     }
 
+    #[test]
+    fn diagram_drawio_wire_nested_group_import_resolves_parent_local_geometry() {
+        // Child before parent is legal: cell order must not determine ancestry.
+        let result = import_minimal(r#"
+<mxCell id="leaf" vertex="1" parent="lane" style="shape=rectangle;"><mxGeometry x="5" y="7" width="20" height="20" as="geometry"/></mxCell>
+<mxCell id="lane" vertex="1" parent="group" style="swimlane;startSize=28;swimlaneFillColor=none;fontColor=#000000;strokeColor=#000000;"><mxGeometry x="10" y="20" width="200" height="100" as="geometry"/></mxCell>
+<mxCell id="group" value="Group title" vertex="1" parent="layer" style="group;"><mxGeometry x="100" y="200" width="300" height="200" as="geometry"/></mxCell>
+"#).unwrap();
+        let scene = result.document.scene();
+        let group = scene
+            .objects
+            .iter()
+            .find(|object| matches!(object.kind, VisualObjectKind::Container { .. }))
+            .unwrap();
+        let lane = scene
+            .objects
+            .iter()
+            .find(|object| matches!(object.kind, VisualObjectKind::Swimlane { .. }))
+            .unwrap();
+        let leaf = scene
+            .objects
+            .iter()
+            .find(|object| matches!(object.kind, VisualObjectKind::Primitive { .. }))
+            .unwrap();
+        assert_eq!(scene.parent_by_child.get(&lane.id), Some(&group.id));
+        assert_eq!(scene.parent_by_child.get(&leaf.id), Some(&lane.id));
+        assert_eq!((leaf.transform.x, leaf.transform.y), (125.0, 237.0));
+        assert_eq!(group.style.fill.alpha, 0);
+        assert_eq!(group.style.border_width, 0.0);
+        let label = scene.objects.iter().find(|object| matches!(&object.kind, VisualObjectKind::Text { text } if text == "Group title")).unwrap();
+        assert_eq!(scene.parent_by_child.get(&label.id), Some(&group.id));
+    }
+
+    #[test]
+    fn diagram_drawio_wire_hierarchy_rejects_cycles_missing_parents_and_depth() {
+        let cell = |id: &str, parent: &str| {
+            format!(
+                "<mxCell id=\"{id}\" parent=\"{parent}\" vertex=\"1\" style=\"group;\"><mxGeometry x=\"0\" y=\"0\" width=\"20\" height=\"20\" as=\"geometry\"/></mxCell>"
+            )
+        };
+        assert!(
+            matches!(import_minimal(&(cell("a", "b") + &cell("b", "a"))), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.source_id.as_deref() == Some("a") && issue.property == "cyclic cell hierarchy"))
+        );
+        assert!(
+            matches!(import_minimal(&cell("a", "missing")), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.source_id.as_deref() == Some("a") && issue.property == "missing cell parent"))
+        );
+        let mut deep = cell("g0", "layer");
+        for i in 1..=MAX_VISUAL_CONTAINMENT_DEPTH + 1 {
+            deep.push_str(&cell(&format!("g{i}"), &format!("g{}", i - 1)));
+        }
+        assert!(matches!(
+            import_minimal(&deep),
+            Err(DrawioWireError::LimitExceeded("cell hierarchy depth"))
+        ));
+    }
+
+    #[test]
+    fn diagram_drawio_wire_grouped_export_reimport_preserves_supported_scene() {
+        let original = import_minimal(r#"
+<mxCell id="group" vertex="1" parent="layer" style="group;"><mxGeometry x="100" y="200" width="300" height="200" as="geometry"/></mxCell>
+<mxCell id="lane" vertex="1" parent="group" style="swimlane;horizontal=0;startSize=28;swimlaneFillColor=none;fontColor=#000000;strokeColor=#000000;"><mxGeometry x="10" y="20" width="200" height="100" as="geometry"/></mxCell>
+<mxCell id="leaf" vertex="1" parent="lane" style="shape=rectangle;"><mxGeometry x="5" y="7" width="20" height="20" as="geometry"/></mxCell>
+<mxCell id="other" vertex="1" parent="group" style="shape=ellipse;"><mxGeometry x="50" y="27" width="20" height="20" as="geometry"/></mxCell>
+<mxCell id="edge" edge="1" parent="lane" source="leaf" target="other" style="exitX=1;exitY=0.5;entryX=0;entryY=0.5;"><mxGeometry relative="1" as="geometry"/></mxCell>
+"#).unwrap();
+        assert!(
+            original
+                .report
+                .issues
+                .iter()
+                .any(|issue| issue.source_id.as_deref() == Some("edge")
+                    && issue.property == "edge-routing-parent-normalized")
+        );
+        let wire = export_drawio_xml(&original.document).unwrap();
+        let reopened = import_drawio_xml(&wire.bytes).unwrap();
+        assert!(
+            !reopened
+                .report
+                .issues
+                .iter()
+                .any(|issue| issue.property == "edge-routing-parent-normalized")
+        );
+        let scene = reopened.document.scene();
+        let lane = scene
+            .objects
+            .iter()
+            .find(|object| {
+                matches!(
+                    object.kind,
+                    VisualObjectKind::Swimlane {
+                        orientation: VisualSwimlaneOrientation::Vertical,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let leaf = scene
+            .objects
+            .iter()
+            .find(|object| matches!(object.kind, VisualObjectKind::Primitive { .. }))
+            .unwrap();
+        assert_eq!(scene.parent_by_child.get(&leaf.id), Some(&lane.id));
+        assert_eq!((leaf.transform.x, leaf.transform.y), (125.0, 237.0));
+        assert_eq!(scene.parent_by_child.len(), 3);
+        let connector = scene
+            .objects
+            .iter()
+            .find_map(|object| match &object.kind {
+                VisualObjectKind::Connector { connector } => Some(connector),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(connector.from.object_id, leaf.id);
+        assert_eq!(connector.from.anchor, VisualAnchor::East);
+        assert_eq!(connector.to.anchor, VisualAnchor::West);
+
+        let sample = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/plans/execution/standalone/desktop-productivity-completion-recovery/fixtures/diagram-grouped-supported.drawio"
+        ));
+        let imported_sample = import_drawio_xml(sample).expect("portable sample imports");
+        let sample_wire = export_drawio_xml(&imported_sample.document).expect("sample exports");
+        let reopened_sample = import_drawio_xml(&sample_wire.bytes).expect("sample reimports");
+        for document in [&imported_sample.document, &reopened_sample.document] {
+            let scene = document.scene();
+            let group = scene.objects.iter().find(|object| matches!(&object.kind, VisualObjectKind::Container { label } if label.is_empty())).expect("transparent group");
+            let lane = scene.objects.iter().find(|object| matches!(&object.kind, VisualObjectKind::Swimlane { orientation: VisualSwimlaneOrientation::Horizontal, label } if label == "Workflow")).expect("horizontal lane");
+            assert_eq!(scene.parent_by_child.get(&lane.id), Some(&group.id));
+            let start = scene
+                .objects
+                .iter()
+                .find(|object| {
+                    matches!(
+                        object.kind,
+                        VisualObjectKind::Primitive {
+                            shape: VisualPrimitiveShape::Rectangle
+                        }
+                    )
+                })
+                .expect("start shape");
+            let finish = scene
+                .objects
+                .iter()
+                .find(|object| {
+                    matches!(
+                        object.kind,
+                        VisualObjectKind::Primitive {
+                            shape: VisualPrimitiveShape::Ellipse
+                        }
+                    )
+                })
+                .expect("finish shape");
+            assert_eq!(scene.parent_by_child.get(&start.id), Some(&lane.id));
+            assert_eq!(scene.parent_by_child.get(&finish.id), Some(&lane.id));
+            let edge = scene
+                .objects
+                .iter()
+                .find_map(|object| match &object.kind {
+                    VisualObjectKind::Connector { connector } => Some(connector),
+                    _ => None,
+                })
+                .expect("sample connector");
+            assert_eq!(
+                (edge.from.object_id, edge.from.anchor),
+                (start.id, VisualAnchor::East)
+            );
+            assert_eq!(
+                (edge.to.object_id, edge.to.anchor),
+                (finish.id, VisualAnchor::West)
+            );
+            assert_eq!(edge.label, "Next");
+        }
+    }
+
+    #[test]
+    fn diagram_drawio_wire_frame_preflight_refuses_unrepresentable_styles_layers_and_stack() {
+        let mut scene = VisualScene::new("Wire title");
+        let mut frame = primitive(2, VisualPrimitiveShape::Rectangle);
+        frame.kind = VisualObjectKind::Container {
+            label: "Frame".into(),
+        };
+        scene.objects.push(frame.clone());
+        scene
+            .objects
+            .push(primitive(3, VisualPrimitiveShape::Rectangle));
+        scene
+            .objects
+            .push(primitive(4, VisualPrimitiveShape::Rectangle));
+        scene
+            .parent_by_child
+            .insert(VisualObjectId::from_raw(4), frame.id);
+        scene
+            .parent_by_child
+            .insert(VisualObjectId::from_raw(3), frame.id);
+        scene
+            .objects
+            .insert(3, primitive(5, VisualPrimitiveShape::Rectangle));
+        let document = VisualDiagramDocument::from_fresh_scene(scene).unwrap();
+        assert!(
+            matches!(export_drawio_xml(&document), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.property == "interleaved-frame-stack"))
+        );
+
+        let mut cross_layer = VisualScene::new("Wire title");
+        cross_layer.layers.push(VisualLayer {
+            id: VisualLayerId::from_raw(2),
+            name: "Other".into(),
+        });
+        cross_layer.objects.push(frame.clone());
+        let mut child = primitive(3, VisualPrimitiveShape::Rectangle);
+        child.layer_id = VisualLayerId::from_raw(2);
+        cross_layer.objects.push(child);
+        cross_layer
+            .parent_by_child
+            .insert(VisualObjectId::from_raw(3), frame.id);
+        let document = VisualDiagramDocument::from_fresh_scene(cross_layer).unwrap();
+        assert!(
+            matches!(export_drawio_xml(&document), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.property == "cross-layer-membership"))
+        );
+
+        let mut far = VisualScene::new("Wire title");
+        let mut far_frame = frame.clone();
+        far_frame.transform.x = -MAX_VISUAL_COORDINATE_ABS + 100.0;
+        far.objects.push(far_frame);
+        let mut far_child = primitive(3, VisualPrimitiveShape::Rectangle);
+        far_child.transform.x = MAX_VISUAL_COORDINATE_ABS - 100.0;
+        far.objects.push(far_child);
+        far.parent_by_child
+            .insert(VisualObjectId::from_raw(3), frame.id);
+        let document = VisualDiagramDocument::from_fresh_scene(far).unwrap();
+        let reopened = import_drawio_xml(&export_drawio_xml(&document).unwrap().bytes).unwrap();
+        assert!(
+            reopened
+                .document
+                .scene()
+                .objects
+                .iter()
+                .any(
+                    |object| matches!(object.kind, VisualObjectKind::Primitive { .. })
+                        && object.transform.x == MAX_VISUAL_COORDINATE_ABS - 100.0
+                )
+        );
+        let outside = format!(
+            "<mxCell id=\"outside\" vertex=\"1\" parent=\"layer\"><mxGeometry x=\"{}\" y=\"0\" width=\"20\" height=\"20\" as=\"geometry\"/></mxCell>",
+            MAX_VISUAL_COORDINATE_ABS
+        );
+        assert!(matches!(
+            import_minimal(&outside),
+            Err(DrawioWireError::LimitExceeded("visual geometry"))
+        ));
+
+        let mut nested = VisualScene::new("Wire title");
+        let mut outer = frame.clone();
+        outer.transform.x = MAX_VISUAL_COORDINATE_ABS - 50.0;
+        outer.transform.width = 100.0;
+        let mut inner = outer.clone();
+        inner.id = VisualObjectId::from_raw(3);
+        inner.transform.x = 0.0;
+        let mut nested_child = primitive(4, VisualPrimitiveShape::Rectangle);
+        nested_child.transform.x = MAX_VISUAL_COORDINATE_ABS - 100.0;
+        nested.objects.extend([outer, inner, nested_child]);
+        nested
+            .parent_by_child
+            .insert(VisualObjectId::from_raw(3), VisualObjectId::from_raw(2));
+        nested
+            .parent_by_child
+            .insert(VisualObjectId::from_raw(4), VisualObjectId::from_raw(3));
+        let nested = VisualDiagramDocument::from_fresh_scene(nested).unwrap();
+        let reopened = import_drawio_xml(&export_drawio_xml(&nested).unwrap().bytes).unwrap();
+        assert!(
+            reopened
+                .document
+                .scene()
+                .objects
+                .iter()
+                .any(
+                    |object| matches!(object.kind, VisualObjectKind::Primitive { .. })
+                        && object.transform.x == MAX_VISUAL_COORDINATE_ABS - 100.0
+                )
+        );
+
+        let invalid_lane = r#"<mxCell id="bad-lane" parent="layer" vertex="1" style="swimlane;startSize=40;"><mxGeometry x="0" y="0" width="100" height="100" as="geometry"/></mxCell>"#;
+        assert!(
+            matches!(import_minimal(invalid_lane), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.source_id.as_deref() == Some("bad-lane") && issue.property == "swimlane appearance is not representable"))
+        );
+        let invalid_marker = r#"<mxCell id="bad-marker" parent="layer" vertex="1" style="swimlane;horizontal=0;mlFrame=container;startSize=22;swimlaneFillColor=none;strokeColor=#000000;fontColor=#000000;"><mxGeometry x="0" y="0" width="100" height="100" as="geometry"/></mxCell>"#;
+        assert!(import_minimal(&invalid_marker.replace("mlFrame=container;", "")).is_ok());
+        assert!(
+            matches!(import_minimal(invalid_marker), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.source_id.as_deref() == Some("bad-marker") && issue.property == "invalid frame marker"))
+        );
+    }
+
     fn primitive(id: u64, shape: VisualPrimitiveShape) -> VisualObject {
         VisualObject {
             id: VisualObjectId::from_raw(id),
@@ -2474,9 +3210,9 @@ mod tests {
             .parent_by_child
             .insert(VisualObjectId::from_raw(3), VisualObjectId::from_raw(2));
         let grouped = VisualDiagramDocument::from_fresh_scene(grouped_scene).unwrap();
-        assert!(
-            matches!(export_drawio_xml(&grouped), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.property == "frame-membership-not-exported"))
-        );
+        let bytes = export_drawio_xml(&grouped).unwrap().bytes;
+        let reopened = import_drawio_xml(&bytes).unwrap();
+        assert_eq!(reopened.document.scene().parent_by_child.len(), 1);
 
         for delimiter in [";", "="] {
             let mut unsafe_font = primitive(2, VisualPrimitiveShape::Rectangle);
