@@ -4883,6 +4883,7 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
+            Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.root_layer().is_some()
                     || self.xml_toolkit_dialog.needs_viewport_bootstrap()
@@ -5011,7 +5012,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5318,7 +5319,7 @@ impl LauncherApp {
                 self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::TableUtilityDialog => {
-                self.table_utility_dialog.close();
+                self.table_utility_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.table_utility_dialog = false;
             }
             Panel::ImageCompareDialog => {
@@ -5633,7 +5634,7 @@ impl LauncherApp {
                 self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::TableUtilityDialog => {
-                self.table_utility_dialog.close();
+                self.table_utility_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.table_utility_dialog = false;
             }
             Panel::ImageCompareDialog => {
@@ -5847,7 +5848,11 @@ impl LauncherApp {
                     self.xml_toolkit_dialog.open();
                 }
             }
-            Panel::TableUtilityDialog => self.table_utility_dialog.open(),
+            Panel::TableUtilityDialog => {
+                if !self.table_utility_dialog.open {
+                    self.table_utility_dialog.open();
+                }
+            }
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open(),
             Panel::FolderSizeDialog => self.folder_size_dialog.open(),
@@ -5925,6 +5930,8 @@ impl LauncherApp {
         } else if panel == Panel::ClipboardModifyDialog {
             self.ensure_open(panel);
             self.clipboard_modify_host.request_focus();
+        } else if panel == Panel::TableUtilityDialog {
+            self.table_utility_dialog.open();
         } else if panel == Panel::XmlToolkitDialog {
             self.xml_toolkit_dialog.open();
         } else if panel == Panel::RegexTesterDialog {

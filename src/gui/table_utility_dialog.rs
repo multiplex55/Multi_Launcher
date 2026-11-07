@@ -53,8 +53,67 @@ enum SaveOutcome {
     OverwriteRequired,
 }
 
+enum TableHostedAction {
+    Paste,
+    OpenFile(bool),
+    SaveJson,
+    Delimiter(DelimiterChoice),
+    Header(bool),
+    ParseOptions(crate::table_utility::TableParseOptions),
+    Parse,
+    Source(String),
+    Filter(String),
+    Sort(Option<TableSort>),
+    Column(usize, bool),
+    Row(crate::table_utility::TableRowId, bool),
+    FileRow(crate::table_utility::TableFileRowId, bool),
+    Page(u64),
+    Export(TableExportKind, ExportAction, bool),
+    Previous(TableDelimiter, bool),
+    Overwrite(bool),
+    Close,
+    CopyText(String),
+}
+
+fn table_utility_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("table_utility_viewport")
+}
+#[derive(Clone)]
+struct TableHostDraft {
+    source: String,
+    source_revision: Option<u64>,
+    filter: String,
+    shape: TableJsonShape,
+    headers: bool,
+    status: Option<String>,
+}
+struct TableHostFrame {
+    root: super::utility_host::ViewportPassProvenance,
+    owner: super::utility_host::ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    lifetime: crate::table_utility_session::TableSessionLifetime,
+    source: crate::table_utility_session::TableSourceRevision,
+    view: crate::table_utility_session::TableViewRevision,
+    selection: crate::table_utility_session::TableSelectionRevision,
+    draft: TableHostDraft,
+    actions: Vec<TableHostedAction>,
+    request: Option<super::utility_host::UtilityPresentation>,
+    native_info: Option<egui::ViewportInfo>,
+    overwrite_id: Option<egui::Id>,
+}
+
 pub struct TableUtilityDialogState {
     pub open: bool,
+    host_state: super::utility_host::UtilityHostState,
+    host_actions: Option<Vec<TableHostedAction>>,
+    host_requested: Option<super::utility_host::UtilityPresentation>,
+    host_pending: Option<TableHostFrame>,
+    host_jump: crate::gui::jump_mode::ui::JumpModeUi,
+    host_jump_frame: Option<u64>,
+    host_focus: bool,
+    host_os_close_pending: bool,
+    #[cfg(test)]
+    test_host_button: Option<(egui::Rect, egui::Rect, bool)>,
     session: TableUtilitySession,
     profile: TableUtilityProfile,
     clipboard: Arc<dyn ClipboardBackend>,
@@ -86,6 +145,10 @@ pub struct TableUtilityDialogState {
     test_results_inner_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_replace_response_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_native_replace_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_delimiter_rects: [Option<egui::Rect>; 2],
     #[cfg(test)]
     test_cancel_overwrite_response_id: Option<egui::Id>,
     #[cfg(test)]
@@ -148,6 +211,16 @@ impl Default for TableUtilityDialogState {
     fn default() -> Self {
         Self {
             open: false,
+            host_state: super::utility_host::UtilityHostState::docked(),
+            host_actions: None,
+            host_requested: None,
+            host_pending: None,
+            host_jump: Default::default(),
+            host_jump_frame: None,
+            host_focus: false,
+            host_os_close_pending: false,
+            #[cfg(test)]
+            test_host_button: None,
             session: TableUtilitySession::new(),
             profile: TableUtilityProfile::Table,
             clipboard: Arc::new(ArboardClipboardBackend),
@@ -179,6 +252,10 @@ impl Default for TableUtilityDialogState {
             test_results_inner_rect: None,
             #[cfg(test)]
             test_replace_response_id: None,
+            #[cfg(test)]
+            test_native_replace_rect: None,
+            #[cfg(test)]
+            test_delimiter_rects: [None; 2],
             #[cfg(test)]
             test_cancel_overwrite_response_id: None,
             #[cfg(test)]
@@ -260,8 +337,11 @@ impl TableUtilityDialogState {
     }
 
     pub fn open(&mut self) {
-        self.open = true;
-        self.pending_overwrite = None;
+        if !self.open {
+            self.open = true;
+            self.host_state = super::utility_host::UtilityHostState::docked();
+        }
+        self.host_focus = true;
     }
 
     pub(crate) fn open_with_profile(&mut self, profile: TableUtilityProfile) {
@@ -295,6 +375,10 @@ impl TableUtilityDialogState {
         self.status = None;
     }
 
+    pub(crate) fn has_pending_overwrite(&self) -> bool {
+        self.open && self.pending_overwrite.is_some()
+    }
+
     pub(crate) fn overwrite_confirmation_layer_is_current(&self, ctx: &egui::Context) -> bool {
         let Some(pending) = self.pending_overwrite.as_ref() else {
             return false;
@@ -306,7 +390,11 @@ impl TableUtilityDialogState {
             return false;
         }
         let layer = overwrite_confirmation_layer_id(&pending.receipt);
-        let parent_layer = crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility.layer_id();
+        let parent_layer = if ctx.viewport_id() == egui::ViewportId::ROOT {
+            crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility.layer_id()
+        } else {
+            Some(egui::LayerId::background())
+        };
         self.session.lifetime() == pending.receipt.lifetime
             && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
             && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focused| {
@@ -319,27 +407,27 @@ impl TableUtilityDialogState {
     pub(crate) fn owned_combo_popup_is_current(&self, ctx: &egui::Context) -> bool {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, focused_response_layer};
 
-        if !self.open
-            || !egui::Popup::is_any_open(ctx)
-            || ctx.viewport_id() != egui::ViewportId::ROOT
-        {
+        if !self.open || !egui::Popup::is_any_open(ctx) {
             return false;
         }
+        let parent_layer = if ctx.viewport_id() == egui::ViewportId::ROOT {
+            NavigationDialogKind::TableUtility
+                .layer_id()
+                .unwrap_or_else(egui::LayerId::background)
+        } else {
+            egui::LayerId::background()
+        };
         let open_anchors = self
             .combo_anchor_ids
             .into_iter()
             .flatten()
             .filter_map(|id| {
                 let response = ctx.read_response(id)?;
-                (response.layer_id == NavigationDialogKind::TableUtility.layer_id()?)
-                    .then_some(response)
+                (response.layer_id == parent_layer).then_some(response)
             })
             .filter(|response| egui::ComboBox::is_open(ctx, response.id))
             .collect::<Vec<_>>();
         let [anchor] = open_anchors.as_slice() else {
-            return false;
-        };
-        let Some(parent_layer) = NavigationDialogKind::TableUtility.layer_id() else {
             return false;
         };
         let popup_id = egui::Popup::default_response_id(anchor);
@@ -362,7 +450,13 @@ impl TableUtilityDialogState {
         let popup_is_sizing = egui::containers::AreaState::load(ctx, popup_id)
             .is_some_and(|state| !state.interactable);
         let popup_is_current = ctx.layer_id_at(rect.center()) == Some(popup_layer);
-        crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(parent_layer)
+        let middle = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+        let parent_is_current = if ctx.viewport_id() == table_utility_viewport_id() {
+            middle.is_none()
+        } else {
+            middle == Some(parent_layer)
+        };
+        parent_is_current
             && rect.is_positive()
             && top_foreground == Some(popup_layer)
             && (popup_is_current || popup_is_sizing)
@@ -390,6 +484,66 @@ impl TableUtilityDialogState {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_set_open_path(&mut self, path: PathBuf) {
+        self.test_open_file_path = Some(path);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_page_controls(
+        &self,
+    ) -> (Option<egui::Rect>, Option<egui::Rect>, Option<egui::Rect>) {
+        let enabled_rect = |response: Option<TestWidgetResponse>| {
+            response
+                .filter(|widget| widget.enabled)
+                .map(|widget| widget.rect)
+        };
+        (
+            enabled_rect(self.test_open_large_response),
+            enabled_rect(self.test_file_page_next_response),
+            enabled_rect(self.test_first_row_select_response),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_snapshot(&self) -> crate::table_utility_session::TableSessionSnapshot {
+        self.session.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_job_counts(&self) -> crate::table_utility_session::TableTestJobCounts {
+        self.session.test_job_counts()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_hold_next_file_page(
+        &self,
+    ) -> crate::table_utility_session::TableTestJobGateHandle {
+        self.session.test_hold_next_file_page()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_native_replace_rect(&self) -> Option<egui::Rect> {
+        self.test_native_replace_rect
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_delimiter_rects(&self) -> [Option<egui::Rect>; 2] {
+        self.test_delimiter_rects
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_overwrite_identity(
+        &self,
+    ) -> Option<(
+        crate::table_utility_session::TableSessionLifetime,
+        crate::table_utility_session::TableExportOperation,
+    )> {
+        self.pending_overwrite
+            .as_ref()
+            .map(|pending| (pending.receipt.lifetime, pending.receipt.operation))
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_results_layout(
         &self,
     ) -> (Option<egui::Id>, egui::Vec2, Option<egui::Rect>, f32) {
@@ -409,6 +563,8 @@ impl TableUtilityDialogState {
     ) -> Result<(), String> {
         self.open();
         self.session.open(ctx)?;
+        self.session
+            .set_delimiter(DelimiterChoice::Explicit(TableDelimiter::Comma));
         self.session.set_has_header(true);
         self.session
             .paste_source("name,value\nalpha,1\n".to_owned())?;
@@ -468,6 +624,31 @@ impl TableUtilityDialogState {
         native_owner_current: bool,
         first_ui_pass: bool,
     ) {
+        self.show_inner(
+            ctx,
+            scope,
+            instance,
+            owner,
+            application_input_allowed,
+            native_owner_current,
+            first_ui_pass,
+            None,
+            None,
+        );
+    }
+
+    fn show_inner(
+        &mut self,
+        ctx: &egui::Context,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        instance: Option<u64>,
+        owner: crate::gui::jump_mode::ui::NavigationOwner,
+        application_input_allowed: bool,
+        native_owner_current: bool,
+        first_ui_pass: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) {
         if !self.open {
             return;
         }
@@ -499,11 +680,13 @@ impl TableUtilityDialogState {
             self.test_rendered_row_range = None;
             self.test_visible_row_count = 0;
         }
-        if let Err(error) = self.session.open(ctx) {
-            self.session_open_error = Some(error);
+        if presentation.is_none() {
+            if let Err(error) = self.session.open(ctx) {
+                self.session_open_error = Some(error);
+            }
+            self.session.poll();
+            self.finish_export_if_ready();
         }
-        self.session.poll();
-        self.finish_export_if_ready();
 
         let snapshot = self.session.snapshot();
         self.sync_editors(&snapshot);
@@ -525,15 +708,24 @@ impl TableUtilityDialogState {
             )
         });
 
-        let parent_layer_current = crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility
-            .layer_id()
-            .is_some_and(|layer| {
-                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
-            });
+        let native_child = child_ui.is_some() && ctx.viewport_id() != egui::ViewportId::ROOT;
+        let parent_layer_current = if native_child {
+            crate::gui::jump_mode::ui::visible_top_middle_layer(ctx).is_none()
+        } else {
+            crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility
+                .layer_id()
+                .is_some_and(|layer| {
+                    crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                })
+        };
         let native_input_owner = native_owner_current && application_input_allowed;
-        let combo_popup_current = native_input_owner && self.owned_combo_popup_is_current(ctx);
-        let main_owner_current =
-            native_input_owner && parent_layer_current && !egui::Popup::is_any_open(ctx);
+        let combo_popup_current = native_input_owner
+            && self.pending_overwrite.is_none()
+            && self.owned_combo_popup_is_current(ctx);
+        let main_owner_current = native_input_owner
+            && parent_layer_current
+            && self.pending_overwrite.is_none()
+            && !egui::Popup::is_any_open(ctx);
         let response_owner_current = main_owner_current || combo_popup_current;
         let mut window_open = self.open;
         let mut visual_order = 0_u64;
@@ -553,86 +745,104 @@ impl TableUtilityDialogState {
             .collapsible(false)
             .resizable(true)
             .min_size((600.0, 420.0));
-        let _response = size_access.show_window(
-            ctx,
-            key,
-            window_id,
-            &mut window_open,
-            egui::vec2(1180.0, 760.0),
-            egui::vec2(600.0, 420.0),
-            window,
-            |ui| {
-                let visible_owner =
-                    response_owner_current && ui.is_visible() && !ui.is_sizing_pass();
-                let main_response_owner = visible_owner && main_owner_current;
-                let combo_response_owner = visible_owner;
-                let main_committing_owner = committing_owner && main_owner_current;
-                let combo_committing_owner = committing_owner && combo_response_owner;
-                ui.add_enabled_ui(visible_owner, |ui| {
-                    if let Some(error) = &self.session_open_error {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
+        let mut draw_body = |ui: &mut egui::Ui| {
+            let visible_owner = response_owner_current && ui.is_visible() && !ui.is_sizing_pass();
+            let main_response_owner = visible_owner && main_owner_current;
+            let combo_response_owner = visible_owner;
+            let main_committing_owner = committing_owner && main_owner_current;
+            let combo_committing_owner = committing_owner && combo_response_owner;
+            ui.add_enabled_ui(visible_owner, |ui| {
+                if let Some(current) = presentation {
+                    let (response, requested) =
+                        super::utility_host::presentation_button(ui, current, visible_owner);
+                    #[cfg(test)]
+                    {
+                        self.test_host_button =
+                            Some((response.rect, ui.clip_rect(), response.enabled()));
                     }
-                    let body_max_height = (ui.available_height() - 96.0).max(80.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("table-utility-body")
-                        .max_height(body_max_height)
-                        .show(ui, |ui| {
-                            self.show_controls(
+                    if response.clicked() && main_committing_owner && !ctx.will_discard() {
+                        self.host_requested = Some(requested);
+                    }
+                }
+                if let Some(error) = &self.session_open_error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                let body_max_height = (ui.available_height() - 96.0).max(80.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("table-utility-body")
+                    .max_height(body_max_height)
+                    .show(ui, |ui| {
+                        self.show_controls(
+                            ui,
+                            &snapshot,
+                            main_response_owner,
+                            main_committing_owner,
+                            combo_response_owner,
+                            combo_committing_owner,
+                            table_scope.as_ref(),
+                            &mut visual_order,
+                        );
+                        ui.separator();
+                        ui.add_enabled_ui(main_response_owner, |ui| {
+                            self.show_source(
                                 ui,
                                 &snapshot,
                                 main_response_owner,
                                 main_committing_owner,
-                                combo_response_owner,
-                                combo_committing_owner,
                                 table_scope.as_ref(),
                                 &mut visual_order,
                             );
                             ui.separator();
-                            ui.add_enabled_ui(main_response_owner, |ui| {
-                                self.show_source(
-                                    ui,
-                                    &snapshot,
-                                    main_response_owner,
-                                    main_committing_owner,
-                                    table_scope.as_ref(),
-                                    &mut visual_order,
-                                );
-                                ui.separator();
-                                self.show_results(
-                                    ui,
-                                    &snapshot,
-                                    main_response_owner,
-                                    main_committing_owner,
-                                    table_scope.as_ref(),
-                                    &mut visual_order,
-                                );
-                            });
+                            self.show_results(
+                                ui,
+                                &snapshot,
+                                main_response_owner,
+                                main_committing_owner,
+                                table_scope.as_ref(),
+                                &mut visual_order,
+                            );
                         });
-                    ui.separator();
-                    self.show_footer(
-                        ui,
-                        &snapshot,
-                        main_response_owner,
-                        main_committing_owner,
-                        combo_response_owner,
-                        combo_committing_owner,
-                        table_scope.as_ref(),
-                        &mut visual_order,
-                        &mut close_requested,
-                    );
-                    if let Some(message) = snapshot.message.as_deref().or(self.status.as_deref()) {
-                        ui.label(message);
-                    }
-                });
-            },
-        );
+                    });
+                ui.separator();
+                self.show_footer(
+                    ui,
+                    &snapshot,
+                    main_response_owner,
+                    main_committing_owner,
+                    combo_response_owner,
+                    combo_committing_owner,
+                    table_scope.as_ref(),
+                    &mut visual_order,
+                    &mut close_requested,
+                );
+                if let Some(message) = snapshot.message.as_deref().or(self.status.as_deref()) {
+                    ui.label(message);
+                }
+            });
+        };
+        if let Some(ui) = child_ui {
+            draw_body(ui);
+        } else {
+            size_access.show_window(
+                ctx,
+                key,
+                window_id,
+                &mut window_open,
+                egui::vec2(1180.0, 760.0),
+                egui::vec2(600.0, 420.0),
+                window,
+                draw_body,
+            );
+        }
 
         if first_ui_pass
             && native_owner_current
             && application_input_allowed
             && (!window_open || close_requested)
         {
-            self.close();
+            if !self.defer_action(TableHostedAction::Close) {
+                self.close();
+            }
         }
         self.show_overwrite_confirmation(ctx, native_input_owner, first_ui_pass);
     }
@@ -652,6 +862,670 @@ impl TableUtilityDialogState {
         }
         if self.filter_editor != self.session.view_options().filter {
             self.filter_editor = self.session.view_options().filter.clone();
+        }
+    }
+
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        if self.host_state.presentation() == super::utility_host::UtilityPresentation::Docked {
+            crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility.layer_id()
+        } else {
+            self.host_state.embedded_root_layer()
+        }
+    }
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        (self.open
+            && (self.host_state.presentation() == super::utility_host::UtilityPresentation::Popout
+                || self.pending_export.is_some()))
+            || self.host_pending.is_some()
+    }
+    pub(crate) fn poll_host_background(&mut self, ctx: &egui::Context) {
+        if self.open {
+            if let Err(error) = self.session.open(ctx) {
+                self.session_open_error = Some(error);
+            }
+        }
+        self.session.poll();
+    }
+    #[cfg(test)]
+    pub(crate) fn test_host_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_host_button
+    }
+    pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        let identity = self.native_identity(self.host_state.identity());
+        if let Some(identity) = identity {
+            super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+        }
+        self.host_pending = None;
+        self.host_os_close_pending = false;
+        self.host_state.retire_to_docked();
+        self.host_jump.cancel_all();
+        self.host_jump_frame = None;
+        self.close();
+    }
+    fn native_identity(
+        &self,
+        host: super::utility_host::HostIdentity,
+    ) -> Option<super::utility_window_geometry::NativeViewportIdentity> {
+        (host.host == super::utility_host::UtilityPresentation::Popout).then_some(
+            super::utility_window_geometry::NativeViewportIdentity {
+                key: crate::settings::UtilityToolKey::parse("table-utility")
+                    .expect("stable table utility key"),
+                viewport_id: table_utility_viewport_id(),
+                owner_generation: self.session.lifetime().value(),
+                host_generation: host.generation,
+            },
+        )
+    }
+    pub(crate) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        instance: Option<u64>,
+        root_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        application_input_allowed: bool,
+        root_native_owner_current: bool,
+        launcher_jump: &crate::gui::jump_mode::ui::JumpModeUi,
+        jump_mode_enabled: bool,
+        root_visible: bool,
+        first: bool,
+        pinned: bool,
+    ) {
+        use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
+        };
+        if let Some(previous) = self.host_pending.take() {
+            let current = self.session.snapshot();
+            if current.lifetime == previous.lifetime
+                && current.source_revision == previous.source
+                && current.view_revision == previous.view
+                && current.selection_revision == previous.selection
+            {
+                self.restore_host_draft(previous.draft);
+            }
+        }
+        if pinned {
+            self.host_os_close_pending = false;
+        }
+        if !self.open {
+            return;
+        }
+        let replay_scope = (!first)
+            .then(|| root_scope.map(crate::gui::jump_mode::ui::JumpModeScope::registration_only))
+            .flatten();
+        let root_scope = replay_scope.as_ref().or(root_scope);
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let host = self.host_state.identity();
+        let snapshot = self.session.snapshot();
+        let draft = TableHostDraft {
+            source: self.source_editor.clone(),
+            source_revision: self.source_editor_revision,
+            filter: self.filter_editor.clone(),
+            shape: self.json_shape,
+            headers: self.include_headers,
+            status: self.status.clone(),
+        };
+        let overwrite_id = self
+            .pending_overwrite
+            .as_ref()
+            .map(|p| overwrite_confirmation_window_id(&p.receipt));
+        self.host_actions = Some(Vec::new());
+        self.host_requested = None;
+        #[cfg(test)]
+        {
+            self.test_host_button = None;
+        }
+        let mut owner_pass = None;
+        let mut native_info = None;
+        if host.host == UtilityPresentation::Docked {
+            if root_visible {
+                owner_pass = Some(root);
+                if first
+                    && root_native_owner_current
+                    && !egui::Popup::is_any_open(ctx)
+                    && launcher_jump.active_session().is_none()
+                    && ctx.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    })
+                {
+                    if let Some(actions) = &mut self.host_actions {
+                        if self.pending_overwrite.is_some() {
+                            actions.push(TableHostedAction::Overwrite(false));
+                        } else if !pinned {
+                            actions.push(TableHostedAction::Close);
+                        }
+                    }
+                }
+                let output_start = ctx.output(|output| output.commands.len());
+                self.show_inner(
+                    ctx,
+                    root_scope,
+                    instance,
+                    root_owner,
+                    application_input_allowed,
+                    root_native_owner_current,
+                    first,
+                    None,
+                    Some(UtilityPresentation::Docked),
+                );
+                self.capture_host_copies(ctx, output_start, root_native_owner_current && first);
+            } else if self.pending_export.is_some() {
+                owner_pass = Some(root);
+            }
+        } else {
+            let viewport = table_utility_viewport_id();
+            let title = if self.profile.is_csv() {
+                "CSV Viewer"
+            } else {
+                "Table Utility"
+            };
+            let builder = egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([1180.0, 760.0])
+                .with_min_inner_size([600.0, 420.0])
+                .with_resizable(true);
+            ctx.show_viewport_immediate(viewport, builder, |child, class| {
+                let child_ctx = child.ctx().clone();
+                let output_start = child_ctx.output(|output| output.commands.len());
+                let native =
+                    class == egui::ViewportClass::Immediate && child_ctx.viewport_id() == viewport;
+                let child_first = first && child.current_pass_index() == 0;
+                if child_first {
+                    owner_pass = Some(ViewportPassProvenance::current(
+                        &child_ctx,
+                        child_ctx.viewport_id(),
+                    ));
+                    if native {
+                        native_info = Some(child.input(|input| input.viewport().clone()));
+                    }
+                } else {
+                    owner_pass = None;
+                    native_info = None;
+                    self.restore_host_draft(draft.clone());
+                    if let Some(actions) = &mut self.host_actions {
+                        actions.clear();
+                    }
+                    self.host_requested = None;
+                }
+                let popup = self.owned_combo_popup_is_current(&child_ctx);
+                let modal = self.pending_overwrite.is_some();
+                let owner = application_input_allowed
+                    && child_ctx.input(|input| input.focused)
+                    && child_ctx.memory(|memory| memory.top_modal_layer().is_none())
+                    && if modal {
+                        self.overwrite_confirmation_layer_is_current(&child_ctx)
+                    } else {
+                        super::jump_mode::ui::visible_top_middle_layer(&child_ctx).is_none()
+                            && (popup
+                                || (!egui::Popup::is_any_open(&child_ctx)
+                                    && super::jump_mode::ui::focused_response_layer(&child_ctx)
+                                        .is_none_or(|layer| layer == egui::LayerId::background())))
+                    };
+                if child_first && child.input(|input| input.viewport().close_requested()) {
+                    child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    if !pinned && !modal {
+                        self.host_os_close_pending = true;
+                    }
+                }
+                if child_first && self.host_os_close_pending && !pinned && !modal {
+                    if let Some(actions) = &mut self.host_actions {
+                        actions.push(TableHostedAction::Close);
+                    }
+                }
+                if native {
+                    let (chord, alphabet) = launcher_jump.configuration();
+                    self.host_jump.set_configuration(chord, alphabet);
+                    self.host_jump.set_enabled(jump_mode_enabled);
+                    let frame = child_ctx.cumulative_frame_nr();
+                    if self.host_jump_frame != Some(frame) {
+                        self.host_jump.begin_frame();
+                        self.host_jump_frame = Some(frame);
+                    }
+                    let binding = instance.map(|instance| NavigationViewportBinding {
+                        viewport,
+                        owner: NavigationOwner::Dialog {
+                            kind: NavigationDialogKind::TableUtility,
+                            instance,
+                        },
+                        base_layer: egui::LayerId::background(),
+                    });
+                    let navigation_owner = binding.map_or(NavigationOwner::Blocked, |binding| {
+                        self.host_jump.update_navigation_owner_for_viewport(
+                            &child_ctx,
+                            binding,
+                            application_input_allowed && jump_mode_enabled,
+                        )
+                    });
+                    self.host_jump.handle_viewport_input(
+                        &child_ctx,
+                        binding.is_some_and(|binding| navigation_owner == binding.owner),
+                        child_first,
+                        viewport,
+                    );
+                    if child_first
+                        && owner
+                        && !popup
+                        && self.host_jump.active_session().is_none()
+                        && child_ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                        })
+                    {
+                        if let Some(actions) = &mut self.host_actions {
+                            if modal {
+                                actions.push(TableHostedAction::Overwrite(false));
+                            } else if !pinned {
+                                actions.push(TableHostedAction::Close);
+                            }
+                        }
+                    }
+                    self.host_jump.begin_ui_pass();
+                    let scope = binding
+                        .filter(|binding| navigation_owner == binding.owner && !modal)
+                        .and_then(|binding| {
+                            self.host_jump.scope_for_viewport_binding(
+                                crate::gui::jump_mode::SurfaceId::dialog(
+                                    "table-utility",
+                                    instance.unwrap_or_default(),
+                                ),
+                                crate::gui::jump_mode::TargetGeneration(
+                                    snapshot.source_revision.value(),
+                                ),
+                                "table-utility/form",
+                                binding,
+                            )
+                        });
+                    let replay_scope = (!child_first)
+                        .then(|| {
+                            scope
+                                .as_ref()
+                                .map(crate::gui::jump_mode::ui::JumpModeScope::registration_only)
+                        })
+                        .flatten();
+                    let scope = replay_scope.as_ref().or(scope.as_ref());
+                    egui::CentralPanel::default().show(child, |ui| {
+                        self.show_inner(
+                            &child_ctx,
+                            scope,
+                            instance,
+                            binding.map_or(NavigationOwner::Blocked, |binding| binding.owner),
+                            application_input_allowed,
+                            owner,
+                            child_first,
+                            Some(ui),
+                            Some(UtilityPresentation::Popout),
+                        )
+                    });
+                    self.host_jump.finish_ui_pass();
+                    if let Some(binding) = binding {
+                        let current = self.host_jump.update_navigation_owner_for_viewport(
+                            &child_ctx,
+                            binding,
+                            application_input_allowed && jump_mode_enabled,
+                        );
+                        if self.host_jump.prepare_pass_for_viewport(
+                            &child_ctx,
+                            binding,
+                            current,
+                            application_input_allowed && jump_mode_enabled,
+                        ) {
+                            super::jump_mode::paint::paint(&child_ctx, &self.host_jump);
+                        }
+                        if !child_ctx.will_discard() {
+                            self.host_jump.complete_frame_for_viewport(
+                                &child_ctx,
+                                binding,
+                                current,
+                                application_input_allowed && jump_mode_enabled,
+                            );
+                        }
+                    }
+                } else {
+                    if child_first
+                        && root_native_owner_current
+                        && !popup
+                        && launcher_jump.active_session().is_none()
+                        && child_ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                        })
+                    {
+                        if let Some(actions) = &mut self.host_actions {
+                            if modal {
+                                actions.push(TableHostedAction::Overwrite(false));
+                            } else if !pinned {
+                                actions.push(TableHostedAction::Close);
+                            }
+                        }
+                    }
+                    self.show_inner(
+                        &child_ctx,
+                        root_scope,
+                        instance,
+                        root_owner,
+                        application_input_allowed,
+                        root_native_owner_current,
+                        child_first,
+                        None,
+                        Some(UtilityPresentation::Popout),
+                    );
+                }
+                let copy_owner = if native {
+                    owner
+                } else {
+                    root_native_owner_current
+                };
+                self.capture_host_copies(&child_ctx, output_start, copy_owner && child_first);
+            });
+        }
+        let mut actions = self.host_actions.take().unwrap_or_default();
+        if pinned {
+            actions.retain(|action| !matches!(action, TableHostedAction::Close));
+        }
+        if let Some(owner) = owner_pass
+            && first
+            && !ctx.will_discard()
+        {
+            self.host_pending = Some(TableHostFrame {
+                root,
+                owner,
+                host,
+                lifetime: snapshot.lifetime,
+                source: snapshot.source_revision,
+                view: snapshot.view_revision,
+                selection: snapshot.selection_revision,
+                draft,
+                actions,
+                request: self.host_requested.take(),
+                native_info,
+                overwrite_id,
+            });
+        } else {
+            self.restore_host_draft(draft);
+        }
+    }
+    fn capture_host_copies(&mut self, ctx: &egui::Context, start: usize, allowed: bool) {
+        let copies = ctx.output_mut(|output| {
+            let mut copies = Vec::new();
+            for command in output.commands.split_off(start) {
+                match command {
+                    egui::OutputCommand::CopyText(text) => copies.push(text),
+                    other => output.commands.push(other),
+                }
+            }
+            copies
+        });
+        if allowed && let Some(actions) = &mut self.host_actions {
+            actions.extend(copies.into_iter().map(TableHostedAction::CopyText));
+        }
+    }
+    fn picker(owner_hwnd: Option<usize>) -> Result<rfd::FileDialog, String> {
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = owner_hwnd
+                .and_then(|value| std::num::NonZeroIsize::new(value as isize))
+                .ok_or_else(|| {
+                    "The Table Utility window is not ready to own the file picker.".to_owned()
+                })?;
+            return Ok(rfd::FileDialog::new()
+                .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd)));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = owner_hwnd;
+            Ok(rfd::FileDialog::new())
+        }
+    }
+    pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> (bool, bool) {
+        use super::utility_host::UtilityPresentation;
+        let Some(frame) = self.host_pending.take() else {
+            if self.open && self.pending_export.is_some() {
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+            return (false, false);
+        };
+        let snapshot = self.session.snapshot();
+        if !self.open
+            || frame.host != self.host_state.identity()
+            || !frame.root.was_retained(ctx)
+            || !frame.owner.was_retained(ctx)
+            || snapshot.lifetime != frame.lifetime
+            || snapshot.source_revision != frame.source
+            || snapshot.view_revision != frame.view
+            || snapshot.selection_revision != frame.selection
+        {
+            if self.open && snapshot.lifetime == frame.lifetime {
+                self.restore_host_draft(frame.draft);
+            }
+            return (false, false);
+        }
+        let identity = self.native_identity(frame.host);
+        if self.host_focus && frame.native_info.is_none() {
+            let layer = self
+                .pending_overwrite
+                .as_ref()
+                .map(|pending| overwrite_confirmation_layer_id(&pending.receipt))
+                .or_else(|| {
+                    crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility.layer_id()
+                });
+            if let Some(layer) = layer {
+                ctx.move_to_top(layer);
+            }
+        }
+        if let (Some(identity), Some(info)) = (identity, frame.native_info.as_ref()) {
+            let title = if self.profile.is_csv() {
+                "CSV Viewer"
+            } else {
+                "Table Utility"
+            };
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                egui::ViewportClass::Immediate,
+                true,
+                title,
+                identity,
+                info,
+                egui::vec2(1180.0, 760.0),
+                Some(egui::vec2(600.0, 420.0)),
+                None,
+            );
+            if self.host_focus {
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
+            }
+        }
+        self.host_focus = false;
+        #[cfg(all(not(test), windows))]
+        let hwnd = super::utility_dialog_size::utility_picker_hwnd(
+            ctx,
+            frame.native_info.as_ref().and(identity),
+        );
+        #[cfg(all(not(test), not(windows)))]
+        let hwnd = None;
+        for action in frame.actions {
+            match action {
+                TableHostedAction::Paste => match self.clipboard.read_text() {
+                    Ok(text) => match self.session.paste_source(text) {
+                        Ok(()) => self.status = Some("Clipboard text loaded; parsing…".into()),
+                        Err(error) => self.status = Some(error),
+                    },
+                    Err(error) => self.status = Some(clipboard_message(&error).into()),
+                },
+                TableHostedAction::OpenFile(large) => {
+                    #[cfg(test)]
+                    let path = self.test_open_file_path.take();
+                    #[cfg(not(test))]
+                    let path = match Self::picker(hwnd) {
+                        Ok(dialog) => dialog
+                            .add_filter("Delimited text", &["csv", "tsv", "txt"])
+                            .pick_file(),
+                        Err(error) => {
+                            self.status = Some(error);
+                            None
+                        }
+                    };
+                    if let Some(path) = path {
+                        if large {
+                            let mut options = TableFileParseOptions {
+                                profile: self.profile,
+                                delimiter: snapshot.parse_options.delimiter,
+                                has_header: snapshot.parse_options.has_header,
+                                strict_width: snapshot.parse_options.row_width
+                                    == RowWidthPolicy::Strict,
+                            };
+                            if self.profile.is_csv()
+                                && let Some(delimiter) = delimiter_for_path(&path)
+                            {
+                                options.delimiter = DelimiterChoice::Explicit(delimiter);
+                            }
+                            match self.session.request_file_backed_source(path, options) {
+                                Ok(()) => self.status = None,
+                                Err(error) => self.status = Some(error),
+                            }
+                        } else {
+                            if self.profile.is_csv()
+                                && let Some(delimiter) = delimiter_for_path(&path)
+                            {
+                                self.session
+                                    .set_delimiter(DelimiterChoice::Explicit(delimiter));
+                            }
+                            match self.session.request_file_read(path) {
+                                Ok(()) => self.status = None,
+                                Err(error) => self.status = Some(error),
+                            }
+                        }
+                    }
+                }
+                TableHostedAction::SaveJson => {
+                    #[cfg(test)]
+                    let path = self.test_save_json_path.take();
+                    #[cfg(not(test))]
+                    let path = match Self::picker(hwnd) {
+                        Ok(dialog) => dialog.add_filter("JSON", &["json"]).save_file(),
+                        Err(error) => {
+                            self.status = Some(error);
+                            None
+                        }
+                    };
+                    if let Some(path) = path {
+                        if ensure_destination_is_not_source(
+                            self.session.snapshot().source_path.as_deref(),
+                            &path,
+                        )
+                        .is_ok()
+                        {
+                            self.queue_export_with_headers(
+                                TableExportKind::Json(self.json_shape),
+                                ExportAction::SaveJson(path),
+                                false,
+                            );
+                        } else {
+                            self.status = Some("Choose a different destination; the opened source file is read-only.".into());
+                        }
+                    }
+                }
+                TableHostedAction::Delimiter(value) => self.session.set_delimiter(value),
+                TableHostedAction::Header(value) => self.session.set_has_header(value),
+                TableHostedAction::ParseOptions(value) => self.session.set_parse_options(value),
+                TableHostedAction::Parse => self.session.request_parse(),
+                TableHostedAction::Source(value) => {
+                    match self.session.inline_source_changed(value.clone()) {
+                        Ok(()) => {
+                            self.source_editor = value;
+                            self.status = None;
+                        }
+                        Err(error) => self.status = Some(error),
+                    }
+                }
+                TableHostedAction::Filter(value) => self.session.set_filter(value),
+                TableHostedAction::Sort(value) => self.session.set_sort(value),
+                TableHostedAction::Column(column, selected) => {
+                    self.session.set_column_selected(column, selected)
+                }
+                TableHostedAction::Row(row, selected) => {
+                    self.session.set_row_selected(row, selected)
+                }
+                TableHostedAction::FileRow(row, selected) => {
+                    self.session.set_file_row_selected(row, selected)
+                }
+                TableHostedAction::Page(start) => {
+                    if let Err(error) = self.session.request_file_page(start) {
+                        self.status = Some(error);
+                    }
+                }
+                TableHostedAction::Export(kind, action, headers) => {
+                    self.queue_export_with_headers(kind, action, headers)
+                }
+                TableHostedAction::Previous(delimiter, header) => {
+                    self.queue_previous_valid_csv(delimiter, header)
+                }
+                TableHostedAction::Overwrite(confirm) => {
+                    let current = self
+                        .pending_overwrite
+                        .as_ref()
+                        .map(|p| overwrite_confirmation_window_id(&p.receipt));
+                    if current.is_some() && current == frame.overwrite_id {
+                        self.apply_overwrite_decision(confirm, true);
+                    }
+                }
+                TableHostedAction::Close => {
+                    self.end_session_with_host(ctx);
+                    return (true, false);
+                }
+                TableHostedAction::CopyText(text) => {
+                    if let Err(error) = self.clipboard.write_text(&text) {
+                        self.status = Some(clipboard_message(&error).into());
+                    }
+                }
+            }
+        }
+        self.finish_export_if_ready();
+        let requested = frame.request;
+        let show_root = requested == Some(UtilityPresentation::Docked);
+        if let Some(requested) = requested
+            && self.host_state.transition(requested)
+        {
+            self.host_jump.cancel_all();
+            self.host_jump_frame = None;
+            self.host_focus = true;
+            if requested == UtilityPresentation::Docked {
+                if let Some(identity) = identity {
+                    super::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+                }
+            }
+            ctx.request_repaint();
+        }
+        if frame.host.host == UtilityPresentation::Popout {
+            let embedded = frame
+                .native_info
+                .is_none()
+                .then(|| crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility.layer_id())
+                .flatten();
+            self.host_state
+                .complete_bootstrap(frame.host, embedded, None);
+        }
+        (false, show_root)
+    }
+
+    fn restore_host_draft(&mut self, draft: TableHostDraft) {
+        self.source_editor = draft.source;
+        self.source_editor_revision = draft.source_revision;
+        self.filter_editor = draft.filter;
+        self.json_shape = draft.shape;
+        self.include_headers = draft.headers;
+        self.status = draft.status;
+    }
+
+    fn defer_action(&mut self, action: TableHostedAction) -> bool {
+        if let Some(actions) = &mut self.host_actions {
+            actions.push(action);
+            true
+        } else {
+            false
         }
     }
 
@@ -691,7 +1565,7 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if paste.clicked() && commit_enabled {
+            if paste.clicked() && commit_enabled && !self.defer_action(TableHostedAction::Paste) {
                 match self.clipboard.read_text() {
                     Ok(text) => match self.session.paste_source(text) {
                         Ok(()) => self.status = Some("Clipboard text loaded; parsing…".into()),
@@ -719,7 +1593,10 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if open_file.clicked() && commit_enabled {
+            if open_file.clicked()
+                && commit_enabled
+                && !self.defer_action(TableHostedAction::OpenFile(false))
+            {
                 #[cfg(test)]
                 let selected_path = self.test_open_file_path.take();
                 #[cfg(not(test))]
@@ -758,7 +1635,10 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if open_large_file.clicked() && commit_enabled {
+            if open_large_file.clicked()
+                && commit_enabled
+                && !self.defer_action(TableHostedAction::OpenFile(true))
+            {
                 #[cfg(test)]
                 let selected_path = self.test_open_file_path.take();
                 #[cfg(not(test))]
@@ -787,7 +1667,10 @@ impl TableUtilityDialogState {
             ui.separator();
             let mut delimiter = snapshot.parse_options.delimiter;
             #[cfg(test)]
-            self.test_delimiter_option_ids.clear();
+            {
+                self.test_delimiter_option_ids.clear();
+                self.test_delimiter_rects = [None; 2];
+            }
             let delimiter_response = ui.add_enabled_ui(combo_enabled, |ui| {
                 egui::ComboBox::from_id_salt("table-delimiter")
                     .selected_text(match delimiter {
@@ -817,11 +1700,23 @@ impl TableUtilityDialogState {
                             "TSV (tab)",
                         );
                         #[cfg(test)]
-                        self.test_delimiter_option_ids
-                            .push((DelimiterChoice::Explicit(TableDelimiter::Tab), _tab.id));
+                        {
+                            self.test_delimiter_option_ids
+                                .push((DelimiterChoice::Explicit(TableDelimiter::Tab), _tab.id));
+                            let rect = _tab.rect.intersect(ui.clip_rect());
+                            self.test_delimiter_rects[1] =
+                                (_tab.enabled() && rect.is_positive()).then_some(rect);
+                        }
                     })
             });
             self.combo_anchor_ids[0] = Some(delimiter_response.inner.response.id);
+            #[cfg(test)]
+            {
+                let response = &delimiter_response.inner.response;
+                let rect = response.rect.intersect(ui.clip_rect());
+                self.test_delimiter_rects[0] =
+                    (response.enabled() && rect.is_positive()).then_some(rect);
+            }
             register_target(
                 scope,
                 ui,
@@ -836,7 +1731,9 @@ impl TableUtilityDialogState {
                 order,
             );
             if combo_commit_enabled && delimiter != snapshot.parse_options.delimiter {
-                self.session.set_delimiter(delimiter);
+                if !self.defer_action(TableHostedAction::Delimiter(delimiter)) {
+                    self.session.set_delimiter(delimiter);
+                }
             }
 
             let mut has_header = snapshot.parse_options.has_header;
@@ -852,7 +1749,9 @@ impl TableUtilityDialogState {
                 order,
             );
             if has_header_response.changed() && commit_enabled {
-                self.session.set_has_header(has_header);
+                if !self.defer_action(TableHostedAction::Header(has_header)) {
+                    self.session.set_has_header(has_header);
+                }
             }
             #[cfg(test)]
             {
@@ -906,11 +1805,13 @@ impl TableUtilityDialogState {
                     order,
                 );
                 if combo_commit_enabled && width_policy != snapshot.parse_options.row_width {
-                    self.session
-                        .set_parse_options(crate::table_utility::TableParseOptions {
-                            row_width: width_policy,
-                            ..snapshot.parse_options
-                        });
+                    let options = crate::table_utility::TableParseOptions {
+                        row_width: width_policy,
+                        ..snapshot.parse_options
+                    };
+                    if !self.defer_action(TableHostedAction::ParseOptions(options)) {
+                        self.session.set_parse_options(options);
+                    }
                 }
             }
 
@@ -925,7 +1826,9 @@ impl TableUtilityDialogState {
                 order,
             );
             if parse.clicked() && commit_enabled {
-                self.session.request_parse();
+                if !self.defer_action(TableHostedAction::Parse) {
+                    self.session.request_parse();
+                }
                 self.status = Some("Parsing the current source…".into());
             }
         });
@@ -1067,6 +1970,9 @@ impl TableUtilityDialogState {
                 order,
             );
             if response.changed() && commit_enabled {
+                if self.defer_action(TableHostedAction::Source(source_editor.clone())) {
+                    return;
+                }
                 match self.session.inline_source_changed(source_editor.clone()) {
                     Ok(()) => {
                         self.source_editor = source_editor;
@@ -1150,7 +2056,9 @@ impl TableUtilityDialogState {
             );
             if response.changed() && commit_enabled {
                 self.filter_editor = filter_editor;
-                self.session.set_filter(self.filter_editor.clone());
+                if !self.defer_action(TableHostedAction::Filter(self.filter_editor.clone())) {
+                    self.session.set_filter(self.filter_editor.clone());
+                }
             }
             let sort_mode = snapshot
                 .projection
@@ -1246,7 +2154,9 @@ impl TableUtilityDialogState {
                                         },
                                         mode: self.profile.sort_mode(),
                                     });
-                                    self.session.set_sort(sort);
+                                    if !self.defer_action(TableHostedAction::Sort(sort)) {
+                                        self.session.set_sort(sort);
+                                    }
                                 }
                                 #[cfg(test)]
                                 if column == 0 {
@@ -1272,7 +2182,11 @@ impl TableUtilityDialogState {
                                     order,
                                 );
                                 if column_response.changed() && commit_enabled {
-                                    self.session.set_column_selected(column, selected);
+                                    if !self
+                                        .defer_action(TableHostedAction::Column(column, selected))
+                                    {
+                                        self.session.set_column_selected(column, selected);
+                                    }
                                 }
                                 #[cfg(test)]
                                 self.test_column_select_responses.push((
@@ -1337,7 +2251,11 @@ impl TableUtilityDialogState {
                                         order,
                                     );
                                     if row_response.changed() && commit_enabled {
-                                        self.session.set_row_selected(row_id, selected);
+                                        if !self
+                                            .defer_action(TableHostedAction::Row(row_id, selected))
+                                        {
+                                            self.session.set_row_selected(row_id, selected);
+                                        }
                                     }
                                     #[cfg(test)]
                                     if visible_index == 0 {
@@ -1428,7 +2346,9 @@ impl TableUtilityDialogState {
                 order,
             );
             if first.clicked() && commit_enabled {
-                if let Err(error) = self.session.request_file_page(0) {
+                if !self.defer_action(TableHostedAction::Page(0))
+                    && let Err(error) = self.session.request_file_page(0)
+                {
                     self.status = Some(error);
                 }
             }
@@ -1449,7 +2369,9 @@ impl TableUtilityDialogState {
             if previous.clicked() && commit_enabled {
                 let start = page_start
                     .saturating_sub(crate::table_utility::TABLE_FILE_PAGE_MAX_ROWS as u64);
-                if let Err(error) = self.session.request_file_page(start) {
+                if !self.defer_action(TableHostedAction::Page(start))
+                    && let Err(error) = self.session.request_file_page(start)
+                {
                     self.status = Some(error);
                 }
             }
@@ -1478,7 +2400,9 @@ impl TableUtilityDialogState {
                 order,
             );
             if next.clicked() && commit_enabled {
-                if let Err(error) = self.session.request_file_page(page_next) {
+                if !self.defer_action(TableHostedAction::Page(page_next))
+                    && let Err(error) = self.session.request_file_page(page_next)
+                {
                     self.status = Some(error);
                 }
             }
@@ -1497,7 +2421,9 @@ impl TableUtilityDialogState {
                 order,
             );
             if last.clicked() && commit_enabled {
-                if let Err(error) = self.session.request_file_page(last_start) {
+                if !self.defer_action(TableHostedAction::Page(last_start))
+                    && let Err(error) = self.session.request_file_page(last_start)
+                {
                     self.status = Some(error);
                 }
             }
@@ -1552,7 +2478,9 @@ impl TableUtilityDialogState {
                         order,
                     );
                     if response.changed() && commit_enabled {
-                        self.session.set_column_selected(column, selected);
+                        if !self.defer_action(TableHostedAction::Column(column, selected)) {
+                            self.session.set_column_selected(column, selected);
+                        }
                     }
                     #[cfg(test)]
                     {
@@ -1661,7 +2589,11 @@ impl TableUtilityDialogState {
                                     order,
                                 );
                                 if response.changed() && commit_enabled {
-                                    self.session.set_file_row_selected(row_id, selected);
+                                    if !self
+                                        .defer_action(TableHostedAction::FileRow(row_id, selected))
+                                    {
+                                        self.session.set_file_row_selected(row_id, selected);
+                                    }
                                 }
                                 #[cfg(test)]
                                 if row_index == 0 {
@@ -1948,7 +2880,10 @@ impl TableUtilityDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if save_json.clicked() && commit_enabled {
+            if save_json.clicked()
+                && commit_enabled
+                && !self.defer_action(TableHostedAction::SaveJson)
+            {
                 #[cfg(test)]
                 let selected_path = self.test_save_json_path.take();
                 #[cfg(not(test))]
@@ -2037,6 +2972,13 @@ impl TableUtilityDialogState {
         action: ExportAction,
         include_headers: bool,
     ) {
+        if self.defer_action(TableHostedAction::Export(
+            kind,
+            action.clone(),
+            include_headers,
+        )) {
+            return;
+        }
         self.status = None;
         match self.session.request_export(kind, include_headers) {
             Ok(operation) => {
@@ -2047,6 +2989,9 @@ impl TableUtilityDialogState {
     }
 
     fn queue_previous_valid_csv(&mut self, delimiter: TableDelimiter, has_header: bool) {
+        if self.defer_action(TableHostedAction::Previous(delimiter, has_header)) {
+            return;
+        }
         self.status = None;
         match self
             .session
@@ -2140,6 +3085,7 @@ impl TableUtilityDialogState {
         #[cfg(test)]
         {
             self.test_replace_response_id = None;
+            self.test_native_replace_rect = None;
             self.test_cancel_overwrite_response_id = None;
         }
         let Some(pending) = self.pending_overwrite.as_ref() else {
@@ -2159,6 +3105,25 @@ impl TableUtilityDialogState {
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
+                if self.host_actions.is_some() {
+                    let (response, requested) = super::utility_host::presentation_button(
+                        ui,
+                        self.host_state.presentation(),
+                        confirmation_current && first_ui_pass,
+                    );
+                    #[cfg(test)]
+                    {
+                        self.test_host_button =
+                            Some((response.rect, ui.clip_rect(), response.enabled()));
+                    }
+                    if response.clicked()
+                        && confirmation_current
+                        && first_ui_pass
+                        && !ctx.will_discard()
+                    {
+                        self.host_requested = Some(requested);
+                    }
+                }
                 ui.label("The destination already exists. Replace it with this captured export?");
                 ui.horizontal(|ui| {
                     let replace = ui.add_enabled(replace_enabled, egui::Button::new("Replace"));
@@ -2166,6 +3131,9 @@ impl TableUtilityDialogState {
                     #[cfg(test)]
                     {
                         response_ids = Some((replace.id, cancel.id));
+                        let rect = replace.rect.intersect(ui.clip_rect());
+                        self.test_native_replace_rect =
+                            (replace.enabled() && rect.is_positive()).then_some(rect);
                     }
                     if replace.clicked() && first_ui_pass {
                         decision = Some(true);
@@ -2189,6 +3157,13 @@ impl TableUtilityDialogState {
         let Some(confirm) = decision else {
             return;
         };
+        if self.defer_action(TableHostedAction::Overwrite(confirm)) {
+            return;
+        }
+        self.apply_overwrite_decision(confirm, confirmation_current);
+    }
+
+    fn apply_overwrite_decision(&mut self, confirm: bool, confirmation_current: bool) {
         let Some(pending) = self.pending_overwrite.take() else {
             return;
         };
@@ -2565,6 +3540,16 @@ fn write_json_target(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosted_action_queue_does_not_mutate_the_live_session() {
+        let mut dialog = super::TableUtilityDialogState::default();
+        let before = dialog.session.parse_options();
+        dialog.host_actions = Some(Vec::new());
+        assert!(dialog.defer_action(super::TableHostedAction::Header(!before.has_header)));
+        assert_eq!(dialog.session.parse_options(), before);
+        assert_eq!(dialog.host_actions.as_ref().unwrap().len(), 1);
+    }
+
     use super::*;
     use crate::table_utility_session::{TableParseState, TableProjectionState};
     use std::sync::atomic::{AtomicUsize, Ordering};

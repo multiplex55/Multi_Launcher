@@ -2145,7 +2145,7 @@ impl LauncherApp {
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer(),
             Panel::SearchReplaceDialog => self.search_replace_host.root_layer(),
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.root_layer(),
-            Panel::TableUtilityDialog => NavigationDialogKind::TableUtility.layer_id(),
+            Panel::TableUtilityDialog => self.table_utility_dialog.root_layer(),
             Panel::QrDialog => middle(egui::Id::new(Some("QR Generator"))),
             Panel::ConvertPanel => middle(egui::Id::new("convert-panel-window")),
             Panel::VolumeDialog => middle(egui::Id::new(Some("Volume"))),
@@ -4322,6 +4322,7 @@ impl LauncherApp {
         self.poll_screen_draw_region_picker(ctx);
         self.xml_toolkit_dialog.poll_host_background(ctx);
         self.regex_tester_dialog.poll_host_background(ctx);
+        self.table_utility_dialog.poll_host_background(ctx);
         self.clipboard_dialog.observe_clipboard_version();
         self.poll_batch_rename_runtime(ctx);
         self.poll_search_replace_runtime(ctx);
@@ -6641,17 +6642,18 @@ impl LauncherApp {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
 
         let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
-        let instance = match owner {
-            NavigationOwner::Dialog {
-                kind: NavigationDialogKind::TableUtility,
-                instance,
-            } => Some(instance),
-            _ => None,
-        };
+        let instance = self.jump_mode_ui.dialog_instance(NavigationDialogKind::TableUtility);
         let native_owner_current = !owner_transition_pending
             && self.table_utility_native_ui_owner_current(ctx, root_visible);
         let scope = instance
-            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .filter(|instance| {
+                native_owner_current
+                    && self.jump_mode_enabled()
+                    && owner == NavigationOwner::Dialog {
+                        kind: NavigationDialogKind::TableUtility,
+                        instance: *instance,
+                    }
+            })
             .and_then(|instance| {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("table-utility", instance),
@@ -6662,14 +6664,18 @@ impl LauncherApp {
                     false,
                 )
             });
-        self.table_utility_dialog.show_with_jump_mode(
+        self.table_utility_dialog.show_hosted(
             ctx,
             scope.as_ref(),
             instance,
             owner,
-            self.native_ui_application_input_allowed(ctx),
+            self.native_ui_application_input_allowed(ctx) && !self.ocr_surface_visible(),
             native_owner_current,
+            &self.jump_mode_ui,
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            root_visible,
             first_ui_pass,
+            self.pinned_panels.contains(&super::Panel::TableUtilityDialog),
         );
     }
 
@@ -7685,22 +7691,23 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
-        if !self.table_utility_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible)
-        {
+        let Some(layer) = self.table_utility_dialog.root_layer() else {
+            return false;
+        };
+        if !self.table_utility_dialog.open || !self.native_ui_host_input_allowed(ctx, root_visible) {
             return false;
         }
-        let parent_is_current = NavigationDialogKind::TableUtility
-            .layer_id()
-            .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer));
+        if self.table_utility_dialog.has_pending_overwrite() {
+            return self.table_utility_dialog.overwrite_confirmation_layer_is_current(ctx);
+        }
         if egui::Popup::is_any_open(ctx) {
             return self.table_utility_dialog.owned_combo_popup_is_current(ctx);
         }
-        parent_is_current
-            || self
-                .table_utility_dialog
-                .overwrite_confirmation_layer_is_current(ctx)
+        visible_top_middle_layer(ctx) == Some(layer)
+            && focused_response_layer(ctx)
+                .is_none_or(|focused| focused == layer || focused.order == egui::Order::Background)
     }
 
     fn image_compare_native_ui_owner_current(
@@ -7791,6 +7798,8 @@ impl LauncherApp {
     fn query_focus_confirmation_owner_pending(&self) -> bool {
         (self.xml_toolkit_dialog.root_layer().is_some()
             && self.xml_toolkit_dialog.jump_mode_pending_overwrite_identity().is_some())
+            || (self.table_utility_dialog.root_layer().is_some()
+                && self.table_utility_dialog.has_pending_overwrite())
             || self
                 .dashboard_editor
                 .jump_mode_pending_confirmation_identity()
@@ -8106,6 +8115,8 @@ impl LauncherApp {
                         self.regex_tester_dialog.root_navigation_instance(current)
                     } else if kind == NavigationDialogKind::XmlToolkit {
                         self.xml_toolkit_dialog.root_navigation_instance(current)
+                    } else if kind == NavigationDialogKind::TableUtility {
+                        self.table_utility_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -8779,6 +8790,7 @@ impl LauncherApp {
             // usable while the launcher is hidden. Its ROOT scope and ROOT
             // native-owner eligibility stay disabled in this branch.
             self.show_regex_tester(&ctx, first_ui_pass, false);
+            self.show_table_utility(&ctx, false, first_ui_pass, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -9622,84 +9634,7 @@ impl LauncherApp {
                     }
                 }
 
-                let table_utility_escape_handled = if first_ui_pass
-                    && !action_sheet_blocks_launcher_input
-                    && !owner_transition_pending
-                    && !jump_session_escape_preempted
-                    && self.jump_mode_ui.active_session().is_none()
-                    && self.table_utility_dialog.open
-                    && !egui::Popup::is_any_open(&ctx)
-                    && ctx.input(|input| input.key_pressed(egui::Key::Escape))
-                {
-                    let native_owner = self.table_utility_native_ui_owner_current(
-                        &ctx,
-                        frame_logic.should_be_visible,
-                    );
-                    let exact_confirmation_owner = self.native_ui_host_input_allowed(
-                        &ctx,
-                        frame_logic.should_be_visible,
-                    ) && self
-                        .table_utility_dialog
-                        .overwrite_confirmation_layer_is_current(&ctx);
-                    let escaped_confirmation = exact_confirmation_owner
-                        && self
-                            .table_utility_dialog
-                            .cancel_overwrite_confirmation();
-                    let table_layer = crate::gui::jump_mode::ui::NavigationDialogKind::TableUtility
-                        .layer_id();
-                    let exact_table_owner = table_layer.is_some_and(|layer| {
-                        crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx) == Some(layer)
-                            && crate::gui::jump_mode::ui::focused_response_layer(&ctx)
-                                .is_none_or(|focused| focused == layer)
-                    });
-                    if escaped_confirmation {
-                        let modifiers = ctx.input(|input| {
-                            input.events.iter().rev().find_map(|event| match event {
-                                egui::Event::Key {
-                                    key: egui::Key::Escape,
-                                    pressed: true,
-                                    modifiers,
-                                    ..
-                                } => Some(*modifiers),
-                                _ => None,
-                            })
-                        });
-                        if let Some(modifiers) = modifiers {
-                            ctx.input_mut(|input| {
-                                input.consume_key(modifiers, egui::Key::Escape)
-                            });
-                        }
-                        true
-                    } else if exact_table_owner
-                        && native_owner
-                        && self.close_front_dialog_from_root_input()
-                    {
-                        let modifiers = ctx.input(|input| {
-                            input.events.iter().rev().find_map(|event| match event {
-                                egui::Event::Key {
-                                    key: egui::Key::Escape,
-                                    pressed: true,
-                                    modifiers,
-                                    ..
-                                } => Some(*modifiers),
-                                _ => None,
-                            })
-                        });
-                        if let Some(modifiers) = modifiers {
-                            ctx.input_mut(|input| {
-                                input.consume_key(modifiers, egui::Key::Escape)
-                            });
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !table_utility_escape_handled
-                    && first_ui_pass
+                if first_ui_pass
                     && !action_sheet_blocks_launcher_input
                     && Self::launcher_escape_handling_enabled(
                         self.file_search_has_root_presentation(),
@@ -9711,6 +9646,7 @@ impl LauncherApp {
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
@@ -9800,6 +9736,7 @@ impl LauncherApp {
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
@@ -10687,6 +10624,7 @@ impl LauncherApp {
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             self.show_xml_toolkit(&ctx, first_ui_pass, false);
             self.show_regex_tester(&ctx, first_ui_pass, false);
+            self.show_table_utility(&ctx, false, first_ui_pass, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11908,6 +11846,14 @@ impl LauncherApp {
         if regex_docked {
             effects.push(RootDialogEffect::ShowRoot);
         }
+        let (table_closed, table_docked) = self.table_utility_dialog.on_ui_frame_complete(ctx);
+        if table_closed {
+            self.panel_states.table_utility_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::TableUtilityDialog);
+        }
+        if table_docked {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         let (xml_closed, xml_docked) = self.xml_toolkit_dialog.on_ui_frame_complete(ctx);
         if xml_closed {
             self.panel_states.xml_toolkit_dialog = false;
@@ -12476,6 +12422,7 @@ impl eframe::App for LauncherApp {
             || self.json_utility_host.needs_root_ui_when_hidden(self.json_utility_dialog.open)
             || self.xml_toolkit_dialog.needs_root_ui_when_hidden()
             || self.regex_tester_dialog.needs_root_ui_when_hidden()
+            || self.table_utility_dialog.needs_root_ui_when_hidden()
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -35349,6 +35296,231 @@ mod tests {
         app.run_root_frame_for_test(ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
+    }
+
+
+    #[test]
+    fn table_utility_moves_the_same_held_file_page_and_selection_between_hosts() {
+        use crate::gui::table_utility_dialog::TableUtilityDialogState;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let source_path = workspace.root().join("table-host-pages.csv");
+        let mut csv = String::from("name,value\n");
+        for row in 0..135 {
+            use std::fmt::Write as _;
+            writeln!(&mut csv, "row-{row},{row}").unwrap();
+        }
+        std::fs::write(&source_path, csv).unwrap();
+        app.focus_panel(super::super::Panel::TableUtilityDialog);
+        app.table_utility_dialog.test_set_open_path(source_path);
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame_at_size(&ctx, app, events, false, egui::vec2(900.0, 760.0))
+                .drop_without_applying_deltas();
+        };
+        let host_button = |dialog: &TableUtilityDialogState| {
+            let (rect, clip, enabled) = dialog.test_host_button().unwrap();
+            assert!(enabled && clip.contains_rect(rect));
+            rect
+        };
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let open_large = app.table_utility_dialog.test_page_controls().0
+            .expect("Open Large File is visible and enabled");
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(open_large, pressed));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let first = loop {
+            root(&mut app, Vec::new());
+            let snapshot = app.table_utility_dialog.test_host_snapshot();
+            if snapshot.file_page.is_some() && !snapshot.file_page_pending {
+                break snapshot;
+            }
+            assert!(std::time::Instant::now() < deadline, "initial table page did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let backing = first.accepted_source.as_ref().unwrap().file_source().unwrap().clone();
+        let row = app.table_utility_dialog.test_page_controls().2
+            .expect("a visible row can be deselected");
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(row, pressed));
+        }
+        let selected = app.table_utility_dialog.test_host_snapshot();
+        assert_eq!(
+            selected.file_row_selection.as_ref().unwrap().selected_count() + 1,
+            backing.row_count(),
+        );
+
+        let before = app.table_utility_dialog.test_host_job_counts();
+        let gate = app.table_utility_dialog.test_hold_next_file_page();
+        let next = app.table_utility_dialog.test_page_controls().1
+            .expect("Next page is visible and enabled");
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(next, pressed));
+        }
+        assert!(gate.wait_until_entered(std::time::Duration::from_secs(5)));
+        let pending = app.table_utility_dialog.test_host_snapshot();
+        assert!(pending.file_page_pending);
+
+        let pop_out = host_button(&app.table_utility_dialog);
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(pop_out, pressed));
+        }
+        assert!(app.table_utility_dialog.root_layer().is_none());
+        let viewport = egui::ViewportId::from_hash_of("table_utility_viewport");
+        let native = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..3 {
+            native(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.table_utility_dialog.needs_root_ui_when_hidden());
+        assert!(app.table_utility_dialog.test_host_snapshot().file_page_pending);
+        gate.release();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let completed = loop {
+            native(&mut app, Vec::new());
+            let snapshot = app.table_utility_dialog.test_host_snapshot();
+            if !snapshot.file_page_pending
+                && snapshot.file_page.as_ref().is_some_and(|page| page.start_row() == 64)
+            {
+                break snapshot;
+            }
+            assert!(std::time::Instant::now() < deadline, "detached page did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let retained_source = completed.accepted_source.as_ref().unwrap().file_source().unwrap();
+        assert!(Arc::ptr_eq(&backing, retained_source));
+        assert_eq!(completed.lifetime, pending.lifetime);
+        assert_eq!(completed.source_revision, pending.source_revision);
+        assert_eq!(completed.view_revision, pending.view_revision);
+        assert_eq!(completed.selection_revision, selected.selection_revision);
+        let jobs = app.table_utility_dialog.test_host_job_counts();
+        assert_eq!(jobs.page_submitted, before.page_submitted + 1);
+        assert_eq!(jobs.page_executed, before.page_executed + 1);
+
+        let dock = host_button(&app.table_utility_dialog);
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(dock, pressed));
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.table_utility_dialog.root_layer().is_some());
+        assert_eq!(app.table_utility_dialog.test_host_snapshot().lifetime, pending.lifetime);
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.table_utility_dialog.open);
+    }
+
+
+    #[test]
+    fn table_utility_native_replace_rejects_discarded_passes_and_writes_the_captured_export() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::TableUtilityDialog);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (pop_out, clip, enabled) = app.table_utility_dialog.test_host_button().unwrap();
+        assert!(enabled && clip.contains_rect(pop_out));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop_out, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert!(app.table_utility_dialog.root_layer().is_none());
+
+        let viewport = egui::ViewportId::from_hash_of("table_utility_viewport");
+        let native = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            native(&mut app, Vec::new(), false);
+        }
+        let delimiter = app.table_utility_dialog.test_delimiter_rects()[0].unwrap();
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(delimiter, pressed), false);
+        }
+        for _ in 0..3 {
+            native(&mut app, Vec::new(), false);
+        }
+        let tab = app.table_utility_dialog.test_delimiter_rects()[1]
+            .expect("the current native popup admits its TSV option");
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(tab, pressed), false);
+        }
+        assert_eq!(
+            app.table_utility_dialog.test_host_snapshot().parse_options.delimiter,
+            crate::table_utility::DelimiterChoice::Explicit(crate::table_utility::TableDelimiter::Tab),
+        );
+
+        let target = workspace.root().join("table-retained-export.json");
+        std::fs::write(&target, b"old contents").unwrap();
+        app.table_utility_dialog.test_prepare_overwrite_confirmation(&ctx, target.clone()).unwrap();
+        let receipt = app.table_utility_dialog.test_overwrite_identity().unwrap();
+        for _ in 0..4 {
+            native(&mut app, Vec::new(), false);
+        }
+        let (dock, clip, enabled) = app.table_utility_dialog.test_host_button().unwrap();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.table_utility_dialog.root_layer().is_some());
+        assert_eq!(app.table_utility_dialog.test_overwrite_identity(), Some(receipt));
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let (pop_out, clip, enabled) = app.table_utility_dialog.test_host_button().unwrap();
+        assert!(enabled && clip.contains_rect(pop_out));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop_out, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert!(app.table_utility_dialog.root_layer().is_none());
+        assert_eq!(app.table_utility_dialog.test_overwrite_identity(), Some(receipt));
+        for _ in 0..4 {
+            native(&mut app, Vec::new(), false);
+        }
+        for discard_child in [false, true] {
+            let replace = app.table_utility_dialog.test_native_replace_rect()
+                .expect("the detached Replace control is enabled");
+            native(&mut app, tool_dialog_pointer_events(replace, true), false);
+            if discard_child {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            native(&mut app, tool_dialog_pointer_events(replace, false), !discard_child);
+            assert_eq!(app.table_utility_dialog.test_overwrite_identity(), Some(receipt));
+            assert_eq!(std::fs::read(&target).unwrap(), b"old contents");
+            for _ in 0..3 {
+                native(&mut app, Vec::new(), false);
+            }
+        }
+        let replace = app.table_utility_dialog.test_native_replace_rect().unwrap();
+        for pressed in [true, false] {
+            native(&mut app, tool_dialog_pointer_events(replace, pressed), false);
+        }
+        assert!(app.table_utility_dialog.test_overwrite_identity().is_none());
+        assert_eq!(std::fs::read(&target).unwrap(), br#"[["alpha"]]"#);
     }
 
     #[test]

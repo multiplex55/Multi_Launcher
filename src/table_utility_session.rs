@@ -279,11 +279,11 @@ impl TableTestJobGate {
 }
 
 #[cfg(test)]
-struct TableTestJobGateHandle(Arc<TableTestJobGate>);
+pub(crate) struct TableTestJobGateHandle(Arc<TableTestJobGate>);
 
 #[cfg(test)]
 impl TableTestJobGateHandle {
-    fn wait_until_entered(&self, timeout: std::time::Duration) -> bool {
+    pub(crate) fn wait_until_entered(&self, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let mut state = self
             .0
@@ -308,7 +308,7 @@ impl TableTestJobGateHandle {
         true
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         let mut state = self
             .0
             .state
@@ -2744,6 +2744,11 @@ impl TableUtilitySession {
             .as_ref()
             .map(TableWorker::test_job_counts)
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_hold_next_file_page(&self) -> TableTestJobGateHandle {
+        self.worker.as_ref().expect("table worker is open").hold_next_job(JobKind::Page)
     }
 
     #[cfg(test)]
