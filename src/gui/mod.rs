@@ -4883,6 +4883,10 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
+            Panel::XmlToolkitDialog => {
+                self.xml_toolkit_dialog.root_layer().is_some()
+                    || self.xml_toolkit_dialog.needs_viewport_bootstrap()
+            },
             Panel::SnippetDialog => self.snippet_window_host.root_layer().is_some(),
             Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer().is_some(),
             Panel::SnippetPromptDialog => self.snippet_prompt_has_root_presentation(),
@@ -5003,7 +5007,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5306,7 +5310,7 @@ impl LauncherApp {
                 self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
-                self.xml_toolkit_dialog.end_session();
+                self.xml_toolkit_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::TableUtilityDialog => {
@@ -5621,7 +5625,7 @@ impl LauncherApp {
                 self.panel_states.markdown_studio_dialog = self.markdown_studio_dialog.open;
             }
             Panel::XmlToolkitDialog => {
-                self.xml_toolkit_dialog.end_session();
+                self.xml_toolkit_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::TableUtilityDialog => {
@@ -5834,7 +5838,11 @@ impl LauncherApp {
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.ensure_open(),
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.ensure_open(),
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.ensure_open(),
-            Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
+            Panel::XmlToolkitDialog => {
+                if !self.xml_toolkit_dialog.open {
+                    self.xml_toolkit_dialog.open();
+                }
+            }
             Panel::TableUtilityDialog => self.table_utility_dialog.open(),
             Panel::ImageCompareDialog => self.image_compare_dialog.open(),
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.open(),
@@ -5913,6 +5921,8 @@ impl LauncherApp {
         } else if panel == Panel::ClipboardModifyDialog {
             self.ensure_open(panel);
             self.clipboard_modify_host.request_focus();
+        } else if panel == Panel::XmlToolkitDialog {
+            self.xml_toolkit_dialog.open();
         } else if panel == Panel::JsonUtilityDialog {
             if !self.json_utility_dialog.open {
                 self.json_utility_dialog.reopen_existing();

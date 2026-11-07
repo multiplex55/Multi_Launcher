@@ -2144,7 +2144,7 @@ impl LauncherApp {
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root(),
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer(),
             Panel::SearchReplaceDialog => self.search_replace_host.root_layer(),
-            Panel::XmlToolkitDialog => NavigationDialogKind::XmlToolkit.layer_id(),
+            Panel::XmlToolkitDialog => self.xml_toolkit_dialog.root_layer(),
             Panel::TableUtilityDialog => NavigationDialogKind::TableUtility.layer_id(),
             Panel::QrDialog => middle(egui::Id::new(Some("QR Generator"))),
             Panel::ConvertPanel => middle(egui::Id::new("convert-panel-window")),
@@ -4320,7 +4320,7 @@ impl LauncherApp {
 
         self.poll_crop_screenshot(ctx);
         self.poll_screen_draw_region_picker(ctx);
-        self.xml_toolkit_dialog.poll_closed_background(ctx);
+        self.xml_toolkit_dialog.poll_host_background(ctx);
         self.clipboard_dialog.observe_clipboard_version();
         self.poll_batch_rename_runtime(ctx);
         self.poll_search_replace_runtime(ctx);
@@ -6576,15 +6576,16 @@ impl LauncherApp {
         );
     }
 
-    fn show_xml_toolkit(&mut self, ctx: &egui::Context, root_visible: bool) {
+    fn show_xml_toolkit(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
         use crate::gui::jump_mode::ui::NavigationDialogKind;
 
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let instance = self
             .jump_mode_ui
             .dialog_instance(NavigationDialogKind::XmlToolkit);
-        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
         let root_native_owner_current = self.native_ui_host_input_allowed(ctx, root_visible);
         let application_input_allowed = self.native_ui_application_input_allowed(ctx);
+        let native_owner = self.xml_toolkit_root_input_owner(ctx, root_visible);
         let scope = if root_native_owner_current && self.jump_mode_enabled() {
             match owner {
                 NavigationOwner::Dialog {
@@ -6618,14 +6619,17 @@ impl LauncherApp {
         } else {
             None
         };
-        self.xml_toolkit_dialog.show_with_jump_mode(
+        self.xml_toolkit_dialog.show_hosted(
             ctx,
             scope.as_ref(),
             instance,
-            owner,
-            application_input_allowed,
+            native_owner,
+            application_input_allowed && !self.ocr_surface_visible(),
             root_native_owner_current,
             self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            root_visible,
+            first,
+            self.pinned_panels.contains(&super::Panel::XmlToolkitDialog),
         );
     }
 
@@ -7644,6 +7648,40 @@ impl LauncherApp {
             })
     }
 
+    fn xml_toolkit_root_input_owner(
+        &self,
+        ctx: &egui::Context,
+        root_visible: bool,
+    ) -> NavigationOwner {
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, focused_response_layer, resolve_xml_overwrite_confirmation_owner,
+            visible_top_middle_layer,
+        };
+
+        let kind = NavigationDialogKind::XmlToolkit;
+        let Some((layer, instance)) = self
+            .xml_toolkit_dialog
+            .root_layer()
+            .zip(self.jump_mode_ui.dialog_instance(kind))
+        else {
+            return NavigationOwner::Blocked;
+        };
+        if !self.native_ui_host_input_allowed(ctx, root_visible) || egui::Popup::is_any_open(ctx) {
+            return NavigationOwner::Blocked;
+        }
+        if let Some(confirmation) = self.xml_toolkit_dialog.jump_mode_pending_overwrite_identity() {
+            return resolve_xml_overwrite_confirmation_owner(ctx, instance, confirmation);
+        }
+        if visible_top_middle_layer(ctx) == Some(layer)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
+        {
+            NavigationOwner::Dialog { kind, instance }
+        } else {
+            NavigationOwner::Blocked
+        }
+    }
+
     fn table_utility_native_ui_owner_current(
         &self,
         ctx: &egui::Context,
@@ -7753,9 +7791,8 @@ impl LauncherApp {
     }
 
     fn query_focus_confirmation_owner_pending(&self) -> bool {
-        self.xml_toolkit_dialog
-            .jump_mode_pending_overwrite_identity()
-            .is_some()
+        (self.xml_toolkit_dialog.root_layer().is_some()
+            && self.xml_toolkit_dialog.jump_mode_pending_overwrite_identity().is_some())
             || self
                 .dashboard_editor
                 .jump_mode_pending_confirmation_identity()
@@ -8096,21 +8133,9 @@ impl LauncherApp {
                     }
                 }),
             };
-            let xml_overwrite_owner = self
-                .jump_mode_ui
-                .dialog_instance(NavigationDialogKind::XmlToolkit)
-                .zip(
-                    self.xml_toolkit_dialog
-                        .jump_mode_pending_overwrite_identity(),
-                )
-                .map(|(parent_instance, confirmation_instance)| {
-                    crate::gui::jump_mode::ui::resolve_xml_overwrite_confirmation_owner(
-                        ctx,
-                        parent_instance,
-                        confirmation_instance,
-                    )
-                })
-                .filter(|owner| *owner != NavigationOwner::Blocked);
+            let xml_owner = self.xml_toolkit_root_input_owner(ctx, root_visible);
+            let xml_overwrite_owner = matches!(xml_owner, NavigationOwner::XmlOverwriteConfirmation { .. })
+                .then_some(xml_owner);
             let (owner, combo_popup) = if let Some(owner) = xml_overwrite_owner {
                 (owner, None)
             } else {
@@ -8751,7 +8776,7 @@ impl LauncherApp {
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
             self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
             self.show_recording_compact_controller(&ctx);
-            self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
+            self.show_xml_toolkit(&ctx, first_ui_pass, frame_logic.should_be_visible);
             // An Immediate Regex Tester owns its own viewport and remains
             // usable while the launcher is hidden. Its ROOT scope and ROOT
             // native-owner eligibility stay disabled in this branch.
@@ -9687,6 +9712,8 @@ impl LauncherApp {
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
+                        == NavigationOwner::Blocked
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.paste_sequence_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
@@ -9773,6 +9800,8 @@ impl LauncherApp {
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
+                        == NavigationOwner::Blocked
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.paste_sequence_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
@@ -10656,6 +10685,7 @@ impl LauncherApp {
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
+            self.show_xml_toolkit(&ctx, first_ui_pass, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11095,7 +11125,7 @@ impl LauncherApp {
         }
         self.hash_generator_dialog.show(&ctx);
         self.show_regex_tester(&ctx, frame_logic.should_be_visible);
-        self.show_xml_toolkit(&ctx, frame_logic.should_be_visible);
+        self.show_xml_toolkit(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_table_utility(
             &ctx,
             frame_logic.should_be_visible,
@@ -11869,6 +11899,14 @@ impl LauncherApp {
         }
         self.complete_mouse_settings_hosts(ctx);
         self.complete_file_search_host(ctx);
+        let (xml_closed, xml_docked) = self.xml_toolkit_dialog.on_ui_frame_complete(ctx);
+        if xml_closed {
+            self.panel_states.xml_toolkit_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::XmlToolkitDialog);
+        }
+        if xml_docked {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         if let Some(completion) = self.batch_rename_host.complete(ctx, &mut self.batch_rename_dialog) {
             for command in completion.commands {
                 self.handle_batch_rename_ui_command(command);
@@ -12427,6 +12465,7 @@ impl eframe::App for LauncherApp {
             || self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open)
             || self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open)
             || self.json_utility_host.needs_root_ui_when_hidden(self.json_utility_dialog.open)
+            || self.xml_toolkit_dialog.needs_root_ui_when_hidden()
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -19295,6 +19334,152 @@ mod tests {
         app.xml_toolkit_dialog.shutdown();
         drop(app);
         drop(workspace);
+    }
+
+
+    #[cfg(windows)]
+    #[test]
+    fn xml_toolkit_host_moves_keep_the_session_and_discarded_replace_keeps_the_file() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::XmlToolkitDialog);
+        let epoch = app.xml_toolkit_dialog.host_session_epoch();
+        let viewport = egui::ViewportId::from_hash_of("xml_toolkit_viewport");
+        let native_frame = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        let host_button = |app: &LauncherApp| {
+            let (rect, clip, enabled) = app.xml_toolkit_dialog.test_host_button().unwrap();
+            assert!(enabled && clip.contains_rect(rect));
+            rect
+        };
+        for _ in 0..4 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        assert!(app.xml_toolkit_dialog.root_layer().is_none());
+        let dock = host_button(&app);
+        for pressed in [true, false] {
+            native_frame(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.xml_toolkit_dialog.root_layer().is_some());
+        assert_eq!(app.xml_toolkit_dialog.host_session_epoch(), epoch);
+
+        app.set_jump_mode_enabled(true);
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let source_target = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "XML source text")
+            .expect("the docked source editor is visible")
+            .clipped_rect();
+        for pressed in [true, false] {
+            run_tool_dialog_frame(
+                &ctx, &mut app, tool_dialog_pointer_events(source_target, pressed), false,
+            ).drop_without_applying_deltas();
+        }
+        let source = "<root>\u{03bb}</root>";
+        run_tool_dialog_frame(&ctx, &mut app, vec![egui::Event::Text(source.into())], false)
+            .drop_without_applying_deltas();
+        assert_eq!(app.xml_toolkit_dialog.test_source(), source);
+        let pop_out = host_button(&app);
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(pop_out, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        assert!(app.xml_toolkit_dialog.root_layer().is_none());
+        for _ in 0..3 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..actual_query_input(true)
+            },
+            false,
+        ).0.drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.xml_toolkit_dialog.needs_root_ui_when_hidden());
+
+        let path = workspace.root().join("xml-retained-overwrite.xml");
+        std::fs::write(&path, b"initial bytes").unwrap();
+        app.xml_toolkit_dialog.test_request_overwrite_confirmation(57, path.clone(), source);
+        let frozen = app.xml_toolkit_dialog.test_pending_overwrite_signature().unwrap();
+        for _ in 0..4 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        assert_eq!(app.xml_toolkit_dialog.host_session_epoch(), epoch);
+        assert_eq!(app.xml_toolkit_dialog.test_source(), source);
+        let replace_button = |app: &LauncherApp| {
+            app.xml_toolkit_dialog.test_native_jump_targets().iter()
+                .find(|target| target.metadata().label() == "Replace existing XML file")
+                .expect("the detached confirmation owns the Replace control")
+                .clipped_rect()
+        };
+        let replace = replace_button(&app);
+        native_frame(&mut app, tool_dialog_pointer_events(replace, true), false);
+        native_frame(&mut app, tool_dialog_pointer_events(replace, false), true);
+        assert_eq!(std::fs::read(&path).unwrap(), b"initial bytes");
+        assert_eq!(app.xml_toolkit_dialog.test_pending_overwrite_signature(), Some(frozen.clone()));
+
+        native_frame(&mut app, Vec::new(), false);
+        let replace = replace_button(&app);
+        native_frame(&mut app, tool_dialog_pointer_events(replace, true), false);
+        super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+        native_frame(&mut app, tool_dialog_pointer_events(replace, false), false);
+        assert_eq!(std::fs::read(&path).unwrap(), b"initial bytes");
+        assert_eq!(app.xml_toolkit_dialog.test_pending_overwrite_signature(), Some(frozen));
+
+        native_frame(&mut app, Vec::new(), false);
+        let replace = replace_button(&app);
+        for pressed in [true, false] {
+            native_frame(&mut app, tool_dialog_pointer_events(replace, pressed), false);
+        }
+        assert!(app.xml_toolkit_dialog.jump_mode_pending_overwrite_identity().is_none());
+        let start = std::time::Instant::now();
+        while std::fs::read(&path).unwrap() != source.as_bytes() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(10), "XML write did not finish");
+            native_frame(&mut app, Vec::new(), false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for _ in 0..3 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        let dock = host_button(&app);
+        for pressed in [true, false] {
+            native_frame(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.xml_toolkit_dialog.root_layer().is_some());
+        assert_eq!(app.xml_toolkit_dialog.host_session_epoch(), epoch);
+        assert_eq!(app.xml_toolkit_dialog.test_source(), source);
+        for _ in 0..3 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        run_tool_dialog_frame(
+            &ctx, &mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false,
+        ).drop_without_applying_deltas();
+        assert!(!app.xml_toolkit_dialog.open);
+        assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+
+        app.focus_panel(super::super::Panel::XmlToolkitDialog);
+        for _ in 0..3 {
+            native_frame(&mut app, Vec::new(), false);
+        }
+        super::with_immediate_viewport_test_close_request(viewport, || {
+            super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            native_frame(&mut app, Vec::new(), false);
+        });
+        assert!(app.xml_toolkit_dialog.open, "discarded native close is deferred");
+        native_frame(&mut app, Vec::new(), false);
+        assert!(!app.xml_toolkit_dialog.open, "the next retained owner closes");
     }
 
     #[cfg(windows)]
@@ -41770,6 +41955,8 @@ mod tests {
             app.render_root_ui(ui);
             passes += 1;
         });
+        let effects = app.complete_retained_tool_dialogs(ctx);
+        app.dispatch_root_dialog_effects(ctx, effects);
         app.finish_ui_frame_receipt();
         app.complete_jump_mode_frame(ctx);
         assert!(passes > 0, "the embedded root fixture renders a pass");

@@ -904,7 +904,6 @@ impl JsonUtilityCommandHost for LauncherApp {
 
 impl XmlToolkitCommandHost for LauncherApp {
     fn open_xml_toolkit(&mut self) {
-        self.xml_toolkit_dialog.open();
         self.focus_panel(super::Panel::XmlToolkitDialog);
     }
 }
