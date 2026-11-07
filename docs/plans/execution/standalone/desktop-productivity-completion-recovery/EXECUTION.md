@@ -1613,3 +1613,11 @@ Large manifests/logs/scripts remain ignored target evidence. Current hashes were
 | r06-parent-ancestry-audit.json | C4FA9523F47DA67311087F33C612375813CFB4B6D77DDB17129F1D0FD7C63964 |
 | r06-parent-coverage-reference-check.json | 66303D6B60FB4DD4BA6D93442EBAD83D08E4AA51892EF18827CC930C7AC2FB1A |
 | r06-parent-artifact-evidence-check.json | 63F725B038C11CBF9159F57EE6A520D7076C5984960DFE396B3550ACAD2D21D0 |
+
+## R06/M6-B — Final manual acceptance packet
+
+M6-B is complete. The single [Windows 11 acceptance packet](MANUAL_WINDOWS_11_ACCEPTANCE.md) covers all N1–N12 with exact routes, expected outcomes, initially NOT_RUN gate/subcheck fields, executable identity, disposable setup, suggested 20–30 minute smoke subset, optional deeper checks and redacted feedback. Its minimal settings template is copied into a uniquely owned runtime directory before construction, with Paste Sequence Next/Cancel shortcuts null. The executable, working directory and note/template locations are isolated; tracked fixtures are not used as writable profiles.
+
+Independent read-only review checked current routes, labels, settings schema, profile isolation and helper disposal. Corrections incorporated the separate gesture editor and auto-save semantics, Paste Sequence Run/preflight/Next and second run, Diagram align/layer actions, and actual live-pin opener. Static inspection confirms all twelve gates and 43 initially NOT_RUN gate/subcheck fields; no PASS/FAIL is preselected. JSON parses, the grouped draw.io fixture exists, and git diff --check passes. No Cargo, application, helper, native capture or Explorer action was run for this documentation milestone.
+
+The packet binds the executable to accepted code checkpoint 08c91e819ef8f488fdc83da33f0e052230a6a34d and preserves the original dirty-build provenance. No later documentation SHA is claimed to be embedded. Full native N1–N12 and independent external draw.io rendering remain user-pending. An applicable Windows 11 Explorer capability refusal is FAIL/capability-gap feedback, not a successful five-tab proof. M6-C final reporting/receipt is next; the implementation is not waiting for user execution of this packet.
