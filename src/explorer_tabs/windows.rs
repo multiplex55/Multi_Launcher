@@ -24,6 +24,7 @@ use crate::explorer_tabs::identity::{
 use crate::explorer_tabs::operation::{FolderPath, MAX_FOLDER_PATH_UTF16_UNITS};
 
 const MAX_SHELL_COUNT: i32 = MAX_SHELL_VIEWS as i32;
+const FOLDER_NOT_READY: &str = "selected tab folder does not match requested PIDL";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellObservationError {
@@ -775,4 +776,1211 @@ fn window_identity(hwnd: HWND) -> Option<WindowIdentity> {
         root_process_id,
         root_thread_id,
     )
+}
+
+// The native port is worker-confined: UIA and Shell interfaces never leave the
+// apartment, and only typed operation evidence crosses into the driver.
+use crate::explorer_tabs::backend::{BackendDiagnostic, BootstrapState, ExplorerTabsPort};
+use crate::explorer_tabs::identity::{CandidateCorrelation, correlate_shell_candidate};
+use crate::explorer_tabs::native_uia::{ExplorerUia, UiaSnapshot};
+use crate::explorer_tabs::operation::{
+    BoundTargetEvidence, FolderIdentityEvidence, FolderIdentityResult, FolderRequestKind,
+    FolderRequestStep, InitialTargetEvidence, OperationId, RequestResult, TargetAuthorityId,
+    VerifiedFolderTab, VerifiedTabEvidence, VerifiedTabIdentity,
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
+use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+use windows::Win32::UI::Shell::{
+    ASSOCF_NONE, ASSOCSTR_COMMAND, AssocQueryStringW, SBSP_ABSOLUTE, SBSP_NEWBROWSER,
+    SBSP_SAMEBROWSER, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{IsChild, SW_SHOWNORMAL};
+use windows::core::w;
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn RtlGetVersion(info: *mut OSVERSIONINFOW) -> i32;
+}
+
+struct NativeTab {
+    element: windows::Win32::UI::Accessibility::IUIAutomationElement,
+    runtime: Vec<i32>,
+    identity: VerifiedTabIdentity,
+    folder: FolderPath,
+    binding: ShellBindingIdentity,
+}
+#[derive(Clone)]
+struct PendingNativeTab {
+    element: windows::Win32::UI::Accessibility::IUIAutomationElement,
+    runtime: Vec<i32>,
+    identity: VerifiedTabIdentity,
+}
+
+struct BootstrapReceipt {
+    operation_id: OperationId,
+    private_path: FolderPath,
+}
+
+fn attributed_bootstrap(
+    before: &ShellViewSnapshot,
+    after: &ShellViewSnapshot,
+    receipt: &BootstrapReceipt,
+) -> Result<Option<BoundTargetEvidence>, String> {
+    match correlate_shell_candidate(before, after, &receipt.private_path) {
+        CandidateCorrelation::Unique(candidate) => {
+            let window = candidate.window();
+            if window.hwnd() != window.root_hwnd()
+                || window.process_id() != window.root_process_id()
+            {
+                return Err("bootstrap is not a distinct Explorer root".into());
+            }
+            let authority =
+                TargetAuthorityId::from_correlated_worker_token(1).ok_or("invalid authority")?;
+            Ok(Some(BoundTargetEvidence::from_correlated_launch(
+                receipt.operation_id,
+                authority,
+                window,
+            )))
+        }
+        CandidateCorrelation::Ambiguous => Err("bootstrap target is ambiguous".into()),
+        CandidateCorrelation::Incomplete(error) => {
+            Err(format!("incomplete bootstrap observation: {error:?}"))
+        }
+        CandidateCorrelation::None => Ok(None),
+    }
+}
+
+pub(super) struct WindowsExplorerTabsPort {
+    // UIA references must drop before observer's COM apartment guard.
+    uia: Option<ExplorerUia>,
+    tabs: Vec<NativeTab>,
+    pending: Option<PendingNativeTab>,
+    bindings: Vec<(IUnknown, ShellBindingIdentity)>,
+    observer: Option<WindowsShellObserver>,
+    operation_id: OperationId,
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+    baseline: Option<ShellViewSnapshot>,
+    target: Option<BoundTargetEvidence>,
+    bootstrap: BootstrapState,
+    bootstrap_path: Option<std::path::PathBuf>,
+    requested_step_attempted: bool,
+    last_error: Option<String>,
+    opennew_available: bool,
+}
+impl WindowsExplorerTabsPort {
+    pub(super) fn new(
+        operation_id: OperationId,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            uia: None,
+            tabs: Vec::new(),
+            pending: None,
+            bindings: Vec::new(),
+            observer: None,
+            operation_id,
+            cancelled,
+            deadline,
+            baseline: None,
+            target: None,
+            bootstrap: BootstrapState::NotStarted,
+            bootstrap_path: None,
+            requested_step_attempted: false,
+            last_error: None,
+            opennew_available: false,
+        }
+    }
+    fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err("cancelled".into())
+        } else if Instant::now() >= self.deadline {
+            Err("deadline expired".into())
+        } else {
+            Ok(())
+        }
+    }
+    fn diagnostic_for(&self, reason: impl Into<String>) -> BackendDiagnostic {
+        BackendDiagnostic {
+            reason: reason.into(),
+            bootstrap: self.bootstrap,
+            owned_resource_remaining: self.bootstrap_path.is_some(),
+            owned_resource_path: self.bootstrap_path.clone(),
+            requested_step_attempted: self.requested_step_attempted,
+        }
+    }
+    fn uia(&self) -> Result<&ExplorerUia, String> {
+        self.uia
+            .as_ref()
+            .ok_or_else(|| "UI Automation is unavailable".into())
+    }
+    fn observer(&mut self) -> Result<&mut WindowsShellObserver, String> {
+        self.observer
+            .as_mut()
+            .ok_or_else(|| "Shell observer is unavailable".into())
+    }
+    fn target_window(&self) -> Result<WindowIdentity, String> {
+        self.target
+            .as_ref()
+            .map(BoundTargetEvidence::window)
+            .ok_or_else(|| "Explorer target is not attributed".into())
+    }
+    fn checked_snapshot(&self) -> Result<UiaSnapshot, String> {
+        self.check()?;
+        let target = self.target_window()?;
+        if self.call_native(|| window_identity(hwnd_from_usize(target.hwnd())))? != Some(target) {
+            return Err("Explorer target identity changed".into());
+        }
+        let snapshot = self.uia()?.snapshot(
+            hwnd_from_usize(target.root_hwnd()),
+            target.root_process_id(),
+        )?;
+        self.check()?;
+        if self.call_native(|| window_identity(hwnd_from_usize(target.hwnd())))? != Some(target) {
+            return Err("Explorer target identity changed".into());
+        }
+        Ok(snapshot)
+    }
+    fn check_existing_tabs(&self, snapshot: &UiaSnapshot, expected: usize) -> Result<(), String> {
+        let expected_ids = self
+            .tabs
+            .iter()
+            .map(|tab| tab.runtime.clone())
+            .collect::<Vec<_>>();
+        let observed_ids = snapshot
+            .tabs
+            .iter()
+            .map(|tab| tab.runtime.clone())
+            .collect::<Vec<_>>();
+        let mut same = Vec::with_capacity(self.tabs.len());
+        for (old, current) in self.tabs.iter().zip(&snapshot.tabs) {
+            same.push(self.uia()?.same_element(&old.element, &current.element)?);
+        }
+        crate::explorer_tabs::evidence::validate_tab_prefix(
+            &expected_ids,
+            &observed_ids,
+            &same,
+            expected,
+        )
+        .map_err(str::to_owned)
+    }
+    fn wait_snapshot(&self, expected: usize) -> Result<UiaSnapshot, String> {
+        loop {
+            self.check()?;
+            match self.checked_snapshot() {
+                Ok(snapshot) if snapshot.tabs.len() == expected => return Ok(snapshot),
+                Ok(snapshot) if snapshot.tabs.len() > expected => {
+                    return Err("unexpected extra Explorer tabs".into());
+                }
+                Ok(_) => std::thread::sleep(Duration::from_millis(25)),
+                Err(reason) => return Err(reason),
+            }
+        }
+    }
+    fn retained_browser(&self, binding: ShellBindingIdentity) -> Result<IShellBrowser, String> {
+        let retained = self
+            .observer
+            .as_ref()
+            .ok_or("missing observer")?
+            .previous_bindings
+            .iter()
+            .find(|item| item.token == binding)
+            .ok_or("Shell binding retired")?;
+        let provider: IServiceProvider = self
+            .call_native(|| retained.unknown.cast())?
+            .map_err(|e| format!("Shell service provider: {e}"))?;
+        self.call_native(|| unsafe { provider.QueryService(&SID_STopLevelBrowser) })?
+            .map_err(|e| format!("Shell browser: {e}"))
+    }
+    fn opennew_supported(&self) -> Result<bool, String> {
+        let mut length = 0u32;
+        let result = self.call_native(|| unsafe {
+            AssocQueryStringW(
+                ASSOCF_NONE,
+                ASSOCSTR_COMMAND,
+                w!("Directory"),
+                w!("opennew"),
+                PWSTR::null(),
+                &mut length,
+            )
+        })?;
+        if result.is_err() || !(2..=32768).contains(&length) {
+            return Ok(false);
+        }
+        let mut buffer = vec![0u16; length as usize];
+        let result = self.call_native(|| unsafe {
+            AssocQueryStringW(
+                ASSOCF_NONE,
+                ASSOCSTR_COMMAND,
+                w!("Directory"),
+                w!("opennew"),
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        })?;
+        Ok(result.is_ok() && length > 1 && buffer.first().is_some_and(|value| *value != 0))
+    }
+    fn launch_bootstrap(&mut self, path: &FolderPath) -> Result<BootstrapReceipt, String> {
+        self.check()?;
+        let baseline = self.baseline.as_ref().ok_or("missing baseline")?;
+        let browser = baseline.views().first().map(|view| view.shell_binding());
+        if let Some(binding) = browser {
+            let shell = self.retained_browser(binding)?;
+            let pidl = self
+                .call_native(|| parse_display_name(path))?
+                .map_err(|_| "bootstrap PIDL unavailable")?;
+            self.check()?;
+            self.bootstrap = BootstrapState::Attempted;
+            let result =
+                unsafe { shell.BrowseObject(pidl.as_ptr(), SBSP_ABSOLUTE | SBSP_NEWBROWSER) };
+            self.check()?;
+            result.map_err(|e| format!("new Explorer window request: {e}"))?;
+        } else {
+            self.check()?;
+            if !self.opennew_available || !self.opennew_supported()? {
+                return Err("opennew Shell verb unavailable".into());
+            }
+            self.check()?;
+            let wide: Vec<u16> = path.as_str().encode_utf16().chain(Some(0)).collect();
+            let mut info = SHELLEXECUTEINFOW {
+                cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+                fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+                lpVerb: w!("opennew"),
+                lpFile: PCWSTR(wide.as_ptr()),
+                nShow: SW_SHOWNORMAL.0,
+                ..Default::default()
+            };
+            self.check()?;
+            self.bootstrap = BootstrapState::Attempted;
+            let result = unsafe { ShellExecuteExW(&mut info) };
+            self.check()?;
+            result.map_err(|e| format!("opennew Shell request: {e}"))?;
+        }
+        Ok(BootstrapReceipt {
+            operation_id: self.operation_id,
+            private_path: path.clone(),
+        })
+    }
+    fn await_bootstrap(&mut self, receipt: &BootstrapReceipt) -> Result<(), String> {
+        loop {
+            self.check()?;
+            let after = self.observer()?.observe(Some(&receipt.private_path));
+            self.check()?;
+            let before = self.baseline.as_ref().ok_or("missing baseline")?;
+            match attributed_bootstrap(before, &after, receipt)? {
+                Some(target) => {
+                    self.target = Some(target);
+                    self.bootstrap = BootstrapState::Attributed;
+                    return Ok(());
+                }
+                None => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
+    }
+}
+
+impl WindowsExplorerTabsPort {
+    fn call_native<T>(&self, call: impl FnOnce() -> T) -> Result<T, String> {
+        self.check()?;
+        let result = call();
+        self.check()?;
+        Ok(result)
+    }
+
+    fn current_folder_pidl(&self, folder: &IPersistFolder2) -> Result<PidlGuard, String> {
+        self.check()?;
+        let raw = unsafe { folder.GetCurFolder() }
+            .map_err(|error| format!("Shell folder PIDL: {error}"))?;
+        let owned = PidlGuard::new(raw).ok_or("Shell folder PIDL unavailable")?;
+        self.check()?;
+        Ok(owned)
+    }
+
+    /// Resolve exactly one Shell browser whose active view belongs to the
+    /// selected UIA pane. Shared root HWNDs are never treated as tab identity.
+    fn selected_view(
+        &mut self,
+        pane: HWND,
+        expected: Option<&FolderPath>,
+    ) -> Result<(IShellBrowser, ShellBindingIdentity), String> {
+        self.check()?;
+        let target = self.target_window()?;
+        let root = hwnd_from_usize(target.root_hwnd());
+        if pane.0.is_null()
+            || pane == root
+            || self.call_native(|| unsafe { GetAncestor(pane, GA_ROOT) })? != root
+            || !self
+                .call_native(|| unsafe { IsChild(root, pane) })?
+                .as_bool()
+        {
+            return Err("selected pane is not a distinct target content pane".into());
+        }
+        let shell = self
+            .observer
+            .as_ref()
+            .and_then(|observer| observer.shell.as_ref())
+            .cloned()
+            .ok_or("Shell unavailable")?;
+        let expected_pidl = match expected {
+            Some(path) => Some(
+                self.call_native(|| parse_display_name(path))?
+                    .map_err(|_| "requested folder PIDL unavailable")?,
+            ),
+            None => None,
+        };
+        let count = self
+            .call_native(|| unsafe { shell.Count() })?
+            .map_err(|e| format!("Shell count: {e}"))?;
+        if !(0..=MAX_SHELL_COUNT).contains(&count) {
+            return Err("Shell enumeration limit".into());
+        }
+        let mut matches = Vec::new();
+        for index in 0..count {
+            self.check()?;
+            let dispatch = self
+                .call_native(|| unsafe { shell.Item(&VARIANT::from(index)) })?
+                .map_err(|e| format!("Shell item: {e}"))?;
+            let browser: IWebBrowserApp = self
+                .call_native(|| dispatch.cast())?
+                .map_err(|e| format!("Shell browser dispatch: {e}"))?;
+            let hwnd = self
+                .call_native(|| unsafe { browser.HWND() })?
+                .map_err(|e| format!("Shell HWND: {e}"))?;
+            if usize::try_from(hwnd.0).ok() != Some(target.hwnd()) {
+                continue;
+            }
+            if self.call_native(|| window_identity(hwnd_from_usize(target.hwnd())))? != Some(target)
+            {
+                return Err("Explorer target identity changed".into());
+            }
+            let unknown: IUnknown = self
+                .call_native(|| browser.cast())?
+                .map_err(|e| format!("Shell identity: {e}"))?;
+            let provider: IServiceProvider = self
+                .call_native(|| browser.cast())?
+                .map_err(|e| format!("Shell provider: {e}"))?;
+            let shell_browser: IShellBrowser = self
+                .call_native(|| unsafe { provider.QueryService(&SID_STopLevelBrowser) })?
+                .map_err(|e| format!("Shell browser service: {e}"))?;
+            let view = self
+                .call_native(|| unsafe { shell_browser.QueryActiveShellView() })?
+                .map_err(|e| format!("Shell active view: {e}"))?;
+            let ole: IOleWindow = self
+                .call_native(|| view.cast())?
+                .map_err(|e| format!("Shell view window: {e}"))?;
+            let view_hwnd = self
+                .call_native(|| unsafe { ole.GetWindow() })?
+                .map_err(|e| format!("Shell view HWND: {e}"))?;
+            if !crate::explorer_tabs::native_uia::pane_view_relation(
+                root.0 as usize,
+                pane.0 as usize,
+                view_hwnd.0 as usize,
+                true,
+                self.call_native(|| unsafe { IsChild(pane, view_hwnd) })?
+                    .as_bool(),
+            ) {
+                continue;
+            }
+            if !self.call_native(|| shell_browser_window_matches(&shell_browser, target))?
+                || !self.call_native(|| ole_window_matches(&ole, target))?
+            {
+                return Err("Shell view ownership changed".into());
+            }
+            let folder_view: IFolderView = self
+                .call_native(|| view.cast())?
+                .map_err(|e| format!("Shell folder view: {e}"))?;
+            let persisted: IPersistFolder2 = self
+                .call_native(|| unsafe { folder_view.GetFolder() })?
+                .map_err(|e| format!("Shell folder: {e}"))?;
+            let current = self.current_folder_pidl(&persisted)?;
+            if let Some(expected) = &expected_pidl {
+                if !self
+                    .call_native(|| unsafe { ILIsEqual(current.as_ptr(), expected.as_ptr()) })?
+                    .as_bool()
+                {
+                    return Err(FOLDER_NOT_READY.into());
+                }
+            }
+            let view_unknown: IUnknown = self
+                .call_native(|| view.cast())?
+                .map_err(|e| format!("Shell view identity: {e}"))?;
+            matches.push((
+                index,
+                unknown,
+                shell_browser,
+                view_unknown,
+                view_hwnd,
+                current,
+            ));
+        }
+        if matches.len() != 1 {
+            return Err("selected pane has no unique Shell view".into());
+        }
+        if self.call_native(|| unsafe { shell.Count() })?.ok() != Some(count) {
+            return Err("Shell enumeration changed".into());
+        }
+        let (index, unknown, browser, view_identity, view_hwnd, folder) = matches.pop().unwrap();
+        let again = self
+            .call_native(|| unsafe { shell.Item(&VARIANT::from(index)) })?
+            .map_err(|e| format!("Shell recheck: {e}"))?;
+        let again: IWebBrowserApp = self
+            .call_native(|| again.cast())?
+            .map_err(|e| format!("Shell recheck dispatch: {e}"))?;
+        let again_unknown: IUnknown = self
+            .call_native(|| again.cast())?
+            .map_err(|e| format!("Shell recheck identity: {e}"))?;
+        if !same_com_identity(&unknown, &again_unknown)
+            || self.call_native(|| window_identity(hwnd_from_usize(target.hwnd())))? != Some(target)
+        {
+            return Err("Shell binding changed".into());
+        }
+        let active = self
+            .call_native(|| unsafe { browser.QueryActiveShellView() })?
+            .map_err(|e| format!("Shell view recheck: {e}"))?;
+        let active_unknown: IUnknown = self
+            .call_native(|| active.cast())?
+            .map_err(|e| format!("Shell view identity: {e}"))?;
+        if !same_com_identity(&view_identity, &active_unknown) {
+            return Err("Shell selected view changed".into());
+        }
+        let active_window: IOleWindow = self
+            .call_native(|| active.cast())?
+            .map_err(|e| format!("Shell view window recheck: {e}"))?;
+        let active_hwnd = self
+            .call_native(|| unsafe { active_window.GetWindow() })?
+            .map_err(|e| format!("Shell view HWND recheck: {e}"))?;
+        if active_hwnd != view_hwnd
+            || !crate::explorer_tabs::native_uia::pane_view_relation(
+                root.0 as usize,
+                pane.0 as usize,
+                active_hwnd.0 as usize,
+                true,
+                self.call_native(|| unsafe { IsChild(pane, active_hwnd) })?
+                    .as_bool(),
+            )
+        {
+            return Err("Shell view pane relation changed".into());
+        }
+        let folder_view: IFolderView = self
+            .call_native(|| active.cast())?
+            .map_err(|e| format!("Shell folder recheck: {e}"))?;
+        let persisted: IPersistFolder2 = self
+            .call_native(|| unsafe { folder_view.GetFolder() })?
+            .map_err(|e| format!("Shell folder recheck: {e}"))?;
+        let current = self.current_folder_pidl(&persisted)?;
+        if !self
+            .call_native(|| unsafe { ILIsEqual(folder.as_ptr(), current.as_ptr()) })?
+            .as_bool()
+            || self.call_native(|| unsafe { shell.Count() })?.ok() != Some(count)
+        {
+            return Err("Shell folder or enumeration changed".into());
+        }
+        self.check()?;
+        let binding = if let Some((_, identity)) = self
+            .bindings
+            .iter()
+            .find(|(old, _)| same_com_identity(old, &unknown))
+        {
+            *identity
+        } else {
+            let observer = self.observer()?;
+            let token = observer.next_binding_token;
+            observer.next_binding_token = token
+                .checked_add(1)
+                .ok_or("Shell binding token exhausted")?;
+            let identity = ShellBindingIdentity::from_worker_token(token)
+                .ok_or("invalid Shell binding token")?;
+            self.bindings.push((unknown, identity));
+            identity
+        };
+        Ok((browser, binding))
+    }
+}
+
+impl WindowsExplorerTabsPort {
+    fn prepare_initial(&mut self, step: &FolderRequestStep) -> Result<(), String> {
+        self.check()?;
+        if !is_filesystem_directory(step.folder()) {
+            return Err("requested folder is unavailable or not a directory".into());
+        }
+        self.check()?;
+        let pidl =
+            parse_display_name(step.folder()).map_err(|_| "requested folder PIDL unavailable")?;
+        self.check()?;
+        let baseline = self.observer()?.observe(None);
+        self.check()?;
+        if !baseline.is_complete() {
+            return Err(format!(
+                "incomplete pre-launch Shell baseline: {:?}",
+                baseline.failure()
+            ));
+        }
+        if baseline.views().is_empty() && !self.opennew_available {
+            return Err("opennew Shell verb unavailable".into());
+        }
+        self.baseline = Some(baseline);
+        self.check()?;
+        let temp = tempfile::Builder::new()
+            .prefix("multi-launcher-explorer-")
+            .tempdir()
+            .map_err(|e| format!("bootstrap directory: {e}"))?;
+        let path = temp.keep();
+        self.bootstrap_path = Some(path.clone());
+        self.check()?;
+        let bootstrap = FolderPath::parse(path.to_str().ok_or("bootstrap path is not Unicode")?)
+            .map_err(|e| format!("bootstrap path: {e:?}"))?;
+        self.check()?;
+        let refreshed = self.observer()?.observe(None);
+        self.check()?;
+        if self.baseline.as_ref() != Some(&refreshed) {
+            return Err("Shell baseline changed before bootstrap request".into());
+        }
+        self.baseline = Some(refreshed);
+        let receipt = self.launch_bootstrap(&bootstrap)?;
+        self.await_bootstrap(&receipt)?;
+        let snapshot = self.wait_snapshot(1)?;
+        if snapshot.selected_index != 0 {
+            return Err("bootstrap tab selection is ambiguous".into());
+        }
+        let (_, binding) = self.selected_view(snapshot.selected_pane, Some(&bootstrap))?;
+        let rechecked = self.checked_snapshot()?;
+        if rechecked.tabs.len() != 1
+            || rechecked.selected_index != 0
+            || rechecked.selected_pane != snapshot.selected_pane
+            || snapshot.tabs[0].runtime != rechecked.tabs[0].runtime
+            || !self
+                .uia()?
+                .same_element(&snapshot.tabs[0].element, &rechecked.tabs[0].element)?
+        {
+            return Err("bootstrap tab changed before navigation".into());
+        }
+        let (browser, rechecked_binding) =
+            self.selected_view(rechecked.selected_pane, Some(&bootstrap))?;
+        if rechecked_binding != binding {
+            return Err("bootstrap Shell binding changed before navigation".into());
+        }
+        self.check()?;
+        self.requested_step_attempted = true;
+        let result =
+            unsafe { browser.BrowseObject(pidl.as_ptr(), SBSP_ABSOLUTE | SBSP_SAMEBROWSER) };
+        self.check()?;
+        result.map_err(|e| format!("initial folder navigation: {e}"))?;
+        self.pending = Some(PendingNativeTab {
+            element: snapshot.tabs[0].element.clone(),
+            runtime: snapshot.tabs[0].runtime.clone(),
+            identity: VerifiedTabIdentity::from_worker_token(1).ok_or("invalid tab token")?,
+        });
+        Ok(())
+    }
+    fn prepare_append(&mut self, step: &FolderRequestStep) -> Result<(), String> {
+        self.check()?;
+        if !is_filesystem_directory(step.folder()) {
+            return Err("requested folder is unavailable or not a directory".into());
+        }
+        self.check()?;
+        let pidl =
+            parse_display_name(step.folder()).map_err(|_| "requested folder PIDL unavailable")?;
+        self.check()?;
+        let before = self.checked_snapshot()?;
+        self.check_existing_tabs(&before, self.tabs.len())?;
+        if self.tabs.is_empty() || before.selected_index + 1 != self.tabs.len() {
+            return Err("Explorer selected tab changed".into());
+        }
+        let previous_folder = self.tabs.last().ok_or("missing prior tab")?.folder.clone();
+        let (_, binding) = self.selected_view(before.selected_pane, Some(&previous_folder))?;
+        if self.tabs.last().is_none_or(|tab| tab.binding != binding) {
+            return Err("selected Shell binding changed".into());
+        }
+        let rechecked = self.checked_snapshot()?;
+        self.check_existing_tabs(&rechecked, self.tabs.len())?;
+        if rechecked.selected_index != before.selected_index
+            || rechecked.selected_pane != before.selected_pane
+        {
+            return Err("Explorer selection changed before append".into());
+        }
+        let (_, rechecked_binding) =
+            self.selected_view(rechecked.selected_pane, Some(&previous_folder))?;
+        if rechecked_binding != binding {
+            return Err("selected Shell binding changed before append".into());
+        }
+        let ready = self.checked_snapshot()?;
+        self.check_existing_tabs(&ready, self.tabs.len())?;
+        if ready.selected_index != rechecked.selected_index
+            || ready.selected_pane != rechecked.selected_pane
+            || !self
+                .uia()?
+                .same_element(&ready.new_tab, &rechecked.new_tab)?
+        {
+            return Err("New Tab control or selected pane changed before append".into());
+        }
+        let uia = self.uia.as_ref().ok_or("UI Automation is unavailable")?;
+        let attempted = &mut self.requested_step_attempted;
+        uia.invoke_new_tab(&ready.new_tab, || *attempted = true)?;
+        let after = self.wait_snapshot(self.tabs.len() + 1)?;
+        self.check_existing_tabs(&after, self.tabs.len() + 1)?;
+        if after.selected_index != self.tabs.len() {
+            return Err("new tab was not appended and selected".into());
+        }
+        let new = &after.tabs[after.selected_index];
+        if self.tabs.iter().any(|tab| tab.runtime == new.runtime) {
+            return Err("reused tab runtime ID".into());
+        }
+        for old in &self.tabs {
+            if self.uia()?.same_element(&old.element, &new.element)? {
+                return Err("reused tab element".into());
+            }
+        }
+        let (_, binding) = self.selected_view(after.selected_pane, None)?;
+        let rechecked = self.checked_snapshot()?;
+        self.check_existing_tabs(&rechecked, self.tabs.len() + 1)?;
+        let current = &rechecked.tabs[self.tabs.len()];
+        if rechecked.selected_index != self.tabs.len()
+            || rechecked.selected_pane != after.selected_pane
+            || current.runtime != new.runtime
+            || !self.uia()?.same_element(&current.element, &new.element)?
+        {
+            return Err("new tab changed before navigation".into());
+        }
+        let (browser, rechecked_binding) = self.selected_view(rechecked.selected_pane, None)?;
+        if rechecked_binding != binding {
+            return Err("new tab Shell binding changed before navigation".into());
+        }
+        self.check()?;
+        let result =
+            unsafe { browser.BrowseObject(pidl.as_ptr(), SBSP_ABSOLUTE | SBSP_SAMEBROWSER) };
+        self.check()?;
+        result.map_err(|e| format!("new tab navigation: {e}"))?;
+        self.pending = Some(PendingNativeTab {
+            element: new.element.clone(),
+            runtime: new.runtime.clone(),
+            identity: VerifiedTabIdentity::from_worker_token((self.tabs.len() + 1) as u64)
+                .ok_or("tab token exhausted")?,
+        });
+        Ok(())
+    }
+    fn observe_pending(
+        &mut self,
+        step: &FolderRequestStep,
+    ) -> Result<(PendingNativeTab, ShellBindingIdentity), PendingObservationError> {
+        let snapshot = self.wait_snapshot(self.tabs.len() + 1)?;
+        self.check_existing_tabs(&snapshot, self.tabs.len() + 1)?;
+        let pending = self.pending.as_ref().ok_or("missing pending tab")?.clone();
+        let current = &snapshot.tabs[self.tabs.len()];
+        if snapshot.selected_index != self.tabs.len()
+            || current.runtime != pending.runtime
+            || !self
+                .uia()?
+                .same_element(&current.element, &pending.element)?
+        {
+            return Err("pending tab identity changed".into());
+        }
+        let (_, binding) = self
+            .selected_view(snapshot.selected_pane, Some(step.folder()))
+            .map_err(|reason| {
+                if reason == FOLDER_NOT_READY {
+                    PendingObservationError::NotReady
+                } else {
+                    PendingObservationError::Failed(reason)
+                }
+            })?;
+        let after = self.checked_snapshot()?;
+        self.check_existing_tabs(&after, self.tabs.len() + 1)?;
+        let current = &after.tabs[self.tabs.len()];
+        if after.selected_index != self.tabs.len()
+            || current.runtime != pending.runtime
+            || !self
+                .uia()?
+                .same_element(&current.element, &pending.element)?
+        {
+            return Err("pending tab changed during folder observation".into());
+        }
+        let (_, rechecked_binding) = self
+            .selected_view(after.selected_pane, Some(step.folder()))
+            .map_err(PendingObservationError::Failed)?;
+        if !selected_relation_unchanged(
+            snapshot.selected_pane,
+            after.selected_pane,
+            binding,
+            rechecked_binding,
+        ) {
+            return Err("pending Shell binding changed during folder observation".into());
+        }
+        let final_snapshot = self.checked_snapshot()?;
+        self.check_existing_tabs(&final_snapshot, self.tabs.len() + 1)?;
+        let current = &final_snapshot.tabs[self.tabs.len()];
+        if final_snapshot.selected_index != self.tabs.len()
+            || final_snapshot.selected_pane != after.selected_pane
+            || current.runtime != pending.runtime
+            || !self
+                .uia()?
+                .same_element(&current.element, &pending.element)?
+        {
+            return Err("pending tab changed after exact folder observation".into());
+        }
+        Ok((self.pending.take().ok_or("pending tab retired")?, binding))
+    }
+    fn record_tab(
+        &mut self,
+        pending: PendingNativeTab,
+        binding: ShellBindingIdentity,
+        folder: FolderPath,
+    ) -> VerifiedTabIdentity {
+        let identity = pending.identity;
+        self.tabs.push(NativeTab {
+            element: pending.element,
+            runtime: pending.runtime,
+            identity,
+            folder,
+            binding,
+        });
+        identity
+    }
+    fn await_pending(
+        &mut self,
+        step: &FolderRequestStep,
+    ) -> Result<(PendingNativeTab, ShellBindingIdentity), String> {
+        poll_pending(|| {
+            self.check().map_err(PendingObservationError::Failed)?;
+            self.observe_pending(step)
+        })
+    }
+    fn cleanup_bootstrap(&mut self) {
+        if let Some(path) = &self.bootstrap_path {
+            match std::fs::remove_dir(path) {
+                Ok(()) => self.bootstrap_path = None,
+                Err(error) => {
+                    self.last_error = Some(format!("owned bootstrap directory remains: {error}"))
+                }
+            }
+        }
+    }
+    fn observation_error<T>(&mut self, result: Result<T, String>) -> Result<T, SnapshotFailure> {
+        result.map_err(|reason| {
+            self.last_error = Some(reason);
+            SnapshotFailure::ShellUnavailable
+        })
+    }
+}
+
+enum PendingObservationError {
+    NotReady,
+    Failed(String),
+}
+
+impl From<String> for PendingObservationError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl From<&str> for PendingObservationError {
+    fn from(reason: &str) -> Self {
+        Self::Failed(reason.into())
+    }
+}
+
+fn poll_pending<T>(
+    mut observe: impl FnMut() -> Result<T, PendingObservationError>,
+) -> Result<T, String> {
+    loop {
+        match observe() {
+            Ok(value) => return Ok(value),
+            Err(PendingObservationError::NotReady) => std::thread::sleep(Duration::from_millis(25)),
+            Err(PendingObservationError::Failed(reason)) => return Err(reason),
+        }
+    }
+}
+
+fn selected_relation_unchanged(
+    before_pane: HWND,
+    after_pane: HWND,
+    before_binding: ShellBindingIdentity,
+    after_binding: ShellBindingIdentity,
+) -> bool {
+    before_pane == after_pane && before_binding == after_binding
+}
+
+#[cfg(test)]
+mod native_relation_tests {
+    use super::*;
+
+    #[test]
+    fn explorer_tabs_backend_replaced_selected_pane_cannot_verify_old_view() {
+        let binding = ShellBindingIdentity::from_worker_token(1).unwrap();
+        let other = ShellBindingIdentity::from_worker_token(2).unwrap();
+        let first = hwnd_from_usize(10);
+        let replacement = hwnd_from_usize(20);
+        assert!(!selected_relation_unchanged(
+            first,
+            replacement,
+            binding,
+            binding
+        ));
+        assert!(!selected_relation_unchanged(first, first, binding, other));
+        assert!(selected_relation_unchanged(first, first, binding, binding));
+    }
+
+    #[test]
+    fn explorer_tabs_backend_only_initial_not_ready_may_retry() {
+        let mut calls = 0;
+        let ready = poll_pending(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(PendingObservationError::NotReady)
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(ready.unwrap(), 42);
+        assert_eq!(calls, 2);
+        let mut calls = 0;
+        let contradicted = poll_pending(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(PendingObservationError::Failed(FOLDER_NOT_READY.into()))
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(contradicted.unwrap_err(), FOLDER_NOT_READY);
+        assert_eq!(calls, 1, "a changed exact observation must not be retried");
+    }
+
+    #[test]
+    fn explorer_tabs_backend_bootstrap_receipt_rejects_preexisting_and_ambiguous_windows() {
+        use crate::explorer_tabs::identity::test_support as ids;
+        let path = FolderPath::parse(r"C:\private-bootstrap").unwrap();
+        let receipt = BootstrapReceipt {
+            operation_id: OperationId::from_token(7).unwrap(),
+            private_path: path.clone(),
+        };
+        let old = ids::window(10);
+        let first = ids::window(20);
+        let second = ids::window(30);
+        let row = |window, binding, view, index| {
+            ids::view(
+                window,
+                ids::shell_binding(binding),
+                ids::view_identity(view),
+                index,
+                Some(ids::path_comparison(path.clone(), PidlPathMatch::Exact)),
+            )
+        };
+        let before = ShellViewSnapshot::complete(vec![old], vec![row(old, 1, 1, 0)]).unwrap();
+        assert!(
+            attributed_bootstrap(&before, &before, &receipt)
+                .unwrap()
+                .is_none()
+        );
+        let unique = ShellViewSnapshot::complete(
+            vec![old, first],
+            vec![row(old, 1, 1, 0), row(first, 2, 2, 1)],
+        )
+        .unwrap();
+        assert_eq!(
+            attributed_bootstrap(&before, &unique, &receipt)
+                .unwrap()
+                .unwrap()
+                .window(),
+            first
+        );
+        let ambiguous = ShellViewSnapshot::complete(
+            vec![old, first, second],
+            vec![row(old, 1, 1, 0), row(first, 2, 2, 1), row(second, 3, 3, 2)],
+        )
+        .unwrap();
+        assert!(attributed_bootstrap(&before, &ambiguous, &receipt).is_err());
+
+        // Exercise the production driver with the same attribution helper and
+        // record its fake port's navigation targets. No OS action is performed.
+        struct AttributionPort {
+            before: ShellViewSnapshot,
+            after: ShellViewSnapshot,
+            receipt: BootstrapReceipt,
+            target: Option<BoundTargetEvidence>,
+            navigated: Vec<usize>,
+        }
+        impl ExplorerTabsPort for AttributionPort {
+            fn preflight(&mut self) -> Result<(), BackendDiagnostic> {
+                Ok(())
+            }
+            fn request(
+                &mut self,
+                _step: &FolderRequestStep,
+            ) -> Result<RequestResult, BackendDiagnostic> {
+                let target = attributed_bootstrap(&self.before, &self.after, &self.receipt)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| BackendDiagnostic {
+                        reason: "unattributed bootstrap".into(),
+                        bootstrap: BootstrapState::Attempted,
+                        owned_resource_remaining: true,
+                        owned_resource_path: None,
+                        requested_step_attempted: false,
+                    })?;
+                self.navigated.push(target.window().hwnd());
+                self.target = Some(target);
+                Ok(RequestResult::Accepted)
+            }
+            fn observe_initial(
+                &mut self,
+                step: &FolderRequestStep,
+            ) -> Result<InitialTargetEvidence, SnapshotFailure> {
+                Ok(InitialTargetEvidence::verified(
+                    self.target
+                        .clone()
+                        .ok_or(SnapshotFailure::InvalidWindowIdentity)?,
+                    ShellBindingIdentity::from_worker_token(1).unwrap(),
+                    VerifiedTabIdentity::from_worker_token(1).unwrap(),
+                    1,
+                    FolderIdentityEvidence::from_pidl_check(
+                        step.request_index(),
+                        step.folder().clone(),
+                        FolderIdentityResult::ExactPidl,
+                    ),
+                ))
+            }
+            fn observe_append(
+                &mut self,
+                _step: &FolderRequestStep,
+                _prefix: &[VerifiedFolderTab],
+            ) -> Result<VerifiedTabEvidence, SnapshotFailure> {
+                Err(SnapshotFailure::ShellUnavailable)
+            }
+            fn verify_final(
+                &mut self,
+                _prefix: &[VerifiedFolderTab],
+            ) -> Result<(), BackendDiagnostic> {
+                Ok(())
+            }
+        }
+        for (after, expected_targets) in [
+            (&before, vec![]),
+            (&ambiguous, vec![]),
+            (&unique, vec![first.hwnd()]),
+        ] {
+            let mut port = AttributionPort {
+                before: before.clone(),
+                after: after.clone(),
+                receipt: BootstrapReceipt {
+                    operation_id: receipt.operation_id,
+                    private_path: path.clone(),
+                },
+                target: None,
+                navigated: Vec::new(),
+            };
+            let request = crate::explorer_tabs::operation::FolderTabRequest::new(vec![
+                FolderPath::parse(r"C:\requested").unwrap(),
+            ])
+            .unwrap();
+            let report = crate::explorer_tabs::backend::drive(
+                request,
+                receipt.operation_id,
+                &mut port,
+                &AtomicBool::new(false),
+                Instant::now() + Duration::from_secs(1),
+                &mut |_| {},
+            );
+            assert_eq!(port.navigated, expected_targets);
+            assert!(!port.navigated.contains(&old.hwnd()));
+            if port.navigated.is_empty() {
+                assert!(report.operation.verified_prefix().is_empty());
+                assert!(report.operation.attempted_unverified().is_none());
+            } else {
+                assert_eq!(
+                    report.operation.outcome(),
+                    crate::explorer_tabs::operation::OperationOutcome::Completed
+                );
+            }
+        }
+    }
+}
+
+impl ExplorerTabsPort for WindowsExplorerTabsPort {
+    fn preflight(&mut self) -> Result<(), BackendDiagnostic> {
+        let result = (|| -> Result<(), String> {
+            self.check()?;
+            let mut version = OSVERSIONINFOW {
+                dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+                ..Default::default()
+            };
+            let status = unsafe { RtlGetVersion(&mut version) };
+            self.check()?;
+            if status < 0 || version.dwMajorVersion < 10 || version.dwBuildNumber < 22621 {
+                return Err(
+                    "Windows 11 Explorer tab capability requires build 22621 or later".into(),
+                );
+            }
+            let mut observer = WindowsShellObserver::connect()
+                .map_err(|error| format!("Shell observer: {error:?}"))?;
+            self.check()?;
+            let uia = ExplorerUia::connect(Arc::clone(&self.cancelled), self.deadline)?;
+            self.check()?;
+            let baseline = observer.observe(None);
+            self.check()?;
+            if !baseline.is_complete() {
+                return Err(format!(
+                    "incomplete Shell baseline: {:?}",
+                    baseline.failure()
+                ));
+            }
+            let opennew = self.opennew_supported()?;
+            self.check()?;
+            if baseline.views().is_empty() && !opennew {
+                return Err("no Shell browser and no supported opennew verb".into());
+            }
+            self.opennew_available = opennew;
+            self.baseline = Some(baseline);
+            self.observer = Some(observer);
+            self.uia = Some(uia);
+            Ok(())
+        })();
+        result.map_err(|reason| self.diagnostic_for(reason))
+    }
+    fn request(&mut self, step: &FolderRequestStep) -> Result<RequestResult, BackendDiagnostic> {
+        self.requested_step_attempted = false;
+        let result = match step.kind() {
+            FolderRequestKind::CreateInitialWindow => self.prepare_initial(step),
+            FolderRequestKind::OpenAdditionalTab => self.prepare_append(step),
+        };
+        match result {
+            Ok(()) => Ok(RequestResult::Accepted),
+            Err(reason) => {
+                if self.bootstrap == BootstrapState::NotStarted {
+                    self.cleanup_bootstrap();
+                }
+                Err(self.diagnostic_for(reason))
+            }
+        }
+    }
+    fn observe_initial(
+        &mut self,
+        step: &FolderRequestStep,
+    ) -> Result<InitialTargetEvidence, SnapshotFailure> {
+        let result = self.await_pending(step);
+        let (pending, binding) = self.observation_error(result)?;
+        let Some(target) = self.target.clone() else {
+            return Err(SnapshotFailure::InvalidWindowIdentity);
+        };
+        let identity = self.record_tab(pending, binding, step.folder().clone());
+        self.cleanup_bootstrap();
+        Ok(InitialTargetEvidence::verified(
+            target,
+            binding,
+            identity,
+            step.expected_ordinal(),
+            FolderIdentityEvidence::from_pidl_check(
+                step.request_index(),
+                step.folder().clone(),
+                FolderIdentityResult::ExactPidl,
+            ),
+        ))
+    }
+    fn observe_append(
+        &mut self,
+        step: &FolderRequestStep,
+        prefix: &[VerifiedFolderTab],
+    ) -> Result<VerifiedTabEvidence, SnapshotFailure> {
+        if prefix.len() != self.tabs.len()
+            || prefix.iter().zip(&self.tabs).any(|(verified, tab)| {
+                verified.identity() != tab.identity
+                    || verified.folder() != &tab.folder
+                    || verified.shell_binding() != tab.binding
+            })
+        {
+            self.last_error = Some("verified prefix changed".into());
+            return Err(SnapshotFailure::InvalidWindowIdentity);
+        }
+        let result = self.await_pending(step);
+        let (pending, binding) = self.observation_error(result)?;
+        let Some(target) = self.target.clone() else {
+            return Err(SnapshotFailure::InvalidWindowIdentity);
+        };
+        let identity = self.record_tab(pending, binding, step.folder().clone());
+        Ok(VerifiedTabEvidence::verified(
+            target,
+            binding,
+            identity,
+            step.expected_ordinal(),
+            FolderIdentityEvidence::from_pidl_check(
+                step.request_index(),
+                step.folder().clone(),
+                FolderIdentityResult::ExactPidl,
+            ),
+        ))
+    }
+    fn verify_final(&mut self, prefix: &[VerifiedFolderTab]) -> Result<(), BackendDiagnostic> {
+        let result = (|| -> Result<(), String> {
+            if prefix.len() != self.tabs.len()
+                || prefix.iter().zip(&self.tabs).any(|(verified, tab)| {
+                    verified.identity() != tab.identity
+                        || verified.folder() != &tab.folder
+                        || verified.shell_binding() != tab.binding
+                })
+            {
+                return Err("verified prefix changed".into());
+            }
+            for index in 0..self.tabs.len() {
+                self.check()?;
+                let before = self.checked_snapshot()?;
+                self.check_existing_tabs(&before, self.tabs.len())?;
+                let current_index = before.selected_index;
+                let current_folder = self.tabs[current_index].folder.clone();
+                let (_, current_binding) =
+                    self.selected_view(before.selected_pane, Some(&current_folder))?;
+                if current_binding != self.tabs[current_index].binding {
+                    return Err("current selected binding changed".into());
+                }
+                let pre_select = self.checked_snapshot()?;
+                self.check_existing_tabs(&pre_select, self.tabs.len())?;
+                if pre_select.selected_index != current_index
+                    || pre_select.selected_pane != before.selected_pane
+                {
+                    return Err("selected pane changed before final selection".into());
+                }
+                let (_, rechecked_current) =
+                    self.selected_view(pre_select.selected_pane, Some(&current_folder))?;
+                if rechecked_current != current_binding {
+                    return Err("current Shell binding changed before final selection".into());
+                }
+                if current_index != index {
+                    self.uia()?.select(&pre_select.tabs[index].element)?;
+                }
+                let after = self.checked_snapshot()?;
+                self.check_existing_tabs(&after, self.tabs.len())?;
+                if after.selected_index != index {
+                    return Err("selected tab changed during final check".into());
+                }
+                let folder = self.tabs[index].folder.clone();
+                let (_, binding) = self.selected_view(after.selected_pane, Some(&folder))?;
+                if binding != self.tabs[index].binding {
+                    return Err("verified Shell binding changed".into());
+                }
+                let final_snapshot = self.checked_snapshot()?;
+                self.check_existing_tabs(&final_snapshot, self.tabs.len())?;
+                if final_snapshot.selected_index != index
+                    || final_snapshot.selected_pane != after.selected_pane
+                {
+                    return Err("selection changed during final verification".into());
+                }
+                let (_, rechecked_binding) =
+                    self.selected_view(final_snapshot.selected_pane, Some(&folder))?;
+                if rechecked_binding != binding {
+                    return Err("Shell binding changed during final verification".into());
+                }
+            }
+            Ok(())
+        })();
+        result.map_err(|reason| self.diagnostic_for(reason))
+    }
+    fn diagnostic(&self) -> Option<BackendDiagnostic> {
+        self.last_error
+            .as_ref()
+            .map(|reason| self.diagnostic_for(reason.clone()))
+    }
 }

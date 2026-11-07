@@ -414,6 +414,9 @@ pub enum OperationFailure {
     RequestRejected,
     StaleRequestResult,
     UnexpectedObservation,
+    FinalVerificationFailed,
+    CapabilityUnavailable,
+    NativeOperationFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,6 +465,7 @@ enum OperationPhase {
     RequestIssuedAppend,
     AwaitingInitialEvidence,
     AwaitingAppendEvidence,
+    AwaitingFinalVerification,
     Terminal(OperationOutcome),
 }
 
@@ -470,6 +474,7 @@ pub enum OperationAction {
     Request(FolderRequestStep),
     WaitingForNativeResult,
     WaitingForObservation,
+    VerifyFinal,
     Verified(OperationReport),
     Finished(OperationReport),
 }
@@ -519,11 +524,12 @@ impl FolderTabOperation {
             OperationPhase::AwaitingInitialEvidence | OperationPhase::AwaitingAppendEvidence => {
                 return OperationAction::WaitingForObservation;
             }
+            OperationPhase::AwaitingFinalVerification => return OperationAction::VerifyFinal,
             OperationPhase::Terminal(_) => return OperationAction::Finished(self.report()),
         };
         if self.verified_prefix.len() == self.request.len() {
-            self.phase = OperationPhase::Terminal(OperationOutcome::Completed);
-            return OperationAction::Finished(self.report());
+            self.phase = OperationPhase::AwaitingFinalVerification;
+            return OperationAction::VerifyFinal;
         }
 
         let request_index = self.verified_prefix.len();
@@ -702,7 +708,6 @@ impl FolderTabOperation {
     pub fn report(&self) -> OperationReport {
         let outcome = match self.phase {
             OperationPhase::Terminal(outcome) => outcome,
-            _ if self.verified_prefix.len() == self.request.len() => OperationOutcome::Completed,
             _ => OperationOutcome::Running,
         };
         let remaining_from = self
@@ -725,12 +730,66 @@ impl FolderTabOperation {
 
     fn after_verified_step(&mut self) -> OperationAction {
         if self.verified_prefix.len() == self.request.len() {
-            self.phase = OperationPhase::Terminal(OperationOutcome::Completed);
-            OperationAction::Finished(self.report())
+            self.phase = OperationPhase::AwaitingFinalVerification;
+            OperationAction::VerifyFinal
         } else {
             self.phase = OperationPhase::ReadyAppend;
             OperationAction::Verified(self.report())
         }
+    }
+
+    pub(crate) fn final_verification_returned(
+        &mut self,
+        valid: bool,
+        control: OperationControl,
+    ) -> OperationAction {
+        if let OperationPhase::Terminal(_) = self.phase {
+            return OperationAction::Finished(self.report());
+        }
+        if let Some(outcome) = control_outcome(control) {
+            self.phase = OperationPhase::Terminal(outcome);
+        } else if self.phase != OperationPhase::AwaitingFinalVerification {
+            return self.fail(OperationFailure::UnexpectedObservation);
+        } else if valid {
+            self.phase = OperationPhase::Terminal(OperationOutcome::Completed);
+        } else {
+            self.phase = OperationPhase::Terminal(OperationOutcome::Failed(
+                OperationFailure::FinalVerificationFailed,
+            ));
+        }
+        OperationAction::Finished(self.report())
+    }
+
+    pub(crate) fn backend_failure(&mut self, failure: OperationFailure) -> OperationAction {
+        if matches!(self.phase, OperationPhase::Terminal(_)) {
+            return OperationAction::Finished(self.report());
+        }
+        self.fail(failure)
+    }
+
+    pub(crate) fn backend_failure_before_dispatch(
+        &mut self,
+        failure: OperationFailure,
+    ) -> OperationAction {
+        if matches!(
+            self.phase,
+            OperationPhase::RequestIssuedInitial | OperationPhase::RequestIssuedAppend
+        ) {
+            self.outstanding = None;
+        }
+        self.backend_failure(failure)
+    }
+
+    /// A step is only an attempted native request once its call may have run.
+    pub(crate) fn stop_before_dispatch(&mut self, control: OperationControl) -> OperationAction {
+        if matches!(
+            self.phase,
+            OperationPhase::RequestIssuedInitial | OperationPhase::RequestIssuedAppend
+        ) && control != OperationControl::Continue
+        {
+            self.outstanding = None;
+        }
+        self.next_action(control)
     }
 }
 
@@ -1234,6 +1293,12 @@ mod tests {
     fn explorer_tabs_operation_freezes_terminal_outcomes_against_late_results() {
         let (mut operation, operation_id, initial) = start_operation(&[r"C:\one"], 8);
         verify_initial(&mut operation, operation_id, &initial);
+        assert_eq!(operation.report().outcome(), OperationOutcome::Running);
+        assert_eq!(
+            operation.next_action(OperationControl::Continue),
+            OperationAction::VerifyFinal
+        );
+        operation.final_verification_returned(true, OperationControl::Continue);
         let completed = operation.report();
         assert_eq!(completed.outcome(), OperationOutcome::Completed);
         assert_eq!(
