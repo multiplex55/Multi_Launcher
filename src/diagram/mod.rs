@@ -134,3 +134,8 @@ pub use session::{
 pub use templates::{DiagramTemplate, DiagramTemplateCapability, DiagramTemplateError};
 
 pub use visual_templates::VisualAuthoringTemplate;
+
+pub(crate) use persistence::{
+    ResolvedExportDestination, StagedUnoccupiedFile, resolve_export_destination,
+    stage_export_unoccupied,
+};

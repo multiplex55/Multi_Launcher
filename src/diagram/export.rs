@@ -76,18 +76,15 @@ impl DiagramExportArtifact {
         self.warnings
     }
 
-    /// Publish this already encoded artifact only if its destination is unoccupied.
-    /// The check is immediately before the atomic writer; this is not a filesystem CAS.
+    /// Publish using a synced same-directory stage and atomic no-clobber commit.
     pub fn publish_unoccupied(&self, path: &Path) -> Result<(), DiagramExportPublicationError> {
-        self.publish_unoccupied_with_writer(path, crate::common::atomic_file::save_atomic)
-    }
-
-    fn publish_unoccupied_with_writer(
-        &self,
-        path: &Path,
-        writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
-    ) -> Result<(), DiagramExportPublicationError> {
-        super::persistence::publish_export_unoccupied(path, self.format, &self.bytes, writer)
+        let destination = super::persistence::resolve_export_destination(path, self.format)?;
+        let staged =
+            super::persistence::stage_export_unoccupied(destination, self.format, &self.bytes)?;
+        staged
+            .publish()
+            .map_err(|error| super::persistence::export_stage_error(path, error))?;
+        Ok(())
     }
 }
 
@@ -4115,31 +4112,17 @@ mod tests {
         let published = fs::read(&path).unwrap();
         assert_eq!(published, artifact.bytes());
 
-        let mut writer_called = false;
-        let occupied = artifact.publish_unoccupied_with_writer(&path, |_path, _bytes| {
-            writer_called = true;
-            anyhow::bail!("writer should not run")
-        });
+        let occupied = artifact.publish_unoccupied(&path);
         assert!(matches!(
             occupied,
             Err(DiagramExportPublicationError::OccupiedPath(_))
         ));
-        assert!(!writer_called);
         assert_eq!(fs::read(&path).unwrap(), published);
-
-        let failure_path = directory.path().join("failure.svg");
+        let missing_parent = directory.path().join("missing").join("failure.svg");
+        assert!(artifact.publish_unoccupied(&missing_parent).is_err());
+        assert!(!missing_parent.exists());
         assert!(matches!(
-            artifact.publish_unoccupied_with_writer(&failure_path, |_path, _bytes| {
-                anyhow::bail!("injected writer failure")
-            }),
-            Err(DiagramExportPublicationError::AtomicWrite { .. })
-        ));
-        assert!(!failure_path.exists());
-        assert!(matches!(
-            artifact.publish_unoccupied_with_writer(
-                &directory.path().join("wrong.png"),
-                |_path, _bytes| Ok(())
-            ),
+            artifact.publish_unoccupied(&directory.path().join("wrong.png")),
             Err(DiagramExportPublicationError::WrongExtension {
                 expected: "svg",
                 ..

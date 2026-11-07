@@ -34,6 +34,11 @@ use crate::diagram::{
     visual_canvas_selection_bounds, visual_canvas_selection_handles,
     visual_canvas_snap_translation_delta,
 };
+use crate::diagram::{
+    DiagramExportWarnings, DiagramVisualExportOptions, DiagramVisualSnapshot,
+    ResolvedExportDestination, StagedUnoccupiedFile, resolve_export_destination,
+    stage_export_unoccupied,
+};
 use eframe::egui;
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -614,11 +619,20 @@ struct VisualAssetImportFence {
 enum VisualAssetWorkKind {
     Import(VisualAssetImportFence),
     Hydrate,
+    Export,
+}
+
+#[derive(Clone, Copy)]
+enum VisualAssetWorkKindTag {
+    Import,
+    Hydrate,
+    Export,
 }
 
 enum VisualAssetWorkResult {
     Import(Result<PreparedVisualAsset, String>),
     Hydrate(Vec<Result<DecodedVisualAsset, (VisualAssetId, String)>>),
+    Export(Result<StagedVisualExport, String>),
 }
 
 struct PendingVisualAssetWork {
@@ -636,6 +650,15 @@ struct PendingVisualAssetWork {
 struct CompletedVisualAssetImport {
     fence: VisualAssetImportFence,
     prepared: PreparedVisualAsset,
+}
+
+struct StagedVisualExport {
+    fence: DocumentActionFence,
+    format: DiagramExportFormat,
+    revision: u64,
+    dimensions: Option<(u32, u32)>,
+    warnings: crate::diagram::DiagramExportWarnings,
+    staged: StagedUnoccupiedFile,
 }
 
 #[derive(Clone)]
@@ -846,6 +869,7 @@ impl DocumentIntent {
     fn requires_action_fence(&self) -> bool {
         matches!(
             self,
+            Self::Export(_, _) |
             Self::ApplyVisualTemplate(_)
                 | Self::ConvertMermaidCopy
                 | Self::OpenRecent(_)
@@ -884,6 +908,10 @@ struct MenuFocusRequest {
 struct DrawBodyEffects {
     menu_focus_request: Option<MenuFocusRequest>,
     export_scale_requested: Option<ExportScale>,
+    visual_export_scale_requested: Option<ExportScale>,
+    visual_export_background_requested: Option<Option<VisualColor>>,
+    visual_export_cancel_requested: Option<VisualExportCancelFence>,
+    visual_export_cancel_pointer_down: bool,
     open_viewer_requested: bool,
     active_menu_scope: Option<MenuFocusScope>,
     visual_selection: Option<VisualSelectionState>,
@@ -918,6 +946,10 @@ struct PendingRootEffects {
     source_focus_requested: Option<egui::Id>,
     menu_focus_request: Option<MenuFocusRequest>,
     export_scale_requested: Option<ExportScale>,
+    visual_export_scale_requested: Option<ExportScale>,
+    visual_export_background_requested: Option<Option<VisualColor>>,
+    visual_export_cancel_requested: Option<VisualExportCancelFence>,
+    visual_export_cancel_pointer_down: bool,
     menu_scope_observed: bool,
     active_menu_scope: Option<MenuFocusScope>,
     visual_selection: Option<VisualSelectionState>,
@@ -932,7 +964,126 @@ struct PendingRootEffects {
 }
 
 #[derive(Clone)]
+struct VisualExportCancelFence {
+    host: HostIdentity,
+    document: RenderDocumentIdentity,
+    revision: u64,
+    owner_generation: u64,
+    owner_viewport_id: egui::ViewportId,
+}
+
+#[derive(Clone, Copy)]
+struct RootOwnerPassProvenance {
+    host: HostIdentity,
+    root_pass: ViewportPassProvenance,
+    owner_generation: u64,
+    owner_viewport_id: egui::ViewportId,
+    owner_pass: Option<ViewportPassProvenance>,
+    owner_pass_accepted: bool,
+    viewport_callback_observed: bool,
+}
+
+impl RootOwnerPassProvenance {
+    fn from_effects(effects: &PendingRootEffects) -> Self {
+        Self {
+            host: effects.host,
+            root_pass: effects.root_pass,
+            owner_generation: effects.owner_generation,
+            owner_viewport_id: effects.owner_viewport_id,
+            owner_pass: effects.owner_pass,
+            owner_pass_accepted: effects.owner_pass_accepted,
+            viewport_callback_observed: effects.viewport_callback_observed,
+        }
+    }
+
+    fn is_current(self, ctx: &egui::Context, owner_generation: u64, host: HostIdentity) -> bool {
+        self.host == host
+            && self.owner_generation == owner_generation
+            && self.owner_pass_accepted
+            && self.viewport_callback_observed
+            && self.root_pass.was_retained(ctx)
+            && match self.owner_pass {
+                Some(pass) => {
+                    self.owner_viewport_id == pass.viewport_id
+                        && pass.viewport_id == viewport_id()
+                        && pass.was_retained(ctx)
+                }
+                None => self.owner_viewport_id == egui::ViewportId::ROOT,
+            }
+    }
+}
+
+fn encode_and_stage_visual_export(
+    snapshot: DiagramVisualSnapshot,
+    fence: DocumentActionFence,
+    format: DiagramExportFormat,
+    options: DiagramVisualExportOptions,
+    destination: ResolvedExportDestination,
+) -> Result<StagedVisualExport, String> {
+    let artifact = match format {
+        DiagramExportFormat::Svg => snapshot.encode_svg(options),
+        DiagramExportFormat::Png => snapshot.encode_png(options),
+        DiagramExportFormat::Mermaid => {
+            return Err("visual documents cannot be exported as Mermaid source".into());
+        }
+    }
+    .map_err(|error| format!("could not encode visual export: {error}"))?;
+    if artifact.revision() != fence.revision {
+        return Err("visual export snapshot revision does not match its accepted action".into());
+    }
+    let revision = artifact.revision();
+    let dimensions = artifact.dimensions();
+    let warnings = artifact.warnings();
+    let staged = stage_export_unoccupied(destination, format, artifact.bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(StagedVisualExport {
+        fence,
+        format,
+        revision,
+        dimensions,
+        warnings,
+        staged,
+    })
+}
+
+fn visual_export_warning_summary(warnings: DiagramExportWarnings) -> String {
+    let mut parts = Vec::new();
+    if warnings.glyph_substitutions() != 0 {
+        parts.push(format!(
+            "{} glyph substitutions",
+            warnings.glyph_substitutions()
+        ));
+    }
+    if warnings.visual_asset_placeholders() != 0 {
+        parts.push(format!(
+            "{} image placeholders",
+            warnings.visual_asset_placeholders()
+        ));
+    }
+    if warnings.visual_truncated_text_items() != 0 {
+        parts.push(format!(
+            "{} shortened text items",
+            warnings.visual_truncated_text_items()
+        ));
+    }
+    if warnings.visual_simplified_dash_paths() != 0 {
+        parts.push(format!(
+            "{} simplified dashed paths",
+            warnings.visual_simplified_dash_paths()
+        ));
+    }
+    if warnings.visual_connector_route_fallbacks() != 0 {
+        parts.push(format!(
+            "{} connector route fallbacks",
+            warnings.visual_connector_route_fallbacks()
+        ));
+    }
+    parts.join(", ")
+}
+
+#[derive(Clone)]
 struct DocumentActionFence {
+    host: HostIdentity,
     document: RenderDocumentIdentity,
     revision: u64,
     owner_generation: u64,
@@ -998,6 +1149,7 @@ pub(crate) struct DiagramStudioDialog {
     source_preview_split_ratio: f32,
     inspector_canvas_split_ratio: f32,
     export_scale: ExportScale,
+    visual_export_background: Option<VisualColor>,
     cache: Option<RevisionCache>,
     visual_projection_cache: Option<VisualProjectionCache>,
     visual_asset_textures: HashMap<VisualAssetId, VisualAssetTexture>,
@@ -1008,6 +1160,7 @@ pub(crate) struct DiagramStudioDialog {
     visual_asset_owner_generation: u64,
     visual_asset_work: Option<PendingVisualAssetWork>,
     completed_visual_asset_import: Option<CompletedVisualAssetImport>,
+    completed_visual_export: Option<StagedVisualExport>,
     drawio_work: Option<PendingDrawioWork>,
     drawio_review: Option<DrawioWorkflowReview>,
     renderer: Option<RendererService>,
@@ -1123,6 +1276,12 @@ pub(crate) struct DiagramStudioDialog {
     #[cfg(test)]
     test_picker_source_change: Option<String>,
     #[cfg(test)]
+    test_picker_visual_change: Option<String>,
+    #[cfg(test)]
+    test_picker_host_change: bool,
+    #[cfg(test)]
+    test_visual_export_scale_requested: Option<ExportScale>,
+    #[cfg(test)]
     test_picker_visual_label_change: Option<String>,
 }
 
@@ -1192,6 +1351,7 @@ impl DiagramStudioDialog {
             source_preview_split_ratio: DEFAULT_SOURCE_PREVIEW_RATIO,
             inspector_canvas_split_ratio: DEFAULT_INSPECTOR_CANVAS_RATIO,
             export_scale: ExportScale::default(),
+            visual_export_background: None,
             cache: None,
             visual_projection_cache: None,
             visual_asset_textures: HashMap::new(),
@@ -1202,6 +1362,7 @@ impl DiagramStudioDialog {
             visual_asset_owner_generation: 0,
             visual_asset_work: None,
             completed_visual_asset_import: None,
+            completed_visual_export: None,
             drawio_work: None,
             drawio_review: None,
             renderer: None,
@@ -1317,6 +1478,12 @@ impl DiagramStudioDialog {
             #[cfg(test)]
             test_picker_source_change: None,
             #[cfg(test)]
+            test_picker_visual_change: None,
+            #[cfg(test)]
+            test_picker_host_change: false,
+            #[cfg(test)]
+            test_visual_export_scale_requested: None,
+            #[cfg(test)]
             test_picker_visual_label_change: None,
         }
     }
@@ -1371,6 +1538,8 @@ impl DiagramStudioDialog {
             || self.close_pending
             || self.viewer_bootstrap_pending
             || self.pending_viewer_effects.is_some()
+            || self.visual_asset_work.as_ref().is_some_and(|work| matches!(&work.kind, VisualAssetWorkKind::Export))
+            || self.completed_visual_export.is_some()
             || self.drawio_work.is_some()
             || self.drawio_review.is_some()
     }
@@ -1616,6 +1785,10 @@ impl DiagramStudioDialog {
         let mut source_focus_requested = None;
         let mut menu_focus_request = None;
         let mut export_scale_requested = None;
+        let mut visual_export_scale_requested = None;
+        let mut visual_export_background_requested = None;
+        let mut visual_export_cancel_requested = None;
+        let mut visual_export_cancel_pointer_down = false;
         let mut active_menu_scope = None;
         let mut visual_selection_requested = None;
         let mut visual_canvas_editing_allowed = false;
@@ -1798,6 +1971,10 @@ impl DiagramStudioDialog {
                     );
                     menu_focus_request = effects.menu_focus_request;
                     export_scale_requested = effects.export_scale_requested;
+                    visual_export_scale_requested = effects.visual_export_scale_requested;
+                    visual_export_background_requested = effects.visual_export_background_requested;
+                    visual_export_cancel_requested = effects.visual_export_cancel_requested;
+                    visual_export_cancel_pointer_down = effects.visual_export_cancel_pointer_down;
                     open_viewer_requested = effects.open_viewer_requested;
                     active_menu_scope = effects.active_menu_scope;
                     visual_selection_requested = effects.visual_selection;
@@ -1828,6 +2005,10 @@ impl DiagramStudioDialog {
                 );
                 menu_focus_request = effects.menu_focus_request;
                 export_scale_requested = effects.export_scale_requested;
+                visual_export_scale_requested = effects.visual_export_scale_requested;
+                visual_export_background_requested = effects.visual_export_background_requested;
+                visual_export_cancel_requested = effects.visual_export_cancel_requested;
+                visual_export_cancel_pointer_down = effects.visual_export_cancel_pointer_down;
                 open_viewer_requested = effects.open_viewer_requested;
                 active_menu_scope = effects.active_menu_scope;
                 visual_selection_requested = effects.visual_selection;
@@ -1963,6 +2144,7 @@ impl DiagramStudioDialog {
                 .as_ref()
                 .filter(|intent| intent.requires_action_fence())
                 .map(|_| DocumentActionFence {
+                    host: owner_host,
                     document: action_document,
                     revision: action_revision,
                     owner_generation,
@@ -1999,6 +2181,25 @@ impl DiagramStudioDialog {
                 export_scale_requested: (child_pass_accepted && !close_requested && body_rendered)
                     .then_some(export_scale_requested)
                     .flatten(),
+                visual_export_scale_requested: (child_pass_accepted
+                    && !close_requested
+                    && body_rendered)
+                    .then_some(visual_export_scale_requested)
+                    .flatten(),
+                visual_export_background_requested: (child_pass_accepted
+                    && !close_requested
+                    && body_rendered)
+                    .then_some(visual_export_background_requested)
+                    .flatten(),
+                visual_export_cancel_requested: (child_pass_accepted
+                    && !close_requested
+                    && body_rendered)
+                    .then_some(visual_export_cancel_requested)
+                    .flatten(),
+                visual_export_cancel_pointer_down: child_pass_accepted
+                    && !close_requested
+                    && body_rendered
+                    && visual_export_cancel_pointer_down,
                 menu_scope_observed: child_pass_accepted && body_rendered,
                 active_menu_scope: (child_pass_accepted && body_rendered)
                     .then_some(active_menu_scope)
@@ -2265,7 +2466,7 @@ impl DiagramStudioDialog {
             if let Some((scene, _)) = presentation.as_ref() {
                 let revision = self.documents.visual_revision().unwrap_or(0);
                 let pending = self.documents.pending_transition().is_some();
-                self.sync_visual_asset_scope(scene, revision, pending);
+                self.sync_visual_asset_scope(scene, revision, pending, false);
                 self.poll_visual_asset_work();
                 self.upload_visual_asset_textures(ui.ctx());
             }
@@ -2684,6 +2885,7 @@ impl DiagramStudioDialog {
             && self.drawio_review.is_none()
             && self.visual_asset_work.is_none()
             && self.completed_visual_asset_import.is_none()
+            && self.completed_visual_export.is_none()
     }
 
     pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> bool {
@@ -2699,6 +2901,10 @@ impl DiagramStudioDialog {
         };
         let retained_pass = effects.root_pass.was_retained(ctx);
         if !retained_pass {
+            if let Some(export) = self.completed_visual_export.as_ref() {
+                ctx.request_repaint_of(export.fence.owner_viewport_id);
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
             let discarded_gesture_commit = effects.mutation.as_ref().is_some_and(|mutation| {
                 matches!(mutation, PendingMutation::VisualGestureTransaction { .. })
             });
@@ -2727,6 +2933,18 @@ impl DiagramStudioDialog {
             return false;
         }
         let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
+        let completion_pass = RootOwnerPassProvenance::from_effects(&effects);
+        if owner_pass_current
+            && let Some(cancel) = effects.visual_export_cancel_requested.as_ref()
+            && cancel.host == self.owner_host.identity()
+            && cancel.document == self.render_document
+            && self.documents.visual_revision() == Some(cancel.revision)
+            && cancel.owner_generation == self.owner_generation
+            && cancel.owner_viewport_id == effects.owner_viewport_id
+            && self.documents.pending_transition().is_none()
+        {
+            self.cancel_visual_export();
+        }
         let accepted_owner_viewport_id = effects.owner_viewport_id;
         let owner_native = native_geometry_identity(
             "diagram-studio",
@@ -2829,6 +3047,10 @@ impl DiagramStudioDialog {
             || effects.source_focus_requested.is_some()
             || effects.menu_focus_request.is_some()
             || effects.export_scale_requested.is_some()
+            || effects.visual_export_scale_requested.is_some()
+            || effects.visual_export_background_requested.is_some()
+            || effects.visual_export_cancel_requested.is_some()
+            || effects.visual_export_cancel_pointer_down
             || effects.mutation.is_some()
             || effects.close_dialog
             || effects.close_viewport
@@ -2851,6 +3073,8 @@ impl DiagramStudioDialog {
         if let Some(scale) = effects.export_scale_requested {
             self.export_scale = scale;
         }
+        if owner_pass_current && let Some(scale) = effects.visual_export_scale_requested { self.export_scale = scale; }
+        if owner_pass_current && let Some(background) = effects.visual_export_background_requested { self.visual_export_background = background; }
         if effects.focus_viewport && owner_pass_current {
             if let Some(layer) = self.docked_owner_layer() {
                 ctx.move_to_top(layer);
@@ -2956,6 +3180,7 @@ impl DiagramStudioDialog {
                     owner_pass_current,
                 )
             });
+        self.publish_completed_visual_export(ctx, completion_pass, effects.close_dialog || effects.os_close_requested, accepted_close, effects.visual_export_cancel_pointer_down);
         self.poll_drawio_work(ctx, accepted_owner_viewport_id, owner_pass_current);
         #[cfg(all(windows, not(test)))]
         {
@@ -3179,12 +3404,12 @@ impl DiagramStudioDialog {
                 DocumentIntent::ImportMermaid
                     | DocumentIntent::ApplyTemplate(_)
                     | DocumentIntent::AutoLayout
-                    | DocumentIntent::Export(_, _)
+                    | DocumentIntent::Export(DiagramExportFormat::Mermaid, _)
                     | DocumentIntent::UseSourceInMarkdown(_)
             )
         {
             self.message = Some(StudioNotice::error(
-                "This action is only available for Mermaid documents.",
+                "This action is not available for visual documents.",
             ));
             return false;
         }
@@ -3421,7 +3646,9 @@ impl DiagramStudioDialog {
                 }
             }
             DocumentIntent::Export(format, scale) => {
-                self.export_document(format, scale);
+                if self.documents.authoring_kind() == Some(crate::diagram::DiagramAuthoringKind::Visual) {
+                    if let Some(fence) = fence { self.start_visual_export(ctx, format, self.export_scale, fence.clone(), owner_pass_current); }
+                } else { self.export_document(format, scale); }
             }
             DocumentIntent::DrawioImport => {
                 if let Some(fence) = fence {
@@ -3706,6 +3933,288 @@ impl DiagramStudioDialog {
         Some(dialog)
     }
 
+    fn start_visual_export(
+        &mut self,
+        ctx: &egui::Context,
+        format: DiagramExportFormat,
+        scale: ExportScale,
+        fence: DocumentActionFence,
+        owner_pass_current: bool,
+    ) {
+        if !matches!(format, DiagramExportFormat::Svg | DiagramExportFormat::Png) {
+            self.message = Some(StudioNotice::error(
+                "Visual documents can be exported as SVG or PNG.",
+            ));
+            return;
+        }
+        if self.visual_asset_work.is_some()
+            || self.completed_visual_asset_import.is_some()
+            || self.completed_visual_export.is_some()
+            || self.drawio_work.is_some()
+            || self.drawio_review.is_some()
+        {
+            self.message = Some(StudioNotice::error(
+                "Wait for the current visual image or export operation to finish first.",
+            ));
+            return;
+        }
+        if !self.open
+            || self.documents.authoring_kind() != Some(crate::diagram::DiagramAuthoringKind::Visual)
+            || self.documents.pending_transition().is_some()
+            || !self.document_action_fence_is_current(&fence, ctx, owner_pass_current)
+        {
+            self.message = Some(StudioNotice::error(
+                "The visual document changed before export started; try again.",
+            ));
+            return;
+        }
+
+        let Some((_, projection)) = self.visual_projection() else {
+            self.message = Some(StudioNotice::error(
+                "There is no active visual document to export.",
+            ));
+            return;
+        };
+        let projection = match projection {
+            Ok(projection) => projection,
+            Err(error) => {
+                self.message = Some(StudioNotice::error(format!(
+                    "Could not prepare the visual export: {error}"
+                )));
+                return;
+            }
+        };
+        let snapshot = DiagramVisualSnapshot::capture(fence.revision, projection);
+        #[cfg(all(windows, not(test)))]
+        let picker_hwnd = self.picker_owner.as_ref().and_then(|(ctx, identity)| {
+            super::utility_dialog_size::utility_picker_hwnd(ctx, *identity)
+        });
+        let Some(path) = self.pick_export_destination(format) else {
+            self.message = Some(StudioNotice::info(format!(
+                "{} export cancelled.",
+                export_format_name(format)
+            )));
+            return;
+        };
+
+        #[cfg(all(windows, not(test)))]
+        if picker_hwnd.is_none()
+            || self.picker_owner.as_ref().and_then(|(ctx, identity)| {
+                super::utility_dialog_size::utility_picker_hwnd(ctx, *identity)
+            }) != picker_hwnd
+        {
+            self.message = Some(StudioNotice::error(
+                "The Diagram window changed while choosing an export destination; nothing was written.",
+            ));
+            return;
+        }
+
+        // The native picker may run a nested message loop. Validate the exact
+        // accepted document action again before any worker or disk activity.
+        if !self.open
+            || self.documents.authoring_kind() != Some(crate::diagram::DiagramAuthoringKind::Visual)
+            || self.documents.pending_transition().is_some()
+            || !self.document_action_fence_is_current(&fence, ctx, owner_pass_current)
+        {
+            self.message = Some(StudioNotice::error(
+                "The visual document changed while choosing an export destination; nothing was written.",
+            ));
+            return;
+        }
+        if let Some(native_path) = self.documents.path() {
+            match same_export_destination(native_path, &path) {
+                Ok(true) => {
+                    self.message = Some(StudioNotice::error(format!(
+                        "Cannot export over the active native Diagram document: {}",
+                        path.display()
+                    )));
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.message = Some(StudioNotice::error(format!(
+                        "Could not resolve the export destination {}: {error}",
+                        path.display()
+                    )));
+                    return;
+                }
+            }
+        }
+        let destination = match resolve_export_destination(&path, format) {
+            Ok(destination) => destination,
+            Err(error) => {
+                self.message = Some(StudioNotice::error(format!(
+                    "Could not prepare the export destination: {error}"
+                )));
+                return;
+            }
+        };
+
+        let options = DiagramVisualExportOptions {
+            scale: scale.factor(),
+            background: self.visual_export_background,
+        };
+        let revision = fence.revision;
+        let document = fence.document.clone();
+        let owner_generation = fence.owner_generation;
+        let owner_viewport_id = fence.owner_viewport_id;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let wake_context = ctx.clone();
+        let (sender, receiver) = sync_channel(1);
+
+        #[cfg(test)]
+        let worker: io::Result<()> = {
+            let result = encode_and_stage_visual_export(
+                snapshot,
+                fence.clone(),
+                format,
+                options,
+                destination,
+            );
+            if !worker_cancelled.load(Ordering::Acquire) {
+                let _ = sender.send(VisualAssetWorkResult::Export(result));
+            }
+            drop(sender);
+            wake_context.request_repaint_of(owner_viewport_id);
+            if owner_viewport_id != egui::ViewportId::ROOT {
+                wake_context.request_repaint_of(egui::ViewportId::ROOT);
+            }
+            Ok(())
+        };
+
+        #[cfg(not(test))]
+        let worker = std::thread::Builder::new()
+            .name("diagram-visual-export".into())
+            .spawn(move || {
+                let result = if worker_cancelled.load(Ordering::Acquire) {
+                    Err("visual export was cancelled".to_owned())
+                } else {
+                    encode_and_stage_visual_export(snapshot, fence, format, options, destination)
+                };
+                if !worker_cancelled.load(Ordering::Acquire) {
+                    let _ = sender.send(VisualAssetWorkResult::Export(result));
+                }
+                drop(sender);
+                wake_context.request_repaint_of(owner_viewport_id);
+                if owner_viewport_id != egui::ViewportId::ROOT {
+                    wake_context.request_repaint_of(egui::ViewportId::ROOT);
+                }
+            });
+        if let Err(error) = worker {
+            self.message = Some(StudioNotice::error(format!(
+                "Could not start visual export: {error}"
+            )));
+            return;
+        }
+        self.visual_asset_work = Some(PendingVisualAssetWork {
+            document,
+            revision,
+            owner_generation,
+            owner_viewport_id,
+            kind: VisualAssetWorkKind::Export,
+            cancelled,
+            receiver,
+            hydration_ids: Vec::new(),
+            retired: false,
+        });
+        self.message = Some(StudioNotice::info(
+            "Encoding visual export; it will be published after the next accepted owner pass.",
+        ));
+    }
+
+    fn publish_completed_visual_export(
+        &mut self,
+        ctx: &egui::Context,
+        completion_pass: RootOwnerPassProvenance,
+        close_requested: bool,
+        accepted_close: bool,
+        cancel_pointer_down: bool,
+    ) {
+        let Some(export) = self.completed_visual_export.as_ref() else {
+            return;
+        };
+        if !completion_pass.is_current(ctx, self.owner_generation, self.owner_host.identity()) {
+            ctx.request_repaint_of(export.fence.owner_viewport_id);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+        if cancel_pointer_down {
+            ctx.request_repaint_of(export.fence.owner_viewport_id);
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            return;
+        }
+        let current_revision = self.documents.visual_revision();
+        let current_owner = export.fence.host == self.owner_host.identity()
+            && export.fence.owner_generation == self.owner_generation
+            && export.fence.owner_viewport_id == completion_pass.owner_viewport_id;
+        let current_document = export.fence.document == self.render_document
+            && current_revision == Some(export.revision)
+            && export.revision == export.fence.revision;
+        if !self.open
+            || !current_owner
+            || !current_document
+            || self.documents.authoring_kind() != Some(crate::diagram::DiagramAuthoringKind::Visual)
+            || self.documents.pending_transition().is_some()
+            || self.close_pending
+            || close_requested
+            || accepted_close
+        {
+            self.completed_visual_export = None;
+            return;
+        }
+
+        let export = self
+            .completed_visual_export
+            .take()
+            .expect("completed visual export was checked above");
+        if let Some(native_path) = self.documents.path() {
+            match same_export_destination(native_path, export.staged.destination()) {
+                Ok(true) => {
+                    self.message = Some(StudioNotice::error(format!(
+                        "Cannot export over the active native Diagram document: {}",
+                        export.staged.destination().display()
+                    )));
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.message = Some(StudioNotice::error(format!(
+                        "Could not resolve the export destination {}: {error}",
+                        export.staged.destination().display()
+                    )));
+                    return;
+                }
+            }
+        }
+
+        let destination = export.staged.destination().to_path_buf();
+        match export.staged.publish() {
+            Ok(_) => {
+                let size_message = export
+                    .dimensions
+                    .map_or_else(String::new, |(width, height)| {
+                        format!(" ({width}×{height})")
+                    });
+                let warnings = visual_export_warning_summary(export.warnings);
+                let warnings = if warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {warnings}")
+                };
+                self.message = Some(StudioNotice::info(format!(
+                    "Exported {} revision {} to {}{size_message}{warnings}.",
+                    export_format_name(export.format),
+                    export.revision,
+                    destination.display()
+                )));
+            }
+            Err(error) => {
+                self.message = Some(StudioNotice::error(error.to_string()));
+            }
+        }
+    }
+
     fn pick_mermaid_source(&mut self) -> Option<PathBuf> {
         #[cfg(test)]
         {
@@ -3784,7 +4293,7 @@ impl DiagramStudioDialog {
         source_path: PathBuf,
         scope: DrawioWorkflowScope,
     ) {
-        if self.drawio_work.is_some() || self.visual_asset_work.is_some() {
+        if self.drawio_work.is_some() || self.visual_asset_work.is_some() || self.completed_visual_export.is_some() {
             self.message = Some(StudioNotice::error(
                 "Another bounded Diagram import or export is still running.",
             ));
@@ -3848,7 +4357,7 @@ impl DiagramStudioDialog {
         scene: VisualScene,
         scope: DrawioWorkflowScope,
     ) {
-        if self.drawio_work.is_some() || self.visual_asset_work.is_some() {
+        if self.drawio_work.is_some() || self.visual_asset_work.is_some() || self.completed_visual_export.is_some() {
             self.message = Some(StudioNotice::error(
                 "Another bounded Diagram import or export is still running.",
             ));
@@ -4073,6 +4582,7 @@ impl DiagramStudioDialog {
         if self.drawio_work.is_some()
             || self.drawio_review.is_some()
             || self.visual_asset_work.is_some()
+            || self.completed_visual_export.is_some()
         {
             self.message = Some(StudioNotice::error(
                 "Finish or cancel the current Diagram import/export before starting another.",
@@ -4116,6 +4626,7 @@ impl DiagramStudioDialog {
         if self.drawio_work.is_some()
             || self.drawio_review.is_some()
             || self.visual_asset_work.is_some()
+            || self.completed_visual_export.is_some()
         {
             self.message = Some(StudioNotice::error(
                 "Finish or cancel the current Diagram import/export before starting another.",
@@ -4338,6 +4849,11 @@ impl DiagramStudioDialog {
                 let _ = self.documents.replace_source(&source);
                 self.refresh_cache();
             }
+            if let Some(label) = self.test_picker_visual_change.take() { let _ = self.documents.replace_visual_label(label); self.revalidate_visual_selection(); }
+            if std::mem::take(&mut self.test_picker_host_change) {
+                let next = if self.owner_host.presentation() == UtilityPresentation::Docked { UtilityPresentation::Popout } else { UtilityPresentation::Docked };
+                self.owner_host.transition(next);
+            }
             return self
                 .test_next_file_picker_result
                 .take()
@@ -4514,7 +5030,8 @@ impl DiagramStudioDialog {
             Some(pass) => pass.viewport_id == fence.owner_viewport_id && pass.was_retained(ctx),
             None => fence.owner_viewport_id == egui::ViewportId::ROOT,
         };
-        fence.document == self.render_document
+        fence.host == self.owner_host.identity()
+            && fence.document == self.render_document
             && fence.revision == current_revision
             && fence.owner_generation == self.owner_generation
             && owner_origin_matches
@@ -4667,6 +5184,7 @@ impl DiagramStudioDialog {
     ) {
         if self.visual_asset_work.is_some()
             || self.completed_visual_asset_import.is_some()
+            || self.completed_visual_export.is_some()
             || self.drawio_work.is_some()
         {
             self.message = Some(StudioNotice::error(
@@ -4783,6 +5301,7 @@ impl DiagramStudioDialog {
     ) {
         if self.visual_asset_work.is_some()
             || self.completed_visual_asset_import.is_some()
+            || self.completed_visual_export.is_some()
             || self.drawio_work.is_some()
         {
             return;
@@ -4856,6 +5375,7 @@ impl DiagramStudioDialog {
             work.cancelled.store(true, Ordering::Release);
         }
         self.completed_visual_asset_import = None;
+        self.completed_visual_export = None;
     }
 
     fn clear_visual_asset_state(&mut self) {
@@ -4868,7 +5388,13 @@ impl DiagramStudioDialog {
         self.visual_asset_owner_generation = self.owner_generation;
     }
 
-    fn sync_visual_asset_scope(&mut self, scene: &VisualScene, revision: u64, pending: bool) {
+    fn sync_visual_asset_scope(
+        &mut self,
+        scene: &VisualScene,
+        revision: u64,
+        pending: bool,
+        speculative_close: bool,
+    ) {
         let identity = self.render_document.clone();
         if self.visual_asset_document.as_ref() != Some(&identity) {
             self.retire_visual_asset_work();
@@ -4900,11 +5426,18 @@ impl DiagramStudioDialog {
                 {
                     self.completed_visual_asset_import = None;
                 }
+                if self.completed_visual_export.as_ref().is_some_and(|export| {
+                    export.fence.document != identity || export.revision != revision
+                }) {
+                    self.completed_visual_export = None;
+                }
                 self.visual_asset_revision = Some(revision);
             }
         }
         if pending {
             self.retire_visual_asset_work();
+        } else if speculative_close {
+            self.retire_visual_asset_work_preserving_export();
         }
         let active_assets = scene
             .assets
@@ -4928,13 +5461,54 @@ impl DiagramStudioDialog {
         {
             self.completed_visual_asset_import = None;
         }
+        if self.completed_visual_export.as_ref().is_some_and(|export| {
+            export.fence.document != identity
+                || export.revision != revision
+                || export.fence.owner_generation != self.owner_generation
+        }) {
+            self.completed_visual_export = None;
+        }
+    }
+
+    fn retire_visual_asset_work_preserving_export(&mut self) {
+        if let Some(work) = self.visual_asset_work.as_mut()
+            && !matches!(&work.kind, VisualAssetWorkKind::Export)
+        {
+            work.retired = true;
+            work.cancelled.store(true, Ordering::Release);
+        }
+        self.completed_visual_asset_import = None;
+    }
+
+    fn cancel_visual_export(&mut self) {
+        let mut running = false;
+        if let Some(work) = self.visual_asset_work.as_mut()
+            && matches!(&work.kind, VisualAssetWorkKind::Export)
+            && !work.retired
+        {
+            work.retired = true;
+            work.cancelled.store(true, Ordering::Release);
+            running = true;
+        }
+        let staged = self.completed_visual_export.take().is_some();
+        self.message = Some(StudioNotice::info(if running {
+            "Visual export cancelled; its worker slot remains occupied until it settles."
+        } else if staged {
+            "Staged visual export cancelled."
+        } else {
+            "There is no visual export to cancel."
+        }));
     }
 
     fn poll_visual_asset_work(&mut self) {
         let Some(work) = self.visual_asset_work.as_ref() else {
             return;
         };
-        let disconnected_import = matches!(&work.kind, VisualAssetWorkKind::Import(_));
+        let work_kind = match &work.kind {
+            VisualAssetWorkKind::Import(_) => VisualAssetWorkKindTag::Import,
+            VisualAssetWorkKind::Hydrate => VisualAssetWorkKindTag::Hydrate,
+            VisualAssetWorkKind::Export => VisualAssetWorkKindTag::Export,
+        };
         let was_retired = work.retired;
         let hydration_ids = work.hydration_ids.clone();
         let result = match work.receiver.try_recv() {
@@ -4945,16 +5519,24 @@ impl DiagramStudioDialog {
         if result.is_none() {
             self.visual_asset_work = None;
             if !was_retired {
-                if disconnected_import {
-                    self.message = Some(StudioNotice::error(
-                        "Image import worker stopped before returning a result.",
-                    ));
-                } else {
-                    for id in hydration_ids {
-                        self.visual_asset_errors.insert(
-                            id,
-                            "image decoder stopped before returning this resource".into(),
-                        );
+                match work_kind {
+                    VisualAssetWorkKindTag::Import => {
+                        self.message = Some(StudioNotice::error(
+                            "Image import worker stopped before returning a result.",
+                        ));
+                    }
+                    VisualAssetWorkKindTag::Export => {
+                        self.message = Some(StudioNotice::error(
+                            "Visual export worker stopped before returning a result.",
+                        ));
+                    }
+                    VisualAssetWorkKindTag::Hydrate => {
+                        for id in hydration_ids {
+                            self.visual_asset_errors.insert(
+                                id,
+                                "image decoder stopped before returning this resource".into(),
+                            );
+                        }
                     }
                 }
             }
@@ -5000,9 +5582,30 @@ impl DiagramStudioDialog {
                     }
                 }
             }
+            (VisualAssetWorkKind::Export, VisualAssetWorkResult::Export(Ok(export))) => {
+                if export.fence.document == work.document
+                    && export.revision == work.revision
+                    && export.fence.owner_generation == work.owner_generation
+                    && export.fence.owner_viewport_id == work.owner_viewport_id
+                {
+                    self.completed_visual_export = Some(export);
+                    self.message = Some(StudioNotice::info(
+                        "Visual export is staged; it will publish after an accepted owner pass.",
+                    ));
+                } else {
+                    self.message = Some(StudioNotice::error(
+                        "Visual export worker returned a mismatched document result.",
+                    ));
+                }
+            }
+            (VisualAssetWorkKind::Export, VisualAssetWorkResult::Export(Err(error))) => {
+                self.message = Some(StudioNotice::error(format!(
+                    "Could not create visual export: {error}"
+                )));
+            }
             _ => {
                 self.message = Some(StudioNotice::error(
-                    "Image worker returned an unexpected result.",
+                    "Visual background worker returned an unexpected result.",
                 ));
             }
         }
@@ -5819,6 +6422,9 @@ impl DiagramStudioDialog {
     pub(crate) fn test_stage_pending_decision(&mut self, decision: TransitionDecision) {
         self.test_pending_document_intent = Some(DocumentIntent::ResolvePending(decision));
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_picker_visual_change(&mut self, label: impl Into<String>) { self.test_picker_visual_change = Some(label.into()); }
 
     #[cfg(test)]
     pub(crate) fn test_set_next_file_picker_result(&mut self, result: Option<PathBuf>) {
@@ -7079,7 +7685,8 @@ impl DiagramStudioDialog {
             self.sync_visual_asset_scope(
                 scene,
                 visual_revision,
-                pending_transition.is_some() || closing_requested,
+                pending_transition.is_some(),
+                closing_requested,
             );
             self.poll_visual_asset_work();
             if pending_transition.is_none() && !closing_requested {
@@ -7184,7 +7791,8 @@ impl DiagramStudioDialog {
                         let available = self.drawio_work.is_none()
                             && self.drawio_review.is_none()
                             && self.visual_asset_work.is_none()
-                            && self.completed_visual_asset_import.is_none();
+                            && self.completed_visual_asset_import.is_none()
+                            && self.completed_visual_export.is_none();
                         let import = menu_ui.add_enabled(
                             menu_allowed && available,
                             egui::Button::new("Import diagram…"),
@@ -7270,6 +7878,111 @@ impl DiagramStudioDialog {
                     if egui::Popup::is_id_open(ui.ctx(), template_popup_id) {
                         effects.active_menu_scope = Some(MenuFocusScope { popup_id: template_popup_id, trigger_id: templates.response.id, item_ids: template_item_ids, sizing_pass: template_sizing_pass });
                     }
+                    let export_busy = self.visual_asset_work.is_some()
+                        || self.completed_visual_asset_import.is_some()
+                        || self.completed_visual_export.is_some()
+                        || self.drawio_work.is_some()
+                        || self.drawio_review.is_some();
+                    let export_allowed = actions_allowed
+                        && !closing_requested
+                        && pending_transition.is_none()
+                        && pending.is_none()
+                        && !visual_draft_active;
+                    let mut export_items = Vec::new();
+                    let mut export_sizing = false;
+                    let export_menu = ui.add_enabled_ui(export_allowed, |ui| {
+                        let (response, inner) = egui::containers::menu::MenuButton::new("Visual export")
+                            .config(egui::containers::menu::MenuConfig::new().close_behavior(
+                                egui::PopupCloseBehavior::CloseOnClickOutside,
+                            ))
+                            .ui(ui, |menu_ui| {
+                                export_sizing = menu_ui.is_sizing_pass();
+                                menu_ui.label("Scale");
+                                for (scale, label, _name) in ExportScale::ALL {
+                                    let response = menu_ui.selectable_label(self.export_scale == scale, label);
+                                    if response.enabled() { export_items.push(response.id); }
+                                    #[cfg(test)] {
+                                        let action = format!("visual_export_scale_{_name}");
+                                        self.test_action_enabled.push((action.clone(), response.enabled() && menu_ui.is_visible() && !menu_ui.is_sizing_pass()));
+                                        self.test_action_rects.push((action, response.rect, menu_ui.clip_rect()));
+                                    }
+                                    if response.clicked() { effects.visual_export_scale_requested = Some(scale); }
+                                }
+                                menu_ui.separator();
+                                menu_ui.label("Background");
+                                for (_name, label, color) in [
+                                    ("transparent", "Transparent", None),
+                                    ("white", "White", Some(VisualColor::rgba(255, 255, 255, 255))),
+                                    ("charcoal", "Charcoal", Some(VisualColor::rgba(34, 39, 46, 255))),
+                                ] {
+                                    let response = menu_ui.selectable_label(self.visual_export_background == color, label);
+                                    if response.enabled() { export_items.push(response.id); }
+                                    #[cfg(test)] {
+                                        let action = format!("visual_export_background_{_name}");
+                                        self.test_action_enabled.push((action.clone(), response.enabled() && menu_ui.is_visible() && !menu_ui.is_sizing_pass()));
+                                        self.test_action_rects.push((action, response.rect, menu_ui.clip_rect()));
+                                    }
+                                    if response.clicked() { effects.visual_export_background_requested = Some(color); }
+                                }
+                                let color = self.visual_export_background.unwrap_or(VisualColor::rgba(255, 255, 255, 255));
+                                let mut rgba = [color.red, color.green, color.blue, color.alpha];
+                                let color_response = menu_ui.color_edit_button_srgba_unmultiplied(&mut rgba);
+                                if color_response.changed() {
+                                    effects.visual_export_background_requested = Some(Some(VisualColor::rgba(rgba[0], rgba[1], rgba[2], rgba[3])));
+                                }
+                                menu_ui.separator();
+                                for (_name, label, format) in [
+                                    ("visual_export_svg", "Export SVG…", DiagramExportFormat::Svg),
+                                    ("visual_export_png", "Export PNG…", DiagramExportFormat::Png),
+                                ] {
+                                    let response = menu_ui.add_enabled(!export_busy, egui::Button::new(label));
+                                    if response.enabled() { export_items.push(response.id); }
+                                    #[cfg(test)] {
+                                        self.test_action_rects.push((_name.into(), response.rect, menu_ui.clip_rect()));
+                                        self.test_action_enabled.push((_name.into(), response.enabled() && menu_ui.is_visible() && !menu_ui.is_sizing_pass()));
+                                    }
+                                    if response.clicked() && document_intent.is_none() {
+                                        *document_intent = Some(DocumentIntent::Export(format, self.export_scale));
+                                        menu_ui.close();
+                                    }
+                                }
+                            });
+                        egui::InnerResponse::new(inner.map(|result| result.inner), response)
+                    }).inner;
+                    #[cfg(test)] {
+                        self.test_action_rects.push(("visual_export_options".into(), export_menu.response.rect, ui.clip_rect()));
+                        self.test_action_focus_ids.push(("visual_export_options".into(), export_menu.response.id));
+                    }
+                    let export_popup = egui::Popup::default_response_id(&export_menu.response);
+                    if egui::Popup::is_id_open(ui.ctx(), export_popup) {
+                        effects.active_menu_scope = Some(MenuFocusScope {
+                            popup_id: export_popup,
+                            trigger_id: export_menu.response.id,
+                            item_ids: export_items,
+                            sizing_pass: export_sizing,
+                        });
+                    }
+                    let export_cancellable = self.completed_visual_export.is_some()
+                        || self.visual_asset_work.as_ref().is_some_and(|work| {
+                            !work.retired && matches!(&work.kind, VisualAssetWorkKind::Export)
+                        });
+                    if export_cancellable {
+                        let cancel_export = ui.add_enabled(export_allowed, egui::Button::new("Cancel export"));
+                        effects.visual_export_cancel_pointer_down = cancel_export.is_pointer_button_down_on();
+                        #[cfg(test)] {
+                            self.test_action_rects.push(("visual_export_cancel".into(), cancel_export.rect, ui.clip_rect()));
+                            self.test_action_enabled.push(("visual_export_cancel".into(), cancel_export.enabled()));
+                        }
+                        if cancel_export.clicked() {
+                            effects.visual_export_cancel_requested = Some(VisualExportCancelFence {
+                                host: self.owner_host.identity(),
+                                document: visual_identity.clone(),
+                                revision: visual_revision,
+                                owner_generation: self.owner_generation,
+                                owner_viewport_id: ui.ctx().viewport_id(),
+                            });
+                        }
+                    }
                     if let Some(path) = path.as_deref() {
                         ui.weak(path.file_name().and_then(|name| name.to_str()).unwrap_or("diagram.mld"));
                     } else {
@@ -7281,6 +7994,7 @@ impl DiagramStudioDialog {
                     let import_enabled = structural_edits_allowed
                         && self.visual_asset_work.is_none()
                         && self.completed_visual_asset_import.is_none()
+                        && self.completed_visual_export.is_none()
                         && self.drawio_work.is_none()
                         && self.drawio_review.is_none();
                     let add_image = ui.add_enabled(
@@ -9108,6 +9822,8 @@ impl DiagramStudioDialog {
             ui, effects.active_menu_scope.as_ref(), previous_menu_scope.as_ref(), actions_allowed,
             closing_requested, focused_at_start,
         );
+        #[cfg(test)]
+        if effects.visual_export_scale_requested.is_none() { effects.visual_export_scale_requested = self.test_visual_export_scale_requested.take(); }
         effects.visual_selection = Some(selection_state);
         effects.visual_canvas_editing_allowed = canvas_interaction_authorized;
         effects.visual_structural_editing_allowed = structural_edits_allowed;
@@ -18610,6 +19326,675 @@ mod tests {
             dialog.documents.visual_label(),
             Some("Untitled visual diagram")
         );
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_controls_apply_scale_background_and_publish_png() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("visual.png");
+        let saved_path = directory.path().join("source.mld");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        dialog.documents.save_as(&saved_path).unwrap();
+        let saved_bytes = std::fs::read(&saved_path).unwrap();
+        let projection = project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap();
+        let bounds = projection.bounds.expect("the title creates visible bounds");
+
+        open_viewer(&mut dialog, &ctx);
+        let viewer_before = dialog.viewer_camera;
+        click_viewer_canvas(&mut dialog, &ctx);
+        send_viewer_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::ArrowRight,
+            egui::Modifiers::COMMAND,
+        );
+        click_viewer_action(&mut dialog, &ctx, "visual_viewer_zoom_in");
+        let viewer_camera = dialog.viewer_camera;
+        assert_ne!(viewer_camera.center, viewer_before.center);
+        assert_ne!(viewer_camera.zoom, viewer_before.zoom);
+        click_action(&mut dialog, &ctx, "visual_export_options");
+        for _ in 0..20 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_export_scale_two");
+        assert_eq!(dialog.export_scale, ExportScale::Two);
+        click_action(&mut dialog, &ctx, "visual_export_background_white");
+        assert_eq!(
+            dialog.visual_export_background,
+            Some(VisualColor::rgba(255, 255, 255, 255))
+        );
+
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        click_action(&mut dialog, &ctx, "visual_export_png");
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert!(matches!(
+            dialog.visual_asset_work.as_ref().map(|work| &work.kind),
+            Some(VisualAssetWorkKind::Export)
+        ));
+        assert!(
+            !destination.exists(),
+            "the picker pass only starts encoding"
+        );
+
+        dialog.poll_visual_asset_work();
+        assert!(dialog.completed_visual_export.is_some());
+        assert!(
+            !destination.exists(),
+            "the completed stage is not published yet"
+        );
+        frame_with_root_discard(&mut dialog, &ctx);
+        assert!(dialog.completed_visual_export.is_some());
+        assert!(
+            !destination.exists(),
+            "a discarded root pass retains the stage"
+        );
+
+        dialog.test_request_child_discard();
+        frame(&mut dialog, &ctx);
+        assert!(
+            dialog.completed_visual_export.is_some(),
+            "discarded child pass retains the stage"
+        );
+        assert!(!destination.exists());
+
+        frame(&mut dialog, &ctx);
+        let bytes = std::fs::read(&destination).expect("accepted visual PNG is published");
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (
+                (bounds.width() * 2.0 + 48.0).ceil() as u32,
+                (bounds.height() * 2.0 + 48.0).ceil() as u32,
+            )
+        );
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 255, 255, 255]);
+        assert_eq!(dialog.viewer_camera.center, viewer_camera.center);
+        assert_eq!(dialog.viewer_camera.zoom, viewer_camera.zoom);
+        assert_eq!(dialog.viewer_camera.fit_next, viewer_camera.fit_next);
+        assert_eq!(std::fs::read(&saved_path).unwrap(), saved_bytes);
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message))
+                if message.contains("PNG image")
+                    && message.contains("revision 0")
+                    && message.contains("visual.png")
+        ));
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_svg_and_transparent_png_use_actual_controls() {
+        let directory = tempfile::tempdir().unwrap();
+        let svg_path = directory.path().join("scene.svg");
+        let png_path = directory.path().join("scene.png");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let transform = VisualTransform {
+            x: 300.0,
+            y: 0.0,
+            width: 80.0,
+            height: 60.0,
+            rotation_degrees: 0.0,
+        };
+        for color in [
+            VisualColor::rgba(220, 30, 30, 255),
+            VisualColor::rgba(20, 50, 230, 255),
+        ] {
+            dialog
+                .documents
+                .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform,
+                    style: VisualStyle {
+                        fill: color,
+                        ..VisualStyle::default()
+                    },
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Rectangle,
+                    },
+                })])
+                .unwrap();
+        }
+        let bounds = project_visual_scene(dialog.documents.visual_scene().unwrap())
+            .unwrap()
+            .bounds
+            .unwrap();
+        let expected_svg = DiagramVisualSnapshot::capture(
+            dialog.documents.visual_revision().unwrap(),
+            Arc::new(project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap()),
+        )
+        .encode_svg(DiagramVisualExportOptions::default())
+        .unwrap();
+        dialog.test_set_next_file_picker_result(Some(svg_path.clone()));
+        click_action(&mut dialog, &ctx, "visual_export_options");
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_export_svg");
+        assert!(!svg_path.exists());
+        frame(&mut dialog, &ctx);
+        let svg_bytes = std::fs::read(&svg_path).unwrap();
+        assert_eq!(
+            svg_bytes,
+            expected_svg.bytes(),
+            "actual SVG must use the current overlapping scene"
+        );
+        let svg = std::str::from_utf8(&svg_bytes).unwrap();
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("<path"));
+        dialog.test_set_next_file_picker_result(Some(png_path.clone()));
+        click_action(&mut dialog, &ctx, "visual_export_options");
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_export_background_transparent");
+        click_action(&mut dialog, &ctx, "visual_export_png");
+        assert!(!png_path.exists());
+        frame(&mut dialog, &ctx);
+        let png = image::load_from_memory(&std::fs::read(png_path).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(png.get_pixel(0, 0).0[3], 0);
+        let x = (300.0 - bounds.min.x + 24.0).floor() as u32;
+        let y = (0.0 - bounds.min.y + 24.0).floor() as u32;
+        let overlap = png.get_pixel(x, y).0;
+        assert!(
+            overlap[2] > overlap[0],
+            "later blue shape must appear above red: {overlap:?}"
+        );
+        assert_eq!(dialog.test_file_picker_calls(), 2);
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_discarded_options_do_not_change_choices() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_export_options");
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        assert_eq!(
+            dialog.test_action_enabled("visual_export_scale_two"),
+            Some(true)
+        );
+        click_action_with_root_discard(&mut dialog, &ctx, "visual_export_scale_two");
+        assert_eq!(dialog.export_scale, ExportScale::One);
+        click_action_with_child_discard(&mut dialog, &ctx, "visual_export_scale_two");
+        assert_eq!(dialog.export_scale, ExportScale::One);
+        click_action(&mut dialog, &ctx, "visual_export_scale_two");
+        assert_eq!(dialog.export_scale, ExportScale::Two);
+        assert_eq!(dialog.visual_export_background, None);
+        click_action_with_root_discard(&mut dialog, &ctx, "visual_export_background_white");
+        assert_eq!(dialog.visual_export_background, None);
+        click_action(&mut dialog, &ctx, "visual_export_background_white");
+        assert_eq!(
+            dialog.visual_export_background,
+            Some(VisualColor::rgba(255, 255, 255, 255))
+        );
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_uses_same_pass_accepted_scale() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("scale.png");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        let bounds = project_visual_scene(dialog.documents.visual_scene().unwrap())
+            .unwrap()
+            .bounds
+            .unwrap();
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_visual_export_scale_requested = Some(ExportScale::Two);
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Png,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.export_scale, ExportScale::Two);
+        frame(&mut dialog, &ctx);
+        let png = image::load_from_memory(&std::fs::read(destination).unwrap()).unwrap();
+        assert_eq!(
+            (png.width(), png.height()),
+            (
+                (bounds.width() * 2.0 + 48.0).ceil() as u32,
+                (bounds.height() * 2.0 + 48.0).ceil() as u32
+            )
+        );
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_rejects_host_only_change_during_picker() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("host.svg");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        let identity = dialog.render_document.clone();
+        let revision = dialog.documents.visual_revision();
+        let host = dialog.owner_host.identity();
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_picker_host_change = true;
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        assert_eq!(dialog.render_document, identity);
+        assert_eq!(dialog.documents.visual_revision(), revision);
+        assert_ne!(dialog.owner_host.identity(), host);
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert!(dialog.visual_asset_work.is_none());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_cancel_dominates_same_pass_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let native = directory.path().join("source.mld");
+        let destination = directory.path().join("cancel.svg");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        dialog.documents.save_as(&native).unwrap();
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        let mut work = dialog.visual_asset_work.take().expect("real export worker");
+        let queued = work.receiver.try_recv().expect("test worker staged result");
+        let temporary = match &queued {
+            VisualAssetWorkResult::Export(Ok(export)) => {
+                export.staged.temporary_path_for_test().to_path_buf()
+            }
+            _ => panic!("expected a staged export"),
+        };
+        let (sender, receiver) = sync_channel(1);
+        work.receiver = receiver;
+        dialog.visual_asset_work = Some(work);
+        frame(&mut dialog, &ctx);
+        assert_eq!(
+            dialog.test_action_enabled("visual_export_cancel"),
+            Some(true)
+        );
+        let pos = action_center(&dialog, "visual_export_cancel");
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(pos), button(true)],
+        );
+        assert!(
+            dialog.visual_asset_work.is_some() && !destination.exists(),
+            "actual Cancel press must precede the queued completion"
+        );
+        assert!(sender.send(queued).is_ok());
+        drop(sender);
+        dialog.test_stage_document_intent(DocumentIntent::Save);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerMoved(pos), button(false)],
+        );
+        assert!(dialog.completed_visual_export.is_none());
+        assert!(
+            !destination.exists(),
+            "cancel release published: message={:?}, action={:?}",
+            dialog.message,
+            dialog.test_action_rect("visual_export_cancel")
+        );
+        assert!(!temporary.exists());
+        assert!(native.exists());
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_stage_blocks_asset_import_and_hydration() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("held.svg");
+        let image_path = directory.path().join("asset.png");
+        write_test_png(&image_path, 4, 4);
+        let prepared = crate::diagram::prepare_visual_asset_file(&image_path, usize::MAX).unwrap();
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        dialog.poll_visual_asset_work();
+        assert!(dialog.completed_visual_export.is_some());
+        let mut scene = dialog.documents.visual_scene().unwrap().clone();
+        scene.assets.push(prepared.asset);
+        let revision = dialog.documents.visual_revision().unwrap();
+        dialog.start_visual_asset_hydration(&ctx, &scene, revision);
+        assert!(dialog.visual_asset_work.is_none());
+        let fence = VisualAssetImportFence {
+            document: dialog.render_document.clone(),
+            revision,
+            owner_generation: dialog.owner_generation,
+            owner_viewport_id: viewport_id(),
+            start_pass: ViewportPassProvenance::current(&ctx, viewport_id()),
+            start_pass_accepted: true,
+        };
+        dialog.start_visual_asset_import(&ctx, image_path, fence);
+        assert!(dialog.visual_asset_work.is_none());
+        assert!(dialog.completed_visual_export.is_some());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_same_pass_edit_uses_accepted_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("accepted.svg");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        let original_revision = dialog.documents.visual_revision().unwrap();
+        let expected_document = dialog.render_document.clone();
+        let label = "Accepted in the export pass";
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_pending_mutation = Some(PendingMutation::ReplaceVisualLabel {
+            label: label.into(),
+            expected_document,
+            expected_revision: original_revision,
+        });
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+
+        frame(&mut dialog, &ctx);
+        let accepted_revision = original_revision + 1;
+        assert_eq!(dialog.documents.visual_revision(), Some(accepted_revision));
+        assert_eq!(dialog.documents.visual_label(), Some(label));
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert!(!destination.exists());
+
+        let expected_projection =
+            Arc::new(project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap());
+        let expected = DiagramVisualSnapshot::capture(accepted_revision, expected_projection)
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        frame(&mut dialog, &ctx);
+        assert_eq!(std::fs::read(&destination).unwrap(), expected.bytes());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message))
+                if message.contains(&format!("revision {accepted_revision}"))
+        ));
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_discarded_click_does_not_open_picker() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("discarded.svg");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+
+        click_action(&mut dialog, &ctx, "visual_export_options");
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action_with_root_discard(&mut dialog, &ctx, "visual_export_svg");
+
+        assert_eq!(dialog.test_file_picker_calls(), 0);
+        assert!(!destination.exists());
+        assert!(dialog.visual_asset_work.is_none());
+        assert!(dialog.completed_visual_export.is_none());
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_rechecks_revision_after_picker() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("stale.svg");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        let initial_revision = dialog.documents.visual_revision().unwrap();
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_set_picker_visual_change("Changed inside the picker hook");
+
+        click_action(&mut dialog, &ctx, "visual_export_options");
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_export_svg");
+
+        assert_eq!(
+            dialog.documents.visual_revision(),
+            Some(initial_revision + 1)
+        );
+        assert_eq!(
+            dialog.documents.visual_label(),
+            Some("Changed inside the picker hook")
+        );
+        assert_eq!(dialog.test_file_picker_calls(), 1);
+        assert!(!destination.exists());
+        assert!(dialog.visual_asset_work.is_none());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Error(message)) if message.contains("changed while choosing")
+        ));
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_worker_result_is_retired_after_document_identity_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("retired.png");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Png,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        assert!(dialog.visual_asset_work.is_some());
+        let temporary = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".diagram-copy-")
+            })
+            .expect("worker result owns a staged temporary before collection");
+        assert!(
+            dialog.completed_visual_export.is_none(),
+            "worker result remains queued"
+        );
+        let old_identity = dialog.render_document.clone();
+
+        assert_eq!(
+            dialog.documents.request_new_visual().unwrap(),
+            TransitionOutcome::Applied
+        );
+        dialog.reset_document_presentation();
+        dialog.poll_visual_asset_work();
+
+        assert_ne!(dialog.render_document, old_identity);
+        assert!(dialog.completed_visual_export.is_none());
+        assert!(dialog.visual_asset_work.is_none());
+        assert!(!destination.exists());
+        assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_staged_result_is_dropped_on_accepted_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let saved_path = directory.path().join("clean-before-close.mld");
+        let destination = directory.path().join("closed.svg");
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        dialog.documents.save_as(&saved_path).unwrap();
+        let saved_bytes = std::fs::read(&saved_path).unwrap();
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        dialog.poll_visual_asset_work();
+        let temporary = dialog
+            .completed_visual_export
+            .as_ref()
+            .expect("test worker returns a stage before the close")
+            .staged
+            .temporary_path_for_test()
+            .to_path_buf();
+        assert!(temporary.exists());
+        assert!(!destination.exists());
+
+        dialog.request_close();
+        frame(&mut dialog, &ctx);
+
+        assert!(!dialog.open, "the clean document close is accepted");
+        assert!(dialog.completed_visual_export.is_none());
+        assert!(dialog.visual_asset_work.is_none());
+        assert!(!destination.exists());
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read(&saved_path).unwrap(), saved_bytes);
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_late_collision_preserves_destination_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("occupied.svg");
+        let occupied = b"preserve a file created after staging";
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        dialog.test_set_next_file_picker_result(Some(destination.clone()));
+        dialog.test_stage_document_intent(DocumentIntent::Export(
+            DiagramExportFormat::Svg,
+            ExportScale::One,
+        ));
+        frame(&mut dialog, &ctx);
+        dialog.poll_visual_asset_work();
+        let temporary = dialog
+            .completed_visual_export
+            .as_ref()
+            .expect("test worker returns a stage before publication")
+            .staged
+            .temporary_path_for_test()
+            .to_path_buf();
+        std::fs::write(&destination, occupied).unwrap();
+
+        frame(&mut dialog, &ctx);
+
+        assert_eq!(std::fs::read(&destination).unwrap(), occupied);
+        assert!(!temporary.exists());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Error(message)) if message.contains("occupied")
+        ));
+    }
+
+    #[test]
+    fn diagram_studio_visual_export_cancel_retires_only_export_work_until_worker_settles() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        frame(&mut dialog, &ctx);
+        let host_only_hidden_demand = dialog.needs_root_ui_when_hidden();
+        let document = dialog.render_document.clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        let owner_generation = dialog.owner_generation;
+        let owner_viewport_id = viewport_id();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = sync_channel(1);
+        dialog.visual_asset_work = Some(PendingVisualAssetWork {
+            document: document.clone(),
+            revision,
+            owner_generation,
+            owner_viewport_id,
+            kind: VisualAssetWorkKind::Export,
+            cancelled: cancelled.clone(),
+            receiver,
+            hydration_ids: Vec::new(),
+            retired: false,
+        });
+        frame(&mut dialog, &ctx);
+        assert_eq!(
+            dialog.test_action_enabled("visual_export_cancel"),
+            Some(true)
+        );
+
+        click_action(&mut dialog, &ctx, "visual_export_cancel");
+
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(
+            dialog
+                .visual_asset_work
+                .as_ref()
+                .is_some_and(|work| work.retired)
+        );
+        assert!(dialog.needs_root_ui_when_hidden());
+        assert!(matches!(
+            &dialog.message,
+            Some(StudioNotice::Info(message)) if message.contains("slot remains occupied")
+        ));
+        drop(sender);
+        frame(&mut dialog, &ctx);
+        assert!(dialog.visual_asset_work.is_none());
+        assert!(dialog.completed_visual_export.is_none());
+        assert_eq!(dialog.needs_root_ui_when_hidden(), host_only_hidden_demand);
+
+        let mut asset_dialog = initialized_visual_dialog();
+        let asset_ctx = egui::Context::default();
+        frame(&mut asset_dialog, &asset_ctx);
+        let asset_document = asset_dialog.render_document.clone();
+        let asset_revision = asset_dialog.documents.visual_revision().unwrap();
+        let asset_generation = asset_dialog.owner_generation;
+        let (asset_sender, asset_receiver) = sync_channel(1);
+        asset_dialog.visual_asset_work = Some(PendingVisualAssetWork {
+            document: asset_document.clone(),
+            revision: asset_revision,
+            owner_generation: asset_generation,
+            owner_viewport_id: viewport_id(),
+            kind: VisualAssetWorkKind::Import(VisualAssetImportFence {
+                document: asset_document,
+                revision: asset_revision,
+                owner_generation: asset_generation,
+                owner_viewport_id: viewport_id(),
+                start_pass: ViewportPassProvenance::current(&asset_ctx, viewport_id()),
+                start_pass_accepted: true,
+            }),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            receiver: asset_receiver,
+            hydration_ids: Vec::new(),
+            retired: false,
+        });
+        frame(&mut asset_dialog, &asset_ctx);
+        assert_eq!(
+            asset_dialog.test_action_enabled("visual_export_cancel"),
+            None
+        );
+        assert!(!asset_dialog.visual_asset_work.as_ref().unwrap().retired);
+        drop(asset_sender);
+        frame(&mut asset_dialog, &asset_ctx);
     }
 
     #[test]
