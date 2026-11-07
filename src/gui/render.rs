@@ -27,6 +27,7 @@ enum DialogCopyOwner {
     ZipExtractor,
     FolderSize,
     FileLock,
+    FileLockLabel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2165,7 +2166,7 @@ impl LauncherApp {
             Panel::ImageCompareDialog => self.image_compare_dialog.root_layer(),
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.root_layer(),
             Panel::FolderSizeDialog => self.folder_size_dialog.root_layer(),
-            Panel::FileLockDialog => middle(egui::Id::new(Some("File Lock Inspector"))),
+            Panel::FileLockDialog => self.file_lock_dialog.root_layer(),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
             Panel::RecordingDialog => middle(egui::Id::new("recording-setup-window")),
             Panel::DiagramStudioDialog | Panel::RadialEditor => None,
@@ -4805,7 +4806,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 35] {
+    fn viewport_bootstrap_state(&self) -> [bool; 36] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4820,6 +4821,7 @@ impl LauncherApp {
             self.duplicate_finder_dialog.needs_viewport_bootstrap(),
             self.zip_extractor_dialog.needs_viewport_bootstrap(),
             self.folder_size_dialog.needs_viewport_bootstrap(),
+            self.file_lock_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4855,7 +4857,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 35],
+        previously_pending: [bool; 36],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -7220,13 +7222,34 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
         first_ui_pass: bool,
-        owner_transition_pending: bool,
+        _owner_transition_pending: bool,
+        jump_escape_preempted: bool,
     ) {
-        self.file_lock_dialog.show(
+        let input_allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let root_owner = root_visible
+            && input_allowed
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && self.file_lock_dialog.root_layer().is_some_and(|layer| {
+                let top = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+                (top == Some(layer)
+                    || (top.is_none() && self.file_lock_dialog.awaiting_root_focus()))
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                        focus == layer || focus.order == egui::Order::Background
+                    })
+            });
+        self.file_lock_dialog.show_hosted(
             ctx,
             root_visible,
-            !owner_transition_pending && self.native_ui_host_input_allowed(ctx, root_visible),
+            root_owner,
+            input_allowed,
             first_ui_pass,
+            self.pinned_panels.contains(&super::Panel::FileLockDialog),
+            !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
         );
     }
 
@@ -9251,6 +9274,7 @@ impl LauncherApp {
             self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
             self.show_zip_host(&ctx, false, first_ui_pass, false);
             self.show_folder_size(&ctx, false, first_ui_pass, false, false);
+            self.show_file_lock(&ctx, false, first_ui_pass, false, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -11102,6 +11126,7 @@ impl LauncherApp {
             self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
             self.show_zip_host(&ctx, false, first_ui_pass, false);
             self.show_folder_size(&ctx, false, first_ui_pass, false, false);
+            self.show_file_lock(&ctx, false, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11499,6 +11524,7 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             first_ui_pass,
             owner_transition_pending,
+            jump_session_escape_preempted,
         );
         self.show_recording_setup(&ctx, frame_logic.should_be_visible);
         self.render_hotfolder_manager(&ctx, first_ui_pass);
@@ -12596,9 +12622,11 @@ impl LauncherApp {
                         text,
                     });
                 }
+                super::FileLockDialogEffect::CopyLabel(text) => effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::FileLockLabel, text }),
                 super::FileLockDialogEffect::RevealExecutable(request) => {
                     effects.push(RootDialogEffect::RevealFileLockExecutable(request));
                 }
+                super::FileLockDialogEffect::ShowRoot => effects.push(RootDialogEffect::ShowRoot),
                 super::FileLockDialogEffect::FocusPanel => {
                     self.focus_panel(super::Panel::FileLockDialog);
                     if let Some(layer) = self.query_focus_panel_layer(super::Panel::FileLockDialog)
@@ -12776,6 +12804,7 @@ impl LauncherApp {
                             self.folder_size_dialog.copy_completed(result)
                         }
                         DialogCopyOwner::FileLock => self.file_lock_dialog.copy_completed(result),
+                        DialogCopyOwner::FileLockLabel => self.file_lock_dialog.label_copy_completed(result),
                     }
                 }
                 RootDialogEffect::OpenPath(path) => {
@@ -17045,7 +17074,11 @@ mod tests {
         app.file_lock_dialog.shutdown();
         drop(app);
         drop(workspace);
+    }
 
+    #[test]
+    fn file_lock_ui_discarded_file_search_prefill_does_not_open_inspector() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         let file_path = workspace.root().join("discarded menu file.txt");
@@ -17101,7 +17134,11 @@ mod tests {
         app.file_lock_dialog.shutdown();
         drop(app);
         drop(workspace);
+    }
 
+    #[test]
+    fn file_lock_ui_discarded_choose_file_does_not_inspect() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
         let path = workspace.root().join("discarded picker file.txt");
@@ -19170,6 +19207,393 @@ mod tests {
         assert!(!app.duplicate_finder_dialog.open);
     }
 
+    fn file_lock_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut prior = None;
+        for _ in 0..16 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((rect, clip)) = app.file_lock_dialog.test_action_rect(name)
+                && rect.is_positive()
+                && clip.contains_rect(rect)
+            {
+                if prior == Some(rect) {
+                    return rect;
+                }
+                prior = Some(rect);
+            } else {
+                prior = None;
+            }
+        }
+        panic!("File Lock control {name:?} must be visible");
+    }
+    fn click_file_lock_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        let rect = file_lock_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    struct FileLockTestGate(std::sync::Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>);
+    impl Drop for FileLockTestGate {
+        fn drop(&mut self) {
+            let (lock, wake) = &*self.0;
+            lock.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+    }
+    #[test]
+    fn file_lock_host_preserves_held_inspection_selection_and_reveal() {
+        use super::super::utility_host::UtilityPresentation;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let file = workspace.root().join("host-locked.txt");
+        let exe = workspace.root().join("host-process.exe");
+        std::fs::write(&file, b"inspect").unwrap();
+        std::fs::write(&exe, b"fixture executable").unwrap();
+        let gate = std::sync::Arc::new((
+            std::sync::Mutex::new((false, false)),
+            std::sync::Condvar::new(),
+        ));
+        let _release = FileLockTestGate(gate.clone());
+        let worker_gate = gate.clone();
+        let worker_exe = exe.clone();
+        let wake_ctx = ctx.clone();
+        let session = crate::file_lock::FileLockSession::with_test_job(
+            move |path| {
+                let (lock, wake) = &*worker_gate;
+                let mut state = lock.lock().unwrap();
+                state.0 = true;
+                wake.notify_all();
+                while !state.1 {
+                    state = wake.wait(state).unwrap();
+                }
+                Ok(crate::file_lock::FileLockInspection {
+                    path,
+                    identity: crate::file_operations::NativeFileIdentity::from_parts(1, [9; 16]),
+                    inspected_at: std::time::SystemTime::now(),
+                    processes: vec![crate::file_lock::FileLockProcess {
+                        process_id: 4242,
+                        creation_filetime: 133_000_000_000_000_000,
+                        application_name: "Synthetic process".into(),
+                        service_name: String::new(),
+                        executable_path: Some(worker_exe.clone()),
+                    }],
+                })
+            },
+            move || wake_ctx.request_repaint(),
+        );
+        app.file_lock_dialog.set_session_for_test(session);
+        open_file_lock_through_plugin(&mut app, Some(&file));
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FileLockDialogState::viewport();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        click_file_lock_host_control(&ctx, &mut app, root, "inspect");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !gate.0.lock().unwrap().0 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let generation = app.file_lock_dialog.session_view_for_test().generation();
+        assert!(app.file_lock_dialog.session_view_for_test().is_busy());
+        click_file_lock_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.file_lock_dialog.test_presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        {
+            let (lock, wake) = &*gate;
+            lock.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.file_lock_dialog.has_current_inspection_for_test() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().generation(),
+            generation
+        );
+        click_file_lock_host_control(&ctx, &mut app, native, "process_row");
+        let selected = app.file_lock_dialog.test_selected_process();
+        assert_eq!(selected, Some((generation, 4242, 133_000_000_000_000_000)));
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        click_file_lock_host_control(&ctx, &mut app, native, "copy_snapshot");
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::FileLock,
+                ..
+            }]
+        ));
+        app.file_lock_dialog
+            .set_reveal_result_for_test(Ok(exe.clone()));
+        app.file_lock_dialog.test_hold_ready_dispatch(true);
+        click_file_lock_host_control(&ctx, &mut app, native, "reveal");
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        let dock = file_lock_host_control(&ctx, &mut app, native, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(dock, true),
+            false,
+            false,
+        );
+        app.file_lock_dialog.test_hold_ready_dispatch(false);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(dock, false),
+            false,
+            false,
+        );
+        assert_eq!(
+            app.file_lock_dialog.test_presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        let transition_effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(
+            transition_effects
+                .iter()
+                .any(|effect| matches!(effect, RootDialogEffect::ShowRoot))
+        );
+        assert!(
+            !transition_effects
+                .iter()
+                .any(|effect| matches!(effect, RootDialogEffect::RevealFileLockExecutable(_)))
+        );
+        assert_eq!(app.file_lock_dialog.test_selected_process(), selected);
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().generation(),
+            generation
+        );
+        run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), true, false);
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::RevealFileLockExecutable(request)] if request.process_id==4242 && request.executable_path==exe)
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.file_lock_dialog.open);
+    }
+    #[test]
+    fn file_lock_native_discarded_picker_inspect_copy_reveal_and_close_are_inert() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let file = workspace.root().join("native-pick.txt");
+        std::fs::write(&file, b"fixture").unwrap();
+        let exe = workspace.root().join("native-process.exe");
+        std::fs::write(&exe, b"fixture executable").unwrap();
+        let job_exe = exe.clone();
+        let wake_ctx = ctx.clone();
+        app.file_lock_dialog.set_session_for_test(
+            crate::file_lock::FileLockSession::with_test_job(
+                move |path| {
+                    Ok(crate::file_lock::FileLockInspection {
+                        path,
+                        identity: crate::file_operations::NativeFileIdentity::from_parts(
+                            1, [9; 16],
+                        ),
+                        inspected_at: std::time::SystemTime::now(),
+                        processes: vec![crate::file_lock::FileLockProcess {
+                            process_id: 4242,
+                            creation_filetime: 133_000_000_000_000_000,
+                            application_name: "Synthetic process".into(),
+                            service_name: String::new(),
+                            executable_path: Some(job_exe.clone()),
+                        }],
+                    })
+                },
+                move || wake_ctx.request_repaint(),
+            ),
+        );
+        open_file_lock_through_plugin(&mut app, None);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FileLockDialogState::viewport();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        click_file_lock_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        app.file_lock_dialog
+            .set_file_choice_for_test(Some(file.clone()));
+        for discard_child in [false, true] {
+            let rect = file_lock_host_control(&ctx, &mut app, native, "choose_file");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.file_lock_dialog.file_picker_calls_for_test(), 0);
+            assert!(app.file_lock_dialog.selected_path_for_test().is_none());
+        }
+        click_file_lock_host_control(&ctx, &mut app, native, "choose_file");
+        assert_eq!(app.file_lock_dialog.file_picker_calls_for_test(), 1);
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        for discard_child in [false, true] {
+            let rect = file_lock_host_control(&ctx, &mut app, native, "inspect");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        }
+        click_file_lock_host_control(&ctx, &mut app, native, "inspect");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.file_lock_dialog.has_current_inspection_for_test() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        click_file_lock_host_control(&ctx, &mut app, native, "process_row");
+        app.file_lock_dialog.set_reveal_result_for_test(Ok(exe));
+        for name in ["copy_snapshot", "reveal"] {
+            for discard_child in [false, true] {
+                let rect = file_lock_host_control(&ctx, &mut app, native, name);
+                let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, true),
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, false),
+                    !discard_child,
+                    discard_child,
+                );
+                assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+            }
+            click_file_lock_host_control(&ctx, &mut app, native, name);
+            let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+            assert!(match name {
+                "copy_snapshot" => matches!(
+                    effects.as_slice(),
+                    [RootDialogEffect::CopyText {
+                        owner: DialogCopyOwner::FileLock,
+                        ..
+                    }]
+                ),
+                _ => matches!(
+                    effects.as_slice(),
+                    [RootDialogEffect::RevealFileLockExecutable(_)]
+                ),
+            });
+        }
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.file_lock_dialog.open);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.file_lock_dialog.open);
+    }
+
     fn folder_size_host_control(
         ctx: &egui::Context,
         app: &mut LauncherApp,
@@ -19545,6 +19969,113 @@ mod tests {
         );
         assert!(
             matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::CopyText { owner:DialogCopyOwner::FolderSize,text }] if !text.is_empty())
+        );
+    }
+
+    #[test]
+    fn file_lock_native_label_copy_waits_for_both_viewport_receipts() {
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let path = _workspace.root().join("label-selection-file.txt");
+        std::fs::write(&path, b"label selection").unwrap();
+        open_file_lock_through_plugin(&mut app, Some(&path));
+        for _ in 0..3 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FileLockDialogState::viewport();
+        click_file_lock_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let label = file_lock_host_control(&ctx, &mut app, native, "selected-label");
+        let start = egui::pos2(label.left() + 5.0, label.center().y);
+        let end = egui::pos2(label.right() - 5.0, label.center().y);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerMoved(end)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::CopyText { owner:DialogCopyOwner::FileLockLabel,text }] if !text.is_empty())
         );
     }
 

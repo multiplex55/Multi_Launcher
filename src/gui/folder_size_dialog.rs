@@ -319,50 +319,7 @@ fn project_row(
     }
 }
 
-#[derive(Clone, Copy)]
-struct FolderCopyReceipt {
-    root: ViewportPassProvenance,
-    owner: ViewportPassProvenance,
-    host: super::utility_host::HostIdentity,
-    epoch: u64,
-    eligible: bool,
-}
-#[derive(Default)]
-struct FolderCopyCapture {
-    armed: std::collections::HashMap<egui::ViewportId, FolderCopyReceipt>,
-    captured: Vec<(FolderCopyReceipt, Vec<String>)>,
-}
-impl egui::Plugin for FolderCopyCapture {
-    fn debug_name(&self) -> &'static str {
-        "FolderSizeCopyCapture"
-    }
-    fn output_hook(&mut self, ctx: &egui::Context, output: &mut egui::FullOutput) {
-        // egui restores the parent viewport before invoking output hooks. Identify
-        // the just-ended child from its counters rather than ctx.viewport_id().
-        let ended = self.armed.iter().find_map(|(viewport, receipt)| {
-            (ctx.cumulative_pass_nr_for(*viewport) == receipt.owner.pass_nr.saturating_add(1)
-                && ctx.cumulative_frame_nr_for(*viewport) == receipt.owner.frame_nr)
-                .then_some(*viewport)
-        });
-        let Some(receipt) = ended.and_then(|viewport| self.armed.remove(&viewport)) else {
-            return;
-        };
-        let mut copies = Vec::new();
-        output
-            .platform_output
-            .commands
-            .retain(|command| match command {
-                egui::OutputCommand::CopyText(text) => {
-                    copies.push(text.clone());
-                    false
-                }
-                _ => true,
-            });
-        if receipt.eligible && !copies.is_empty() {
-            self.captured.push((receipt, copies));
-        }
-    }
-}
+use super::utility_host::{HostedCopyCapture, HostedCopyReceipt};
 
 #[derive(Clone)]
 enum FolderSizeAction {
@@ -460,7 +417,7 @@ impl FolderSizeDialogState {
         ctx: &egui::Context,
         activity_center: Option<crate::activity::ActivityCenter>,
     ) -> Self {
-        ctx.add_plugin(FolderCopyCapture::default());
+        ctx.add_plugin(HostedCopyCapture::default());
         let wake_context = ctx.clone();
         let session = match activity_center {
             Some(activity_center) => FolderSizeSession::new_with_activity_center(
@@ -941,14 +898,14 @@ impl FolderSizeDialogState {
                             || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
                     });
                 if is_native {
-                    let receipt = FolderCopyReceipt {
+                    let receipt = HostedCopyReceipt {
                         root,
                         owner: ViewportPassProvenance::current(&c, c.viewport_id()),
                         host,
                         epoch: self.host_epoch,
                         eligible: child_first && allowed && !c.will_discard(),
                     };
-                    c.with_plugin(|plugin: &mut FolderCopyCapture| {
+                    c.with_plugin(|plugin: &mut HostedCopyCapture| {
                         plugin.armed.insert(c.viewport_id(), receipt);
                     });
                     egui::CentralPanel::default().show(child, |ui| {
@@ -1086,10 +1043,13 @@ impl FolderSizeDialogState {
         let mut effects = Vec::new();
         if !prefill {
             let copies = ctx
-                .with_plugin(|plugin: &mut FolderCopyCapture| {
+                .with_plugin(|plugin: &mut HostedCopyCapture| {
                     let mut accepted = Vec::new();
+                    let mut other = Vec::new();
                     for (receipt, copies) in plugin.captured.drain(..) {
-                        if receipt.root == pending.provenance
+                        if receipt.owner.viewport_id != pending.owner.viewport_id {
+                            other.push((receipt, copies));
+                        } else if receipt.root == pending.provenance
                             && receipt.owner == pending.owner
                             && receipt.host == pending.host
                             && receipt.epoch == pending.epoch
@@ -1097,6 +1057,7 @@ impl FolderSizeDialogState {
                             accepted.extend(copies);
                         }
                     }
+                    plugin.captured = other;
                     accepted
                 })
                 .unwrap_or_default();

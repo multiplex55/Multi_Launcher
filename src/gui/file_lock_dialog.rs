@@ -25,12 +25,15 @@ pub(crate) struct FileLockRevealRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FileLockDialogEffect {
     CopySnapshot(String),
+    CopyLabel(String),
     RevealExecutable(FileLockRevealRequest),
     FocusPanel,
+    ShowRoot,
 }
 
 #[derive(Clone)]
 enum FileLockAction {
+    Host(super::utility_host::UtilityPresentation),
     Open(Option<PathBuf>),
     Prefill(PathBuf),
     ChooseFile,
@@ -57,6 +60,18 @@ enum FileLockAction {
 struct PendingFileLockPass {
     provenance: ViewportPassProvenance,
     actions: Vec<FileLockAction>,
+    owner: ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    native: bool,
+    info: Option<egui::ViewportInfo>,
+}
+#[derive(Clone, Copy)]
+struct FileLockOwnerPass {
+    root: ViewportPassProvenance,
+    owner: ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
 }
 
 #[derive(Clone)]
@@ -105,12 +120,17 @@ impl Drop for RevealRetirementReceipt {
 
 pub(crate) struct FileLockDialogState {
     pub(crate) open: bool,
+    host: super::utility_host::UtilityHostState,
+    host_epoch: u64,
+    host_focus: bool,
+    host_os_close_pending: bool,
+    external_pending: Option<PendingFileLockPass>,
     session: FileLockSession,
     selected_path: Option<PathBuf>,
     submitted: Option<SubmittedInspection>,
     selected_process: Option<(u64, u32, u64)>,
     pending: Option<PendingFileLockPass>,
-    latest_pass: Option<ViewportPassProvenance>,
+    latest_pass: Option<FileLockOwnerPass>,
     notice: Option<String>,
     reveal_worker: Option<RevealWorker>,
     reveal_ready: Option<ReadyReveal>,
@@ -122,14 +142,22 @@ pub(crate) struct FileLockDialogState {
     #[cfg(test)]
     test_reveal_result: Option<Result<PathBuf, String>>,
     #[cfg(test)]
+    test_hold_ready_dispatch: bool,
+    #[cfg(test)]
     test_action_rects: Vec<(String, egui::Rect, egui::Rect)>,
 }
 
 impl FileLockDialogState {
     pub(crate) fn new(ctx: &egui::Context) -> Self {
+        ctx.add_plugin(super::utility_host::HostedCopyCapture::default());
         let wake_context = ctx.clone();
         Self {
             open: false,
+            host: super::utility_host::UtilityHostState::docked(),
+            host_epoch: 0,
+            host_focus: false,
+            host_os_close_pending: false,
+            external_pending: None,
             session: FileLockSession::new(move || {
                 wake_context.request_repaint_of(egui::ViewportId::ROOT);
             }),
@@ -149,13 +177,24 @@ impl FileLockDialogState {
             #[cfg(test)]
             test_reveal_result: None,
             #[cfg(test)]
+            test_hold_ready_dispatch: false,
+            #[cfg(test)]
             test_action_rects: Vec::new(),
         }
     }
 
+    pub(crate) fn ensure_open(&mut self) {
+        if !self.open {
+            self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+            self.open = true;
+        }
+    }
     pub(crate) fn request_open(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
         if ctx.viewport_id() == egui::ViewportId::ROOT {
-            self.stage(ctx, vec![FileLockAction::Open(path)]);
+            self.stage_external(
+                ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                FileLockAction::Open(path),
+            );
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     }
@@ -165,18 +204,21 @@ impl FileLockDialogState {
         pass: ViewportPassProvenance,
         path: PathBuf,
     ) {
-        self.stage_with_provenance(pass, vec![FileLockAction::Prefill(path)]);
+        self.stage_external(pass, FileLockAction::Prefill(path));
     }
 
     pub(crate) fn stage_prefill(&mut self, ctx: &egui::Context, path: PathBuf) {
         if ctx.viewport_id() == egui::ViewportId::ROOT {
-            self.stage(ctx, vec![FileLockAction::Prefill(path)]);
+            self.stage_external(
+                ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                FileLockAction::Prefill(path),
+            );
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     }
 
     pub(crate) fn request_close(&mut self, ctx: &egui::Context) {
-        if self.open || self.pending.is_some() {
+        if self.open || self.pending.is_some() || self.external_pending.is_some() {
             self.stage(ctx, vec![FileLockAction::Close]);
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
@@ -192,32 +234,31 @@ impl FileLockDialogState {
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
         self.pending.is_some()
+            || self.external_pending.is_some()
+            || (self.open
+                && self.host.presentation() == super::utility_host::UtilityPresentation::Popout)
             || self.session.view().is_busy()
             || self.reveal_worker.is_some()
             || self.reveal_ready.is_some()
     }
 
-    pub(crate) fn show(
+    fn render_host_body(
         &mut self,
         ctx: &egui::Context,
-        root_visible: bool,
         input_allowed: bool,
         first_ui_pass: bool,
-    ) {
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> (Vec<FileLockAction>, bool) {
         self.poll_reveal_work();
         if !self.open {
-            return;
+            return (Vec::new(), false);
         }
         #[cfg(test)]
         self.test_action_rects.clear();
 
-        let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
-        self.latest_pass = Some(pass);
-        let commit_allowed = input_allowed
-            && root_visible
-            && first_ui_pass
-            && ctx.viewport_id() == egui::ViewportId::ROOT
-            && !egui::Popup::is_any_open(ctx);
+        let commit_allowed =
+            input_allowed && first_ui_pass && !ctx.will_discard() && !egui::Popup::is_any_open(ctx);
         let view = self.session.view();
         let current_inspection = self.current_inspection(&view);
         let selected_path = self.selected_path.clone();
@@ -227,29 +268,20 @@ impl FileLockDialogState {
         let mut window_open = self.open;
         let mut actions = Vec::new();
 
-        egui::Window::new(WINDOW_TITLE)
-            .id(egui::Id::new(Some(WINDOW_TITLE)))
-            .collapsible(false)
-            .resizable(true)
-            .default_size((760.0, 520.0))
-            .min_size((520.0, 340.0))
-            .max_size(ctx.content_rect().size())
-            .show_utility(
-                ctx,
-                UTILITY_KEY,
-                egui::Id::new(WINDOW_TITLE),
-                Some(&mut window_open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::vec2(760.0, 520.0),
-                    ),
-                    egui::vec2(520.0, 340.0),
-                    [None, None],
-                )
-                .with_maximum(ctx.content_rect().size()),
-                |ui| {
-                    let controls_allowed = commit_allowed && ui.is_visible() && !ui.is_sizing_pass();
-                    ui.add_enabled_ui(controls_allowed, |ui| {
+        let mut draw = |ui: &mut egui::Ui| {
+            let controls_allowed = commit_allowed && ui.is_visible() && !ui.is_sizing_pass();
+            if let Some(presentation) = presentation {
+                let (button, next) = super::utility_host::presentation_button(
+                    ui,
+                    presentation,
+                    input_allowed && ui.is_visible() && !ui.is_sizing_pass(),
+                );
+                self.record_action_rect("host-presentation", button.rect, ui.clip_rect());
+                if controls_allowed && button.clicked() {
+                    actions.push(FileLockAction::Host(next));
+                }
+            }
+            ui.add_enabled_ui(input_allowed && ui.is_visible() && !ui.is_sizing_pass(), |ui| {
                         ui.horizontal_wrapped(|ui| {
                             let choose = ui.button("Choose file…");
                             self.record_action_rect("choose_file", choose.rect, ui.clip_rect());
@@ -307,7 +339,8 @@ impl FileLockDialogState {
                         });
 
                         if let Some(path) = selected_path.as_ref() {
-                            ui.label(format!("Selected file: {}", path.display()));
+                            let label = ui.label(format!("Selected file: {}", path.display()));
+                            self.record_action_rect("selected-label",label.rect,ui.clip_rect());
                         } else {
                             ui.label("Choose a regular file, then select Inspect.");
                         }
@@ -415,13 +448,268 @@ impl FileLockDialogState {
                             ui.colored_label(ui.visuals().warn_fg_color, notice);
                         }
                     });
-                },
-            );
-
-        if !window_open && commit_allowed {
-            actions.push(FileLockAction::Close);
+        };
+        if let Some(ui) = child_ui {
+            draw(ui);
+        } else {
+            egui::Window::new(WINDOW_TITLE)
+                .id(egui::Id::new(Some(WINDOW_TITLE)))
+                .collapsible(false)
+                .resizable(true)
+                .default_size((760.0, 520.0))
+                .min_size((520.0, 340.0))
+                .max_size(ctx.content_rect().size())
+                .show_utility(
+                    ctx,
+                    UTILITY_KEY,
+                    egui::Id::new(WINDOW_TITLE),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::vec2(760.0, 520.0),
+                        ),
+                        egui::vec2(520.0, 340.0),
+                        [None, None],
+                    )
+                    .with_maximum(ctx.content_rect().size()),
+                    |ui| draw(ui),
+                );
         }
-        self.stage_with_provenance(pass, actions);
+        if !commit_allowed {
+            actions.clear();
+        }
+        (actions, !window_open && commit_allowed)
+    }
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+                || self.host.embedded_root_layer().is_some()))
+        .then_some(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(Some(WINDOW_TITLE)),
+        ))
+    }
+    pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
+        self.open && self.host.bootstrap_pending()
+    }
+    pub(crate) fn awaiting_root_focus(&self) -> bool {
+        self.host_focus
+            && self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+    }
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host_focus = true;
+        self.host.request_focus();
+    }
+    pub(super) fn presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    pub(crate) fn viewport() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("file-lock-viewport")
+    }
+    fn native_identity(
+        &self,
+        host: super::utility_host::HostIdentity,
+    ) -> super::utility_window_geometry::NativeViewportIdentity {
+        super::utility_window_geometry::NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse(UTILITY_KEY)
+                .expect("stable folder-size key"),
+            viewport_id: Self::viewport(),
+            owner_generation: self.host_epoch,
+            host_generation: host.generation,
+        }
+    }
+    fn retire_host(&mut self, ctx: &egui::Context) {
+        if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
+            let identity = self.native_identity(self.host.identity());
+            super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+        }
+        self.host.retire_to_docked();
+        self.host_os_close_pending = false;
+        self.host_focus = false;
+        self.latest_pass = None;
+    }
+    pub(crate) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        input_allowed: bool,
+        first: bool,
+    ) {
+        self.show_hosted(
+            ctx,
+            root_visible,
+            input_allowed,
+            input_allowed,
+            first,
+            false,
+            true,
+        );
+    }
+    pub(crate) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        root_owner: bool,
+        application_input_allowed: bool,
+        first: bool,
+        pinned: bool,
+        shortcut_allowed: bool,
+    ) {
+        use super::utility_host::UtilityPresentation;
+        self.poll_reveal_work();
+        self.latest_pass = None;
+        if !self.open {
+            return;
+        }
+        if pinned {
+            self.host_os_close_pending = false;
+        }
+        let host = self.host.identity();
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let mut owner = None;
+        let mut native = false;
+        let mut info = None;
+        let mut staged = None;
+        let mut owner_allowed = false;
+        if host.host == UtilityPresentation::Docked {
+            if root_visible {
+                let allowed = root_owner && !egui::Popup::is_any_open(ctx);
+                owner_allowed = allowed;
+                let shortcut = first
+                    && allowed
+                    && shortcut_allowed
+                    && !pinned
+                    && ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                let (actions, close) =
+                    self.render_host_body(ctx, allowed, first, None, Some(host.host));
+                staged = Some((actions, close || shortcut));
+                owner = Some(root);
+            }
+        } else {
+            let viewport = Self::viewport();
+            let builder = egui::ViewportBuilder::default()
+                .with_title(WINDOW_TITLE)
+                .with_inner_size([760.0, 520.0])
+                .with_min_inner_size([520.0, 340.0])
+                .with_resizable(true);
+            ctx.show_viewport_immediate(viewport, builder, |child, class| {
+                let c = child.ctx().clone();
+                let is_native =
+                    class == egui::ViewportClass::Immediate && c.viewport_id() == viewport;
+                let child_first = first && child.current_pass_index() == 0;
+                if child_first {
+                    owner = Some(ViewportPassProvenance::current(&c, c.viewport_id()));
+                    native = is_native;
+                    if is_native {
+                        info = Some(child.input(|i| i.viewport().clone()));
+                    }
+                } else {
+                    owner = None;
+                    info = None;
+                    staged = None;
+                }
+                let allowed = if is_native {
+                    application_input_allowed
+                        && c.input(|i| i.focused)
+                        && c.memory(|m| m.top_modal_layer().is_none())
+                        && super::jump_mode::ui::visible_top_middle_layer(&c).is_none()
+                        && !egui::Popup::is_any_open(&c)
+                        && super::jump_mode::ui::focused_response_layer(&c)
+                            .is_none_or(|l| l == egui::LayerId::background())
+                } else {
+                    root_owner && !egui::Popup::is_any_open(&c)
+                };
+                owner_allowed = allowed;
+                if is_native && child_first && child.input(|i| i.viewport().close_requested()) {
+                    child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    if !pinned {
+                        self.host_os_close_pending = true;
+                    }
+                }
+                let shortcut = child_first
+                    && allowed
+                    && !pinned
+                    && (is_native || shortcut_allowed)
+                    && c.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                if is_native {
+                    let receipt = super::utility_host::HostedCopyReceipt {
+                        root,
+                        owner: ViewportPassProvenance::current(&c, c.viewport_id()),
+                        host,
+                        epoch: self.host_epoch,
+                        eligible: child_first && allowed && !c.will_discard(),
+                    };
+                    c.with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
+                        plugin.armed.insert(c.viewport_id(), receipt);
+                    });
+                    egui::CentralPanel::default().show(child, |ui| {
+                        staged = Some(self.render_host_body(
+                            &c,
+                            allowed,
+                            child_first,
+                            Some(ui),
+                            Some(host.host),
+                        ));
+                    });
+                } else {
+                    staged = Some(self.render_host_body(
+                        &c,
+                        allowed,
+                        child_first,
+                        None,
+                        Some(host.host),
+                    ));
+                }
+                if let Some((_, close)) = &mut staged {
+                    *close |= shortcut || (is_native && !pinned && self.host_os_close_pending);
+                }
+            });
+        }
+        if let (Some(owner), Some((mut actions, close))) = (owner, staged) {
+            if close && !pinned {
+                actions = vec![FileLockAction::Close];
+            } else if let Some(next) = actions.iter().find_map(|action| {
+                if let FileLockAction::Host(next) = action {
+                    Some(*next)
+                } else {
+                    None
+                }
+            }) {
+                actions = vec![FileLockAction::Host(next)];
+            }
+            if first && !ctx.will_discard() {
+                if let Some(previous) = self.pending.as_ref()
+                    && previous
+                        .actions
+                        .iter()
+                        .any(|action| matches!(action, FileLockAction::Close))
+                {
+                    return;
+                }
+                self.latest_pass = owner_allowed.then_some(FileLockOwnerPass {
+                    root,
+                    owner,
+                    host,
+                    epoch: self.host_epoch,
+                });
+                self.pending = Some(PendingFileLockPass {
+                    provenance: root,
+                    owner,
+                    host,
+                    epoch: self.host_epoch,
+                    native,
+                    info,
+                    actions,
+                });
+            }
+        }
     }
 
     pub(crate) fn on_ui_frame_complete(
@@ -430,19 +718,119 @@ impl FileLockDialogState {
     ) -> Vec<FileLockDialogEffect> {
         self.poll_reveal_work();
         let mut effects = Vec::new();
-        if let Some(pending) = self.pending.take() {
-            if !pending.provenance.was_retained(ctx) {
+        if self.pending.as_ref().is_some_and(|pending| {
+            pending.provenance.was_retained(ctx)
+                && pending.owner.was_retained(ctx)
+                && pending
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, FileLockAction::Close))
+        }) {
+            self.external_pending = None;
+        }
+        let external = self.external_pending.is_some();
+        if let Some(pending) = self.external_pending.take().or_else(|| self.pending.take()) {
+            if !pending.provenance.was_retained(ctx)
+                || !pending.owner.was_retained(ctx)
+                || (!external
+                    && (pending.host != self.host.identity() || pending.epoch != self.host_epoch))
+            {
                 if ctx.cumulative_frame_nr_for(pending.provenance.viewport_id)
                     > pending.provenance.frame_nr
                 {
                     self.pending = None;
                 } else {
-                    self.pending = Some(pending);
+                    if external {
+                        self.external_pending = Some(pending);
+                    } else {
+                        self.pending = Some(pending);
+                    }
                 }
             } else {
+                if !external {
+                    let identity = self.native_identity(pending.host);
+                    if let Some(info) = pending.info.as_ref() {
+                        super::utility_dialog_size::apply_native_utility_geometry_restore(
+                            ctx,
+                            egui::ViewportClass::Immediate,
+                            true,
+                            WINDOW_TITLE,
+                            identity,
+                            info,
+                            egui::vec2(760.0, 520.0),
+                            Some(egui::vec2(520.0, 340.0)),
+                            None,
+                        );
+                        if self.host_focus {
+                            ctx.send_viewport_cmd_to(
+                                identity.viewport_id,
+                                egui::ViewportCommand::Focus,
+                            );
+                        }
+                    } else if self.host_focus {
+                        if let Some(layer) = self.root_layer() {
+                            ctx.move_to_top(layer);
+                        }
+                    }
+                    self.host_focus = false;
+                    if pending.host.host == super::utility_host::UtilityPresentation::Popout {
+                        self.host.complete_bootstrap(
+                            pending.host,
+                            (!pending.native).then(|| {
+                                egui::LayerId::new(
+                                    egui::Order::Middle,
+                                    egui::Id::new(Some(WINDOW_TITLE)),
+                                )
+                            }),
+                            None,
+                        );
+                    }
+                    let copies = ctx
+                        .with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
+                            let mut accepted = Vec::new();
+                            let mut other = Vec::new();
+                            for (receipt, copies) in plugin.captured.drain(..) {
+                                if receipt.owner.viewport_id != pending.owner.viewport_id {
+                                    other.push((receipt, copies));
+                                } else if receipt.root == pending.provenance
+                                    && receipt.owner == pending.owner
+                                    && receipt.host == pending.host
+                                    && receipt.epoch == pending.epoch
+                                {
+                                    accepted.extend(copies);
+                                }
+                            }
+                            plugin.captured = other;
+                            accepted
+                        })
+                        .unwrap_or_default();
+                    if !pending.actions.iter().any(|action| {
+                        matches!(action, FileLockAction::Close | FileLockAction::Host(_))
+                    }) {
+                        effects.extend(copies.into_iter().map(FileLockDialogEffect::CopyLabel));
+                    }
+                }
                 for action in pending.actions {
                     match action {
+                        FileLockAction::Host(next) => {
+                            if self.host.transition(next) {
+                                self.latest_pass = None;
+                                if next == super::utility_host::UtilityPresentation::Docked {
+                                    let identity = self.native_identity(pending.host);
+                                    super::utility_dialog_size::close_native_utility_geometry_viewport(ctx,identity);
+                                    ctx.send_viewport_cmd_to(
+                                        identity.viewport_id,
+                                        egui::ViewportCommand::Close,
+                                    );
+                                    effects.push(FileLockDialogEffect::ShowRoot);
+                                }
+                                self.host_focus = true;
+                            }
+                        }
                         FileLockAction::Open(path) => {
+                            if !self.open {
+                                self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+                            }
                             self.open = true;
                             if let Some(path) = path {
                                 self.apply_selected_path(path);
@@ -450,19 +838,53 @@ impl FileLockDialogState {
                             effects.push(FileLockDialogEffect::FocusPanel);
                         }
                         FileLockAction::Prefill(path) => {
+                            if !self.open {
+                                self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+                            }
                             self.open = true;
                             self.apply_selected_path(path);
                             effects.push(FileLockDialogEffect::FocusPanel);
                         }
                         FileLockAction::ChooseFile => {
-                            if !self.revalidate_root_pass(ctx, pending.provenance) {
-                                continue;
-                            }
-                            if let Some(path) = self.pick_file()
-                                && self.revalidate_root_pass(ctx, pending.provenance)
-                                && self.apply_selected_path(path)
-                            {
-                                self.notice = None;
+                            let before_path = self.selected_path.clone();
+                            let before_submitted = self
+                                .submitted
+                                .as_ref()
+                                .map(|s| (s.generation, s.path.clone()));
+                            let before_generation = self.session.view().generation();
+                            let identity =
+                                pending.native.then(|| self.native_identity(pending.host));
+                            #[cfg(windows)]
+                            let hwnd =
+                                super::utility_dialog_size::utility_picker_hwnd(ctx, identity);
+                            #[cfg(not(windows))]
+                            let hwnd = None;
+                            if let Some(path) = self.pick_file(hwnd) {
+                                if !self.open
+                                    || self.host_epoch != pending.epoch
+                                    || self.host.identity() != pending.host
+                                    || self.selected_path != before_path
+                                    || self
+                                        .submitted
+                                        .as_ref()
+                                        .map(|s| (s.generation, s.path.clone()))
+                                        != before_submitted
+                                    || self.session.view().generation() != before_generation
+                                {
+                                    continue;
+                                }
+                                #[cfg(all(windows, not(test)))]
+                                if hwnd.is_none()
+                                    || hwnd
+                                        != super::utility_dialog_size::utility_picker_hwnd(
+                                            ctx, identity,
+                                        )
+                                {
+                                    continue;
+                                }
+                                if self.apply_selected_path(path) {
+                                    self.notice = None;
+                                }
                             }
                         }
                         FileLockAction::Inspect(path) => {
@@ -522,12 +944,18 @@ impl FileLockDialogState {
                             }
                         }
                         FileLockAction::Close => {
+                            self.retire_host(ctx);
+                            self.external_pending = None;
                             self.close_current_selection();
                         }
                     }
                 }
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
+        }
+        if external && self.pending.is_some() {
+            effects.extend(self.on_ui_frame_complete(ctx));
+            return effects;
         }
 
         if self
@@ -537,12 +965,16 @@ impl FileLockDialogState {
         {
             self.reveal_ready = None;
         }
-        if self
-            .reveal_ready
-            .as_ref()
-            .is_some_and(|ready| !ready.dispatched)
+        if self.ready_dispatch_allowed()
+            && self
+                .reveal_ready
+                .as_ref()
+                .is_some_and(|ready| !ready.dispatched)
             && self.latest_pass.is_some_and(|pass| {
-                pass.viewport_id == egui::ViewportId::ROOT && pass.was_retained(ctx)
+                pass.root.was_retained(ctx)
+                    && pass.owner.was_retained(ctx)
+                    && pass.host == self.host.identity()
+                    && pass.epoch == self.host_epoch
             })
         {
             if let Some(ready) = self.reveal_ready.as_mut() {
@@ -555,6 +987,21 @@ impl FileLockDialogState {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         effects
+    }
+
+    fn ready_dispatch_allowed(&self) -> bool {
+        #[cfg(test)]
+        {
+            !self.test_hold_ready_dispatch
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_hold_ready_dispatch(&mut self, hold: bool) {
+        self.test_hold_ready_dispatch = hold;
     }
 
     pub(crate) fn reveal_request_is_current(&self, request: &FileLockRevealRequest) -> bool {
@@ -582,6 +1029,13 @@ impl FileLockDialogState {
         self.notice = Some(match result {
             Ok(()) => "Requested executable reveal.".into(),
             Err(error) => format!("Could not reveal the executable: {error}"),
+        });
+    }
+
+    pub(crate) fn label_copy_completed(&mut self, result: Result<(), String>) {
+        self.notice = Some(match result {
+            Ok(()) => "Copied to clipboard.".into(),
+            Err(error) => format!("Could not copy text: {error}"),
         });
     }
 
@@ -626,6 +1080,18 @@ impl FileLockDialogState {
         ))
     }
 
+    #[cfg(test)]
+    pub(super) fn test_presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    #[cfg(test)]
+    pub(crate) fn test_selected_process(&self) -> Option<(u64, u32, u64)> {
+        self.selected_process
+    }
+    #[cfg(test)]
+    pub(crate) fn test_reveal_ready(&self) -> bool {
+        self.reveal_ready.is_some()
+    }
     #[cfg(test)]
     pub(crate) fn set_file_choice_for_test(&mut self, choice: Option<PathBuf>) {
         self.test_file_choice = Some(choice);
@@ -928,6 +1394,17 @@ impl FileLockDialogState {
         }
     }
 
+    fn stage_external(&mut self, provenance: ViewportPassProvenance, action: FileLockAction) {
+        self.external_pending = Some(PendingFileLockPass {
+            provenance,
+            owner: provenance,
+            host: self.host.identity(),
+            epoch: self.host_epoch,
+            native: false,
+            info: None,
+            actions: vec![action],
+        });
+    }
     fn stage(&mut self, ctx: &egui::Context, actions: Vec<FileLockAction>) {
         self.stage_with_provenance(
             ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
@@ -949,6 +1426,11 @@ impl FileLockDialogState {
         {
             self.pending = Some(PendingFileLockPass {
                 provenance,
+                owner: provenance,
+                host: self.host.identity(),
+                epoch: self.host_epoch,
+                native: false,
+                info: None,
                 actions: vec![FileLockAction::Close],
             });
             return;
@@ -966,21 +1448,18 @@ impl FileLockDialogState {
             _ => {
                 self.pending = Some(PendingFileLockPass {
                     provenance,
+                    owner: provenance,
+                    host: self.host.identity(),
+                    epoch: self.host_epoch,
+                    native: false,
+                    info: None,
                     actions,
                 });
             }
         }
     }
 
-    fn revalidate_root_pass(
-        &self,
-        ctx: &egui::Context,
-        provenance: ViewportPassProvenance,
-    ) -> bool {
-        provenance.viewport_id == egui::ViewportId::ROOT && provenance.was_retained(ctx)
-    }
-
-    fn pick_file(&mut self) -> Option<PathBuf> {
+    fn pick_file(&mut self, hwnd: Option<usize>) -> Option<PathBuf> {
         #[cfg(test)]
         if let Some(choice) = self.test_file_choice.take() {
             self.test_file_picker_calls = self.test_file_picker_calls.saturating_add(1);
@@ -989,10 +1468,25 @@ impl FileLockDialogState {
 
         #[cfg(not(test))]
         {
-            rfd::FileDialog::new().pick_file()
+            #[cfg(windows)]
+            {
+                let Some(hwnd) = hwnd.and_then(|h| std::num::NonZeroIsize::new(h as isize)) else {
+                    self.notice = Some("Cannot verify the file picker window. Focus File Lock Inspector and try again.".into());
+                    return None;
+                };
+                rfd::FileDialog::new()
+                    .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd))
+                    .pick_file()
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = hwnd;
+                rfd::FileDialog::new().pick_file()
+            }
         }
         #[cfg(test)]
         {
+            let _ = hwnd;
             None
         }
     }

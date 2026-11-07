@@ -242,3 +242,48 @@ mod tests {
         output.drop_without_applying_deltas();
     }
 }
+
+#[derive(Clone, Copy)]
+pub(super) struct HostedCopyReceipt {
+    pub(super) root: ViewportPassProvenance,
+    pub(super) owner: ViewportPassProvenance,
+    pub(super) host: HostIdentity,
+    pub(super) epoch: u64,
+    pub(super) eligible: bool,
+}
+#[derive(Default)]
+pub(super) struct HostedCopyCapture {
+    pub(super) armed: std::collections::HashMap<egui::ViewportId, HostedCopyReceipt>,
+    pub(super) captured: Vec<(HostedCopyReceipt, Vec<String>)>,
+}
+impl egui::Plugin for HostedCopyCapture {
+    fn debug_name(&self) -> &'static str {
+        "HostedNativeCopyCapture"
+    }
+    fn output_hook(&mut self, ctx: &egui::Context, output: &mut egui::FullOutput) {
+        // egui restores the parent viewport before invoking output hooks. Identify
+        // the just-ended child from its counters rather than ctx.viewport_id().
+        let ended = self.armed.iter().find_map(|(viewport, receipt)| {
+            (ctx.cumulative_pass_nr_for(*viewport) == receipt.owner.pass_nr.saturating_add(1)
+                && ctx.cumulative_frame_nr_for(*viewport) == receipt.owner.frame_nr)
+                .then_some(*viewport)
+        });
+        let Some(receipt) = ended.and_then(|viewport| self.armed.remove(&viewport)) else {
+            return;
+        };
+        let mut copies = Vec::new();
+        output
+            .platform_output
+            .commands
+            .retain(|command| match command {
+                egui::OutputCommand::CopyText(text) => {
+                    copies.push(text.clone());
+                    false
+                }
+                _ => true,
+            });
+        if receipt.eligible && !copies.is_empty() {
+            self.captured.push((receipt, copies));
+        }
+    }
+}
