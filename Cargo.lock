@@ -3198,6 +3198,7 @@ dependencies = [
  "embed-resource",
  "exmex",
  "figlet-rs",
+ "flate2",
  "fst",
  "fuzzy-matcher",
  "gif",

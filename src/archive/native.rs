@@ -1458,11 +1458,12 @@ fn rename_open_file_relative_no_replace(
                 io::ErrorKind::InvalidInput,
                 Some(identity),
             )
-        })?;
+        })?
+        .max(std::mem::size_of::<FILE_RENAME_INFO>());
     let mut buffer = vec![0_u64; buffer_bytes.div_ceil(std::mem::size_of::<u64>())];
     let buffer_ptr = buffer.as_mut_ptr().cast::<u8>();
-    // SAFETY: the aligned buffer has the exact FILE_RENAME_INFO prefix and
-    // UTF-16 leaf length. RootDirectory is the held same-parent handle, and
+    // SAFETY: the aligned buffer contains the full FILE_RENAME_INFO and
+    // UTF-16 leaf. RootDirectory is the held same-parent handle, and
     // ReplaceIfExists=false makes the namespace operation no-replace.
     unsafe {
         std::ptr::copy_nonoverlapping(

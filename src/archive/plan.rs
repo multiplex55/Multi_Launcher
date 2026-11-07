@@ -520,7 +520,9 @@ fn build_extraction_plan_with_finalization(
         };
 
         if entry.kind() == EntryKind::Directory
-            && (entry.compressed_size() != 0 || entry.uncompressed_size() != 0)
+            && (entry.uncompressed_size() != 0
+                || (entry.compression() == super::model::EntryCompression::Stored
+                    && entry.compressed_size() != 0))
         {
             report.record(
                 PlanIssue {

@@ -1,4 +1,4 @@
-//! Bounded, handle-relative Stored-entry writer. This module has no GUI or
+//! Bounded, handle-relative ZIP-entry writer. This module has no GUI or
 //! command integration; a run owns one worker until its request, stage, and
 //! held-directory resources are retired.
 
@@ -17,7 +17,7 @@ use crate::file_operations::ScanCancellation;
 
 use super::ArchiveCatalog;
 use super::crc32::Crc32;
-use super::model::{ArchiveEntry, ArchiveEntryId, ArchiveRevision, EntryKind};
+use super::model::{ArchiveEntry, ArchiveEntryId, ArchiveRevision, EntryCompression, EntryKind};
 use super::native::{
     NativeArchiveDestination, NativeArchiveError, NativeArchiveSource, OwnedStage,
 };
@@ -133,6 +133,8 @@ struct EntryLayout {
     id: ArchiveEntryId,
     data_offset: u64,
     data_len: u64,
+    output_len: u64,
+    compression: EntryCompression,
     record_end: u64,
     crc32: u32,
 }
@@ -890,16 +892,16 @@ fn validate_selected_entries(
             ));
         }
         if entry.kind() == EntryKind::File {
-            if entry.compression() != super::model::EntryCompression::Stored
-                || !entry.is_supported()
-                || entry.compressed_size() != entry.uncompressed_size()
+            if !entry.is_supported()
+                || (entry.compression() == EntryCompression::Stored
+                    && entry.compressed_size() != entry.uncompressed_size())
                 || output.compressed_size() != entry.compressed_size()
                 || output.declared_output_size() != entry.uncompressed_size()
             {
                 return Err(PipelineFailure::new(
                     ArchiveWriteFailureKind::UnsupportedZipLayout,
                     Some(id),
-                    "selected file is not a supported unencrypted Stored entry",
+                    "selected file has unsupported compression, flags, or sizes",
                 ));
             }
             if entry.uncompressed_size() > plan.policy().max_actual_entry_output_bytes {
@@ -927,15 +929,16 @@ fn validate_selected_entries(
                     )
                 })?;
             layouts.push(*layout);
-        } else if entry.compressed_size() != 0
-            || entry.uncompressed_size() != 0
-            || entry.compression() != super::model::EntryCompression::Stored
-        {
-            return Err(PipelineFailure::new(
-                ArchiveWriteFailureKind::UnsupportedZipLayout,
-                Some(id),
-                "directory entry has an unsupported payload layout",
-            ));
+        } else {
+            if !entry.is_supported() || entry.uncompressed_size() != 0 {
+                return Err(unsupported(
+                    id,
+                    "directory entry must have a supported empty payload",
+                ));
+            }
+            let layout = physical_layouts[usize::try_from(id.ordinal())
+                .map_err(|_| unsupported(id, "directory ordinal is out of range"))?];
+            decode_payload(source, layout, io, || {}, |_| Ok(()))?;
         }
     }
 
@@ -1148,15 +1151,34 @@ fn validate_entry_layout(
     )?;
     let local_need_c = local_compressed32 == u32::MAX;
     let local_need_u = local_uncompressed32 == u32::MAX;
-    let local_zip64 =
-        parse_zip64_extra(&local_extra, local_need_u, local_need_c, false, false, id)?;
+    let has_descriptor = entry.flags() & FLAG_DATA_DESCRIPTOR != 0;
+    // Streaming ZIP64 writers use zero local size placeholders and still emit
+    // the two ZIP64 size slots. The central ZIP64 sentinels and descriptor
+    // establish their meaning; validate each slot against the central values.
+    let streaming_zip64 = has_descriptor
+        && need_c
+        && need_u
+        && !local_need_c
+        && !local_need_u
+        && local_compressed32 == 0
+        && local_uncompressed32 == 0
+        && local_extra.len() == 20
+        && le_u16(&local_extra, 0) == ZIP64_EXTRA_ID
+        && le_u16(&local_extra, 2) == 16;
+    let local_zip64 = parse_zip64_extra(
+        &local_extra,
+        local_need_u || streaming_zip64,
+        local_need_c || streaming_zip64,
+        false,
+        false,
+        id,
+    )?;
     let local_compressed = local_zip64
         .compressed
         .unwrap_or_else(|| u64::from(local_compressed32));
     let local_uncompressed = local_zip64
         .uncompressed
         .unwrap_or_else(|| u64::from(local_uncompressed32));
-    let has_descriptor = entry.flags() & FLAG_DATA_DESCRIPTOR != 0;
     if has_descriptor {
         if local_crc != 0 && local_crc != entry.crc32()
             || local_compressed != 0 && local_compressed != compressed
@@ -1215,6 +1237,8 @@ fn validate_entry_layout(
         id,
         data_offset,
         data_len,
+        output_len: entry.uncompressed_size(),
+        compression: entry.compression(),
         record_end,
         crc32: entry.crc32(),
     })
@@ -1382,114 +1406,58 @@ fn write_stage_payload(
     total_limit: u64,
     control: &ArchiveWriteJobControl,
 ) -> Result<(), PipelineFailure> {
-    let mut buffer = [0_u8; CHUNK_BYTES];
-    let mut remaining = layout.data_len;
-    let mut source_offset = layout.data_offset;
     let mut stage_offset = 0_u64;
-    let mut entry_written = 0_u64;
-    let mut crc = Crc32::new();
-    while remaining != 0 {
-        if control.is_cancelled() {
-            return Err(PipelineFailure::cancelled(Some(layout.id)));
-        }
-        control.set_phase(ArchiveWritePhase::Reading);
-        let request_len = usize::try_from(remaining.min(CHUNK_BYTES as u64)).unwrap_or(CHUNK_BYTES);
-        let (read_buffer, actual_read) = control
-            .io()
-            .read_at(source.verified_file(), source_offset, request_len)
-            .map_err(|error| io_failure(error, control, Some(layout.id)))?;
-        if actual_read == 0 {
-            return Err(PipelineFailure::new(
-                ArchiveWriteFailureKind::TruncatedPayload,
-                Some(layout.id),
-                "stored payload ended before its validated byte span",
-            ));
-        }
-        if actual_read > request_len || actual_read > read_buffer.len() {
-            return Err(PipelineFailure::new(
-                ArchiveWriteFailureKind::SourceChanged,
-                Some(layout.id),
-                "native source read exceeded its requested span",
-            ));
-        }
-        buffer[..actual_read].copy_from_slice(&read_buffer[..actual_read]);
-        crc.update(&buffer[..actual_read]);
-
-        let mut written_from_chunk = 0_usize;
-        while written_from_chunk < actual_read {
-            if control.is_cancelled() {
-                return Err(PipelineFailure::cancelled(Some(layout.id)));
+    decode_payload(
+        source,
+        layout,
+        control.io(),
+        || control.set_phase(ArchiveWritePhase::Reading),
+        |bytes| {
+            let mut position = 0;
+            while position < bytes.len() {
+                if control.is_cancelled() {
+                    return Err(PipelineFailure::cancelled(Some(layout.id)));
+                }
+                let remaining = bytes.len() - position;
+                let next_entry = stage_offset
+                    .checked_add(remaining as u64)
+                    .ok_or_else(|| quota_failure(layout.id, "entry byte counter overflow"))?;
+                let next_total = control
+                    .progress()
+                    .actual_bytes_written
+                    .checked_add(remaining as u64)
+                    .ok_or_else(|| quota_failure(layout.id, "aggregate byte counter overflow"))?;
+                if next_entry > entry_limit || next_total > total_limit {
+                    return Err(quota_failure(
+                        layout.id,
+                        "actual output quota would be exceeded before the next write",
+                    ));
+                }
+                control.set_phase(ArchiveWritePhase::Writing);
+                let count = stage
+                    .write_chunk(control.io(), stage_offset, &bytes[position..])
+                    .map_err(|error| {
+                        if control.is_cancelled() {
+                            PipelineFailure::cancelled(Some(layout.id))
+                        } else {
+                            PipelineFailure::native(error, Some(layout.id))
+                        }
+                    })?;
+                if count == 0 || count > remaining {
+                    return Err(PipelineFailure::new(
+                        ArchiveWriteFailureKind::NativeIo,
+                        Some(layout.id),
+                        "staged overlapped write made invalid progress",
+                    ));
+                }
+                position += count;
+                stage_offset += count as u64;
+                control.record_written(count as u64)?;
             }
-            let requested_write = actual_read - written_from_chunk;
-            let next_entry_bytes = entry_written
-                .checked_add(requested_write as u64)
-                .ok_or_else(|| quota_failure(layout.id, "entry byte counter overflow"))?;
-            let current_total = control.progress().actual_bytes_written;
-            let next_total_bytes = current_total
-                .checked_add(requested_write as u64)
-                .ok_or_else(|| quota_failure(layout.id, "aggregate byte counter overflow"))?;
-            if next_entry_bytes > entry_limit || next_total_bytes > total_limit {
-                return Err(quota_failure(
-                    layout.id,
-                    "actual output quota would be exceeded before the next write",
-                ));
-            }
-            control.set_phase(ArchiveWritePhase::Writing);
-            let count = stage
-                .write_chunk(
-                    control.io(),
-                    stage_offset,
-                    &buffer[written_from_chunk..actual_read],
-                )
-                .map_err(|error| {
-                    if control.is_cancelled() {
-                        PipelineFailure::cancelled(Some(layout.id))
-                    } else {
-                        PipelineFailure::native(error, Some(layout.id))
-                    }
-                })?;
-            if count == 0 || count > requested_write {
-                return Err(PipelineFailure::new(
-                    ArchiveWriteFailureKind::NativeIo,
-                    Some(layout.id),
-                    "staged overlapped write made invalid progress",
-                ));
-            }
-            written_from_chunk += count;
-            entry_written = entry_written
-                .checked_add(count as u64)
-                .ok_or_else(|| quota_failure(layout.id, "entry byte counter overflow"))?;
-            stage_offset = stage_offset
-                .checked_add(count as u64)
-                .ok_or_else(|| quota_failure(layout.id, "stage offset overflow"))?;
-            control.record_written(count as u64)?;
-        }
-        source_offset = source_offset
-            .checked_add(actual_read as u64)
-            .ok_or_else(|| quota_failure(layout.id, "source offset overflow"))?;
-        remaining = remaining.checked_sub(actual_read as u64).ok_or_else(|| {
-            PipelineFailure::new(
-                ArchiveWriteFailureKind::SourceChanged,
-                Some(layout.id),
-                "stored payload exceeded its validated size",
-            )
-        })?;
-        control.reach_test_after_payload_chunk();
-    }
-    if entry_written != layout.data_len {
-        return Err(PipelineFailure::new(
-            ArchiveWriteFailureKind::TruncatedPayload,
-            Some(layout.id),
-            "stored payload byte count differs from its validated span",
-        ));
-    }
-    if crc.finish() != layout.crc32 {
-        return Err(PipelineFailure::new(
-            ArchiveWriteFailureKind::IntegrityMismatch,
-            Some(layout.id),
-            "stored payload CRC-32 does not match its central record",
-        ));
-    }
+            control.reach_test_after_payload_chunk();
+            Ok(())
+        },
+    )?;
     if control.is_cancelled() {
         return Err(PipelineFailure::cancelled(Some(layout.id)));
     }
@@ -1508,6 +1476,144 @@ fn write_stage_payload(
     Ok(())
 }
 
+// Decode only the validated compressed span, without handing a pathname or
+// unbounded reader to the ZIP library. Every plaintext chunk shares this
+// size/CRC boundary before either a stage write or empty-directory check.
+fn decode_payload(
+    source: &NativeArchiveSource,
+    layout: EntryLayout,
+    io: &ArchiveIoControl,
+    mut on_read: impl FnMut(),
+    mut emit: impl FnMut(&[u8]) -> Result<(), PipelineFailure>,
+) -> Result<(), PipelineFailure> {
+    let mut inflater = match layout.compression {
+        EntryCompression::Stored => None,
+        EntryCompression::Deflated => Some(flate2::Decompress::new(false)),
+        EntryCompression::Unsupported(_) => {
+            return Err(unsupported(layout.id, "unsupported compression method"));
+        }
+    };
+    let mut remaining = layout.data_len;
+    let mut offset = layout.data_offset;
+    let mut input = Vec::new();
+    let mut position = 0_usize;
+    let mut output = [0_u8; CHUNK_BYTES];
+    let mut actual_output = 0_u64;
+    let mut crc = Crc32::new();
+    loop {
+        if io.is_cancelled() {
+            return Err(PipelineFailure::cancelled(Some(layout.id)));
+        }
+        if position == input.len() && remaining > 0 {
+            on_read();
+            let requested = remaining.min(CHUNK_BYTES as u64) as usize;
+            let (buffer, count) = io
+                .read_at(source.verified_file(), offset, requested)
+                .map_err(|error| {
+                    if io.is_cancelled() {
+                        PipelineFailure::cancelled(Some(layout.id))
+                    } else {
+                        PipelineFailure::io(error, Some(layout.id))
+                    }
+                })?;
+            if count == 0 {
+                return Err(PipelineFailure::new(
+                    ArchiveWriteFailureKind::TruncatedPayload,
+                    Some(layout.id),
+                    "compressed payload ended before its validated span",
+                ));
+            }
+            if count > requested || count > buffer.len() {
+                return Err(PipelineFailure::new(
+                    ArchiveWriteFailureKind::SourceChanged,
+                    Some(layout.id),
+                    "native source read exceeded its requested span",
+                ));
+            }
+            input.clear();
+            input.extend_from_slice(&buffer[..count]);
+            position = 0;
+            offset = offset
+                .checked_add(count as u64)
+                .ok_or_else(|| quota_failure(layout.id, "source offset overflow"))?;
+            remaining -= count as u64;
+        }
+        let (consumed, produced, ended) = if let Some(decoder) = inflater.as_mut() {
+            let before_in = decoder.total_in();
+            let before_out = decoder.total_out();
+            let status = decoder
+                .decompress(
+                    &input[position..],
+                    &mut output,
+                    flate2::FlushDecompress::None,
+                )
+                .map_err(|_| {
+                    PipelineFailure::new(
+                        ArchiveWriteFailureKind::IntegrityMismatch,
+                        Some(layout.id),
+                        "invalid Deflate stream",
+                    )
+                })?;
+            (
+                (decoder.total_in() - before_in) as usize,
+                (decoder.total_out() - before_out) as usize,
+                status == flate2::Status::StreamEnd,
+            )
+        } else {
+            let count = input.len() - position;
+            output[..count].copy_from_slice(&input[position..]);
+            (count, count, remaining == 0)
+        };
+        position += consumed;
+        actual_output = actual_output
+            .checked_add(produced as u64)
+            .ok_or_else(|| quota_failure(layout.id, "decoded byte counter overflow"))?;
+        if actual_output > layout.output_len {
+            return Err(PipelineFailure::new(
+                ArchiveWriteFailureKind::IntegrityMismatch,
+                Some(layout.id),
+                "decoded output exceeds the declared entry size",
+            ));
+        }
+        if produced != 0 {
+            crc.update(&output[..produced]);
+            emit(&output[..produced])?;
+        }
+        if ended {
+            if remaining != 0 || position != input.len() {
+                return Err(PipelineFailure::new(
+                    ArchiveWriteFailureKind::IntegrityMismatch,
+                    Some(layout.id),
+                    "compressed payload contains trailing bytes",
+                ));
+            }
+            break;
+        }
+        if consumed == 0 && produced == 0 {
+            return Err(PipelineFailure::new(
+                ArchiveWriteFailureKind::TruncatedPayload,
+                Some(layout.id),
+                "Deflate stream ended before its end marker",
+            ));
+        }
+    }
+    if actual_output != layout.output_len {
+        return Err(PipelineFailure::new(
+            ArchiveWriteFailureKind::IntegrityMismatch,
+            Some(layout.id),
+            "decoded output differs from the declared entry size",
+        ));
+    }
+    if crc.finish() != layout.crc32 {
+        return Err(PipelineFailure::new(
+            ArchiveWriteFailureKind::IntegrityMismatch,
+            Some(layout.id),
+            "payload CRC-32 does not match its central record",
+        ));
+    }
+    Ok(())
+}
+
 fn abort_stage(stage: OwnedStage, mut failure: PipelineFailure) -> PipelineFailure {
     if let Err(cleanup) = stage.abort() {
         failure.message.push_str("; stage cleanup failed: ");
@@ -1516,18 +1622,6 @@ fn abort_stage(stage: OwnedStage, mut failure: PipelineFailure) -> PipelineFailu
         failure.cleanup_failed = cleanup.cleanup_failed();
     }
     failure
-}
-
-fn io_failure(
-    error: io::Error,
-    control: &ArchiveWriteJobControl,
-    entry: Option<ArchiveEntryId>,
-) -> PipelineFailure {
-    if control.is_cancelled() {
-        PipelineFailure::cancelled(entry)
-    } else {
-        PipelineFailure::io(error, entry)
-    }
 }
 
 fn quota_failure(entry: ArchiveEntryId, message: &'static str) -> PipelineFailure {
@@ -2115,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_validation_refuses_truncation_overlap_and_deflate_before_writes() {
+    fn physical_validation_refuses_truncation_and_overlap_before_writes() {
         let truncation = ArchiveFixture::new(&[FixtureEntry::File(
             "truncated.bin",
             b"abc",
@@ -2162,19 +2256,258 @@ mod tests {
             Some(ArchiveWriteFailureKind::UnsupportedZipLayout)
         );
         assert_eq!(fs::read_dir(&overlap.destination).unwrap().count(), 0);
+    }
 
-        let deflated = ArchiveFixture::new(&[FixtureEntry::File(
-            "compressed.bin",
-            b"deflate is deliberately unsupported by this writer",
-            CompressionMethod::Deflated,
-        )]);
-        let report = deflated.start(default_limits()).join();
-        assert_eq!(report.status, ArchiveWriteStatus::Failed);
+    #[test]
+    fn writer_extracts_mixed_deflated_multichunk_and_empty_entries() {
+        let mut random = 0x1234_5678_u32;
+        let payload: Vec<_> = (0..CHUNK_BYTES * 3 + 137)
+            .map(|_| {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                random as u8
+            })
+            .collect();
+        let fixture = ArchiveFixture::new(&[
+            FixtureEntry::Directory("folder/"),
+            FixtureEntry::File("deflated-dir/", b"", CompressionMethod::Deflated),
+            FixtureEntry::File("folder/stored", b"stored", CompressionMethod::Stored),
+            FixtureEntry::File("folder/large", &payload, CompressionMethod::Deflated),
+            FixtureEntry::File("empty", b"", CompressionMethod::Deflated),
+        ]);
+        let prepared = fixture.prepare(default_limits());
+        assert!(
+            prepared
+                .catalog
+                .entries()
+                .iter()
+                .find(|entry| entry.name().as_utf8() == Some("folder/large"))
+                .unwrap()
+                .compressed_size()
+                > CHUNK_BYTES as u64
+        );
+        validate_plan_for_preview(
+            &prepared.source,
+            &prepared.catalog,
+            &prepared.plan,
+            &ArchiveIoControl::new(ScanCancellation::new()),
+        )
+        .expect("preview admits validated Deflate entries");
+        let report = prepared
+            .start(ArchiveIoControl::new(ScanCancellation::new()))
+            .join();
         assert_eq!(
-            report.failure.as_ref().map(|(kind, _)| *kind),
+            report.status,
+            ArchiveWriteStatus::Completed,
+            "{:?}",
+            report.failure
+        );
+        assert_eq!(
+            fs::read(fixture.destination.join("folder/large")).unwrap(),
+            payload
+        );
+        assert_eq!(
+            fs::read(fixture.destination.join("folder/stored")).unwrap(),
+            b"stored"
+        );
+        assert_eq!(fs::read(fixture.destination.join("empty")).unwrap(), b"");
+        assert_eq!(report.actual_bytes_written, payload.len() as u64 + 6);
+        assert_eq!(stage_count(&fixture.destination), 0);
+    }
+
+    #[test]
+    fn deflate_descriptor_and_zip64_fixture_extracts() {
+        let fixture = ArchiveFixture::new(&[]);
+        let mut bytes = Vec::new();
+        {
+            let mut writer = ZipWriter::new_stream(&mut bytes);
+            writer
+                .start_file(
+                    "streamed",
+                    SimpleFileOptions::default()
+                        .compression_method(CompressionMethod::Deflated)
+                        .large_file(true),
+                )
+                .unwrap();
+            writer.write_all(b"descriptor and ZIP64 deflate").unwrap();
+            writer.finish().unwrap();
+        }
+        let mut conflicting = bytes.clone();
+        let extra_start = 30 + read_u16(&conflicting, 26) as usize;
+        conflicting[extra_start + 4] = 1;
+        let invalid = ArchiveFixture::new(&[]);
+        fs::write(&invalid.archive, conflicting).unwrap();
+        let invalid_report = invalid.start(default_limits()).join();
+        assert_eq!(invalid_report.status, ArchiveWriteStatus::Failed);
+        assert_eq!(
+            invalid_report.failure.as_ref().map(|(kind, _)| *kind),
             Some(ArchiveWriteFailureKind::UnsupportedZipLayout)
         );
-        assert_eq!(fs::read_dir(&deflated.destination).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&invalid.destination).unwrap().count(), 0);
+        fs::write(&fixture.archive, bytes).unwrap();
+        let report = fixture.start(default_limits()).join();
+        assert_eq!(
+            report.status,
+            ArchiveWriteStatus::Completed,
+            "{:?}",
+            report.failure
+        );
+        assert_eq!(
+            fs::read(fixture.destination.join("streamed")).unwrap(),
+            b"descriptor and ZIP64 deflate"
+        );
+    }
+
+    #[test]
+    fn deflate_rejects_declared_size_and_crc_mismatch() {
+        for mismatch in ["short", "long", "crc"] {
+            let fixture = ArchiveFixture::new(&[FixtureEntry::File(
+                "data",
+                b"deflated bytes",
+                CompressionMethod::Deflated,
+            )]);
+            let catalog = read_catalog_for_mutation(&fixture.archive);
+            let entry = &catalog.entries()[0];
+            let mut bytes = fs::read(&fixture.archive).unwrap();
+            let local = entry.local_header_offset() as usize;
+            let central = entry.central_header_offset() as usize;
+            if mismatch == "crc" {
+                write_u32(&mut bytes, local + 14, 0x12345678);
+                write_u32(&mut bytes, central + 16, 0x12345678);
+            } else {
+                let size = if mismatch == "short" { 3 } else { 25 };
+                write_u32(&mut bytes, local + 22, size);
+                write_u32(&mut bytes, central + 24, size);
+            }
+            fs::write(&fixture.archive, bytes).unwrap();
+            let report = fixture.start(default_limits()).join();
+            assert_eq!(report.status, ArchiveWriteStatus::Failed, "{mismatch}");
+            assert_eq!(
+                report.failure.as_ref().map(|(kind, _)| *kind),
+                Some(ArchiveWriteFailureKind::IntegrityMismatch),
+                "{mismatch}"
+            );
+            assert!(!fixture.destination.join("data").exists());
+            assert_eq!(stage_count(&fixture.destination), 0);
+        }
+    }
+
+    #[test]
+    fn corrupt_deflated_directory_is_rejected_before_destination_mutation() {
+        let fixture = ArchiveFixture::new(&[
+            FixtureEntry::File("bad-dir/", b"", CompressionMethod::Deflated),
+            FixtureEntry::File("output", b"x", CompressionMethod::Stored),
+        ]);
+        let catalog = read_catalog_for_mutation(&fixture.archive);
+        let mut bytes = fs::read(&fixture.archive).unwrap();
+        let offset =
+            local_payload_offset(&bytes, catalog.entries()[0].local_header_offset() as usize);
+        bytes[offset] = 0xff;
+        fs::write(&fixture.archive, bytes).unwrap();
+        let report = fixture.start(default_limits()).join();
+        assert_eq!(report.status, ArchiveWriteStatus::Failed);
+        assert_eq!(fs::read_dir(&fixture.destination).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn truncated_deflate_stream_is_not_published() {
+        let fixture = ArchiveFixture::new(&[FixtureEntry::File(
+            "data",
+            b"a compressed stream to truncate",
+            CompressionMethod::Deflated,
+        )]);
+        let catalog = read_catalog_for_mutation(&fixture.archive);
+        let entry = &catalog.entries()[0];
+        let mut bytes = fs::read(&fixture.archive).unwrap();
+        let local = entry.local_header_offset() as usize;
+        let payload = local_payload_offset(&bytes, local);
+        let length = entry.compressed_size() as usize;
+        bytes.remove(payload + length - 1);
+        let central = entry.central_header_offset() as usize - 1;
+        write_u32(&mut bytes, local + 18, (length - 1) as u32);
+        write_u32(&mut bytes, central + 20, (length - 1) as u32);
+        let eocd = bytes
+            .windows(4)
+            .rposition(|window| window == 0x0605_4b50_u32.to_le_bytes())
+            .unwrap();
+        write_u32(&mut bytes, eocd + 16, central as u32);
+        fs::write(&fixture.archive, bytes).unwrap();
+        let report = fixture.start(default_limits()).join();
+        assert_eq!(report.status, ArchiveWriteStatus::Failed);
+        assert!(matches!(
+            report.failure.as_ref().map(|(kind, _)| *kind),
+            Some(
+                ArchiveWriteFailureKind::TruncatedPayload
+                    | ArchiveWriteFailureKind::IntegrityMismatch
+            )
+        ));
+        assert!(!fixture.destination.join("data").exists());
+        assert_eq!(stage_count(&fixture.destination), 0);
+    }
+
+    #[test]
+    fn corrupt_deflate_keeps_earlier_publication_and_cleans_stage() {
+        let fixture = ArchiveFixture::new(&[
+            FixtureEntry::File("a", b"first", CompressionMethod::Stored),
+            FixtureEntry::File("b", b"deflated content", CompressionMethod::Deflated),
+        ]);
+        let catalog = read_catalog_for_mutation(&fixture.archive);
+        let mut bytes = fs::read(&fixture.archive).unwrap();
+        let offset =
+            local_payload_offset(&bytes, catalog.entries()[1].local_header_offset() as usize);
+        bytes[offset] = 0xff;
+        fs::write(&fixture.archive, bytes).unwrap();
+        let report = fixture.start(default_limits()).join();
+        assert_eq!(
+            report.status,
+            ArchiveWriteStatus::Partial,
+            "failure={:?}, published={:?}",
+            report.failure,
+            report.published_entries
+        );
+        assert!(matches!(
+            report.failure.as_ref().map(|(kind, _)| *kind),
+            Some(
+                ArchiveWriteFailureKind::IntegrityMismatch
+                    | ArchiveWriteFailureKind::TruncatedPayload
+            )
+        ));
+        assert_eq!(fs::read(fixture.destination.join("a")).unwrap(), b"first");
+        assert!(!fixture.destination.join("b").exists());
+        assert_eq!(stage_count(&fixture.destination), 0);
+    }
+
+    #[test]
+    fn cancellation_between_deflate_chunks_aborts_owned_stage() {
+        let payload = (0..CHUNK_BYTES * 2 + 17)
+            .map(|i| ((i * 37 + i / 257) & 255) as u8)
+            .collect::<Vec<_>>();
+        let fixture = ArchiveFixture::new(&[FixtureEntry::File(
+            "large.bin",
+            &payload,
+            CompressionMethod::Deflated,
+        )]);
+        let prepared = fixture.prepare(default_limits());
+        let (gate, reached, release) = WriterTestGate::new();
+        let job = prepared.start_with_test_hooks(
+            ArchiveIoControl::new(ScanCancellation::new()),
+            WriterTestHooks {
+                after_payload_chunk: Some(gate),
+                ..WriterTestHooks::default()
+            },
+        );
+        let guard = ReleaseGateOnDrop::new(release, job.control());
+        reached
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("first decoded chunk reached stage");
+        job.cancel();
+        guard.release();
+        let report = job.join();
+        assert_eq!(report.status, ArchiveWriteStatus::Cancelled);
+        assert!(report.actual_bytes_written > 0);
+        assert!(!fixture.destination.join("large.bin").exists());
+        assert_eq!(stage_count(&fixture.destination), 0);
     }
 
     #[test]
@@ -2349,7 +2682,7 @@ mod tests {
     fn actual_entry_and_aggregate_quotas_allow_exact_and_stop_cross_entry_write() {
         let exact = ArchiveFixture::new(&[
             FixtureEntry::File("a.bin", b"abc", CompressionMethod::Stored),
-            FixtureEntry::File("b.bin", b"de", CompressionMethod::Stored),
+            FixtureEntry::File("b.bin", b"de", CompressionMethod::Deflated),
         ]);
         let mut limits = default_limits();
         limits.max_actual_entry_output_bytes = 3;
@@ -2360,7 +2693,7 @@ mod tests {
 
         let crossing = ArchiveFixture::new(&[
             FixtureEntry::File("a.bin", b"abc", CompressionMethod::Stored),
-            FixtureEntry::File("b.bin", b"de", CompressionMethod::Stored),
+            FixtureEntry::File("b.bin", b"de", CompressionMethod::Deflated),
         ]);
         limits.max_actual_total_output_bytes = 4;
         let report = crossing.start(limits).join();
@@ -2381,12 +2714,12 @@ mod tests {
     #[test]
     fn competitor_created_after_plan_is_never_replaced() {
         let fixture = ArchiveFixture::new(&[FixtureEntry::File(
-            "winner.bin",
+            "w",
             b"archive data",
             CompressionMethod::Stored,
         )]);
         let prepared = fixture.prepare(default_limits());
-        fs::write(fixture.destination.join("winner.bin"), b"foreign winner")
+        fs::write(fixture.destination.join("w"), b"foreign winner")
             .expect("add competitor after plan construction");
         let report = prepared
             .start(ArchiveIoControl::new(ScanCancellation::new()))
@@ -2396,8 +2729,13 @@ mod tests {
             report.failure.as_ref().map(|(kind, _)| *kind),
             Some(ArchiveWriteFailureKind::NativeIo)
         );
+        assert!(
+            report.failure.as_ref().unwrap().1.contains("3221225525"),
+            "{:?}",
+            report.failure
+        );
         assert_eq!(
-            fs::read(fixture.destination.join("winner.bin")).unwrap(),
+            fs::read(fixture.destination.join("w")).unwrap(),
             b"foreign winner"
         );
         assert_eq!(stage_count(&fixture.destination), 0);
@@ -2413,7 +2751,7 @@ mod tests {
             let fixture = ArchiveFixture::new(&[FixtureEntry::File(
                 "flush.bin",
                 b"must not publish",
-                CompressionMethod::Stored,
+                CompressionMethod::Deflated,
             )]);
             let (gate, reached, release) = WriterTestGate::new();
             let prepared = fixture.prepare(default_limits());
