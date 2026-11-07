@@ -24,6 +24,7 @@ enum DialogCopyOwner {
     DateTimeStudio,
     ImageCompare,
     DuplicateFinder,
+    ZipExtractor,
     FolderSize,
     FileLock,
 }
@@ -2137,7 +2138,7 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_host.root_layer(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
-            Panel::ZipExtractorDialog => NavigationDialogKind::ZipExtractor.layer_id(),
+            Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer(),
             Panel::RegexTesterDialog => self.regex_tester_dialog.root_layer(),
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.root_layer(),
@@ -4804,7 +4805,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 33] {
+    fn viewport_bootstrap_state(&self) -> [bool; 34] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4817,6 +4818,7 @@ impl LauncherApp {
             self.date_time_studio_dialog.needs_root_ui_when_hidden(),
             self.image_compare_dialog.needs_viewport_bootstrap(),
             self.duplicate_finder_dialog.needs_viewport_bootstrap(),
+            self.zip_extractor_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4852,7 +4854,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 33],
+        previously_pending: [bool; 34],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -7056,6 +7058,74 @@ impl LauncherApp {
         );
     }
 
+    fn show_zip_host(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first: bool,
+        jump_escape_preempted: bool,
+    ) {
+        let zip_kind = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor;
+        let zip_owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let zip_scope = match zip_owner {
+            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
+                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
+                instance,
+            } if self.jump_mode_enabled()
+                && self.jump_mode_ui.dialog_instance(zip_kind) == Some(instance) =>
+            {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("zip-extractor", instance),
+                    crate::gui::jump_mode::TargetGeneration(
+                        self.zip_extractor_dialog.target_generation(),
+                    ),
+                    "zip-extractor",
+                    ctx.viewport_id(),
+                    zip_owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        #[cfg(windows)]
+        {
+            let instance = self.jump_mode_ui.dialog_instance(zip_kind);
+            let root_native_owner = root_visible
+                && self.native_ui_host_input_allowed(ctx, true)
+                && ctx.memory(|m| m.top_modal_layer().is_none())
+                && !egui::Popup::is_any_open(ctx)
+                && self.zip_extractor_dialog.root_layer().is_some_and(|layer| {
+                    crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+                        && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(
+                            |focus| focus == layer || focus.order == egui::Order::Background,
+                        )
+                });
+            self.zip_extractor_dialog.show_hosted(
+                ctx,
+                &self.archive_session,
+                zip_scope.as_ref(),
+                instance,
+                zip_owner,
+                self.native_ui_application_input_allowed(ctx)
+                    && !self.ocr_surface_visible()
+                    && !self.confirm_modal.is_open()
+                    && !self.action_sheet.is_open()
+                    && !self.pin_list_open,
+                root_native_owner,
+                &self.jump_mode_ui,
+                self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+                root_visible,
+                first,
+                self.pinned_panels
+                    .contains(&super::Panel::ZipExtractorDialog),
+                !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+            );
+        }
+        #[cfg(not(windows))]
+        self.zip_extractor_dialog
+            .show_unsupported(ctx, first, zip_scope.as_ref());
+    }
+
     fn show_duplicate_finder(
         &mut self,
         ctx: &egui::Context,
@@ -8476,6 +8546,8 @@ impl LauncherApp {
                         self.image_compare_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DuplicateFinder {
                         self.duplicate_finder_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::ZipExtractor {
+                        self.zip_extractor_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -9155,6 +9227,7 @@ impl LauncherApp {
             self.show_date_time_studio_host(&ctx, first_ui_pass, false, false);
             self.show_image_compare(&ctx, false, first_ui_pass, false, false);
             self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
+            self.show_zip_host(&ctx, false, first_ui_pass, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -11004,6 +11077,7 @@ impl LauncherApp {
             self.show_date_time_studio_host(&ctx, first_ui_pass, false, false);
             self.show_image_compare(&ctx, false, first_ui_pass, false, false);
             self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
+            self.show_zip_host(&ctx, false, first_ui_pass, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11365,43 +11439,7 @@ impl LauncherApp {
         self.show_clipboard_history_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_clipboard_modify_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_json_utility_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        let zip_kind = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor;
-        let zip_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let zip_scope = match zip_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
-                instance,
-            } if self.jump_mode_enabled()
-                && self.jump_mode_ui.dialog_instance(zip_kind) == Some(instance) =>
-            {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("zip-extractor", instance),
-                    crate::gui::jump_mode::TargetGeneration(instance),
-                    "zip-extractor",
-                    ctx.viewport_id(),
-                    zip_owner,
-                    false,
-                )
-            }
-            _ => None,
-        };
-        let zip_was_open = self.zip_extractor_dialog.open;
-        #[cfg(windows)]
-        self.zip_extractor_dialog.show(
-            &ctx,
-            &mut self.archive_session,
-            first_ui_pass,
-            zip_scope.as_ref(),
-        );
-        #[cfg(not(windows))]
-        self.zip_extractor_dialog
-            .show_unsupported(&ctx, first_ui_pass, zip_scope.as_ref());
-        if zip_was_open && !self.zip_extractor_dialog.open {
-            self.panel_states.zip_extractor_dialog = false;
-            self.panel_stack
-                .retain(|panel| *panel != super::Panel::ZipExtractorDialog);
-        }
+        self.show_zip_host(&ctx, frame_logic.should_be_visible, first_ui_pass, jump_session_escape_preempted);
         self.hash_generator_dialog.show(&ctx);
         self.show_regex_tester(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_xml_toolkit(&ctx, first_ui_pass, frame_logic.should_be_visible);
@@ -12429,6 +12467,12 @@ impl LauncherApp {
                 }
             }
         }
+        #[cfg(windows)] {
+            let zip = self.zip_extractor_dialog.on_hosted_frame_complete(ctx, &mut self.archive_session);
+            for text in zip.copies { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ZipExtractor, text }); }
+            if zip.show_root { effects.push(RootDialogEffect::ShowRoot); }
+            if zip.closed { self.panel_states.zip_extractor_dialog = false; self.panel_stack.retain(|panel| *panel != super::Panel::ZipExtractorDialog); }
+        }
         let finder = self.duplicate_finder_dialog.on_hosted_frame_complete(ctx);
         for text in finder.copies {
             effects.push(RootDialogEffect::CopyText {
@@ -12696,6 +12740,7 @@ impl LauncherApp {
                                 self.report_error_message("image_compare.copy", error);
                             }
                         }
+                        DialogCopyOwner::ZipExtractor => { if let Err(error) = result { self.report_error_message("zip.copy", error); } }
                         DialogCopyOwner::DuplicateFinder => {
                             if let Err(error) = result {
                                 self.report_error_message("duplicate_finder.copy", error);
@@ -12830,6 +12875,7 @@ impl eframe::App for LauncherApp {
             || self.date_time_studio_dialog.needs_root_ui_when_hidden()
             || self.image_compare_dialog.needs_root_ui_when_hidden()
             || self.duplicate_finder_dialog.needs_root_ui_when_hidden()
+            || self.zip_extractor_dialog.needs_root_ui_when_hidden()
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -18368,6 +18414,334 @@ mod tests {
         );
         assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
         assert_eq!(app.calendar_event_editor.test_start_date(), original);
+    }
+
+    #[cfg(windows)]
+    fn zip_host_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        label: &str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..12 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            let jump = if viewport == egui::ViewportId::ROOT {
+                &app.jump_mode_ui
+            } else {
+                app.zip_extractor_dialog.test_native_jump()
+            };
+            if let Some(target) = jump
+                .retained_registry()
+                .targets()
+                .iter()
+                .find(|t| t.metadata().label() == label && t.enabled() && t.eligible())
+            {
+                let rect = target.clipped_rect();
+                if rect.is_positive() && previous == Some(rect) {
+                    return rect;
+                }
+                previous = Some(rect);
+            } else {
+                previous = None;
+            }
+        }
+        panic!("ZIP control {label:?} must have an enabled visible target");
+    }
+    #[cfg(windows)]
+    fn click_zip_host_target(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        label: &str,
+    ) {
+        let rect = zip_host_target(ctx, app, viewport, label);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn zip_host_preview_confirm_survives_moves_and_rejects_discarded_actions() {
+        use super::super::utility_host::UtilityPresentation;
+        use crate::commands::DialogCommandHost;
+        use std::io::Write as _;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let archive = workspace.root().join("host-fixture.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file(
+            "only.txt",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(b"retained ZIP fixture").unwrap();
+        zip.finish().unwrap();
+        let destination = workspace.root().join("zip-host-output");
+        std::fs::create_dir(&destination).unwrap();
+        DialogCommandHost::open_zip_extractor_dialog(&mut app).unwrap();
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::ZipExtractorDialog::viewport();
+        app.zip_extractor_dialog
+            .queue_picker_for_test(Some(archive));
+        app.zip_extractor_dialog
+            .queue_picker_for_test(Some(destination.clone()));
+        for discard_child in [false, true] {
+            let rect = zip_host_target(&ctx, &mut app, root, "Choose ZIP archive");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(rect, false),
+                true,
+                discard_child,
+            );
+            assert_eq!(app.zip_extractor_dialog.test_picker_queue_len(), 2);
+        }
+        click_zip_host_target(&ctx, &mut app, root, "Choose ZIP archive");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.archive_session.snapshot().catalog.is_none() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "archive inspection must complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        click_zip_host_target(&ctx, &mut app, root, "Choose destination folder");
+        click_zip_host_target(&ctx, &mut app, root, "Select archive entry only.txt");
+        click_zip_host_target(&ctx, &mut app, root, "Preview selected entries");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.archive_session.snapshot().preview.is_none() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preview must complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let initial_token = app.archive_session.snapshot().preview.unwrap().token;
+        assert!(std::fs::read_dir(&destination).unwrap().next().is_none());
+        click_zip_host_target(&ctx, &mut app, root, "Pop Out");
+        assert_eq!(
+            app.zip_extractor_dialog.test_presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.archive_session.snapshot().preview.unwrap().token,
+            initial_token
+        );
+        app.zip_extractor_dialog
+            .queue_picker_for_test(Some(destination.clone()));
+        for discard_child in [false, true] {
+            let rect = zip_host_target(&ctx, &mut app, native, "Choose destination folder");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.zip_extractor_dialog.test_picker_queue_len(), 1);
+            assert_eq!(
+                app.archive_session.snapshot().preview.unwrap().token,
+                initial_token
+            );
+        }
+        click_zip_host_target(&ctx, &mut app, native, "Choose destination folder");
+        assert_eq!(app.zip_extractor_dialog.test_picker_queue_len(), 0);
+        assert_eq!(
+            app.archive_session.snapshot().preview.unwrap().token,
+            initial_token
+        );
+        click_zip_host_target(&ctx, &mut app, native, "Filter archive entries");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Text("only".into())],
+            false,
+            false,
+        );
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            for event in [
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                key_release(egui::Key::A, egui::Modifiers::COMMAND),
+            ] {
+                run_host_viewport_frame(&ctx, &mut app, native, vec![event], false, false);
+            }
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::CopyText { owner: DialogCopyOwner::ZipExtractor, text }] if text == "only")
+        );
+        let selection = zip_host_target(&ctx, &mut app, native, "Select archive entry only.txt");
+        for discard_child in [false, true] {
+            let before = app.archive_session.snapshot().selection_revision;
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(selection, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(selection, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.archive_session.snapshot().selection_revision, before);
+        }
+        click_zip_host_target(&ctx, &mut app, native, "Select archive entry only.txt");
+        assert!(app.archive_session.snapshot().preview.is_none());
+        click_zip_host_target(&ctx, &mut app, native, "Select archive entry only.txt");
+        click_zip_host_target(&ctx, &mut app, native, "Preview selected entries");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.archive_session.snapshot().preview.is_none() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "replacement preview must complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let token = app.archive_session.snapshot().preview.unwrap().token;
+        assert_ne!(token, initial_token);
+        click_zip_host_target(&ctx, &mut app, native, "Confirm preview and destination");
+        for discard_child in [false, true] {
+            let rect = zip_host_target(
+                &ctx,
+                &mut app,
+                native,
+                "Confirm and extract selected entries",
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert!(std::fs::read_dir(&destination).unwrap().next().is_none());
+            assert_eq!(app.archive_session.snapshot().preview.unwrap().token, token);
+        }
+        click_zip_host_target(
+            &ctx,
+            &mut app,
+            native,
+            "Confirm and extract selected entries",
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !destination.join("only.txt").exists() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "accepted confirmation must publish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            std::fs::read(destination.join("only.txt")).unwrap(),
+            b"retained ZIP fixture"
+        );
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 1);
+        click_zip_host_target(&ctx, &mut app, native, "Dock");
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.zip_extractor_dialog.test_presentation(),
+            UtilityPresentation::Docked
+        );
+        click_zip_host_target(&ctx, &mut app, root, "Close ZIP Extractor");
+        assert!(!app.zip_extractor_dialog.open);
     }
 
     fn duplicate_finder_host_control(

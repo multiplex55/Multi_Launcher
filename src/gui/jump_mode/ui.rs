@@ -446,6 +446,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::TableUtility
                     | NavigationDialogKind::ImageCompare
                     | NavigationDialogKind::DuplicateFinder
+                    | NavigationDialogKind::ZipExtractor
                     | NavigationDialogKind::DashboardEditor
                     | NavigationDialogKind::MouseGestures
                     | NavigationDialogKind::MouseSettings
