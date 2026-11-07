@@ -1,7 +1,11 @@
 # Desktop Productivity Completion and Acceptance Recovery
 
-R01 final tip b8c3f259cbd55d483fb1346b262026ed42d5d820 is pushed. Both historical Diagram clicks passed and full native acceptance remains pending.
+R01 final tip b8c3f259cbd55d483fb1346b262026ed42d5d820 is pushed. Both historical Diagram clicks passed; full native acceptance remains pending.
 
-R02 is in progress on feat/productivity-host-migrations. Both exact recovery briefs were restored and pushed in 2db5aae61e35026e73b3da34c2c32d94508c12d1. Markdown Studio, Quick Notes, independent note editors, MkMacro, Dashboard Editor, Main Settings, Mouse Settings, Gesture Settings and the Mouse Gestures editor have passed their focused host and production checks. M2-C File Search, Diff, Batch Rename, Search & Replace, Clipboard History, Snippets, Clipboard Modify, Paste Sequences, JSON Utility, XML Toolkit, Regex Tester, Table Utility, Timer and alarm authoring, the Calendar family, Date & Time Studio, Image Compare, Duplicate Finder and ZIP Extractor have passed their focused host and production checks. M2-D Folder Size Analyzer has passed its focused host and production checks. File Lock has passed its focused host and production checks. Recorder setup has passed its focused host and production checks. R02 category inventory/reporting is next; the accepted Calculation Pad and Diagram reference hosts are preserved. Native N2, N3, N4, N9, N10, N11 and N12 validation remain pending.
+R02 source checkpoint 85f5ba8711df522aa08f0661276fab860e5b5445 is pushed on feat/productivity-host-migrations. All 32 existing ordinary host rows passed their focused implementation and production checks, and the three R01 reference hosts are preserved. Both exact recovery briefs remain restored from 05153ac1. The final 37-row disposition explicitly carries Programmer Inspector to R03 and Explorer saved-list UI to R05; neither is claimed implemented here.
 
-The [execution ledger](EXECUTION.md) tracks the original requirements, 38 milestones, named hosts and native gates.
+R02 category reporting is complete in the accompanying execution ledger. R03 must start from the actual committed reporting HEAD, followed by its direct-parent M0-A checkpoint and M3-A programmer-inspector model. R04–R06 remain pending. The Goal remains active.
+
+Native N1–N12 remain pending as full user flows. One final consolidated Windows acceptance packet is due at R06; no intermediate user run is required.
+
+The [execution ledger](EXECUTION.md) is canonical and preserves original requirements, checkpoint commands/results, the 38-milestone baseline, named hosts and native gates.

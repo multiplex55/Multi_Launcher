@@ -590,3 +590,55 @@ The accepted-base exact subset matched four and passed 4/4 (SHA-256 4024566A584A
 Set `$f` to the trimmed contents of `r02-m2-d3-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched six (SHA-256 52D8583434A8EF129393533397B14E263D79457B863B5575287BC8BCBE3DDEDD). `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f`, with disposable-fixture access, passed 6/6 with 7515 skipped (SHA-256 93B412FC0960751DAEC87CE56E80508CA4E8D56D2000DF40EB9B9C209DC8416D). `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with existing warnings (SHA-256 EBDAC43976BE7D09DF133BF418AEBD6E6FF3F832D42D044AFC3F74C576AB71B4). Scoped Rustfmt and `git diff --check` passed.
 
 Source scope is `src/gui/{recording_dialog,mod,render}.rs` and `src/settings/utility_dialog_sizes.rs`. The CPU viewport fixtures use actual setup controls, owned ROOT/native popups and format options, numeric and drag-label Copy, hidden ROOT, Dock and close. They reject discarded Start before chooser invocation, preserve chooser cancellation, refuse synthetic stale selection/host return, assert the frozen request and admit one job through the existing controller with a fake backend. Only OS target validation is explicitly bypassed for the synthetic test monitor; retained admission and controller preparation remain exercised. Target enumeration was not deterministically held across a move, and no such proof is claimed. Native chooser/focus/region/capture-user flows remain `IMPLEMENTED_USER_VALIDATION_PENDING` under N11/N12. Next is the R02 category inventory/reporting handoff, then R03/M0-A from its exact reporting tip.
+
+## R02 final category disposition
+
+Prepared 2026-11-07 07:00:59 UTC on feat/productivity-host-migrations. Accepted source checkpoint and configured upstream both equal 85f5ba8711df522aa08f0661276fab860e5b5445. This category reporting commit follows that source checkpoint; R03 must start from the actual reporting HEAD read after committing this section, not the source SHA. R02 started directly from pushed R01 final tip b8c3f259cbd55d483fb1346b262026ed42d5d820, with M0-A 9fb5099a. The user-authored model configuration checkpoint and all linear recovery history were preserved.
+
+The current disposition below supersedes only the historical baseline host statuses, not their evidence. All 32 existing ordinary R02 host rows now have implementation, focused state/action verification, production compilation and independent review evidence in their checkpoint sections above. The three reference hosts remain accepted from R01. The two not-yet-created surfaces are explicitly carried to their owning categories: Programmer Inspector in R03 and Explorer saved-list editor/launcher in R05. R02 does not claim those features exist or that their native gates passed. Specialized overlays/prompts and the compact recording controller retain their own lifecycles.
+
+In the Native column, Pending means IMPLEMENTED_USER_VALIDATION_PENDING for an implemented/preserved row; a future-surface row remains NOT_IMPLEMENTED in its owning category and its native check is NOT_RUN. All native requests remain deferred to the single R06 N1–N12 packet.
+
+| Original host row | Implementation / checkpoint | Focused state evidence | Native |
+| --- | --- | --- | --- |
+| Quick Notes | M2-A.2a | Draft, save/template, query return, discarded host intents | Pending N2 |
+| Each note editor | M2-A.2b | Independent instances, dirty/history, Find/prompts/export | Pending N2 |
+| Markdown Studio | M2-A.1 | Source, Unicode selection/history, dirty close and picker ownership | Pending N2 |
+| MkMacro | M2-A.3 | Real host/Run/Apply controls, exactly-once fake playback | Pending N2 |
+| Main Settings | M2-B.2 | Retained editor replacement/save worker and popup ownership | Pending N3 |
+| Dashboard Settings | M2-B.1 | Draft/slot identity, failed Save, discarded effects and Dock | Pending N3 |
+| Mouse Settings | M2-B.3 | Retained settings draft, save/cancel and host ownership | Pending N3 |
+| Mouse Gestures | M2-B.4 | Editor/recorder identity, accepted controls and host ownership | Pending N3 |
+| Gesture Settings | M2-B.3 | Independent settings draft and accepted owner actions | Pending N3 |
+| File Search | M2-C.1 | Same coordinator/preview, hidden work, qualified result/prefill actions | Pending N4 |
+| Diff | M2-C.2 | Same comparison owner, retained input and host effects | Pending N4 |
+| Batch Rename | M2-C.3a | Retained plan/scan/actions and accepted publication | Pending N4 |
+| Search & Replace | M2-C.3b | Retained scan/preview/apply ownership and host state | Pending N4 |
+| Clipboard History | M2-C.4a | Retained history view, owner-qualified popup/actions | Pending N4 |
+| Snippets | M2-C.4b | Retained snippet state and owned prompt/run flow | Pending N4 |
+| Clipboard Modify | M2-C.4c | Retained draft/presets and accepted persistence | Pending N4 |
+| Paste Sequences | M2-C.5 | Retained presentation, prompt/runtime ownership, repeated-run coverage | Pending N4 |
+| JSON | M2-C.6a | Retained document/work and accepted actions | Pending N4 |
+| XML | M2-C.6b | Retained document/tool state and owner-qualified actions | Pending N4 |
+| Regex | M2-C.6c | Retained regex state, popup actions, copied/persisted output | Pending N4 |
+| Table | M2-C.6d | Page worker/source/selection and revocable export/overwrite receipt | Pending N4 |
+| Timer/alarm authoring | M2-C.7a | Retained modes/draft, accepted Start/Play, Sound popup | Pending N4 |
+| Calendar root | M2-C.7b | Retained navigation and qualified occurrence/child opening | Pending N4 |
+| Calendar event editor | M2-C.7b | Independent draft host, retained Save/Delete and stale-source checks | Pending N4 |
+| Calendar event details | M2-C.7b | Captured occurrence, retained Edit/Delete/Snooze and child ownership | Pending N4 |
+| Date & Time Studio | M2-C.7c | Draft/reference/fold/occurrence, popup, Copy and Prepare | Pending N4 |
+| Image Compare | M2-C.8a | Worker/camera/result preservation, clipboard and texture retirement | Pending N4 |
+| Duplicate Finder | M2-C.8b | Held scan/cancel/drain/restart, exact alias proof and clipboard | Pending N4 |
+| ZIP Extractor | M2-C.8c | Read-only preview/token, discarded Confirm and one selected output | Pending N4 |
+| Calculation Pad | R01/M1-B reference | Accepted session/history/geometry/owner and dirty-close checks | Pending N1 |
+| Diagram Studio | R01/M1-A/M1-B reference | Recovered real Pop Out, shared owner/revision and picker bindings | Pending N6/N7 host subset |
+| Diagram viewer | R01/M1-A/M1-B reference | Recovered viewer click, independent camera and focused close | Pending N6/N7 host subset |
+| Programmer inspector | R03/M3-A/B/C pending | Model/UI absent at R02; separate hosted surface remains required | NOT_IMPLEMENTED; NOT_RUN N5 |
+| Explorer saved-list editor/launcher | R05/M5-B pending | Editor/launcher absent at R02; ordinary host remains required | NOT_IMPLEMENTED; NOT_RUN N8 |
+| Folder Size Analyzer | M2-D.1 | Retained result/navigation, source prefill, late-label copy fence | Pending N9 |
+| File Lock Inspector | M2-D.2 | Held inspection/ready Reveal, current receipt and shared copy fence | Pending N10 |
+| Silent recorder setup / compact controller | M2-D.3 | Setup host/chooser/copy; compact controller independently preserved | Pending N11/N12 |
+
+There is no known unaccepted R02 source increment or active implementation blocker at this handoff. Focused failures and compiler corrections were resolved without weakening interaction assertions, changing Nextest configuration, merging, rebasing, resetting or discarding work. The latest production check passed; individual exact test inventories and hashes remain above. No additional broad regression run is introduced for this documentation-only handoff. R06 retains the required final cumulative affected-case run, scoped first-party Clippy and truthful manual acceptance packet.
+
+R03 next: create the fresh programmer-inspector category branch directly from the actual committed R02 reporting tip, commit its M0-A ledger update with verified direct parent, attempt one normal push, then execute M3-A only. The inspected planner handoff calls for a pure independent exact working-copy model, lossless source snapshots with ephemeral document incarnation, formatting/labels, and a checked one-undo source-range Insert seam. Separate hosted UI/caret/accepted-pass dispatch and comparison remain M3-B/M3-C. R04–R06 remain pending. The overall Goal stays active.
