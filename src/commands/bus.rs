@@ -79,6 +79,9 @@ impl CommandBus {
             Command::PasteSequence(command) => {
                 handle_paste_sequence(host, *command, invocation.source)
             }
+            Command::ExplorerTabs(command) => host.stage_explorer_tabs(*command, invocation.source)
+                .map(|()| CommandOutcome::default())
+                .map_err(|error| CommandError::new("explorer_tabs", error).with_gui_failure_policy()),
             Command::Storage(
                 super::StorageCommand::SnippetRun(_) | super::StorageCommand::InvalidSnippetRun,
             ) => handle_snippet_run(host, invocation, captured_history_query),

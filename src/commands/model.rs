@@ -101,6 +101,7 @@ pub enum Command {
     Data(DataCommand),
     HotFolder(HotFolderCommand),
     PasteSequence(PasteSequenceCommand),
+    ExplorerTabs(ExplorerTabsCommand),
     VirtualDesktop(VirtualDesktopCommand),
     External(ExternalCommand),
 }
@@ -149,6 +150,7 @@ impl Command {
             Self::Data(_) => "data",
             Self::HotFolder(_) => "hotfolder",
             Self::PasteSequence(_) => "paste_sequence",
+            Self::ExplorerTabs(_) => "explorer_tabs",
             Self::VirtualDesktop(_) => "virtual_desktop",
             Self::External(_) => "external",
         }
@@ -196,6 +198,7 @@ impl Command {
             Self::Data(v) => v.kind_name(),
             Self::HotFolder(v) => v.kind_name(),
             Self::PasteSequence(v) => v.kind_name(),
+            Self::ExplorerTabs(v) => v.kind_name(),
             Self::VirtualDesktop(v) => v.kind_name(),
             Self::External(v) => v.kind_name(),
         }
@@ -1022,6 +1025,16 @@ pub enum PasteSequenceCommand {
     Cancel,
     InvalidRun,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplorerTabsCommand {
+    Open,
+    Run(crate::explorer_tabs::FolderListId),
+    Cancel,
+}
+kinds!(ExplorerTabsCommand,
+    Self::Open => "open", Self::Run(_) => "run", Self::Cancel => "cancel"
+);
 kinds!(PasteSequenceCommand,
     Self::Open => "open",
     Self::Run(_) => "run",

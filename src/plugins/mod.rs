@@ -24,6 +24,7 @@ pub mod fav;
 pub mod file_lock;
 pub mod file_search;
 pub mod folder_size;
+pub(crate) mod explorer_tabs;
 pub mod folders;
 pub mod hash_generator;
 pub mod help;

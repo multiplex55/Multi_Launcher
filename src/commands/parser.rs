@@ -435,6 +435,40 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         return Ok(Command::PasteSequence(command));
     }
 
+    if s.get(.."explorertabs".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("explorertabs"))
+        && (s.len() == "explorertabs".len()
+            || s.as_bytes().get("explorertabs".len()) == Some(&b':'))
+    {
+        if action.args.is_some() {
+            return Err(CommandError::new(
+                "explorer_tabs",
+                "Explorer Tabs commands do not accept a payload"
+            )
+            .with_gui_failure_policy());
+        }
+        let command = match s {
+            "explorertabs" | "explorertabs:open" => ExplorerTabsCommand::Open,
+            "explorertabs:cancel" => ExplorerTabsCommand::Cancel,
+            _ if s.starts_with("explorertabs:run:") => {
+                let raw = &s["explorertabs:run:".len()..];
+                let id = raw
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(crate::explorer_tabs::FolderListId::from_raw)
+                    .filter(|id| id.get().to_string() == raw)
+                    .ok_or_else(|| {
+                        CommandError::new("explorer_tabs", "Invalid saved folder-list ID")
+                            .with_gui_failure_policy()
+                    })?;
+                ExplorerTabsCommand::Run(id)
+            }
+            _ => return Err(CommandError::new("explorer_tabs", "Unknown Explorer Tabs command")
+                .with_gui_failure_policy()),
+        };
+        return Ok(Command::ExplorerTabs(command));
+    }
+
     if s.starts_with("vd:") {
         return Ok(Command::VirtualDesktop(parse_virtual_desktop(action)));
     }
@@ -3434,5 +3468,42 @@ mod file_lock_ui_command_tests {
             args: None,
         };
         assert_eq!(parse_action(&unknown).unwrap_err().domain, "file_lock");
+    }
+}
+
+#[cfg(test)]
+mod explorer_tabs_parser_tests {
+    use super::*;
+    fn action(raw: &str, args: Option<&str>) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: args.map(str::to_owned)
+        }
+    }
+    #[test]
+    fn explorer_tabs_commands_are_typed_and_malformed_reserved_routes_fail_closed() {
+        assert_eq!(
+            parse_action(&action("explorertabs:open", None)).unwrap(),
+            Command::ExplorerTabs(ExplorerTabsCommand::Open)
+        );
+        assert_eq!(
+            parse_action(&action("explorertabs:cancel", None)).unwrap(),
+            Command::ExplorerTabs(ExplorerTabsCommand::Cancel)
+        );
+        assert_eq!(
+            parse_action(&action("explorertabs:run:42", None)).unwrap(),
+            Command::ExplorerTabs(ExplorerTabsCommand::Run(
+                crate::explorer_tabs::FolderListId::from_raw(42).unwrap()
+            ))
+        );
+        for invalid in [
+            "explorertabs:run:0", "explorertabs:run:01", "explorertabs:run:1:extra",
+            "explorertabs:unknown", "EXPLORERTABS:run:0", "ExplorerTabs:unknown"
+        ] {
+            assert!(parse_action(&action(invalid, None)).is_err());
+        }
+        assert!(parse_action(&action("explorertabs:open", Some("extra"))).is_err());
     }
 }

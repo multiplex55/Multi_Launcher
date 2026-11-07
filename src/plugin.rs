@@ -343,6 +343,7 @@ impl PluginSearchUpdates {
 }
 
 pub struct PluginInternalServices {
+    explorer_tabs_root: crate::plugins::explorer_tabs::ExplorerTabsRoot,
     pub clipboard_modifier_catalog: SharedClipboardModifierCatalog,
     pub mkmacro_store: Arc<crate::mkmacro::MkMacroStore>,
     pub window_catalog: Arc<WindowCatalog>,
@@ -667,6 +668,15 @@ impl PluginManager {
         self.register_with_settings(plugin, &std::collections::HashMap::new());
     }
 
+    #[cfg(test)]
+    pub(crate) fn register_explorer_tabs_for_test(&mut self) {
+        self.register_builtin_for_settings_test(
+            crate::plugins::explorer_tabs::ExplorerTabsPlugin::new(Arc::clone(
+                &self.services.explorer_tabs_root
+            ))
+        );
+    }
+
     fn from_macro_store(store: Arc<crate::mkmacro::MkMacroStore>) -> Self {
         let search_updates = Arc::new(PluginSearchUpdates::default());
         let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
@@ -683,6 +693,7 @@ impl PluginManager {
             runtime_enablement: None,
             missing_scan_inputs: crate::plugins::missing::MissingScanInputs::default(),
             services: PluginInternalServices {
+                explorer_tabs_root: Arc::new(RwLock::new(None)),
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
                 search_updates,
@@ -806,6 +817,12 @@ impl PluginManager {
         *self.services.clipboard_modifier_catalog.write().unwrap() = Arc::new(catalog);
     }
 
+    pub(crate) fn set_explorer_tabs_root(&self, root: crate::platform::app_data::AppDataRoot) {
+        if let Ok(mut value) = self.services.explorer_tabs_root.write() {
+            *value = Some(root);
+        }
+    }
+
     pub fn with_clipboard_modifier_catalog(catalog: SharedClipboardModifierCatalog) -> Self {
         let store = Arc::new(
             crate::mkmacro::MkMacroStore::open(".")
@@ -820,6 +837,7 @@ impl PluginManager {
             runtime_enablement: None,
             missing_scan_inputs: crate::plugins::missing::MissingScanInputs::default(),
             services: PluginInternalServices {
+                explorer_tabs_root: Arc::new(RwLock::new(None)),
                 clipboard_modifier_catalog: catalog,
                 mkmacro_store: store,
                 search_updates,
@@ -969,6 +987,12 @@ impl PluginManager {
         self.register_with_settings(ImageComparePlugin, plugin_settings);
         self.register_with_settings(DuplicateFinderPlugin, plugin_settings);
         self.register_with_settings(FolderSizePlugin, plugin_settings);
+        self.register_with_settings(
+            crate::plugins::explorer_tabs::ExplorerTabsPlugin::new(Arc::clone(
+                &self.services.explorer_tabs_root
+            )),
+            plugin_settings
+        );
         self.register_with_settings(FileLockPlugin, plugin_settings);
         self.register_with_settings(ActivityPlugin, plugin_settings);
         self.register_with_settings(TableUtilityPlugin, plugin_settings);

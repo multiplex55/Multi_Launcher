@@ -45,6 +45,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "diagram-studio",
     "diagram-viewer",
     "duplicate-finder",
+    "explorer-tabs",
     "favorites",
     "file-preview",
     "file-lock",

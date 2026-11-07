@@ -80,6 +80,7 @@ pub struct ExplorerTabsJob {
     worker: Option<Worker>,
     finished: Option<(u64, ExplorerTabsReport)>,
     worker_failed: Option<u64>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 static NEXT_OPERATION: AtomicU64 = AtomicU64::new(1);
@@ -103,6 +104,22 @@ impl Drop for WorkerLease {
 }
 
 impl ExplorerTabsJob {
+    /// Wake the presentation owner when the existing worker publishes an update.
+    pub fn set_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.wake = Some(wake);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_test_held(
+        &mut self,
+        request: FolderTabRequest,
+        gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    ) -> Result<u64, ExplorerTabsStartError> {
+        self.start_with_factory(request, Duration::from_secs(30), move |_, _, _| {
+            TestHeldPort(gate)
+        })
+    }
+
     #[cfg(windows)]
     pub fn start(
         &mut self,
@@ -150,6 +167,7 @@ impl ExplorerTabsJob {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let (sender, receiver) = mpsc::channel();
+        let wake = self.wake.clone();
         let thread = thread::Builder::new()
             .name("explorer-folder-tabs".into())
             .spawn(move || {
@@ -163,10 +181,16 @@ impl ExplorerTabsJob {
                     deadline,
                     &mut |progress| {
                         let _ = sender.send(WorkerUpdate::Progress(progress));
+                        if let Some(wake) = &wake {
+                            wake();
+                        }
                     },
                 );
                 drop(port);
                 let _ = sender.send(WorkerUpdate::Finished(report));
+                if let Some(wake) = &wake {
+                    wake();
+                }
             })
             .map_err(|_| ExplorerTabsStartError::WorkerStartFailed)?;
         self.finished = None;
@@ -186,6 +210,13 @@ impl ExplorerTabsJob {
         if let Some(worker) = &self.worker {
             worker.cancelled.store(true, Ordering::Release);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cancelled(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|worker| worker.cancelled.load(Ordering::Acquire))
     }
 
     pub fn poll(&mut self) -> ExplorerTabsJobState<'_> {
@@ -228,6 +259,46 @@ impl ExplorerTabsJob {
             return ExplorerTabsJobState::WorkerFailed { id };
         }
         ExplorerTabsJobState::Idle
+    }
+}
+
+#[cfg(test)]
+struct TestHeldPort(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+#[cfg(test)]
+impl ExplorerTabsPort for TestHeldPort {
+    fn preflight(&mut self) -> Result<(), BackendDiagnostic> {
+        let (lock, condition) = &*self.0;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = condition.wait(released).unwrap();
+        }
+        Err(BackendDiagnostic {
+            reason: "test backend stopped".into(),
+            bootstrap: BootstrapState::NotStarted,
+            owned_resource_remaining: false,
+            owned_resource_path: None,
+            requested_step_attempted: false,
+        })
+    }
+    fn request(&mut self, _: &FolderRequestStep) -> Result<RequestResult, BackendDiagnostic> {
+        unreachable!()
+    }
+    fn observe_initial(
+        &mut self,
+        _: &FolderRequestStep,
+    ) -> Result<InitialTargetEvidence, SnapshotFailure> {
+        unreachable!()
+    }
+    fn observe_append(
+        &mut self,
+        _: &FolderRequestStep,
+        _: &[VerifiedFolderTab],
+    ) -> Result<VerifiedTabEvidence, SnapshotFailure> {
+        unreachable!()
+    }
+    fn verify_final(&mut self, _: &[VerifiedFolderTab]) -> Result<(), BackendDiagnostic> {
+        unreachable!()
     }
 }
 

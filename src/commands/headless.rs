@@ -398,6 +398,9 @@ fn execute_with_external(
         Command::PasteSequence(_) => {
             anyhow::bail!("paste sequence commands require the launcher interface")
         }
+        Command::ExplorerTabs(_) => {
+            anyhow::bail!("Explorer Tabs commands require the launcher interface")
+        }
         Command::ColorPick(_) => {
             anyhow::bail!("screen color picking requires the launcher interface")
         }

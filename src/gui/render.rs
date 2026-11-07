@@ -29,6 +29,7 @@ enum DialogCopyOwner {
     FolderSize,
     FileLock,
     FileLockLabel,
+    ExplorerTabs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2141,6 +2142,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self.clipboard_modify_host.root_layer(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer(),
+            Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer(),
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer(),
             Panel::RegexTesterDialog => self.regex_tester_dialog.root_layer(),
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
@@ -4826,7 +4828,10 @@ impl LauncherApp {
             self.file_lock_dialog.needs_viewport_bootstrap(),
             self.recording_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
-            self.calculation_pad_dialog.needs_root_ui_when_hidden() || self.programmer_inspector_host.needs_root_ui_when_hidden(self.programmer_inspector_dialog.open),
+            self.calculation_pad_dialog.needs_root_ui_when_hidden()
+                || self.programmer_inspector_host.needs_root_ui_when_hidden(self.programmer_inspector_dialog.open)
+                || self.explorer_tabs_host.needs_root_ui_when_hidden(self.explorer_tabs_dialog.open)
+                || self.explorer_tabs_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
             self.file_lock_dialog.needs_root_ui_when_hidden(),
             self.recording_dialog
@@ -5284,6 +5289,47 @@ impl LauncherApp {
                 self.native_ui_host_input_allowed(ctx, root_visible),
             );
         }
+    }
+
+    fn show_explorer_tabs(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer
+        };
+        use super::utility_window_host::HostInput;
+        self.explorer_tabs_dialog.poll_background(ctx);
+        if !self.explorer_tabs_dialog.open {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.explorer_tabs_host.root_layer();
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self.pinned_panels.contains(&super::Panel::ExplorerTabsDialog);
+        let decision_pending = self.explorer_tabs_dialog.has_pending_decision();
+        let runtime = super::explorer_tabs_dialog::ExplorerTabsRuntime {
+            root: super::utility_host::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            host: self.explorer_tabs_host.identity(),
+            pinned,
+        };
+        self.explorer_tabs_host
+            .configure_jump(&self.jump_mode_ui, false);
+        self.explorer_tabs_host.show(
+            ctx, &mut self.explorer_tabs_dialog, &runtime, HostInput {
+                first, root_visible, root_input, native_input, root_owner: NavigationOwner::Blocked,
+                parent_owner: owner, root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned && !decision_pending, allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked, parent_instance: 0, root_scopes: (None, None),
+            }
+        );
     }
 
     fn show_programmer_inspector(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
@@ -9389,6 +9435,7 @@ impl LauncherApp {
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_json_utility_host(&ctx, first_ui_pass, false);
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
+            self.show_explorer_tabs(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
@@ -11212,6 +11259,7 @@ impl LauncherApp {
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_json_utility_host(&ctx, first_ui_pass, false);
             self.show_programmer_inspector(&ctx, first_ui_pass, false);
+            self.show_explorer_tabs(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
@@ -11702,6 +11750,7 @@ impl LauncherApp {
         self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_calculation_pad(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_programmer_inspector(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_explorer_tabs(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
             &ctx, first_ui_pass, frame_logic.should_be_visible, jump_session_escape_preempted,
@@ -12650,6 +12699,54 @@ impl LauncherApp {
             if completion.show_root { effects.push(RootDialogEffect::ShowRoot); }
         }
         self.programmer_inspector_dialog.publish(self.calculation_pad_dialog.inspector_context());
+        let mut explorer_tabs_closed = false;
+        if let Some(completion) = self.explorer_tabs_host.complete(ctx, &mut self.explorer_tabs_dialog) {
+            use super::explorer_tabs_dialog::ExplorerTabsHostCommand;
+            for command in completion.commands {
+                match command {
+                    ExplorerTabsHostCommand::Closed => {
+                        explorer_tabs_closed = true;
+                        if completion.owner_viewport != egui::ViewportId::ROOT {
+                            ctx.with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
+                                plugin.armed.remove(&completion.owner_viewport);
+                                plugin.captured.retain(|(receipt, _)|
+                                    receipt.owner.viewport_id != completion.owner_viewport
+                                );
+                            });
+                        }
+                        self.explorer_tabs_dialog.finish_close();
+                        self.panel_stack
+                            .retain(|panel| *panel != super::Panel::ExplorerTabsDialog);
+                        self.panel_states.explorer_tabs_dialog = false;
+                    }
+                    ExplorerTabsHostCommand::Apply(actions) => {
+                        let (changed_store, copies) = self.explorer_tabs_dialog.complete(actions);
+                        for text in copies {
+                            effects.push(RootDialogEffect::CopyText {
+                                owner: DialogCopyOwner::ExplorerTabs, text
+                            });
+                        }
+                        if changed_store {
+                            self.update_command_cache();
+                            self.search();
+                        }
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        if self.explorer_tabs_dialog.complete_external(
+            ctx, self.explorer_tabs_host.identity(), explorer_tabs_closed
+        ) {
+            self.panel_states.explorer_tabs_dialog = true;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::ExplorerTabsDialog);
+            self.panel_stack.push(super::Panel::ExplorerTabsDialog);
+            self.request_explorer_tabs_focus();
+            ctx.request_repaint();
+        }
         #[cfg(windows)] {
             let zip = self.zip_extractor_dialog.on_hosted_frame_complete(ctx, &mut self.archive_session);
             for text in zip.copies { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ZipExtractor, text }); }
@@ -12940,6 +13037,11 @@ impl LauncherApp {
                         }
                         DialogCopyOwner::FileLock => self.file_lock_dialog.copy_completed(result),
                         DialogCopyOwner::FileLockLabel => self.file_lock_dialog.label_copy_completed(result),
+                        DialogCopyOwner::ExplorerTabs => {
+                            if let Err(error) = result {
+                                self.report_error_message("explorer_tabs.copy", error);
+                            }
+                        }
                     }
                 }
                 RootDialogEffect::OpenPath(path) => {
@@ -18373,6 +18475,986 @@ mod tests {
             );
         }
         panic!("Inspector control {name} did not become visible: {last:?}");
+    }
+
+    #[test]
+    fn explorer_tabs_actual_saved_run_waits_for_owner_and_root_receipts() {
+        use crate::explorer_tabs::{FolderListStore, FolderPath};
+        use crate::platform::app_data::AppDataRoot;
+        struct Release(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let (lock, cv) = &*self.0;
+                *lock.lock().unwrap() = true;
+                cv.notify_all();
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let root = AppDataRoot::from_path(workspace.root());
+        let mut store = FolderListStore::open(&root).unwrap();
+        let id = store
+            .create(
+                "Fixture",
+                vec![
+                    FolderPath::parse(r"C:\One").unwrap(),
+                    FolderPath::parse(r"C:\Two").unwrap(),
+                ],
+            )
+            .unwrap();
+        let other = store
+            .create("Other", vec![FolderPath::parse(r"C:\Other").unwrap()])
+            .unwrap();
+        let mut app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        app.enabled_plugins = None;
+        app.plugins.register_explorer_tabs_for_test();
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let _release = Release(gate.clone());
+        app.explorer_tabs_dialog.test_use_held_backend(gate);
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        for _ in 0..3 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        let pad = app
+            .calculation_pad_dialog
+            .test_editor_rect()
+            .expect("Pad editor rendered");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                tool_dialog_pointer_events(pad, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            super::super::jump_mode::ui::focused_response_layer(&ctx),
+            app.calculation_pad_dialog.host_layer_if_root()
+        );
+        app.focus_panel(super::super::Panel::ExplorerTabsDialog);
+        let root_view = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (name, clip, enabled) = app.explorer_tabs_dialog.test_control("name").unwrap();
+        assert!(
+            enabled && clip.contains_rect(name),
+            "name={name:?} clip={clip:?} enabled={enabled} top={:?} focus={:?} host={:?}",
+            super::super::jump_mode::ui::visible_top_middle_layer(&ctx),
+            super::super::jump_mode::ui::focused_response_layer(&ctx),
+            app.explorer_tabs_host.root_layer()
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(name, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text("Created".into())],
+            false,
+            false,
+        );
+        let (add, clip, enabled) = app.explorer_tabs_dialog.test_control("add-folder").unwrap();
+        assert!(enabled && clip.contains_rect(add));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(add, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text("relative".into())],
+            false,
+            false,
+        );
+        let (invalid_save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(invalid_save));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(invalid_save, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.explorer_tabs_dialog.test_notice().is_some());
+        assert_eq!(
+            app.explorer_tabs_dialog.test_folders(),
+            vec!["relative".to_owned()]
+        );
+        assert!(
+            FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .all(|list| list.name() != "Created")
+        );
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text(r"C:\Created".into())],
+            false,
+            false,
+        );
+        let (add, clip, enabled) = app.explorer_tabs_dialog.test_control("add-folder").unwrap();
+        assert!(enabled && clip.contains_rect(add));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(add, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-1").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text(r"C:\Created".into())],
+            false,
+            false,
+        );
+        let (save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(save));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            tool_dialog_pointer_events(save, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            tool_dialog_pointer_events(save, false),
+            true,
+            false,
+        );
+        assert!(
+            !FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .any(|list| list.name() == "Created")
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(save));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(save, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .any(|list| list.name() == "Created"
+                    && list.folders().len() == 2
+                    && list
+                        .folders()
+                        .iter()
+                        .all(|folder| folder.as_str() == r"C:\Created"))
+        );
+        assert!(
+            app.command_cache
+                .iter()
+                .any(|action| action.label.contains("Created")
+                    && action.action.starts_with("explorertabs:run:"))
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (list_down, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-down-{}", id.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(list_down));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(list_down, pressed),
+                false,
+                false,
+            );
+        }
+        let reordered = FolderListStore::open(&root).unwrap();
+        assert_eq!(reordered.lists()[0].id(), other);
+        assert_eq!(reordered.lists()[1].id(), id);
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (row, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-{}", id.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(row, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let first_id = app
+            .explorer_tabs_dialog
+            .test_control_id("folder-0")
+            .unwrap();
+        let second_id = app
+            .explorer_tabs_dialog
+            .test_control_id("folder-1")
+            .unwrap();
+        let (down, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control("folder-down-0")
+            .unwrap();
+        assert!(enabled && clip.contains_rect(down));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(down, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.explorer_tabs_dialog.test_control_id("folder-0"),
+            Some(second_id)
+        );
+        assert_eq!(
+            app.explorer_tabs_dialog.test_control_id("folder-1"),
+            Some(first_id)
+        );
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        let before_edit = app.explorer_tabs_dialog.test_folders();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text("x".into())],
+            false,
+            false,
+        );
+        assert_ne!(app.explorer_tabs_dialog.test_folders(), before_edit);
+        let (other_row, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-{}", other.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(other_row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(other_row, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        assert!(app.explorer_tabs_dialog.has_pending_decision());
+        let dirty_before_escape = app.explorer_tabs_dialog.test_folders();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.explorer_tabs_dialog.has_pending_decision());
+        assert!(app.explorer_tabs_dialog.open);
+        assert_eq!(app.explorer_tabs_dialog.test_folders(), dirty_before_escape);
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (other_row, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-{}", other.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(other_row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(other_row, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (discard, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control("decision-discard")
+            .unwrap();
+        assert!(enabled && clip.contains_rect(discard));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(discard, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        assert_ne!(
+            app.explorer_tabs_dialog.test_control_id("folder-0"),
+            Some(first_id)
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::Z, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        assert_eq!(
+            app.explorer_tabs_dialog.test_folders(),
+            vec![r"C:\Other".to_string()]
+        );
+        let (row, clip, enabled) = app
+            .explorer_tabs_dialog
+            .test_control(&format!("list-{}", id.get()))
+            .unwrap();
+        assert!(enabled && clip.contains_rect(row));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(row, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let docked_folder_id = app
+            .explorer_tabs_dialog
+            .test_control_id("folder-0")
+            .unwrap();
+        let (host, clip, enabled) = app.explorer_tabs_host.test_button.unwrap();
+        assert!(enabled && clip.contains_rect(host));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.explorer_tabs_host.is_popped_out());
+        app.request_launcher_visibility(false);
+        let native = super::super::explorer_tabs_dialog::ExplorerTabsWindowHost::test_viewport(
+            app.explorer_tabs_dialog.epoch(),
+        );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.explorer_tabs_dialog.test_control_id("folder-0"),
+            Some(docked_folder_id)
+        );
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            let (run, clip, enabled) = app.explorer_tabs_dialog.test_control("run").unwrap();
+            assert!(enabled && clip.contains_rect(run));
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(run, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(run, false),
+                discard_root,
+                discard_child,
+            );
+            assert_eq!(app.explorer_tabs_dialog.current_job_id(), None);
+            for _ in 0..3 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let (run, clip, enabled) = app.explorer_tabs_dialog.test_control("run").unwrap();
+        assert!(enabled && clip.contains_rect(run));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(run, pressed),
+                false,
+                false,
+            );
+        }
+        let job = app
+            .explorer_tabs_dialog
+            .current_job_id()
+            .expect("accepted run starts one worker");
+        assert!(job > 0);
+        app.explorer_tabs_dialog
+            .cancel_current(Some(job.wrapping_add(1)));
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let (cancel, clip, enabled) = app.explorer_tabs_dialog.test_control("cancel-run").unwrap();
+        assert!(enabled && clip.contains_rect(cancel));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(cancel, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(cancel, false),
+            false,
+            true,
+        );
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        let snapshot = app
+            .explorer_tabs_dialog
+            .test_run_snapshot()
+            .expect("owned run snapshot");
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let (dock, clip, enabled) = app.explorer_tabs_host.test_button.unwrap();
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(dock, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(!app.explorer_tabs_host.is_popped_out());
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        assert_eq!(
+            app.explorer_tabs_dialog.test_run_snapshot(),
+            Some(snapshot.clone())
+        );
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        let (name, clip, enabled) = app.explorer_tabs_dialog.test_control("name").unwrap();
+        assert!(enabled && clip.contains_rect(name));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(name, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![egui::Event::Text("Renamed".into())],
+            false,
+            false,
+        );
+        let (save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(save));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(save, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .any(|list| list.id() == id && list.name() == "Renamed")
+        );
+        assert!(app.command_cache.iter().any(|action| action.action
+            == format!("explorertabs:run:{}", id.get())
+            && action.label.contains("Renamed")));
+        assert_eq!(
+            app.explorer_tabs_dialog.test_run_snapshot(),
+            Some(snapshot.clone())
+        );
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        let (delete, clip, enabled) = app.explorer_tabs_dialog.test_control("delete").unwrap();
+        assert!(enabled && clip.contains_rect(delete));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(delete, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            FolderListStore::open(&root)
+                .unwrap()
+                .lists()
+                .iter()
+                .all(|list| list.id() != id)
+        );
+        assert!(
+            app.command_cache
+                .iter()
+                .all(|action| action.action != format!("explorertabs:run:{}", id.get()))
+        );
+        assert_eq!(
+            app.explorer_tabs_dialog.test_run_snapshot(),
+            Some(snapshot.clone())
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root_view,
+            vec![key_press(egui::Key::W, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        assert!(!app.explorer_tabs_dialog.open);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        app.focus_panel(super::super::Panel::ExplorerTabsDialog);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root_view, Vec::new(), false, false);
+        }
+        assert!(app.explorer_tabs_dialog.open);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert_eq!(app.explorer_tabs_dialog.test_run_snapshot(), Some(snapshot));
+        assert!(!app.explorer_tabs_dialog.job.test_cancelled());
+        let (cancel, clip, enabled) = app.explorer_tabs_dialog.test_control("cancel-run").unwrap();
+        assert!(enabled && clip.contains_rect(cancel));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root_view,
+                tool_dialog_pointer_events(cancel, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.explorer_tabs_dialog.job.test_cancelled());
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        let action = Action {
+            label: "Run saved list".into(),
+            desc: String::new(),
+            action: format!("explorertabs:run:{}", id.get()),
+            args: None,
+        };
+        let mut dispatched = false;
+        app.run_root_frame_for_test_with(&ctx, actual_query_input(true), false, |app, ui| {
+            if !dispatched {
+                app.activate_action(
+                    action.clone(),
+                    None,
+                    crate::commands::ActivationSource::Hotkey,
+                );
+                dispatched = true;
+            }
+            app.render_root_ui(ui);
+        })
+        .0
+        .drop_without_applying_deltas();
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert_eq!(
+            app.explorer_tabs_dialog.test_notice(),
+            Some("An Explorer Tabs run is already active or stopping")
+        );
+    }
+
+    #[test]
+    fn explorer_tabs_plugin_and_hotkey_dispatch_use_one_retained_saved_run() {
+        use crate::explorer_tabs::{FolderListStore, FolderPath};
+        use crate::platform::app_data::AppDataRoot;
+        struct Release(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let (lock, cv) = &*self.0;
+                *lock.lock().unwrap() = true;
+                cv.notify_all();
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let root = AppDataRoot::from_path(workspace.root());
+        let mut store = FolderListStore::open(&root).unwrap();
+        let id = store
+            .create(
+                "Hotkey fixture",
+                vec![FolderPath::parse(r"C:\Current").unwrap()],
+            )
+            .unwrap();
+        let mut app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        app.enabled_plugins = None;
+        app.plugins.register_explorer_tabs_for_test();
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let _release = Release(gate.clone());
+        app.explorer_tabs_dialog.test_use_held_backend(gate);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let action = app
+            .plugins
+            .search_snapshot(None, None)
+            .search("explorertabs")
+            .actions
+            .into_iter()
+            .find(|action| action.action == format!("explorertabs:run:{}", id.get()))
+            .expect("configured plugin exposes saved ID");
+        app.update_command_cache();
+        assert!(
+            app.command_cache
+                .iter()
+                .any(|candidate| candidate.action == action.action)
+        );
+        let _catalog = app.universal_action_catalog_snapshot();
+        assert!(
+            app.resolve_exact_command_action(&action.action, None, "")
+                .is_ok()
+        );
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), None);
+        let invoke = |app: &mut LauncherApp, discard| {
+            let mut dispatched = false;
+            app.run_root_frame_for_test_with(&ctx, actual_query_input(true), discard, |app, ui| {
+                if !dispatched {
+                    app.activate_action(
+                        action.clone(),
+                        None,
+                        crate::commands::ActivationSource::Hotkey,
+                    );
+                    dispatched = true;
+                }
+                app.render_root_ui(ui);
+            })
+            .0
+            .drop_without_applying_deltas();
+        };
+        invoke(&mut app, true);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), None);
+        invoke(&mut app, false);
+        let job = app
+            .explorer_tabs_dialog
+            .current_job_id()
+            .expect("accepted typed hotkey action starts saved run");
+        app.focus_panel(super::super::Panel::HashGeneratorDialog);
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::super::Panel::HashGeneratorDialog)
+        );
+        invoke(&mut app, false);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::super::Panel::ExplorerTabsDialog)
+        );
+        for _ in 0..3 {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                egui::ViewportId::ROOT,
+                Vec::new(),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            egui::ViewportId::ROOT,
+            vec![key_press(egui::Key::W, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        assert!(!app.explorer_tabs_dialog.open);
+        assert!(app.hash_generator_dialog.open);
+        assert_eq!(app.explorer_tabs_dialog.current_job_id(), Some(job));
+    }
+
+    #[test]
+    fn explorer_tabs_failed_save_keeps_draft_disk_and_action_cache() {
+        use crate::explorer_tabs::{FOLDER_LIST_FILE_NAME, FolderListStore, FolderPath};
+        use crate::platform::app_data::AppDataRoot;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.enabled_plugins = None;
+        app.plugins.register_explorer_tabs_for_test();
+        app.update_command_cache();
+        let before_cache = app.command_cache.clone();
+        let root = AppDataRoot::from_path(workspace.root());
+        let mut external = FolderListStore::open(&root).unwrap();
+        external
+            .create("External", vec![FolderPath::parse(r"C:\External").unwrap()])
+            .unwrap();
+        let disk_before = std::fs::read(root.path().join(FOLDER_LIST_FILE_NAME)).unwrap();
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::ExplorerTabsDialog);
+        let viewport = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+        }
+        let (name, clip, enabled) = app.explorer_tabs_dialog.test_control("name").unwrap();
+        assert!(enabled && clip.contains_rect(name));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(name, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            viewport,
+            vec![egui::Event::Text("Unsaved".into())],
+            false,
+            false,
+        );
+        let (add, clip, enabled) = app.explorer_tabs_dialog.test_control("add-folder").unwrap();
+        assert!(enabled && clip.contains_rect(add));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(add, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, viewport, Vec::new(), false, false);
+        }
+        let (folder, clip, enabled) = app.explorer_tabs_dialog.test_control("folder-0").unwrap();
+        assert!(enabled && clip.contains_rect(folder));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(folder, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            viewport,
+            vec![egui::Event::Text(r"C:\Unsaved".into())],
+            false,
+            false,
+        );
+        let (save, clip, enabled) = app.explorer_tabs_dialog.test_control("save").unwrap();
+        assert!(enabled && clip.contains_rect(save));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                viewport,
+                tool_dialog_pointer_events(save, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.explorer_tabs_dialog.test_name(), "Unsaved");
+        assert_eq!(
+            app.explorer_tabs_dialog.test_folders(),
+            vec![r"C:\Unsaved".to_string()]
+        );
+        assert!(app.explorer_tabs_dialog.test_notice().is_some());
+        assert_eq!(
+            std::fs::read(root.path().join(FOLDER_LIST_FILE_NAME)).unwrap(),
+            disk_before
+        );
+        assert_eq!(app.command_cache, before_cache);
     }
 
     #[test]

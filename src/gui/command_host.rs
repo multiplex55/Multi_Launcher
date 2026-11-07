@@ -329,6 +329,22 @@ impl DialogCommandHost for LauncherApp {
         self.focus_panel(super::Panel::PasteSequenceDialog);
     }
 
+    fn stage_explorer_tabs(
+        &mut self,
+        command: crate::commands::ExplorerTabsCommand,
+        _source: crate::commands::ActivationSource
+    ) -> Result<(), String> {
+        if self.egui_ctx.viewport_id() != eframe::egui::ViewportId::ROOT {
+            return Err("Explorer Tabs commands require the launcher window".into());
+        }
+        self.explorer_tabs_dialog.stage_command(
+            &self.egui_ctx,
+            self.explorer_tabs_host.identity(),
+            command
+        );
+        Ok(())
+    }
+
     fn open_hash_generator_dialog(&mut self) {
         self.hash_generator_dialog.ensure_open();
         self.focus_panel(super::Panel::HashGeneratorDialog);

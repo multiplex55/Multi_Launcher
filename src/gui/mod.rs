@@ -10,6 +10,7 @@ mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calculation_pad_dialog;
 mod programmer_inspector_dialog;
+mod explorer_tabs_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
@@ -769,6 +770,7 @@ pub enum Panel {
     RegexTesterDialog,
     CalculationPadDialog,
     ProgrammerInspectorDialog,
+    ExplorerTabsDialog,
     DateTimeStudioDialog,
     DiagramStudioDialog,
     MarkdownStudioDialog,
@@ -842,6 +844,7 @@ impl Panel {
             Self::RegexTesterDialog => "Regex Tester",
             Self::CalculationPadDialog => "Calculation Pad",
             Self::ProgrammerInspectorDialog => "Programmer Inspector",
+            Self::ExplorerTabsDialog => "Explorer Tabs",
             Self::DateTimeStudioDialog => "Date & Time Studio",
             Self::DiagramStudioDialog => "Diagram Studio",
             Self::MarkdownStudioDialog => "Markdown Studio",
@@ -916,6 +919,7 @@ struct PanelStates {
     regex_tester_dialog: bool,
     calculation_pad_dialog: bool,
     programmer_inspector_dialog: bool,
+    explorer_tabs_dialog: bool,
     date_time_studio_dialog: bool,
     diagram_studio_dialog: bool,
     markdown_studio_dialog: bool,
@@ -1318,6 +1322,8 @@ pub struct LauncherApp {
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
     pub(crate) programmer_inspector_dialog: programmer_inspector_dialog::ProgrammerInspectorDialog,
     programmer_inspector_host: utility_window_host::ProgrammerInspectorWindowHost,
+    explorer_tabs_dialog: explorer_tabs_dialog::ExplorerTabsDialog,
+    explorer_tabs_host: explorer_tabs_dialog::ExplorerTabsWindowHost,
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
     pub(crate) diagram_studio_dialog: DiagramStudioDialog,
     pub(crate) markdown_studio_dialog: MarkdownStudioDialog,
@@ -3292,6 +3298,7 @@ impl LauncherApp {
         let toast_duration = settings.toast_duration;
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
+        plugins.set_explorer_tabs_root(data_root.clone());
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
         let mut calculation_pad_dialog = CalculationPadDialog::new(&data_root);
         calculation_pad_dialog
@@ -4012,6 +4019,8 @@ impl LauncherApp {
             calculation_pad_dialog,
             programmer_inspector_dialog,
             programmer_inspector_host: Default::default(),
+            explorer_tabs_dialog: explorer_tabs_dialog::ExplorerTabsDialog::new(data_root.clone()),
+            explorer_tabs_host: Default::default(),
             date_time_studio_dialog: DateTimeStudioDialog::default(),
             diagram_studio_dialog,
             markdown_studio_dialog,
@@ -4750,7 +4759,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 68] = [
+    const TRACKED_PANELS: [Panel; 69] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4790,6 +4799,7 @@ impl LauncherApp {
         Panel::RegexTesterDialog,
         Panel::CalculationPadDialog,
         Panel::ProgrammerInspectorDialog,
+        Panel::ExplorerTabsDialog,
         Panel::DateTimeStudioDialog,
         Panel::DiagramStudioDialog,
         Panel::MarkdownStudioDialog,
@@ -4862,6 +4872,7 @@ impl LauncherApp {
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open,
+            Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open,
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.open,
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.open,
@@ -4915,6 +4926,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer().is_some(),
+            Panel::ExplorerTabsDialog => self.explorer_tabs_host.root_layer().is_some(),
             Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
             Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.root_layer().is_some(),
@@ -5055,7 +5067,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::ExplorerTabsDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5387,6 +5399,7 @@ impl LauncherApp {
             }
             Panel::RecordingDialog => self.close_recording_setup(),
             Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
+            Panel::ExplorerTabsDialog => { self.explorer_tabs_dialog.request_close(); }
             Panel::JsonUtilityDialog => {
                 self.close_json_utility_session();
             }
@@ -5695,6 +5708,7 @@ impl LauncherApp {
             }
             Panel::RecordingDialog => self.close_recording_setup(),
             Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
+            Panel::ExplorerTabsDialog => { self.explorer_tabs_dialog.request_close(); }
             Panel::JsonUtilityDialog => {
                 self.close_json_utility_session();
             }
@@ -5855,6 +5869,7 @@ impl LauncherApp {
             }
             Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
             Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open(),
+            Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open(),
             Panel::ZipExtractorDialog => {
                 #[cfg(windows)]
                 self.zip_extractor_dialog
@@ -5944,6 +5959,18 @@ impl LauncherApp {
         }
     }
 
+    fn request_explorer_tabs_focus(&mut self) {
+        if self.explorer_tabs_host.root_layer().is_some()
+            && self.egui_ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && let Some(focused) = self.egui_ctx.memory(|memory| memory.focused())
+            && crate::gui::jump_mode::ui::focused_response_layer(&self.egui_ctx)
+                != self.explorer_tabs_host.root_layer()
+        {
+            self.egui_ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        self.explorer_tabs_host.request_focus();
+    }
+
     pub(crate) fn focus_panel(&mut self, panel: Panel) {
         self.panel_stack.retain(|p| *p != panel);
         self.panel_stack.push(panel);
@@ -6024,6 +6051,9 @@ impl LauncherApp {
                     .memory_mut(|memory| memory.surrender_focus(focused));
             }
             self.programmer_inspector_host.request_focus();
+        } else if panel == Panel::ExplorerTabsDialog {
+            self.explorer_tabs_dialog.open();
+            self.request_explorer_tabs_focus();
         } else if panel == Panel::JsonUtilityDialog {
             if !self.json_utility_dialog.open {
                 self.json_utility_dialog.reopen_existing();
@@ -6166,6 +6196,7 @@ impl LauncherApp {
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(calculation_pad_dialog, Panel::CalculationPadDialog);
         check!(programmer_inspector_dialog, Panel::ProgrammerInspectorDialog);
+        check!(explorer_tabs_dialog, Panel::ExplorerTabsDialog);
         check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
         check!(diagram_studio_dialog, Panel::DiagramStudioDialog);
         check!(markdown_studio_dialog, Panel::MarkdownStudioDialog);

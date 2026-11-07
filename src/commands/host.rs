@@ -70,6 +70,9 @@ pub trait DialogCommandHost {
     fn open_bookmark_dialog(&mut self);
     fn open_snippet_dialog(&mut self);
     fn open_paste_sequence_dialog(&mut self) {}
+    fn stage_explorer_tabs(&mut self, _command: super::ExplorerTabsCommand, _source: super::ActivationSource) -> Result<(), String> {
+        Err("Explorer Tabs requires the launcher interface".into())
+    }
     fn open_hash_generator_dialog(&mut self) {}
     fn open_activity_dialog(&mut self) {}
     fn open_file_lock_dialog(&mut self, _path: Option<&std::path::Path>) {}

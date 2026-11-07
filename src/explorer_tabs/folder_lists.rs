@@ -31,6 +31,10 @@ pub const MAX_FOLDER_LISTS_BYTES: usize = 1024 * 1024;
 pub struct FolderListId(NonZeroU64);
 
 impl FolderListId {
+    pub fn from_raw(value: u64) -> Option<Self> {
+        NonZeroU64::new(value).map(Self)
+    }
+
     pub fn get(self) -> u64 {
         self.0.get()
     }
