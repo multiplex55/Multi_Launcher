@@ -2095,6 +2095,7 @@ impl LauncherApp {
             .any(|panel| self.is_panel_open(panel) && self.panel_has_root_presentation(panel))
             || self.dashboard_editor.host_layer_if_root().is_some()
             || self.diff_dialog.host_layer_if_root().is_some()
+            || self.calculation_pad_dialog.examples_layer_if_root().is_some()
             || self.show_plugins
             || !note_panel_layers.is_empty()
             || !self.image_panels.is_empty())
@@ -17986,6 +17987,20 @@ mod tests {
                     egui::Id::new("calculation-pad-window"),
                 ))
         );
+    }
+
+    #[test]
+    fn calculation_reference_is_ordinary_root_context_when_pad_is_native() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_open_examples();
+        app.calculation_pad_dialog.test_popout_pad(&ctx);
+        assert!(app.calculation_pad_dialog.host_layer_if_root().is_none());
+        let help = app.calculation_pad_dialog.examples_layer_if_root().unwrap();
+        let ordinary = app.query_focus_ordinary_context().expect("docked help owns ROOT input even with native Pad");
+        assert!(ordinary.ordinary_panel_layers.contains(&help));
     }
 
     #[test]

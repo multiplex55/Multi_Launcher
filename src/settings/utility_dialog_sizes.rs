@@ -30,6 +30,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "calendar-event-details",
     "calendar-event-editor",
     "calculation-pad",
+    "calculation-pad-reference",
     "clipboard-history",
     "clipboard-modify",
     "command-help",

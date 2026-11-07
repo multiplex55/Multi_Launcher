@@ -6,6 +6,11 @@ line-ending bytes. Direct document evaluation always reads the current source.
 The UI session caches its evaluation for the current source revision and
 recomputes after an edit, undo, or redo changes that revision.
 
+The Pad's **Examples & reference** window has a pinned search and executable
+examples with expected results. Use **Pop Out** to keep it in a separate native
+window, or **Dock** to return it to the launcher; its search and scroll position
+are retained when moving between presentations.
+
 ## Lines and names
 
 * An empty or whitespace-only line is blank.
