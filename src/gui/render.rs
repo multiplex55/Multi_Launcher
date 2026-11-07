@@ -2099,7 +2099,7 @@ impl LauncherApp {
 
     fn query_focus_panel_layer(&self, panel: super::Panel) -> Option<egui::LayerId> {
         use super::Panel;
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, root_window_layer_id};
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
         let middle = |id| Some(egui::LayerId::new(egui::Order::Middle, id));
         match panel {
             Panel::AliasDialog => middle(egui::Id::new(Some("Set Folder Alias"))),
@@ -2109,10 +2109,7 @@ impl LauncherApp {
             Panel::AddBookmarkDialog => middle(egui::Id::new(Some("Add Bookmark"))),
             Panel::HelpOverlay => middle(egui::Id::new(Some("Quick Help"))),
             Panel::HelpWindow => middle(egui::Id::new(Some("Command Help"))),
-            Panel::TimerDialog => self
-                .timer_dialog
-                .jump_mode_window_title()
-                .map(root_window_layer_id),
+            Panel::TimerDialog => self.timer_dialog.root_layer(),
             Panel::ShellCmdDialog => middle(egui::Id::new(Some("Shell Commands"))),
             Panel::SnippetDialog => self.snippet_window_host.root_layer(),
             Panel::PasteSequenceDialog => {
@@ -4802,7 +4799,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 28] {
+    fn viewport_bootstrap_state(&self) -> [bool; 29] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4810,6 +4807,7 @@ impl LauncherApp {
             self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
             self.xml_toolkit_dialog.needs_viewport_bootstrap(),
             self.regex_tester_dialog.needs_viewport_bootstrap(),
+            self.timer_dialog.needs_root_ui_when_hidden(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4845,7 +4843,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 28],
+        previously_pending: [bool; 29],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -4880,6 +4878,53 @@ impl LauncherApp {
         if self.enable_toasts {
             self.toasts.show_in_rect(ui, bounds);
         }
+    }
+
+    fn show_timer_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let instance = self.jump_mode_ui.timer_instance();
+        let root_owner_current = self.timer_root_input_owner_current(ctx, root_visible);
+        let scope = match owner {
+            NavigationOwner::Timer { instance } if root_owner_current => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("timer", instance),
+                    crate::gui::jump_mode::TargetGeneration(self.timer_dialog.host_session_epoch()),
+                    "timer-dialog",
+                    ctx.viewport_id(),
+                    owner,
+                    false,
+                )
+            }
+            _ => None,
+        };
+        self.timer_dialog.show_hosted(
+            ctx, scope.as_ref(), Some(instance), owner,
+            self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open()
+                && !self.pin_list_open,
+            root_owner_current, &self.jump_mode_ui,
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            root_visible, first, self.pinned_panels.contains(&super::Panel::TimerDialog),
+        );
+    }
+
+    fn timer_root_input_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+
+        let Some(layer) = self.timer_dialog.root_layer() else {
+            return false;
+        };
+        if !self.native_ui_host_input_allowed(ctx, root_visible) {
+            return false;
+        }
+        if egui::Popup::is_any_open(ctx) {
+            return self.timer_dialog.owned_sound_popup_layer(ctx, layer).is_some();
+        }
+        visible_top_middle_layer(ctx) == Some(layer)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
     }
 
     fn show_regex_tester(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
@@ -8083,7 +8128,7 @@ impl LauncherApp {
                     .todo_dialog
                     .open
                     .then_some(self.jump_mode_ui.todo_instance()),
-                timer: timer_window_title.map(|_| self.jump_mode_ui.timer_instance()),
+                timer: self.timer_dialog.root_layer().map(|_| self.jump_mode_ui.timer_instance()),
                 paste_sequence: self
                     .paste_sequence_dialog
                     .open
@@ -8791,6 +8836,7 @@ impl LauncherApp {
             // native-owner eligibility stay disabled in this branch.
             self.show_regex_tester(&ctx, first_ui_pass, false);
             self.show_table_utility(&ctx, false, first_ui_pass, false);
+            self.show_timer_host(&ctx, first_ui_pass, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -9646,6 +9692,7 @@ impl LauncherApp {
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
@@ -9736,6 +9783,7 @@ impl LauncherApp {
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
@@ -10625,6 +10673,7 @@ impl LauncherApp {
             self.show_xml_toolkit(&ctx, first_ui_pass, false);
             self.show_regex_tester(&ctx, first_ui_pass, false);
             self.show_table_utility(&ctx, false, first_ui_pass, false);
+            self.show_timer_host(&ctx, first_ui_pass, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -10796,46 +10845,7 @@ impl LauncherApp {
         let mut help = std::mem::take(&mut self.help_window);
         help.ui(&ctx, self);
         self.help_window = help;
-        let timer_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let timer_scope = match timer_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Timer { instance } => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("timer", instance),
-                    crate::gui::jump_mode::TargetGeneration(instance),
-                    "timer-dialog",
-                    ctx.viewport_id(),
-                    timer_owner,
-                    false,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::Root
-            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-        };
-        let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
-        timer_dlg.ui_with_jump_mode(
-            &ctx,
-            self,
-            timer_scope,
-            first_ui_pass && frame_logic.should_be_visible,
-        );
-        self.timer_dialog = timer_dlg;
+        self.show_timer_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let mut comp = std::mem::take(&mut self.completion_dialog);
         comp.ui(&ctx);
         self.completion_dialog = comp;
@@ -11846,6 +11856,18 @@ impl LauncherApp {
         if regex_docked {
             effects.push(RootDialogEffect::ShowRoot);
         }
+        let mut timer = std::mem::take(&mut self.timer_dialog);
+        let timer_outcome = timer.on_ui_frame_complete(ctx);
+        let timer_show_root = timer_outcome.show_root;
+        let timer_closed = timer.apply_host_effects(ctx, timer_outcome, self);
+        self.timer_dialog = timer;
+        if timer_closed {
+            self.panel_states.timer_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::TimerDialog);
+        }
+        if timer_show_root {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         let (table_closed, table_docked) = self.table_utility_dialog.on_ui_frame_complete(ctx);
         if table_closed {
             self.panel_states.table_utility_dialog = false;
@@ -12423,6 +12445,7 @@ impl eframe::App for LauncherApp {
             || self.xml_toolkit_dialog.needs_root_ui_when_hidden()
             || self.regex_tester_dialog.needs_root_ui_when_hidden()
             || self.table_utility_dialog.needs_root_ui_when_hidden()
+            || self.timer_dialog.needs_root_ui_when_hidden()
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -12748,7 +12771,7 @@ thread_local! {
     static IMMEDIATE_VIEWPORT_TEST_EVENTS: std::cell::RefCell<Vec<egui::Event>> = const { std::cell::RefCell::new(Vec::new()) };
     static IMMEDIATE_VIEWPORT_TARGETED_TEST_EVENTS: std::cell::RefCell<Option<(egui::ViewportId, Vec<egui::Event>)>> = const { std::cell::RefCell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_CLOSE_REQUEST: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
-    static IMMEDIATE_VIEWPORT_TEST_DISCARD: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
+    pub(super) static IMMEDIATE_VIEWPORT_TEST_DISCARD: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_SIZE: std::cell::Cell<Option<(egui::ViewportId, egui::Vec2)>> = const { std::cell::Cell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_FOCUSED_ID: std::cell::RefCell<Option<(egui::ViewportId, Option<egui::Id>)>> = const { std::cell::RefCell::new(None) };
     static IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY: std::cell::Cell<Option<egui::ViewportId>> = const { std::cell::Cell::new(None) };
@@ -42495,6 +42518,104 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn timer_and_alarm_authoring_keep_their_drafts_across_actual_host_moves() {
+        use crate::commands::DialogCommandHost;
+        use crate::gui::timer_dialog::TimerDialog;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.set_jump_mode_enabled(true);
+        let viewport = egui::ViewportId::from_hash_of("timer_authoring_viewport");
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        let child = |app: &mut LauncherApp, events| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        let button = |timer: &TimerDialog| {
+            let (rect, clip, enabled) = timer.test_host_button().unwrap();
+            assert!(enabled && clip.contains_rect(rect));
+            rect
+        };
+        for alarm in [false, true] {
+            if alarm {
+                DialogCommandHost::open_alarm_dialog(&mut app);
+            } else {
+                DialogCommandHost::open_timer_dialog(&mut app);
+            }
+            let epoch = app.timer_dialog.host_session_epoch();
+            let title = if alarm { "Set Alarm" } else { "Create Timer" };
+            assert_eq!(app.timer_dialog.jump_mode_window_title(), Some(title));
+            for _ in 0..4 {
+                root(&mut app, Vec::new());
+            }
+            if !alarm {
+                let duration = app.jump_mode_ui.retained_registry().targets().iter()
+                    .find(|target| target.metadata().label() == "Duration")
+                    .expect("docked Duration editor").clipped_rect();
+                for pressed in [true, false] {
+                    root(&mut app, tool_dialog_pointer_events(duration, pressed));
+                }
+                root(&mut app, vec![egui::Event::Text("17s".into())]);
+                assert_eq!(app.timer_dialog.test_duration(), "17s");
+            }
+            let pop_out = button(&app.timer_dialog);
+            for pressed in [true, false] {
+                root(&mut app, tool_dialog_pointer_events(pop_out, pressed));
+            }
+            assert!(app.timer_dialog.root_layer().is_none());
+            for _ in 0..3 {
+                child(&mut app, Vec::new());
+            }
+            root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+            assert!(!app.visible_flag.load(Ordering::Relaxed));
+            assert!(app.timer_dialog.needs_root_ui_when_hidden());
+            for _ in 0..3 {
+                child(&mut app, Vec::new());
+            }
+            let name = app.timer_dialog.test_native_jump_targets().iter()
+                .find(|target| target.metadata().label() == "Name")
+                .expect("detached Name editor").clipped_rect();
+            for pressed in [true, false] {
+                child(&mut app, tool_dialog_pointer_events(name, pressed));
+            }
+            child(&mut app, vec![egui::Event::Text(title.into())]);
+            assert_eq!(app.timer_dialog.test_label(), title);
+
+            let dock = button(&app.timer_dialog);
+            for pressed in [true, false] {
+                child(&mut app, tool_dialog_pointer_events(dock, pressed));
+            }
+            assert!(app.visible_flag.load(Ordering::Relaxed));
+            assert!(app.timer_dialog.root_layer().is_some());
+            assert_eq!(app.timer_dialog.host_session_epoch(), epoch);
+            assert_eq!(app.timer_dialog.jump_mode_window_title(), Some(title));
+            assert_eq!(app.timer_dialog.test_label(), title);
+            if !alarm {
+                assert_eq!(app.timer_dialog.test_duration(), "17s");
+            }
+            for _ in 0..3 {
+                root(&mut app, Vec::new());
+            }
+            let cancel = app.jump_mode_ui.retained_registry().targets().iter()
+                .find(|target| target.metadata().label() == "Cancel")
+                .expect("docked Cancel button").clipped_rect();
+            for pressed in [true, false] {
+                root(&mut app, tool_dialog_pointer_events(cancel, pressed));
+            }
+            assert!(!app.timer_dialog.open);
+        }
+    }
+
     #[test]
     fn jump_mode_timer_dialog_cancel_focuses_then_uses_the_existing_button() {
         use crate::gui::jump_mode::ui::NavigationOwner;
@@ -42577,31 +42698,33 @@ mod tests {
 
     #[cfg(feature = "qa-framebuffer-capture")]
     #[test]
+    fn timer_jump_escape_cancels_first() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.timer_dialog.open_timer();
+        for _ in 0..3 {
+            run_dialog_frame(&ctx, &mut app);
+        }
+
+        start_actual_root_jump_mode(&ctx, &mut app);
+        assert!(app.jump_mode_ui.active_session().is_some());
+        assert!(!egui::Popup::is_any_open(&ctx));
+        tap_root_key(&ctx, &mut app, egui::Key::Escape);
+        assert!(app.jump_mode_ui.active_session().is_none());
+        assert!(app.timer_dialog.open);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        drop(app);
+        drop(workspace);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    #[test]
     fn timer_popup_escape_closes_popup_before_parent_and_jump_escape_cancels_first() {
         use crate::gui::jump_mode::ui::NavigationOwner;
-
-        {
-            let ctx = egui::Context::default();
-            let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
-            app.set_jump_mode_enabled(true);
-            app.enable_toasts = true;
-            app.show_error_toasts = true;
-            prepare_actual_query_frame(&ctx, &mut app);
-            app.timer_dialog.open_timer();
-            for _ in 0..3 {
-                run_dialog_frame(&ctx, &mut app);
-            }
-
-            start_actual_root_jump_mode(&ctx, &mut app);
-            assert!(app.jump_mode_ui.active_session().is_some());
-            assert!(!egui::Popup::is_any_open(&ctx));
-            tap_root_key(&ctx, &mut app, egui::Key::Escape);
-            assert!(app.jump_mode_ui.active_session().is_none());
-            assert!(app.timer_dialog.open);
-            assert!(!egui::Popup::is_any_open(&ctx));
-            drop(app);
-            drop(workspace);
-        }
 
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());

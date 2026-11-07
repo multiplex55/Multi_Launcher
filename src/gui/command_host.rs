@@ -305,10 +305,12 @@ impl DialogCommandHost for LauncherApp {
 
     fn open_timer_dialog(&mut self) {
         self.timer_dialog.open_timer();
+        self.focus_panel(super::Panel::TimerDialog);
     }
 
     fn open_alarm_dialog(&mut self) {
         self.timer_dialog.open_alarm();
+        self.focus_panel(super::Panel::TimerDialog);
     }
 
     fn open_shell_dialog(&mut self) {

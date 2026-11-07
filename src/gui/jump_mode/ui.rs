@@ -453,6 +453,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::RadialDesigner,
                 ..
             } | NavigationOwner::PasteSequence { .. }
+                | NavigationOwner::Timer { .. }
                 | NavigationOwner::Notes { .. }
                 | NavigationOwner::MkMacro { .. }
                 | NavigationOwner::Settings { .. }
@@ -504,6 +505,9 @@ impl NavigationViewportBinding {
             NavigationOwner::PasteSequence { .. } => {
                 self.base_layer == paste_sequence_dialog_layer_id()
                     && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::Timer { .. } => {
+                self.base_layer == egui::LayerId::background() && visible_layer.is_none()
             }
             NavigationOwner::SnippetPrompt { generation } => {
                 self.base_layer == snippet_prompt_layer_id(generation)
