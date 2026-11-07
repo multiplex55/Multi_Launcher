@@ -23,6 +23,7 @@ enum DialogCopyOwner {
     Converter,
     DateTimeStudio,
     ImageCompare,
+    DuplicateFinder,
     FolderSize,
     FileLock,
 }
@@ -2161,7 +2162,7 @@ impl LauncherApp {
             Panel::MultiManagerDialog => middle(egui::Id::new("MultiManager")),
             Panel::MultiManagerSettingsDialog => middle(egui::Id::new("MultiManager Settings")),
             Panel::ImageCompareDialog => self.image_compare_dialog.root_layer(),
-            Panel::DuplicateFinderDialog => NavigationDialogKind::DuplicateFinder.layer_id(),
+            Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.root_layer(),
             Panel::FolderSizeDialog => middle(egui::Id::new(Some("Folder Size"))),
             Panel::FileLockDialog => middle(egui::Id::new(Some("File Lock Inspector"))),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
@@ -4323,6 +4324,7 @@ impl LauncherApp {
         self.regex_tester_dialog.poll_host_background(ctx);
         self.table_utility_dialog.poll_host_background(ctx);
         self.image_compare_dialog.poll_host_background(ctx);
+        self.duplicate_finder_dialog.poll_host_background(ctx);
         self.clipboard_dialog.observe_clipboard_version();
         self.poll_batch_rename_runtime(ctx);
         self.poll_search_replace_runtime(ctx);
@@ -4802,7 +4804,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 32] {
+    fn viewport_bootstrap_state(&self) -> [bool; 33] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4814,6 +4816,7 @@ impl LauncherApp {
             self.calendar_hosts_need_hidden_root_ui(),
             self.date_time_studio_dialog.needs_root_ui_when_hidden(),
             self.image_compare_dialog.needs_viewport_bootstrap(),
+            self.duplicate_finder_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4849,7 +4852,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 32],
+        previously_pending: [bool; 33],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -7059,21 +7062,19 @@ impl LauncherApp {
         root_visible: bool,
         first_ui_pass: bool,
         owner_transition_pending: bool,
+        jump_escape_preempted: bool,
     ) {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
+        use crate::gui::jump_mode::ui::NavigationDialogKind;
 
         let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
-        let instance = match owner {
-            NavigationOwner::Dialog {
-                kind: NavigationDialogKind::DuplicateFinder,
-                instance,
-            } => Some(instance),
-            _ => None,
-        };
-        let native_owner_current = !owner_transition_pending
-            && self.duplicate_finder_native_ui_owner_current(ctx, root_visible);
+        let instance = self
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::DuplicateFinder);
+        let native_owner_current = self.duplicate_finder_native_ui_owner_current(ctx, root_visible);
         let scope = instance
-            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .filter(|_| {
+                native_owner_current && !owner_transition_pending && self.jump_mode_enabled()
+            })
             .and_then(|instance| {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("duplicate-finder", instance),
@@ -7084,14 +7085,26 @@ impl LauncherApp {
                     false,
                 )
             });
-        self.duplicate_finder_dialog.show_with_jump_mode(
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        self.duplicate_finder_dialog.show_hosted(
             ctx,
             scope.as_ref(),
             instance,
             owner,
-            self.native_ui_application_input_allowed(ctx),
+            self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open()
+                && !self.pin_list_open,
             native_owner_current,
+            &self.jump_mode_ui,
+            jump_enabled,
+            root_visible,
             first_ui_pass,
+            self.pinned_panels
+                .contains(&super::Panel::DuplicateFinderDialog),
+            !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
         );
     }
 
@@ -8064,14 +8077,20 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
         self.duplicate_finder_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
-            && NavigationDialogKind::DuplicateFinder
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && self
+                .duplicate_finder_dialog
+                .root_layer()
+                .is_some_and(|layer| {
+                    visible_top_middle_layer(ctx) == Some(layer)
+                        && focused_response_layer(ctx).is_none_or(|focus| {
+                            focus == layer || focus.order == egui::Order::Background
+                        })
+                })
     }
 
     fn snippet_native_ui_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
@@ -8455,6 +8474,8 @@ impl LauncherApp {
                         self.table_utility_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::ImageCompare {
                         self.image_compare_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::DuplicateFinder {
+                        self.duplicate_finder_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -9133,6 +9154,7 @@ impl LauncherApp {
             self.show_calendar_hosts(&ctx, first_ui_pass, false, false);
             self.show_date_time_studio_host(&ctx, first_ui_pass, false, false);
             self.show_image_compare(&ctx, false, first_ui_pass, false, false);
+            self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -9992,6 +10014,7 @@ impl LauncherApp {
                     && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.date_time_studio_root_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.image_compare_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.duplicate_finder_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
@@ -10086,6 +10109,7 @@ impl LauncherApp {
                     && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.date_time_studio_root_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.image_compare_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.duplicate_finder_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
@@ -10979,6 +11003,7 @@ impl LauncherApp {
             self.show_calendar_hosts(&ctx, first_ui_pass, false, false);
             self.show_date_time_studio_host(&ctx, first_ui_pass, false, false);
             self.show_image_compare(&ctx, false, first_ui_pass, false, false);
+            self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11398,6 +11423,7 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             first_ui_pass,
             owner_transition_pending,
+            jump_session_escape_preempted,
         );
         self.show_folder_size(
             &ctx,
@@ -12403,6 +12429,20 @@ impl LauncherApp {
                 }
             }
         }
+        let finder = self.duplicate_finder_dialog.on_hosted_frame_complete(ctx);
+        for text in finder.copies {
+            effects.push(RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::DuplicateFinder,
+                text,
+            });
+        }
+        if finder.show_root {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        if finder.closed {
+            self.panel_states.duplicate_finder_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::DuplicateFinderDialog);
+        }
         let comparison = self.image_compare_dialog.on_hosted_frame_complete(ctx);
         for text in comparison.copies {
             effects.push(RootDialogEffect::CopyText {
@@ -12656,6 +12696,11 @@ impl LauncherApp {
                                 self.report_error_message("image_compare.copy", error);
                             }
                         }
+                        DialogCopyOwner::DuplicateFinder => {
+                            if let Err(error) = result {
+                                self.report_error_message("duplicate_finder.copy", error);
+                            }
+                        }
                         DialogCopyOwner::FolderSize => {
                             self.folder_size_dialog.copy_completed(result)
                         }
@@ -12784,6 +12829,7 @@ impl eframe::App for LauncherApp {
             || self.calendar_hosts_need_hidden_root_ui()
             || self.date_time_studio_dialog.needs_root_ui_when_hidden()
             || self.image_compare_dialog.needs_root_ui_when_hidden()
+            || self.duplicate_finder_dialog.needs_root_ui_when_hidden()
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -18322,6 +18368,406 @@ mod tests {
         );
         assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
         assert_eq!(app.calendar_event_editor.test_start_date(), original);
+    }
+
+    fn duplicate_finder_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &'static str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..12 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((_, rect, _, true)) = app.duplicate_finder_dialog.test_response(name)
+                && rect.is_positive()
+            {
+                if previous == Some(rect) {
+                    return rect;
+                }
+                previous = Some(rect);
+            } else {
+                previous = None;
+            }
+        }
+        panic!("Duplicate Finder control {name} must have an enabled visible rectangle");
+    }
+    fn click_duplicate_finder_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &'static str,
+    ) {
+        let rect = duplicate_finder_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    #[derive(Default)]
+    struct DuplicateActionRecorder(std::sync::Mutex<Vec<String>>);
+    impl super::super::duplicate_finder_dialog::DuplicateFinderActions for DuplicateActionRecorder {
+        fn revalidate(
+            &self,
+            proof: &super::super::duplicate_finder_dialog::CandidateProof,
+        ) -> Result<(), String> {
+            use super::super::duplicate_finder_dialog::DuplicateFinderActions;
+            super::super::duplicate_finder_dialog::SystemDuplicateFinderActions.revalidate(proof)
+        }
+        fn open(&self, _: &std::path::Path) -> Result<(), String> {
+            self.0.lock().unwrap().push("open".into());
+            Ok(())
+        }
+        fn reveal(&self, _: &std::path::Path) -> Result<(), String> {
+            self.0.lock().unwrap().push("reveal".into());
+            Ok(())
+        }
+        fn copy_paths(&self, _: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push("copy".into());
+            Ok(())
+        }
+    }
+    struct DuplicateGateGuard(std::sync::Arc<crate::duplicate_finder::FirstReadCheckpointGate>);
+    impl Drop for DuplicateGateGuard {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    #[test]
+    fn dff_host_gated_scan_survives_moves_cancel_drain_restart_and_close() {
+        use super::super::utility_host::UtilityPresentation;
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let scan_root = workspace.root().join("duplicate-finder-gated");
+        std::fs::create_dir(&scan_root).unwrap();
+        std::fs::write(scan_root.join("a.txt"), b"same fixture data").unwrap();
+        std::fs::write(scan_root.join("b.txt"), b"same fixture data").unwrap();
+        let gate = std::sync::Arc::new(crate::duplicate_finder::FirstReadCheckpointGate::new());
+        let _release = DuplicateGateGuard(std::sync::Arc::clone(&gate));
+        app.duplicate_finder_dialog =
+            super::super::DuplicateFinderDialogState::new_with_first_read_checkpoint(
+                &ctx,
+                std::sync::Arc::clone(&gate),
+            );
+        app.duplicate_finder_dialog
+            .attach_activity_center(app.activity_center.clone());
+        let receipts = std::sync::Arc::new(DuplicateActionRecorder::default());
+        app.duplicate_finder_dialog
+            .set_action_sink_for_fixture(receipts.clone());
+        app.duplicate_finder_dialog
+            .add_fixture_root(scan_root.clone())
+            .unwrap();
+        DialogCommandHost::open_duplicate_finder_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::DuplicateFinderDialogState::viewport();
+        click_duplicate_finder_host_control(&ctx, &mut app, root, "start");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !gate.reached() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real Start must reach the first content read; state={:?}, status={:?}",
+                app.duplicate_finder_dialog.test_host_snapshot(),
+                app.duplicate_finder_dialog.test_status()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let before = app.duplicate_finder_dialog.test_host_snapshot();
+        assert!(before.3);
+        assert_eq!(before.5, vec![scan_root.clone()]);
+        click_duplicate_finder_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.duplicate_finder_dialog.presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let moved = app.duplicate_finder_dialog.test_host_snapshot();
+        assert_eq!(
+            (moved.0, moved.2, moved.3, &moved.5),
+            (before.0, before.2, before.3, &before.5)
+        );
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "cancel");
+        let cancelled = app.duplicate_finder_dialog.test_host_snapshot();
+        assert!(cancelled.3);
+        assert!(
+            !app.duplicate_finder_dialog
+                .test_response("start")
+                .unwrap()
+                .3
+        );
+        gate.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.duplicate_finder_dialog.test_host_snapshot().3 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled worker must drain"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "start");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let state = app.duplicate_finder_dialog.test_host_snapshot();
+            if !state.3 && state.2 > cancelled.2 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "restart must finish");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let result = app.duplicate_finder_dialog.test_snapshot();
+        assert!(!result.verified_duplicate_groups.is_empty());
+        for discard_child in [false, true] {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let (rect, enabled) = app
+                .duplicate_finder_dialog
+                .test_result_response("open")
+                .expect("real verified Open response");
+            assert!(enabled && rect.is_positive());
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert!(receipts.0.lock().unwrap().is_empty());
+        }
+        run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        let (rect, enabled) = app
+            .duplicate_finder_dialog
+            .test_result_response("open")
+            .unwrap();
+        assert!(enabled);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(*receipts.0.lock().unwrap(), vec!["open"]);
+        let group = &result.verified_duplicate_groups[0];
+        let member = &group.known_files[0];
+        let changed_path = &result.size_groups[group.size_group_index].known_files
+            [member.known_file_index]
+            .aliases[member.alias_index]
+            .path;
+        std::fs::write(changed_path, b"changed since verified scan").unwrap();
+        run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        let (rect, enabled) = app
+            .duplicate_finder_dialog
+            .test_result_response("open")
+            .unwrap();
+        assert!(
+            enabled && rect.is_positive(),
+            "changed-file Open remains reachable"
+        );
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            *receipts.0.lock().unwrap(),
+            vec!["open"],
+            "changed verified file must be refused"
+        );
+        assert!(
+            app.duplicate_finder_dialog
+                .test_status()
+                .is_some_and(
+                    |status| status.starts_with("The scanned file is no longer current:")
+                        || status.starts_with("The scanned file changed before the action:")
+                ),
+            "a real proof refusal must replace the prior successful Open status"
+        );
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "host-presentation");
+        assert_eq!(
+            app.duplicate_finder_dialog.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(std::sync::Arc::ptr_eq(
+            &result,
+            &app.duplicate_finder_dialog.test_snapshot()
+        ));
+        click_duplicate_finder_host_control(&ctx, &mut app, root, "close");
+        assert!(!app.duplicate_finder_dialog.open);
+    }
+
+    #[test]
+    fn dff_detached_folder_and_close_reject_discarded_root_and_child_passes() {
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_duplicate_finder_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::DuplicateFinderDialogState::viewport();
+        let selected = workspace.root().join("selected-duplicate-root");
+        std::fs::create_dir(&selected).unwrap();
+        app.duplicate_finder_dialog
+            .queue_folder_pick_for_test(Some(selected.clone()));
+        click_duplicate_finder_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        for discard_child in [false, true] {
+            let rect = duplicate_finder_host_control(&ctx, &mut app, native, "pick-root");
+            let before = app.duplicate_finder_dialog.test_host_snapshot();
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.duplicate_finder_dialog.test_host_snapshot(), before);
+        }
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "pick-root");
+        let accepted = app.duplicate_finder_dialog.test_host_snapshot();
+        assert_eq!(accepted.5, vec![selected]);
+        assert_eq!(accepted.7, 0);
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "root-editor");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Text("copy-root-draft".into())],
+            false,
+            false,
+        );
+        assert_eq!(
+            app.duplicate_finder_dialog.test_host_snapshot().6,
+            "copy-root-draft"
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            for event in [
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                key_release(egui::Key::A, egui::Modifiers::COMMAND),
+            ] {
+                run_host_viewport_frame(&ctx, &mut app, native, vec![event], false, false);
+            }
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::DuplicateFinder, text }] if text == "copy-root-draft")
+        );
+        for discard_child in [false, true] {
+            let rect = duplicate_finder_host_control(&ctx, &mut app, native, "close");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.duplicate_finder_dialog.open);
+        }
+        click_duplicate_finder_host_control(&ctx, &mut app, native, "close");
+        assert!(!app.duplicate_finder_dialog.open);
     }
 
     fn image_compare_host_control(

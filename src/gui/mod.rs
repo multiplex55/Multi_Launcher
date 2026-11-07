@@ -4904,6 +4904,7 @@ impl LauncherApp {
             Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.root_layer().is_some(),
             Panel::ImageCompareDialog => self.image_compare_dialog.root_layer().is_some(),
+            Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.root_layer().is_some(),
             Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
                 self.calendar_panel_root_layer(panel).is_some()
             },
@@ -5035,7 +5036,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5350,7 +5351,7 @@ impl LauncherApp {
                 self.panel_states.image_compare_dialog = false;
             }
             Panel::DuplicateFinderDialog => {
-                self.duplicate_finder_dialog.close();
+                self.duplicate_finder_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.duplicate_finder_dialog = false;
             }
             Panel::FolderSizeDialog => {
@@ -5656,7 +5657,7 @@ impl LauncherApp {
                 self.panel_states.image_compare_dialog = false;
             }
             Panel::DuplicateFinderDialog => {
-                self.duplicate_finder_dialog.close();
+                self.duplicate_finder_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.duplicate_finder_dialog = false;
             }
             Panel::FolderSizeDialog => {
@@ -5965,6 +5966,9 @@ impl LauncherApp {
         } else if panel == Panel::ImageCompareDialog {
             self.image_compare_dialog.open();
             self.image_compare_dialog.request_host_focus();
+        } else if panel == Panel::DuplicateFinderDialog {
+            self.duplicate_finder_dialog.open();
+            self.duplicate_finder_dialog.request_host_focus();
         } else if panel == Panel::TableUtilityDialog {
             self.table_utility_dialog.open();
         } else if panel == Panel::XmlToolkitDialog {

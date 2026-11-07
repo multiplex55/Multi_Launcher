@@ -475,6 +475,12 @@ impl eframe::App for DuplicateFinderFixtureApp {
     }
 
     fn on_ui_frame_complete(&mut self, ctx: &egui::Context) {
+        let completion = self.dialog.on_hosted_frame_complete(ctx);
+        for text in completion.copies {
+            if let Err(error) = crate::actions::clipboard::set_text(&text) {
+                self.last_error = Some(format!("Clipboard copy failed: {error}"));
+            }
+        }
         if let Some(mut candidate) = self.pending_frame.take() {
             validate_completed_frame(
                 ctx,

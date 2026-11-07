@@ -147,8 +147,63 @@ struct TestResultActionResponse {
     response: TestWidgetResponse,
 }
 
+enum FinderIntent {
+    PickRoot,
+    AddRoot(PathBuf),
+    RemoveRoot(PathBuf),
+    Start,
+    Cancel,
+    Known {
+        snapshot: Arc<DiscoverySnapshot>,
+        size_group: usize,
+        verified: VerifiedKnownFile,
+        action: KnownFileAction,
+        namespace: &'static str,
+        group: usize,
+        member: usize,
+    },
+    Copy {
+        snapshot: Arc<DiscoverySnapshot>,
+        group: usize,
+    },
+    #[cfg(any(test, feature = "dev-smoke-binaries"))]
+    ReleaseGate,
+}
+struct FinderHostFrame {
+    root: super::utility_host::ViewportPassProvenance,
+    owner: super::utility_host::ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    target_revision: u64,
+    previous_editor: String,
+    intents: Vec<FinderIntent>,
+    copies: Vec<String>,
+    close: bool,
+    request: Option<super::utility_host::UtilityPresentation>,
+    info: Option<egui::ViewportInfo>,
+    native: bool,
+}
+#[derive(Default)]
+pub(super) struct DuplicateFinderHostOutcome {
+    pub(super) closed: bool,
+    pub(super) show_root: bool,
+    pub(super) copies: Vec<String>,
+}
+
 pub struct DuplicateFinderDialogState {
     pub open: bool,
+    host: super::utility_host::UtilityHostState,
+    host_epoch: u64,
+    host_pending: Option<FinderHostFrame>,
+    host_os_close_pending: bool,
+    host_focus: bool,
+    host_jump: crate::gui::jump_mode::ui::JumpModeUi,
+    host_jump_frame: Option<u64>,
+    staged_intents: Vec<FinderIntent>,
+    #[cfg(test)]
+    host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_folder_picks: std::collections::VecDeque<Option<PathBuf>>,
     reopen_pending: bool,
     session: DuplicateFinderSession,
     selected_roots: Vec<PathBuf>,
@@ -207,6 +262,18 @@ impl DuplicateFinderDialogState {
     fn from_session(session: DuplicateFinderSession) -> Self {
         Self {
             open: false,
+            host: super::utility_host::UtilityHostState::docked(),
+            host_epoch: 0,
+            host_pending: None,
+            host_os_close_pending: false,
+            host_focus: false,
+            host_jump: crate::gui::jump_mode::ui::JumpModeUi::default(),
+            host_jump_frame: None,
+            staged_intents: Vec::new(),
+            #[cfg(test)]
+            host_button: None,
+            #[cfg(test)]
+            test_folder_picks: std::collections::VecDeque::new(),
             reopen_pending: false,
             session,
             selected_roots: Vec::new(),
@@ -240,6 +307,7 @@ impl DuplicateFinderDialogState {
         if self.open {
             return;
         }
+        self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
         self.reopen_pending = false;
         if self.session.view().closed {
             match self.session.reopen() {
@@ -262,6 +330,8 @@ impl DuplicateFinderDialogState {
             return;
         }
         self.open = false;
+        self.host_pending = None;
+        self.host_os_close_pending = false;
         self.reopen_pending = false;
         self.session.close();
         self.rows_snapshot = None;
@@ -588,23 +658,58 @@ impl DuplicateFinderDialogState {
         }
     }
 
-    pub(crate) fn show_with_jump_mode(
-        &mut self,
-        ctx: &egui::Context,
-        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
-        instance: Option<u64>,
-        owner: crate::gui::jump_mode::ui::NavigationOwner,
-        application_input_allowed: bool,
-        native_owner_current: bool,
-        first_ui_pass: bool,
-    ) {
-        #[cfg(any(test, feature = "dev-smoke-binaries"))]
-        {
-            self.responses.clear();
-            self.result_action_responses.clear();
-            self.unavailable_result_rows.clear();
-            self.responses_interaction_eligible = false;
+    fn root_window_layer() -> egui::LayerId {
+        crate::gui::jump_mode::ui::NavigationDialogKind::DuplicateFinder
+            .layer_id()
+            .expect("duplicate finder layer")
+    }
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+                || self.host.embedded_root_layer().is_some()))
+        .then_some(Self::root_window_layer())
+    }
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        self.open && self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+    pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
+        self.open && self.host.bootstrap_pending()
+    }
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host_focus = true;
+        self.host.request_focus();
+    }
+    pub(super) fn presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    pub(crate) fn viewport() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("duplicate-finder-viewport")
+    }
+    fn native_identity(
+        &self,
+        host: super::utility_host::HostIdentity,
+    ) -> super::utility_window_geometry::NativeViewportIdentity {
+        super::utility_window_geometry::NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse("duplicate-finder")
+                .expect("stable duplicate finder key"),
+            viewport_id: Self::viewport(),
+            owner_generation: self.host_epoch,
+            host_generation: host.generation,
         }
+    }
+    pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
+            let identity = self.native_identity(self.host.identity());
+            super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+        }
+        self.host.retire_to_docked();
+        self.host_jump.cancel_all();
+        self.host_jump_frame = None;
+        self.host_focus = false;
+        self.close();
+    }
+    pub(crate) fn poll_host_background(&mut self, _ctx: &egui::Context) {
         if self.open && self.reopen_pending {
             match self.session.reopen() {
                 Ok(()) => {
@@ -619,156 +724,642 @@ impl DuplicateFinderDialogState {
                 }
             }
         }
-        if !self.open {
-            return;
-        }
-        let current_instance = instance.filter(|instance| {
-            matches!(
-                owner,
-                crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                    kind: crate::gui::jump_mode::ui::NavigationDialogKind::DuplicateFinder,
-                    instance: owner_instance,
-                } if owner_instance == *instance
-            )
-        });
-        let jump_scope = scope.zip(current_instance).map(|(scope, instance)| {
-            scope.child_namespace("duplicate-finder").with_surface(
-                crate::gui::jump_mode::SurfaceId::dialog("duplicate-finder", instance),
-                crate::gui::jump_mode::TargetGeneration(self.target_revision),
-            )
-        });
-        let parent_layer =
-            crate::gui::jump_mode::ui::NavigationDialogKind::DuplicateFinder.layer_id();
-        let parent_is_current = parent_layer.is_some_and(|layer| {
-            crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
-        });
-        let owner_current = self.open
-            && native_owner_current
-            && application_input_allowed
-            && parent_is_current
-            && !egui::Popup::is_any_open(ctx);
-        let session_view = self.session.view();
+    }
+    #[cfg(test)]
+    pub(crate) fn test_host_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.host_button
+    }
+    #[cfg(test)]
+    pub(crate) fn test_response(
+        &self,
+        key: &'static str,
+    ) -> Option<(egui::Id, egui::Rect, egui::Rect, bool)> {
+        self.responses
+            .get(key)
+            .map(|r| (r.id, r.rect, r.response_rect, r.enabled))
+    }
+    #[cfg(test)]
+    pub(crate) fn test_result_response(&self, action: &'static str) -> Option<(egui::Rect, bool)> {
+        self.result_action_responses
+            .iter()
+            .find(|r| r.action == action && r.group_kind == "verified")
+            .map(|r| (r.response.rect, r.response.enabled))
+    }
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(&self) -> Arc<DiscoverySnapshot> {
+        self.current_snapshot()
+    }
+    #[cfg(test)]
+    pub(crate) fn test_status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+    #[cfg(test)]
+    pub(crate) fn queue_folder_pick_for_test(&mut self, path: Option<PathBuf>) {
+        self.test_folder_picks.push_back(path);
+    }
+    #[cfg(test)]
+    pub(crate) fn test_host_snapshot(
+        &self,
+    ) -> (usize, u64, u64, bool, bool, Vec<PathBuf>, String, usize) {
+        let view = self.session.view();
+        (
+            &self.session as *const _ as usize,
+            self.target_revision,
+            view.snapshot.generation,
+            view.busy,
+            view.closed,
+            self.selected_roots.clone(),
+            self.root_editor.clone(),
+            self.test_folder_picks.len(),
+        )
+    }
+    fn jump_generation(&self, snapshot: &Arc<DiscoverySnapshot>) -> u64 {
+        self.target_revision.rotate_left(7)
+            ^ self.host_epoch.rotate_left(19)
+            ^ self.host.identity().generation.rotate_left(31)
+            ^ snapshot.generation.rotate_left(43)
+            ^ (Arc::as_ptr(snapshot) as usize as u64)
+    }
+    fn current_snapshot(&self) -> Arc<DiscoverySnapshot> {
         #[cfg(test)]
-        let snapshot = self
-            .test_snapshot_override
-            .as_ref()
-            .map_or(session_view.snapshot, Arc::clone);
-        #[cfg(not(test))]
-        let snapshot = session_view.snapshot;
-        self.ensure_rows(&snapshot);
-
+        if let Some(snapshot) = &self.test_snapshot_override {
+            return Arc::clone(snapshot);
+        }
+        self.session.view().snapshot
+    }
+    fn render_host_body(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &Arc<DiscoverySnapshot>,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        owner_current: bool,
+        first: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> (
+        Vec<FinderIntent>,
+        Vec<String>,
+        Option<super::utility_host::UtilityPresentation>,
+        bool,
+    ) {
+        self.staged_intents.clear();
+        self.ensure_rows(snapshot);
         let mut window_open = self.open;
         let mut order = 0_u64;
         let mut visual_close = false;
-        egui::Window::new(WINDOW_TITLE)
-            .id(egui::Id::new(Some(WINDOW_TITLE)))
-            .collapsible(false)
-            .resizable(true)
-            .default_size((1040.0, 700.0))
-            .min_size((620.0, 420.0))
-            .max_size(ctx.content_rect().size())
-            .show_utility(
-                ctx,
-                "duplicate-finder",
-                egui::Id::new(WINDOW_TITLE),
-                Some(&mut window_open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from((1040.0, 700.0)),
-                    ),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_minimum(egui::Vec2::from((620.0, 420.0)))
-                .with_maximum(ctx.content_rect().size()),
-                |ui| {
-                    let visible_owner = owner_current && ui.is_visible() && !ui.is_sizing_pass();
-                    let commit_enabled = visible_owner && first_ui_pass;
-                    #[cfg(any(test, feature = "dev-smoke-binaries"))]
-                    {
-                        self.responses_interaction_eligible = commit_enabled;
-                    }
-                    ui.add_enabled_ui(visible_owner, |ui| {
-                        let footer_reserve = ui.spacing().interact_size.y
-                            + 2.0 * ui.spacing().item_spacing.y
-                            + FOOTER_SEPARATOR_SPACING;
-                        let body_max_height = (ui.available_height() - footer_reserve).max(0.0);
-                        let _content = egui::ScrollArea::vertical()
-                            .id_salt("duplicate-finder-content")
-                            .auto_shrink([false, false])
-                            .min_scrolled_height(0.0)
-                            .max_height(body_max_height)
-                            .show(ui, |ui| {
-                                self.show_roots(
-                                    ui,
-                                    visible_owner,
-                                    commit_enabled,
-                                    jump_scope.as_ref(),
-                                    &mut order,
-                                );
-                                ui.separator();
-                                self.show_status(ui, &snapshot);
-                                if let Some(message) = self.status.as_deref() {
-                                    ui.separator();
-                                    ui.label(message);
-                                }
-                                ui.separator();
-                                // The inner scroll area's remaining height may be
-                                // exhausted by the roots and status sections. Give
-                                // results a finite viewport derived from the
-                                // shared body budget; the outer body scrolls those
-                                // sections together when the window is crowded.
-                                let results_max_height = body_max_height * 0.4;
-                                self.show_results(
-                                    ui,
-                                    &snapshot,
-                                    visible_owner,
-                                    commit_enabled,
-                                    results_max_height,
-                                    jump_scope.as_ref(),
-                                    &mut order,
-                                );
-                            });
-                        #[cfg(any(test, feature = "dev-smoke-binaries"))]
-                        self.record_scroll_area(
-                            "content-scroll",
-                            _content.id,
-                            _content.inner_rect,
-                            ui.clip_rect(),
-                            ui.is_enabled(),
+        let mut request = None;
+        let start = ctx.output(|output| output.commands.len());
+        let mut draw = |ui: &mut egui::Ui| {
+            let visible_owner = owner_current && ui.is_visible() && !ui.is_sizing_pass();
+            let commit_enabled = visible_owner && first && !ctx.will_discard();
+            #[cfg(any(test, feature = "dev-smoke-binaries"))]
+            {
+                self.responses_interaction_eligible = commit_enabled;
+            }
+            if let Some(presentation) = presentation {
+                let (button, target) =
+                    super::utility_host::presentation_button(ui, presentation, visible_owner);
+                self.record_response("host-presentation", &button);
+                #[cfg(test)]
+                {
+                    self.host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
+                }
+                register_target(
+                    scope,
+                    ui,
+                    &button,
+                    "dialog/host",
+                    if presentation == super::utility_host::UtilityPresentation::Docked {
+                        "Pop Out"
+                    } else {
+                        "Dock"
+                    },
+                    crate::gui::jump_mode::TargetKind::Button,
+                    &mut order,
+                );
+                if button.clicked() && commit_enabled {
+                    request = Some(target);
+                }
+            }
+            ui.add_enabled_ui(visible_owner, |ui| {
+                let footer_reserve = ui.spacing().interact_size.y
+                    + 2.0 * ui.spacing().item_spacing.y
+                    + FOOTER_SEPARATOR_SPACING;
+                let body_max_height = (ui.available_height() - footer_reserve).max(0.0);
+                let _content = egui::ScrollArea::vertical()
+                    .id_salt("duplicate-finder-content")
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(0.0)
+                    .max_height(body_max_height)
+                    .show(ui, |ui| {
+                        self.show_roots(ui, visible_owner, commit_enabled, scope, &mut order);
+                        ui.separator();
+                        self.show_status(ui, &snapshot);
+                        if let Some(message) = self.status.as_deref() {
+                            ui.separator();
+                            ui.label(message);
+                        }
+                        ui.separator();
+                        // The inner scroll area's remaining height may be
+                        // exhausted by the roots and status sections. Give
+                        // results a finite viewport derived from the
+                        // shared body budget; the outer body scrolls those
+                        // sections together when the window is crowded.
+                        let results_max_height = body_max_height * 0.4;
+                        self.show_results(
+                            ui,
+                            &snapshot,
+                            visible_owner,
+                            commit_enabled,
+                            results_max_height,
+                            scope,
+                            &mut order,
                         );
-                        ui.add(egui::Separator::default().spacing(FOOTER_SEPARATOR_SPACING));
-                        ui.horizontal(|ui| {
-                            self.show_scan_controls(
-                                ui,
-                                visible_owner,
-                                commit_enabled,
-                                jump_scope.as_ref(),
-                                &mut order,
-                            );
-                            let close = ui.button("Close");
-                            self.record_response("close", &close);
-                            register_target(
-                                jump_scope.as_ref(),
-                                ui,
-                                &close,
-                                "dialog/close",
-                                "Close Duplicate Finder",
-                                crate::gui::jump_mode::TargetKind::Button,
-                                &mut order,
-                            );
-                            visual_close = close.clicked() && commit_enabled;
-                        });
                     });
-                },
-            );
-        if first_ui_pass
-            && native_owner_current
-            && application_input_allowed
-            && (!window_open || visual_close)
-        {
-            self.close();
+                #[cfg(any(test, feature = "dev-smoke-binaries"))]
+                self.record_scroll_area(
+                    "content-scroll",
+                    _content.id,
+                    _content.inner_rect,
+                    ui.clip_rect(),
+                    ui.is_enabled(),
+                );
+                ui.add(egui::Separator::default().spacing(FOOTER_SEPARATOR_SPACING));
+                ui.horizontal(|ui| {
+                    self.show_scan_controls(ui, visible_owner, commit_enabled, scope, &mut order);
+                    let close = ui.button("Close");
+                    self.record_response("close", &close);
+                    register_target(
+                        scope,
+                        ui,
+                        &close,
+                        "dialog/close",
+                        "Close Duplicate Finder",
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut order,
+                    );
+                    visual_close = close.clicked() && commit_enabled;
+                });
+            });
+        };
+        if let Some(ui) = child_ui {
+            draw(ui);
+        } else {
+            egui::Window::new(WINDOW_TITLE)
+                .id(egui::Id::new(Some(WINDOW_TITLE)))
+                .collapsible(false)
+                .resizable(true)
+                .default_size((1040.0, 700.0))
+                .min_size((620.0, 420.0))
+                .max_size(ctx.content_rect().size())
+                .show_utility(
+                    ctx,
+                    "duplicate-finder",
+                    egui::Id::new(WINDOW_TITLE),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::Vec2::from((1040.0, 700.0)),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::Vec2::from((620.0, 420.0)))
+                    .with_maximum(ctx.content_rect().size()),
+                    |ui| draw(ui),
+                );
         }
+        let copies = ctx.output_mut(|output| {
+            let mut copies = Vec::new();
+            for command in output.commands.split_off(start) {
+                match command {
+                    egui::OutputCommand::CopyText(text) => copies.push(text),
+                    other => output.commands.push(other),
+                }
+            }
+            copies
+        });
+        let authorized = first && owner_current && !ctx.will_discard();
+        (
+            std::mem::take(&mut self.staged_intents),
+            if authorized { copies } else { Vec::new() },
+            request,
+            authorized && (!window_open || visual_close),
+        )
+    }
+    fn clear_test_responses(&mut self) {
+        #[cfg(any(test, feature = "dev-smoke-binaries"))]
+        {
+            self.responses.clear();
+            self.result_action_responses.clear();
+            self.unavailable_result_rows.clear();
+            self.responses_interaction_eligible = false;
+        }
+        #[cfg(test)]
+        {
+            self.host_button = None;
+        }
+    }
+    pub(crate) fn show_with_jump_mode(
+        &mut self,
+        ctx: &egui::Context,
+        scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        instance: Option<u64>,
+        owner: crate::gui::jump_mode::ui::NavigationOwner,
+        input_allowed: bool,
+        root_owner: bool,
+        first: bool,
+    ) {
+        use super::utility_host::ViewportPassProvenance;
+        if let Some(old) = self.host_pending.take() {
+            if old.epoch == self.host_epoch {
+                self.root_editor = old.previous_editor;
+            }
+        }
+        self.poll_host_background(ctx);
+        self.clear_test_responses();
+        if !self.open {
+            return;
+        }
+        let snapshot = self.current_snapshot();
+        let scope = scope.zip(instance.filter(|i| matches!(owner, crate::gui::jump_mode::ui::NavigationOwner::Dialog { kind: crate::gui::jump_mode::ui::NavigationDialogKind::DuplicateFinder, instance } if instance == *i)))
+            .map(|(scope, instance)| scope.child_namespace("duplicate-finder").with_surface(crate::gui::jump_mode::SurfaceId::dialog("duplicate-finder", instance), crate::gui::jump_mode::TargetGeneration(self.jump_generation(&snapshot)))).map(|scope| if first && !ctx.will_discard() { scope } else { scope.registration_only() });
+        let allowed = root_owner
+            && input_allowed
+            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
+                == Some(Self::root_window_layer())
+            && !egui::Popup::is_any_open(ctx);
+        let previous_editor = self.root_editor.clone();
+        let (intents, copies, request, close) =
+            self.render_host_body(ctx, &snapshot, scope.as_ref(), allowed, first, None, None);
+        if first && !ctx.will_discard() {
+            let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+            self.host_pending = Some(FinderHostFrame {
+                root,
+                owner: root,
+                host: self.host.identity(),
+                epoch: self.host_epoch,
+                target_revision: self.target_revision,
+                previous_editor,
+                intents,
+                copies,
+                close,
+                request,
+                info: None,
+                native: false,
+            });
+        } else {
+            self.root_editor = previous_editor;
+        }
+    }
+    pub(crate) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+        instance: Option<u64>,
+        root_owner: crate::gui::jump_mode::ui::NavigationOwner,
+        input_allowed: bool,
+        root_native_owner: bool,
+        launcher_jump: &crate::gui::jump_mode::ui::JumpModeUi,
+        jump_enabled: bool,
+        root_visible: bool,
+        first: bool,
+        pinned: bool,
+        root_shortcut_allowed: bool,
+    ) {
+        use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
+        use crate::gui::jump_mode::ui::{
+            NavigationDialogKind, NavigationOwner, NavigationViewportBinding,
+        };
+        if let Some(old) = self.host_pending.take() {
+            if old.epoch == self.host_epoch {
+                self.root_editor = old.previous_editor;
+            }
+        }
+        self.clear_test_responses();
+        if !self.open {
+            return;
+        }
+        if pinned {
+            self.host_os_close_pending = false;
+        }
+        let snapshot = self.current_snapshot();
+        let host = self.host.identity();
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let previous_editor = self.root_editor.clone();
+        let revision = self.target_revision;
+        let jump_generation = self.jump_generation(&snapshot);
+        let mut staged = None;
+        let mut owner = None;
+        let mut info = None;
+        let mut native_owner = false;
+        if host.host == UtilityPresentation::Docked {
+            if root_visible {
+                let allowed = input_allowed && root_native_owner && !egui::Popup::is_any_open(ctx);
+                let scope = root_scope.zip(instance.filter(|i| matches!(root_owner, NavigationOwner::Dialog { kind: NavigationDialogKind::DuplicateFinder, instance } if instance == *i)))
+                    .map(|(scope, instance)| scope.child_namespace("duplicate-finder").with_surface(crate::gui::jump_mode::SurfaceId::dialog("duplicate-finder", instance), crate::gui::jump_mode::TargetGeneration(jump_generation)))
+                    .map(|scope| if first && !ctx.will_discard() { scope } else { scope.registration_only() });
+                let shortcut = first
+                    && allowed
+                    && root_shortcut_allowed
+                    && !pinned
+                    && ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                let mut result = self.render_host_body(
+                    ctx,
+                    &snapshot,
+                    scope.as_ref(),
+                    allowed,
+                    first,
+                    None,
+                    Some(host.host),
+                );
+                result.3 |= shortcut;
+                staged = Some(result);
+                owner = Some(root);
+            }
+        } else {
+            let viewport = Self::viewport();
+            let builder = egui::ViewportBuilder::default()
+                .with_title(WINDOW_TITLE)
+                .with_inner_size([1040.0, 700.0])
+                .with_min_inner_size([620.0, 420.0])
+                .with_resizable(true);
+            ctx.show_viewport_immediate(viewport, builder, |child, class| {
+                let c = child.ctx().clone(); let native = class == egui::ViewportClass::Immediate && c.viewport_id() == viewport;
+                let child_first = first && child.current_pass_index() == 0;
+                if child_first { owner = Some(ViewportPassProvenance::current(&c, c.viewport_id())); native_owner = native; if native { info = Some(child.input(|i| i.viewport().clone())); } }
+                else { owner = None; info = None; staged = None; self.root_editor = previous_editor.clone(); }
+                let allowed = if native { input_allowed && c.input(|i| i.focused) && c.memory(|m| m.top_modal_layer().is_none()) && super::jump_mode::ui::visible_top_middle_layer(&c).is_none() && !egui::Popup::is_any_open(&c) && super::jump_mode::ui::focused_response_layer(&c).is_none_or(|l| l == egui::LayerId::background()) } else { input_allowed && root_native_owner && !egui::Popup::is_any_open(&c) };
+                if native && child_first && child.input(|i| i.viewport().close_requested()) { child.send_viewport_cmd(egui::ViewportCommand::CancelClose); if !pinned { self.host_os_close_pending = true; } }
+                if native {
+                    let (chord, alphabet) = launcher_jump.configuration(); self.host_jump.set_configuration(chord, alphabet); self.host_jump.set_enabled(jump_enabled);
+                    let frame = c.cumulative_frame_nr(); if self.host_jump_frame != Some(frame) { self.host_jump.begin_frame(); self.host_jump_frame = Some(frame); }
+                    let binding = instance.map(|instance| NavigationViewportBinding { viewport, owner: NavigationOwner::Dialog { kind: NavigationDialogKind::DuplicateFinder, instance }, base_layer: egui::LayerId::background() });
+                    let nav = binding.map_or(NavigationOwner::Blocked, |b| self.host_jump.update_navigation_owner_for_viewport(&c, b, input_allowed && jump_enabled));
+                    let jump_was_active = self.host_jump.active_session().is_some();
+                    self.host_jump.handle_viewport_input(&c, binding.is_some_and(|b| b.owner == nav), child_first, viewport);
+                    let shortcut = child_first && allowed && !pinned && !jump_was_active && self.host_jump.active_session().is_none() && c.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W));
+                    self.host_jump.begin_ui_pass();
+                    let scope = binding.filter(|b| b.owner == nav).and_then(|b| self.host_jump.scope_for_viewport_binding(crate::gui::jump_mode::SurfaceId::dialog("duplicate-finder", instance.unwrap_or_default()), crate::gui::jump_mode::TargetGeneration(jump_generation), "duplicate-finder/view", b)).map(|scope| { let scope = scope.child_namespace("duplicate-finder"); if child_first && !c.will_discard() { scope } else { scope.registration_only() } });
+                    egui::CentralPanel::default().show(child, |ui| { staged = Some(self.render_host_body(&c, &snapshot, scope.as_ref(), allowed, child_first, Some(ui), Some(host.host))); });
+                    if let Some(result) = &mut staged { result.3 |= shortcut || (!pinned && self.host_os_close_pending); }
+                    self.host_jump.finish_ui_pass();
+                    if let Some(binding) = binding {
+                        let current = self.host_jump.update_navigation_owner_for_viewport(&c, binding, input_allowed && jump_enabled);
+                        if self.host_jump.prepare_pass_for_viewport(&c, binding, current, input_allowed && jump_enabled) { super::jump_mode::paint::paint(&c, &self.host_jump); }
+                        if !c.will_discard() { self.host_jump.complete_frame_for_viewport(&c, binding, current, input_allowed && jump_enabled); }
+                    }
+                } else {
+                    let scope = root_scope.zip(instance.filter(|i| matches!(root_owner, NavigationOwner::Dialog { kind: NavigationDialogKind::DuplicateFinder, instance } if instance == *i)))
+                        .map(|(scope, instance)| scope.child_namespace("duplicate-finder").with_surface(crate::gui::jump_mode::SurfaceId::dialog("duplicate-finder", instance), crate::gui::jump_mode::TargetGeneration(jump_generation)))
+                        .map(|scope| if child_first && !c.will_discard() { scope } else { scope.registration_only() });
+                    let shortcut = child_first && allowed && root_shortcut_allowed && !pinned && c.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W));
+                    let mut result = self.render_host_body(&c, &snapshot, scope.as_ref(), allowed, child_first, None, Some(host.host)); result.3 |= shortcut; staged = Some(result);
+                }
+            });
+        }
+        if let (Some(owner), Some((intents, copies, request, mut close))) = (owner, staged) {
+            if pinned {
+                close = false;
+            }
+            if first && !ctx.will_discard() {
+                self.host_pending = Some(FinderHostFrame {
+                    root,
+                    owner,
+                    host,
+                    epoch: self.host_epoch,
+                    target_revision: revision,
+                    previous_editor,
+                    intents,
+                    copies,
+                    close,
+                    request,
+                    info,
+                    native: native_owner,
+                });
+                return;
+            }
+        }
+        self.root_editor = previous_editor;
+    }
+    pub(super) fn on_hosted_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> DuplicateFinderHostOutcome {
+        use super::utility_host::UtilityPresentation;
+        let Some(frame) = self.host_pending.take() else {
+            return DuplicateFinderHostOutcome::default();
+        };
+        if !self.open
+            || frame.epoch != self.host_epoch
+            || frame.host != self.host.identity()
+            || frame.target_revision != self.target_revision
+            || !frame.root.was_retained(ctx)
+            || !frame.owner.was_retained(ctx)
+        {
+            if self.open && frame.epoch == self.host_epoch {
+                self.root_editor = frame.previous_editor;
+            }
+            return DuplicateFinderHostOutcome::default();
+        }
+        let identity = self.native_identity(frame.host);
+        if let Some(info) = frame.info.as_ref() {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                egui::ViewportClass::Immediate,
+                true,
+                WINDOW_TITLE,
+                identity,
+                info,
+                egui::vec2(1040.0, 700.0),
+                Some(egui::vec2(620.0, 420.0)),
+                None,
+            );
+            if self.host_focus {
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
+            }
+        } else if self.host_focus {
+            if let Some(layer) = self.root_layer() {
+                ctx.move_to_top(layer);
+            }
+        }
+        self.host_focus = false;
+        if frame.close {
+            self.end_session_with_host(ctx);
+            return DuplicateFinderHostOutcome {
+                closed: true,
+                ..Default::default()
+            };
+        }
+        let show_root = frame.request == Some(UtilityPresentation::Docked);
+        if let Some(next) = frame.request {
+            if self.host.transition(next) {
+                self.host_jump.cancel_all();
+                self.host_jump_frame = None;
+                if next == UtilityPresentation::Docked {
+                    super::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+                }
+                self.host_focus = true;
+                ctx.request_repaint();
+            }
+        } else {
+            for intent in frame.intents {
+                self.apply_host_intent(
+                    ctx,
+                    intent,
+                    frame.host,
+                    frame.epoch,
+                    self.target_revision,
+                    frame.native,
+                );
+            }
+        }
+        if frame.host.host == UtilityPresentation::Popout {
+            self.host.complete_bootstrap(
+                frame.host,
+                (!frame.native).then_some(Self::root_window_layer()),
+                None,
+            );
+        }
+        DuplicateFinderHostOutcome {
+            closed: false,
+            show_root,
+            copies: if frame.request.is_none() {
+                frame.copies
+            } else {
+                Vec::new()
+            },
+        }
+    }
+    fn apply_host_intent(
+        &mut self,
+        ctx: &egui::Context,
+        intent: FinderIntent,
+        host: super::utility_host::HostIdentity,
+        epoch: u64,
+        revision: u64,
+        native: bool,
+    ) {
+        match intent {
+            FinderIntent::PickRoot => {
+                #[cfg(windows)]
+                let captured_hwnd = super::utility_dialog_size::utility_picker_hwnd(
+                    ctx,
+                    native.then(|| self.native_identity(host)),
+                );
+                #[cfg(test)]
+                let queued = self.test_folder_picks.pop_front();
+                #[cfg(test)]
+                let selected = if let Some(selected) = queued {
+                    selected
+                } else {
+                    self.host_folder_picker(ctx, host, native)
+                };
+                #[cfg(not(test))]
+                let selected = self.host_folder_picker(ctx, host, native);
+                if !self.open
+                    || self.host_epoch != epoch
+                    || self.host.identity() != host
+                    || self.target_revision != revision
+                {
+                    return;
+                }
+                #[cfg(all(windows, not(test)))]
+                if captured_hwnd.is_none()
+                    || captured_hwnd
+                        != super::utility_dialog_size::utility_picker_hwnd(
+                            ctx,
+                            native.then(|| self.native_identity(host)),
+                        )
+                {
+                    return;
+                }
+                #[cfg(all(windows, test))]
+                let _ = captured_hwnd;
+                if let Some(path) = selected {
+                    if let Err(error) = self.add_selected_root(path) {
+                        self.status = Some(error);
+                    }
+                }
+            }
+            FinderIntent::AddRoot(path) => {
+                if let Err(error) = self.add_selected_root(path) {
+                    self.status = Some(error);
+                }
+            }
+            FinderIntent::RemoveRoot(path) => {
+                if let Some(index) = self.selected_roots.iter().position(|root| *root == path) {
+                    self.selected_roots.remove(index);
+                    self.bump_target_revision();
+                }
+            }
+            FinderIntent::Start => match self.session.start_scan(self.selected_roots.clone()) {
+                Ok(_) => {
+                    self.status = None;
+                    self.bump_target_revision();
+                }
+                Err(error) => self.status = Some(session_error_message(&error)),
+            },
+            FinderIntent::Cancel => match self.session.cancel() {
+                Ok(true) => {
+                    self.status =
+                        Some("Cancelled. No results were published for this scan.".into());
+                    self.bump_target_revision();
+                }
+                Ok(false) => self.status = Some("There is no active scan to cancel.".into()),
+                Err(error) => self.status = Some(session_error_message(&error)),
+            },
+            FinderIntent::Known {
+                snapshot,
+                size_group,
+                verified,
+                action,
+                namespace,
+                group,
+                member,
+            } => self.run_known_action(
+                &snapshot, size_group, &verified, action, namespace, group, member,
+            ),
+            FinderIntent::Copy { snapshot, group } => self.copy_verified_group(&snapshot, group),
+            #[cfg(any(test, feature = "dev-smoke-binaries"))]
+            FinderIntent::ReleaseGate => {
+                if let Some(gate) = &self.first_read_checkpoint {
+                    gate.release();
+                }
+            }
+        }
+    }
+    fn host_folder_picker(
+        &mut self,
+        ctx: &egui::Context,
+        host: super::utility_host::HostIdentity,
+        native: bool,
+    ) -> Option<PathBuf> {
+        let picker = rfd::FileDialog::new();
+        #[cfg(windows)]
+        let picker = {
+            let Some(hwnd) = super::utility_dialog_size::utility_picker_hwnd(
+                ctx,
+                native.then(|| self.native_identity(host)),
+            )
+            .and_then(|h| std::num::NonZeroIsize::new(h as isize)) else {
+                self.status = Some(
+                    "Cannot verify the folder picker window. Focus Duplicate Finder and try again."
+                        .into(),
+                );
+                return None;
+            };
+            picker.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd))
+        };
+        #[cfg(not(windows))]
+        let _ = (ctx, host, native);
+        picker.pick_folder()
     }
 
     fn show_roots(
@@ -809,12 +1400,8 @@ impl DuplicateFinderDialogState {
                 crate::gui::jump_mode::TargetKind::Button,
                 order,
             );
-            if pick.clicked()
-                && commit_enabled
-                && let Some(path) = rfd::FileDialog::new().pick_folder()
-            {
-                self.add_selected_root(path)
-                    .unwrap_or_else(|error| self.status = Some(error));
+            if pick.clicked() && commit_enabled {
+                self.staged_intents.push(FinderIntent::PickRoot);
             }
             let add = ui.add_enabled(enabled, egui::Button::new("Add Root"));
             self.record_response("add-root", &add);
@@ -828,9 +1415,10 @@ impl DuplicateFinderDialogState {
                 order,
             );
             if add.clicked() && commit_enabled {
-                let root = PathBuf::from(self.root_editor.trim());
-                self.add_selected_root(root)
-                    .unwrap_or_else(|error| self.status = Some(error));
+                self.staged_intents
+                    .push(FinderIntent::AddRoot(PathBuf::from(
+                        self.root_editor.trim(),
+                    )));
             }
         });
 
@@ -867,8 +1455,8 @@ impl DuplicateFinderDialogState {
                     }
                 });
             if let Some(index) = remove_index {
-                self.selected_roots.remove(index);
-                self.bump_target_revision();
+                self.staged_intents
+                    .push(FinderIntent::RemoveRoot(self.selected_roots[index].clone()));
             }
         }
     }
@@ -897,13 +1485,7 @@ impl DuplicateFinderDialogState {
             order,
         );
         if start.clicked() && commit_enabled {
-            match self.session.start_scan(self.selected_roots.clone()) {
-                Ok(_) => {
-                    self.status = None;
-                    self.bump_target_revision();
-                }
-                Err(error) => self.status = Some(session_error_message(&error)),
-            }
+            self.staged_intents.push(FinderIntent::Start);
         }
         let cancel = ui.add_enabled(
             enabled && session.busy && !session.closed,
@@ -920,15 +1502,7 @@ impl DuplicateFinderDialogState {
             order,
         );
         if cancel.clicked() && commit_enabled {
-            match self.session.cancel() {
-                Ok(true) => {
-                    self.status =
-                        Some("Cancelled. No results were published for this scan.".into());
-                    self.bump_target_revision();
-                }
-                Ok(false) => self.status = Some("There is no active scan to cancel.".into()),
-                Err(error) => self.status = Some(session_error_message(&error)),
-            }
+            self.staged_intents.push(FinderIntent::Cancel);
         }
         #[cfg(any(test, feature = "dev-smoke-binaries"))]
         if let Some(checkpoint) = self.first_read_checkpoint.as_ref() {
@@ -939,7 +1513,7 @@ impl DuplicateFinderDialogState {
             );
             self.record_response("fixture-release", &release);
             if release.clicked() && commit_enabled {
-                checkpoint.release();
+                self.staged_intents.push(FinderIntent::ReleaseGate);
             }
         }
     }
@@ -1191,7 +1765,10 @@ impl DuplicateFinderDialogState {
                         order,
                     );
                     if copy.clicked() && commit_enabled {
-                        self.copy_verified_group(snapshot, index);
+                        self.staged_intents.push(FinderIntent::Copy {
+                            snapshot: Arc::clone(snapshot),
+                            group: index,
+                        });
                     }
                     let details = format!(
                         "{} logical duplicate bytes (not recoverable disk space)",
@@ -1409,15 +1986,15 @@ impl DuplicateFinderDialogState {
             order,
         );
         if open.clicked() && commit_enabled {
-            self.run_known_action(
-                snapshot,
-                size_group_index,
-                verified,
-                KnownFileAction::Open,
+            self.staged_intents.push(FinderIntent::Known {
+                snapshot: Arc::clone(snapshot),
+                size_group: size_group_index,
+                verified: *verified,
+                action: KnownFileAction::Open,
                 namespace,
-                group_index,
-                member_index,
-            );
+                group: group_index,
+                member: member_index,
+            });
         }
 
         let target = format!("results/{namespace}/{group_index}/{member_index}/reveal");
@@ -1439,15 +2016,15 @@ impl DuplicateFinderDialogState {
             order,
         );
         if reveal.clicked() && commit_enabled {
-            self.run_known_action(
-                snapshot,
-                size_group_index,
-                verified,
-                KnownFileAction::Reveal,
+            self.staged_intents.push(FinderIntent::Known {
+                snapshot: Arc::clone(snapshot),
+                size_group: size_group_index,
+                verified: *verified,
+                action: KnownFileAction::Reveal,
                 namespace,
-                group_index,
-                member_index,
-            );
+                group: group_index,
+                member: member_index,
+            });
         }
     }
 
@@ -2036,6 +2613,102 @@ mod tests {
         assert_eq!(proof.generation, 4);
         assert_eq!(proof.identity.file_id(), [14; 16]);
         assert_eq!(proof.root.identity.file_id(), [12; 16]);
+        struct AcceptProof(std::sync::atomic::AtomicUsize);
+        impl DuplicateFinderActions for AcceptProof {
+            fn revalidate(&self, _: &CandidateProof) -> Result<(), String> {
+                Ok(())
+            }
+            fn open(&self, _: &Path) -> Result<(), String> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn reveal(&self, _: &Path) -> Result<(), String> {
+                Ok(())
+            }
+            fn copy_paths(&self, _: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut dialog = DuplicateFinderDialogState::new(&ctx);
+        dialog.open();
+        let sink = Arc::new(AcceptProof(std::sync::atomic::AtomicUsize::new(0)));
+        dialog.set_action_sink_for_fixture(sink.clone());
+        dialog.run_known_action(
+            &Arc::new(snapshot),
+            0,
+            &member,
+            KnownFileAction::Open,
+            "verified",
+            0,
+            0,
+        );
+        assert_eq!(
+            sink.0.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "stale originating snapshot must not dispatch even when proof revalidation succeeds"
+        );
+        assert!(
+            dialog
+                .status
+                .as_deref()
+                .is_some_and(|status| status.contains("results changed"))
+        );
+    }
+
+    #[test]
+    fn dff_retained_order_applies_root_edits_before_start_and_picker() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let a = directory.path().join("a");
+        let b = directory.path().join("b");
+        let c = directory.path().join("c");
+        for path in [&a, &b, &c] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let mut dialog = DuplicateFinderDialogState::new(&ctx);
+        dialog.open();
+        dialog.add_fixture_root(a.clone()).unwrap();
+        dialog.queue_folder_pick_for_test(Some(c.clone()));
+        let output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            let root = super::super::utility_host::ViewportPassProvenance::current(
+                ctx,
+                egui::ViewportId::ROOT,
+            );
+            dialog.host_pending = Some(FinderHostFrame {
+                root,
+                owner: root,
+                host: dialog.host.identity(),
+                epoch: dialog.host_epoch,
+                target_revision: dialog.target_revision,
+                previous_editor: dialog.root_editor.clone(),
+                intents: vec![
+                    FinderIntent::RemoveRoot(a.clone()),
+                    FinderIntent::AddRoot(b.clone()),
+                    FinderIntent::PickRoot,
+                    FinderIntent::Start,
+                ],
+                copies: Vec::new(),
+                close: false,
+                request: None,
+                info: None,
+                native: false,
+            });
+        });
+        let _ = dialog.on_hosted_frame_complete(&ctx);
+        output.drop_without_applying_deltas();
+        assert_eq!(dialog.selected_roots, vec![b.clone(), c.clone()]);
+        let view = dialog.session.view();
+        assert_eq!(
+            view.snapshot
+                .roots
+                .iter()
+                .map(|r| &r.selected_path)
+                .collect::<Vec<_>>(),
+            vec![&b, &c]
+        );
+        assert_eq!(dialog.test_folder_picks.len(), 0);
+        dialog.shutdown();
     }
 
     #[test]
@@ -2082,6 +2755,7 @@ mod tests {
                     first_ui_pass,
                 );
             });
+            let _ = dialog.on_hosted_frame_complete(ctx);
             output.drop_without_applying_deltas();
             actual_window_rect(ctx)
         }
@@ -2494,6 +3168,7 @@ mod tests {
                     first_ui_pass,
                 );
             });
+            let _ = dialog.on_hosted_frame_complete(ctx);
             output.drop_without_applying_deltas();
         }
 
@@ -2618,7 +3293,21 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            panic!("timed out waiting for {message}");
+            let view = dialog.session.view();
+            panic!(
+                "timed out waiting for {message}; busy={}, closed={}, status={:?}, generation={}, progress={:?}, diagnostics={:?}, snapshot_roots={}, selected_roots={}, feedback={:?}, start_response={:?}, interaction_eligible={}",
+                view.busy,
+                view.closed,
+                view.snapshot.status,
+                view.snapshot.generation,
+                view.progress,
+                view.snapshot.diagnostics,
+                view.snapshot.roots.len(),
+                dialog.selected_roots.len(),
+                dialog.status,
+                dialog.responses.get("start"),
+                dialog.responses_interaction_eligible
+            );
         }
 
         fn click_result_action(
@@ -2889,6 +3578,18 @@ mod tests {
         frame(&context, &mut dialog, Vec::new());
 
         click_control(&context, &mut dialog, "start");
+        let after_start = dialog.session.view();
+        assert!(
+            after_start.busy || checkpoint.reached(),
+            "real Start did not start a live worker: closed={}, status={:?}, generation={}, roots={}, feedback={:?}, response_enabled={:?}, interaction_eligible={}",
+            after_start.closed,
+            after_start.snapshot.status,
+            after_start.snapshot.generation,
+            dialog.selected_roots.len(),
+            dialog.status,
+            dialog.responses.get("start").map(|r| r.enabled),
+            dialog.responses_interaction_eligible
+        );
         wait_for(
             &context,
             &mut dialog,
