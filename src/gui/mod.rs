@@ -12,6 +12,7 @@ mod calculation_pad_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
+mod calendar_window_host;
 mod clipboard_dialog;
 mod clipboard_modify_dialog;
 mod color_pick;
@@ -1336,6 +1337,17 @@ pub struct LauncherApp {
     calendar_popover: CalendarPopover,
     calendar_event_editor: CalendarEventEditor,
     calendar_event_details: CalendarEventDetails,
+    calendar_popover_host: calendar_window_host::CalendarWindowHost<
+        CalendarPopover, calendar_popover::CalendarPopoverHostActions,
+    >,
+    calendar_editor_host: calendar_window_host::CalendarWindowHost<
+        CalendarEventEditor, calendar_event_editor::CalendarEditorHostActions,
+    >,
+    calendar_details_host: calendar_window_host::CalendarWindowHost<
+        CalendarEventDetails, calendar_event_details::CalendarDetailsHostActions,
+    >,
+    #[cfg(test)]
+    calendar_events_path_override: Option<String>,
     panel_stack: Vec<Panel>,
     panel_states: PanelStates,
     pinned_panels: Vec<Panel>,
@@ -4020,6 +4032,11 @@ impl LauncherApp {
             calendar_popover: CalendarPopover::default(),
             calendar_event_editor: CalendarEventEditor::default(),
             calendar_event_details: CalendarEventDetails::default(),
+            calendar_popover_host: calendar_window_host::CalendarWindowHost::default(),
+            calendar_editor_host: calendar_window_host::CalendarWindowHost::default(),
+            calendar_details_host: calendar_window_host::CalendarWindowHost::default(),
+            #[cfg(test)]
+            calendar_events_path_override: None,
             panel_stack: Vec::new(),
             panel_states: PanelStates::default(),
             pinned_panels: settings.pinned_panels.clone(),
@@ -4885,6 +4902,9 @@ impl LauncherApp {
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
             Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
             Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
+                self.calendar_panel_root_layer(panel).is_some()
+            },
             Panel::XmlToolkitDialog => {
                 self.xml_toolkit_dialog.root_layer().is_some()
                     || self.xml_toolkit_dialog.needs_viewport_bootstrap()
@@ -5013,7 +5033,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5375,17 +5395,8 @@ impl LauncherApp {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
             }
-            Panel::CalendarPopover => {
-                self.calendar_popover_open = false;
-                self.panel_states.calendar_popover = false;
-            }
-            Panel::CalendarEventEditor => {
-                self.calendar_editor_open = false;
-                self.panel_states.calendar_event_editor = false;
-            }
-            Panel::CalendarEventDetails => {
-                self.calendar_details_open = false;
-                self.panel_states.calendar_event_details = false;
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
+                self.close_calendar_panel_host(panel);
             }
             Panel::Editor => {
                 self.editor.retire_repair_dialog();
@@ -5690,17 +5701,8 @@ impl LauncherApp {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
             }
-            Panel::CalendarPopover => {
-                self.calendar_popover_open = false;
-                self.panel_states.calendar_popover = false;
-            }
-            Panel::CalendarEventEditor => {
-                self.calendar_editor_open = false;
-                self.panel_states.calendar_event_editor = false;
-            }
-            Panel::CalendarEventDetails => {
-                self.calendar_details_open = false;
-                self.panel_states.calendar_event_details = false;
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
+                self.close_calendar_panel_host(panel);
             }
             Panel::Editor => {
                 self.editor.retire_repair_dialog();
@@ -5873,9 +5875,25 @@ impl LauncherApp {
                     .open(crate::commands::DataDialogFocus::Overview);
             }
             Panel::ToastLogDialog => self.toast_log_dialog.open = true,
-            Panel::CalendarPopover => self.calendar_popover_open = true,
-            Panel::CalendarEventEditor => self.calendar_editor_open = true,
-            Panel::CalendarEventDetails => self.calendar_details_open = true,
+            Panel::CalendarPopover => {
+                if !self.calendar_popover_open {
+                    self.calendar_popover.begin_host_session();
+                    self.calendar_popover_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_popover_open = true;
+                }
+            }
+            Panel::CalendarEventEditor => {
+                if !self.calendar_editor_open {
+                    self.calendar_editor_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_editor_open = true;
+                }
+            }
+            Panel::CalendarEventDetails => {
+                if !self.calendar_details_open {
+                    self.calendar_details_host.initialize(utility_host::UtilityPresentation::Docked);
+                    self.calendar_details_open = true;
+                }
+            },
             Panel::Editor => self.show_editor = true,
             Panel::Settings => {
                 if !self.show_settings {
@@ -5931,6 +5949,14 @@ impl LauncherApp {
         } else if panel == Panel::ClipboardModifyDialog {
             self.ensure_open(panel);
             self.clipboard_modify_host.request_focus();
+        } else if matches!(panel, Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails) {
+            self.ensure_open(panel);
+            match panel {
+                Panel::CalendarPopover => self.calendar_popover_host.request_focus(),
+                Panel::CalendarEventEditor => self.calendar_editor_host.request_focus(),
+                Panel::CalendarEventDetails => self.calendar_details_host.request_focus(),
+                _ => unreachable!(),
+            }
         } else if panel == Panel::TimerDialog {
             self.timer_dialog.ensure_open();
             self.timer_dialog.request_host_focus();
@@ -6313,11 +6339,113 @@ impl LauncherApp {
         }
     }
 
+    fn calendar_host_spec(panel: Panel) -> calendar_window_host::CalendarHostSpec {
+        let (title, key, viewport, width, height, minimum) = match panel {
+            Panel::CalendarPopover => (
+                "Calendar",
+                "calendar",
+                "calendar_viewport",
+                480.0,
+                400.0,
+                egui::vec2(320.0, 250.0),
+            ),
+            Panel::CalendarEventEditor => (
+                "Calendar Event",
+                "calendar-event-editor",
+                "calendar_event_editor_viewport",
+                470.0,
+                530.0,
+                egui::vec2(320.0, 320.0),
+            ),
+            Panel::CalendarEventDetails => (
+                "Event Details",
+                "calendar-event-details",
+                "calendar_event_details_viewport",
+                390.0,
+                330.0,
+                egui::vec2(300.0, 220.0),
+            ),
+            _ => unreachable!("only Calendar panels have a Calendar host spec"),
+        };
+        calendar_window_host::CalendarHostSpec {
+            title,
+            key,
+            viewport: egui::ViewportId::from_hash_of(viewport),
+            layer: jump_mode::ui::root_window_layer_id(title),
+            size: egui::vec2(width, height),
+            minimum,
+        }
+    }
+
+    fn calendar_panel_root_layer(&self, panel: Panel) -> Option<egui::LayerId> {
+        let spec = Self::calendar_host_spec(panel);
+        match panel {
+            Panel::CalendarPopover => self
+                .calendar_popover_host
+                .root_layer(self.calendar_popover_open, &spec),
+            Panel::CalendarEventEditor => self
+                .calendar_editor_host
+                .root_layer(self.calendar_editor_open, &spec),
+            Panel::CalendarEventDetails => self
+                .calendar_details_host
+                .root_layer(self.calendar_details_open, &spec),
+            _ => unreachable!(),
+        }
+    }
+
+    fn close_calendar_panel_host(&mut self, panel: Panel) {
+        let spec = Self::calendar_host_spec(panel);
+        match panel {
+            Panel::CalendarPopover => {
+                self.calendar_popover_host.retire(
+                    &self.egui_ctx,
+                    &spec,
+                    self.calendar_popover.host_session_epoch(),
+                );
+                self.calendar_popover_open = false;
+                self.panel_states.calendar_popover = false;
+            }
+            Panel::CalendarEventEditor => {
+                self.calendar_editor_host.retire(
+                    &self.egui_ctx,
+                    &spec,
+                    self.calendar_event_editor.host_session_epoch(),
+                );
+                self.calendar_editor_open = false;
+                self.panel_states.calendar_event_editor = false;
+            }
+            Panel::CalendarEventDetails => {
+                self.calendar_details_host.retire(
+                    &self.egui_ctx,
+                    &spec,
+                    self.calendar_event_details.host_session_epoch(),
+                );
+                self.calendar_details_open = false;
+                self.panel_states.calendar_event_details = false;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn calendar_event_store_path(&self) -> &str {
+        #[cfg(test)]
+        if let Some(path) = self.calendar_events_path_override.as_deref() {
+            return path;
+        }
+        crate::plugins::calendar::CALENDAR_EVENTS_FILE
+    }
+
     pub fn open_calendar_popover(&mut self, date: Option<NaiveDate>) {
         let today = chrono::Local::now().naive_local().date();
         self.calendar_selected_date = Some(date.unwrap_or(today));
         self.calendar_selected_event = None;
+        if !self.calendar_popover_open {
+            self.calendar_popover_host
+                .initialize(utility_host::UtilityPresentation::Docked);
+        }
+        self.calendar_popover.begin_host_session();
         self.calendar_popover_open = true;
+        self.focus_panel(Panel::CalendarPopover);
     }
 
     pub fn open_calendar_editor(
@@ -6328,6 +6456,25 @@ impl LauncherApp {
             chrono::NaiveDateTime,
         )>,
     ) {
+        self.open_calendar_editor_from(
+            event,
+            split_scope,
+            utility_host::UtilityPresentation::Docked,
+        );
+    }
+
+    fn open_calendar_editor_from(
+        &mut self,
+        event: Option<crate::plugins::calendar::CalendarEvent>,
+        split_scope: Option<(
+            crate::gui::calendar_event_details::RecurrenceScope,
+            chrono::NaiveDateTime,
+        )>,
+        presentation: utility_host::UtilityPresentation,
+    ) {
+        if !self.calendar_editor_open {
+            self.calendar_editor_host.initialize(presentation);
+        }
         if let Some(event) = event {
             self.calendar_event_editor.open(Some(event), split_scope);
         } else {
@@ -6337,6 +6484,20 @@ impl LauncherApp {
             self.calendar_event_editor.open_new(date);
         }
         self.calendar_editor_open = true;
+        self.focus_panel(Panel::CalendarEventEditor);
+    }
+
+    fn open_calendar_details_from(
+        &mut self,
+        instance: crate::plugins::calendar::EventInstance,
+        presentation: utility_host::UtilityPresentation,
+    ) {
+        if !self.calendar_details_open {
+            self.calendar_details_host.initialize(presentation);
+        }
+        self.calendar_event_details.open(instance);
+        self.calendar_details_open = true;
+        self.focus_panel(Panel::CalendarEventDetails);
     }
 
     pub(crate) fn prepare_calendar_event_at(
@@ -6354,6 +6515,8 @@ impl LauncherApp {
             );
         }
         self.calendar_event_editor.open_new_at(local)?;
+        self.calendar_editor_host
+            .initialize(utility_host::UtilityPresentation::Docked);
         self.calendar_selected_date = Some(local.date());
         self.focus_panel(Panel::CalendarEventEditor);
         Ok(format!(

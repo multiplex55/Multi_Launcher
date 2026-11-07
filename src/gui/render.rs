@@ -2150,9 +2150,9 @@ impl LauncherApp {
             Panel::CpuListDialog => middle(egui::Id::new(Some("CPU Usage"))),
             Panel::DataRecoveryDialog => middle(egui::Id::new(Some("Data & Recovery"))),
             Panel::ToastLogDialog => middle(egui::Id::new(Some("Toast Log"))),
-            Panel::CalendarPopover => middle(egui::Id::new(Some("Calendar"))),
-            Panel::CalendarEventEditor => middle(egui::Id::new(Some("Calendar Event"))),
-            Panel::CalendarEventDetails => middle(egui::Id::new(Some("Event Details"))),
+            Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
+                self.calendar_panel_root_layer(panel)
+            },
             Panel::Editor => middle(egui::Id::new("App Editor")),
             Panel::Settings => self.settings_window_host.root_layer(),
             Panel::Plugins => middle(egui::Id::new("Plugin Settings")),
@@ -4799,7 +4799,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 29] {
+    fn viewport_bootstrap_state(&self) -> [bool; 30] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4808,6 +4808,7 @@ impl LauncherApp {
             self.xml_toolkit_dialog.needs_viewport_bootstrap(),
             self.regex_tester_dialog.needs_viewport_bootstrap(),
             self.timer_dialog.needs_root_ui_when_hidden(),
+            self.calendar_hosts_need_hidden_root_ui(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4843,7 +4844,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 29],
+        previously_pending: [bool; 30],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -4878,6 +4879,230 @@ impl LauncherApp {
         if self.enable_toasts {
             self.toasts.show_in_rect(ui, bounds);
         }
+    }
+
+    fn calendar_hosts_need_hidden_root_ui(&self) -> bool {
+        self.calendar_popover_host
+            .needs_root_ui_when_hidden(self.calendar_popover_open)
+            || self
+                .calendar_details_host
+                .needs_root_ui_when_hidden(self.calendar_details_open)
+            || self
+                .calendar_editor_host
+                .needs_root_ui_when_hidden(self.calendar_editor_open)
+    }
+
+    fn calendar_panel_owns_root_input(&self, ctx: &egui::Context, panel: super::Panel) -> bool {
+        use super::Panel;
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+
+        let Some(layer) = self.calendar_panel_root_layer(panel) else {
+            return false;
+        };
+        if visible_top_middle_layer(ctx) != Some(layer) {
+            return false;
+        }
+        if egui::Popup::is_any_open(ctx) {
+            return match panel {
+                Panel::CalendarPopover => self.calendar_popover.owned_popup_layer(ctx, layer),
+                Panel::CalendarEventDetails => {
+                    self.calendar_event_details.owned_popup_layer(ctx, layer)
+                }
+                Panel::CalendarEventEditor => {
+                    self.calendar_event_editor.owned_popup_layer(ctx, layer)
+                }
+                _ => unreachable!(),
+            }
+            .is_some();
+        }
+        focused_response_layer(ctx)
+            .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
+    }
+
+    fn calendar_root_input_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use super::Panel;
+
+        self.native_ui_host_input_allowed(ctx, root_visible)
+            && [
+                Panel::CalendarPopover,
+                Panel::CalendarEventDetails,
+                Panel::CalendarEventEditor,
+            ]
+            .into_iter()
+            .any(|panel| self.calendar_panel_owns_root_input(ctx, panel))
+    }
+
+    fn show_calendar_hosts(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        root_visible: bool,
+        jump_escape_preempted: bool,
+    ) {
+        use super::Panel;
+        let allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let root_shortcut = !jump_escape_preempted && self.jump_mode_ui.active_session().is_none();
+
+        if self.calendar_popover_open {
+            let panel = Panel::CalendarPopover;
+            let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
+            let epoch = self.calendar_popover.host_session_epoch();
+            let runtime = super::CalendarPopover::runtime(self);
+            self.calendar_popover_host.show(
+                ctx,
+                &mut self.calendar_popover,
+                &Self::calendar_host_spec(panel),
+                true,
+                epoch,
+                root_visible,
+                first,
+                self.pinned_panels.contains(&panel),
+                owner,
+                allowed,
+                root_shortcut,
+                super::CalendarPopover::popup_anchors,
+                |dialog, ctx, owner, first, child, host| {
+                    dialog.render_host(ctx, true, owner, first, &runtime, child, host)
+                },
+            );
+        }
+        if self.calendar_details_open {
+            let panel = Panel::CalendarEventDetails;
+            let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
+            let epoch = self.calendar_event_details.host_session_epoch();
+            self.calendar_details_host.show(
+                ctx,
+                &mut self.calendar_event_details,
+                &Self::calendar_host_spec(panel),
+                true,
+                epoch,
+                root_visible,
+                first,
+                self.pinned_panels.contains(&panel),
+                owner,
+                allowed,
+                root_shortcut,
+                super::CalendarEventDetails::popup_anchors,
+                |dialog, ctx, owner, first, child, host| {
+                    dialog.render_host(ctx, true, owner, first, child, host)
+                },
+            );
+        }
+        if self.calendar_editor_open {
+            let panel = Panel::CalendarEventEditor;
+            let owner = root_input && self.calendar_panel_owns_root_input(ctx, panel);
+            let epoch = self.calendar_event_editor.host_session_epoch();
+            self.calendar_editor_host.show(
+                ctx,
+                &mut self.calendar_event_editor,
+                &Self::calendar_host_spec(panel),
+                true,
+                epoch,
+                root_visible,
+                first,
+                self.pinned_panels.contains(&panel),
+                owner,
+                allowed,
+                root_shortcut,
+                super::CalendarEventEditor::popup_anchors,
+                |dialog, ctx, owner, first, child, host| {
+                    dialog.render_host(ctx, true, owner, first, child, host)
+                },
+            );
+        }
+    }
+
+    fn complete_calendar_hosts(&mut self, ctx: &egui::Context) -> bool {
+        use super::Panel;
+        use super::calendar_event_details::CalendarDetailsDispatch;
+        use super::calendar_popover::CalendarPopoverDispatch;
+
+        let calendar_epoch = self.calendar_popover.host_session_epoch();
+        let details_epoch = self.calendar_event_details.host_session_epoch();
+        let editor_epoch = self.calendar_event_editor.host_session_epoch();
+        let calendar = self.calendar_popover_host.complete(
+            ctx,
+            &mut self.calendar_popover,
+            &Self::calendar_host_spec(Panel::CalendarPopover),
+            self.calendar_popover_open,
+            calendar_epoch,
+        );
+        let details = self.calendar_details_host.complete(
+            ctx,
+            &mut self.calendar_event_details,
+            &Self::calendar_host_spec(Panel::CalendarEventDetails),
+            self.calendar_details_open,
+            details_epoch,
+        );
+        let editor = self.calendar_editor_host.complete(
+            ctx,
+            &mut self.calendar_event_editor,
+            &Self::calendar_host_spec(Panel::CalendarEventEditor),
+            self.calendar_editor_open,
+            editor_epoch,
+        );
+        let show_root = calendar.as_ref().is_some_and(|(_, _, show)| *show)
+            || details.as_ref().is_some_and(|(_, _, show)| *show)
+            || editor.as_ref().is_some_and(|(_, _, show)| *show);
+        let path = self.calendar_event_store_path().to_owned();
+        let calendar_dispatch = calendar.and_then(|(actions, presentation, _)| {
+            if actions.host_request.is_some() && !actions.close {
+                return None;
+            }
+            let mut dialog = std::mem::take(&mut self.calendar_popover);
+            let dispatch = dialog.apply_host_actions(actions, self);
+            self.calendar_popover = dialog;
+            if !self.calendar_popover_open {
+                self.force_close_panel(Panel::CalendarPopover);
+            }
+            dispatch.map(|dispatch| (dispatch, presentation))
+        });
+        let details_dispatch = details.and_then(|(actions, presentation, _)| {
+            if actions.host_request.is_some() && !actions.close {
+                return None;
+            }
+            let mut dialog = std::mem::take(&mut self.calendar_event_details);
+            let dispatch = dialog.apply_host_actions(actions, self, &path);
+            self.calendar_event_details = dialog;
+            if !self.calendar_details_open {
+                self.force_close_panel(Panel::CalendarEventDetails);
+            }
+            dispatch.map(|dispatch| (dispatch, presentation))
+        });
+        if let Some((actions, _, _)) = editor
+            && (actions.host_request.is_none() || actions.close)
+        {
+            let mut dialog = std::mem::take(&mut self.calendar_event_editor);
+            dialog.apply_host_actions(actions, self, &path);
+            self.calendar_event_editor = dialog;
+            if !self.calendar_editor_open {
+                self.force_close_panel(Panel::CalendarEventEditor);
+            }
+        }
+
+        if let Some((dispatch, presentation)) = calendar_dispatch {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            match dispatch {
+                CalendarPopoverDispatch::OpenDetails(instance) => {
+                    self.open_calendar_details_from(instance, presentation)
+                }
+                CalendarPopoverDispatch::OpenEditor(event) => {
+                    self.open_calendar_editor_from(event, None, presentation)
+                }
+            }
+        }
+        if let Some((CalendarDetailsDispatch::OpenEditor(event, scope), presentation)) =
+            details_dispatch
+        {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            self.open_calendar_editor_from(Some(event), scope, presentation);
+        }
+        show_root
     }
 
     fn show_timer_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
@@ -7968,6 +8193,8 @@ impl LauncherApp {
                         || self.mkmacro_dialog.host_layer_if_root().is_some())
                     && (panel != super::Panel::ClipboardModifyDialog
                         || self.clipboard_modify_has_root_presentation())
+                    && (!matches!(panel, super::Panel::CalendarPopover | super::Panel::CalendarEventEditor | super::Panel::CalendarEventDetails)
+                        || self.calendar_panel_root_layer(panel).is_some())
             })
     }
 
@@ -8837,6 +9064,7 @@ impl LauncherApp {
             self.show_regex_tester(&ctx, first_ui_pass, false);
             self.show_table_utility(&ctx, false, first_ui_pass, false);
             self.show_timer_host(&ctx, first_ui_pass, false);
+            self.show_calendar_hosts(&ctx, first_ui_pass, false, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -9693,6 +9921,7 @@ impl LauncherApp {
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
@@ -9784,6 +10013,7 @@ impl LauncherApp {
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
@@ -10674,6 +10904,7 @@ impl LauncherApp {
             self.show_regex_tester(&ctx, first_ui_pass, false);
             self.show_table_utility(&ctx, false, first_ui_pass, false);
             self.show_timer_host(&ctx, first_ui_pass, false);
+            self.show_calendar_hosts(&ctx, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11261,15 +11492,9 @@ impl LauncherApp {
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(&ctx, self);
         self.toast_log_dialog = toast_dlg;
-        let mut calendar_popover = std::mem::take(&mut self.calendar_popover);
-        calendar_popover.ui(&ctx, self);
-        self.calendar_popover = calendar_popover;
-        let mut calendar_editor = std::mem::take(&mut self.calendar_event_editor);
-        calendar_editor.ui(&ctx, self);
-        self.calendar_event_editor = calendar_editor;
-        let mut calendar_details = std::mem::take(&mut self.calendar_event_details);
-        calendar_details.ui(&ctx, self);
-        self.calendar_event_details = calendar_details;
+        self.show_calendar_hosts(
+            &ctx, first_ui_pass, frame_logic.should_be_visible, jump_session_escape_preempted,
+        );
         let confirmation_result = self.confirm_modal.ui(&ctx);
         if first_ui_pass {
             match confirmation_result {
@@ -11848,6 +12073,9 @@ impl LauncherApp {
         }
         self.complete_mouse_settings_hosts(ctx);
         self.complete_file_search_host(ctx);
+        if self.complete_calendar_hosts(ctx) {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         let (regex_closed, regex_docked) = self.regex_tester_dialog.on_ui_frame_complete(ctx);
         if regex_closed {
             self.panel_states.regex_tester_dialog = false;
@@ -12446,6 +12674,7 @@ impl eframe::App for LauncherApp {
             || self.regex_tester_dialog.needs_root_ui_when_hidden()
             || self.table_utility_dialog.needs_root_ui_when_hidden()
             || self.timer_dialog.needs_root_ui_when_hidden()
+            || self.calendar_hosts_need_hidden_root_ui()
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -17332,6 +17561,318 @@ mod tests {
             LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
             [RootDialogEffect::SaveConverterPreferences]
         ));
+    }
+
+
+    #[test]
+    fn detached_calendar_retains_occurrence_and_saves_and_deletes_only_on_accepted_passes() {
+        use super::super::Panel;
+        use crate::plugins::calendar::{
+            CALENDAR_DATA, CalendarEvent, RecurrenceEnd, RecurrenceFrequency, RecurrenceRule,
+            calendar_test_guard, load_events, restore_calendar_test_data,
+        };
+
+        struct RestoreCalendar(Vec<CalendarEvent>);
+        impl Drop for RestoreCalendar {
+            fn drop(&mut self) {
+                restore_calendar_test_data(std::mem::take(&mut self.0));
+            }
+        }
+
+        let _gui = crate::gui::TEST_MUTEX.lock().unwrap();
+        let _calendar = calendar_test_guard();
+        let _restore = RestoreCalendar(CALENDAR_DATA.read().unwrap().clone());
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 11, 5)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        let occurrence = start + chrono::Duration::days(1);
+        let event = CalendarEvent {
+            id: "calendar-host-series".into(),
+            title: "Recurring calendar fixture".into(),
+            start,
+            end: None,
+            duration_minutes: Some(30),
+            all_day: false,
+            notes: None,
+            recurrence: Some(RecurrenceRule {
+                frequency: RecurrenceFrequency::Daily,
+                interval: 1,
+                weekly_days: Vec::new(),
+                nth_weekday: None,
+                end: RecurrenceEnd::Never,
+                custom_unit: None,
+            }),
+            reminders: Vec::new(),
+            tags: Vec::new(),
+            category: None,
+            created_at: start,
+            updated_at: None,
+            entity_refs: Vec::new(),
+        };
+        restore_calendar_test_data(vec![event.clone()]);
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let path = workspace.root().join("retained-calendar-events.json");
+        crate::common::persistence::save_json_atomic(&path, &vec![event]).unwrap();
+        app.calendar_events_path_override = Some(path.to_str().unwrap().to_owned());
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.open_calendar_popover(Some(occurrence.date()));
+        let calendar = LauncherApp::calendar_host_spec(Panel::CalendarPopover).viewport;
+        let details = LauncherApp::calendar_host_spec(Panel::CalendarEventDetails).viewport;
+        let editor = LauncherApp::calendar_host_spec(Panel::CalendarEventEditor).viewport;
+
+        let frame = |app: &mut LauncherApp, viewport, events, discard_root| {
+            let prior = super::IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE
+                .with(|focus| focus.replace(Some((viewport, viewport != egui::ViewportId::ROOT))));
+            if viewport == egui::ViewportId::ROOT {
+                run_tool_dialog_frame(&ctx, app, events, discard_root)
+                    .drop_without_applying_deltas();
+            } else {
+                super::with_immediate_viewport_test_events_for(viewport, events, || {
+                    app.run_root_frame_for_test(&ctx, actual_query_input(false), discard_root)
+                        .0
+                        .drop_without_applying_deltas();
+                });
+            }
+            super::IMMEDIATE_VIEWPORT_FOCUS_OVERRIDE.with(|focus| focus.set(prior));
+        };
+        let active = |control: Option<(egui::Rect, egui::Rect, bool)>| {
+            let (rect, clip, enabled) = control.expect("a Calendar control was rendered");
+            assert!(
+                enabled && clip.contains(rect.center()),
+                "rect={rect:?} clip={clip:?} enabled={enabled}"
+            );
+            rect
+        };
+        let click = |app: &mut LauncherApp, viewport, rect| {
+            for pressed in [true, false] {
+                frame(
+                    app,
+                    viewport,
+                    tool_dialog_pointer_events(rect, pressed),
+                    false,
+                );
+            }
+        };
+        for _ in 0..4 {
+            frame(&mut app, egui::ViewportId::ROOT, Vec::new(), false);
+        }
+        let pop_out = active(app.calendar_popover_host.test_controls()[0]);
+        click(&mut app, egui::ViewportId::ROOT, pop_out);
+        for _ in 0..3 {
+            frame(&mut app, calendar, Vec::new(), false);
+        }
+        frame(
+            &mut app,
+            egui::ViewportId::ROOT,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        frame(&mut app, calendar, Vec::new(), false);
+        let agenda = active(app.calendar_popover_host.test_controls()[1]);
+        click(&mut app, calendar, agenda);
+        assert!(app.calendar_details_open);
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarEventDetails)
+                .is_none()
+        );
+        let captured = app.calendar_event_details.test_instance().unwrap().clone();
+        assert_eq!(captured.start, occurrence);
+        frame(
+            &mut app,
+            calendar,
+            vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            false,
+        );
+        assert_eq!(app.calendar_selected_date, occurrence.date().succ_opt());
+        assert!(app.calendar_selected_event.is_none());
+        assert_eq!(
+            app.calendar_event_details
+                .test_instance()
+                .unwrap()
+                .instance_id,
+            captured.instance_id
+        );
+
+        for _ in 0..4 {
+            frame(&mut app, details, Vec::new(), false);
+        }
+        frame(
+            &mut app,
+            details,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.calendar_editor_open);
+        assert!(app.calendar_selected_event.is_none());
+        assert_eq!(
+            app.calendar_event_details
+                .test_instance()
+                .unwrap()
+                .instance_id,
+            captured.instance_id
+        );
+        let dock_details = active(app.calendar_details_host.test_controls()[0]);
+        click(&mut app, details, dock_details);
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarEventDetails)
+                .is_some()
+        );
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarPopover)
+                .is_none()
+        );
+        for _ in 0..3 {
+            frame(&mut app, egui::ViewportId::ROOT, Vec::new(), false);
+        }
+        let pop_details = active(app.calendar_details_host.test_controls()[0]);
+        click(&mut app, egui::ViewportId::ROOT, pop_details);
+        frame(
+            &mut app,
+            egui::ViewportId::ROOT,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        app.calendar_event_details.edit_scope =
+            super::super::calendar_event_details::RecurrenceScope::This;
+        for _ in 0..4 {
+            frame(&mut app, details, Vec::new(), false);
+        }
+        let edit = active(app.calendar_details_host.test_controls()[1]);
+        click(&mut app, details, edit);
+        assert!(!app.calendar_details_open);
+        assert!(app.calendar_editor_open);
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarEventEditor)
+                .is_none()
+        );
+        assert_eq!(
+            app.calendar_event_editor.test_start_date(),
+            occurrence.date().to_string()
+        );
+        for _ in 0..4 {
+            frame(&mut app, editor, Vec::new(), false);
+        }
+        let title = active(app.calendar_editor_host.test_controls()[2]);
+        click(&mut app, editor, title);
+        frame(
+            &mut app,
+            editor,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("Updated occurrence".into()),
+            ],
+            false,
+        );
+        assert_eq!(app.calendar_event_editor.test_title(), "Updated occurrence");
+        let dock_editor = active(app.calendar_editor_host.test_controls()[0]);
+        click(&mut app, editor, dock_editor);
+        for _ in 0..4 {
+            frame(&mut app, egui::ViewportId::ROOT, Vec::new(), false);
+        }
+        let pop_editor = active(app.calendar_editor_host.test_controls()[0]);
+        click(&mut app, egui::ViewportId::ROOT, pop_editor);
+        assert_eq!(app.calendar_event_editor.test_title(), "Updated occurrence");
+
+        let before = std::fs::read(&path).unwrap();
+        for discard_child in [false, true] {
+            for _ in 0..4 {
+                frame(&mut app, editor, Vec::new(), false);
+            }
+            let save = active(app.calendar_editor_host.test_controls()[1]);
+            frame(
+                &mut app,
+                editor,
+                tool_dialog_pointer_events(save, true),
+                false,
+            );
+            if discard_child {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(editor)));
+            }
+            frame(
+                &mut app,
+                editor,
+                tool_dialog_pointer_events(save, false),
+                !discard_child,
+            );
+            assert!(app.calendar_editor_open);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(app.calendar_event_editor.test_title(), "Updated occurrence");
+        }
+        frame(&mut app, editor, Vec::new(), false);
+        let save = active(app.calendar_editor_host.test_controls()[1]);
+        click(&mut app, editor, save);
+        assert!(!app.calendar_editor_open);
+        let persisted = load_events(path.to_str().unwrap()).unwrap();
+        let edited = persisted
+            .iter()
+            .find(|event| event.title == "Updated occurrence")
+            .unwrap();
+        assert_eq!(edited.start, occurrence);
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|event| event.title == "Updated occurrence")
+                .count(),
+            1
+        );
+
+        app.open_calendar_popover(Some(occurrence.date()));
+        for _ in 0..4 {
+            frame(&mut app, calendar, Vec::new(), false);
+        }
+        let agenda = active(app.calendar_popover_host.test_controls()[1]);
+        click(&mut app, calendar, agenda);
+        assert_eq!(
+            app.calendar_event_details
+                .test_instance()
+                .unwrap()
+                .source_event_id,
+            edited.id
+        );
+        for _ in 0..4 {
+            frame(&mut app, details, Vec::new(), false);
+        }
+        let before_delete = std::fs::read(&path).unwrap();
+        let delete = active(app.calendar_details_host.test_controls()[2]);
+        frame(
+            &mut app,
+            details,
+            tool_dialog_pointer_events(delete, true),
+            false,
+        );
+        frame(
+            &mut app,
+            details,
+            tool_dialog_pointer_events(delete, false),
+            true,
+        );
+        assert!(app.calendar_details_open);
+        assert_eq!(std::fs::read(&path).unwrap(), before_delete);
+        frame(&mut app, details, Vec::new(), false);
+        let delete = active(app.calendar_details_host.test_controls()[2]);
+        click(&mut app, details, delete);
+        assert!(!app.calendar_details_open);
+        assert!(
+            load_events(path.to_str().unwrap())
+                .unwrap()
+                .iter()
+                .all(|event| event.id != edited.id)
+        );
+        frame(&mut app, calendar, Vec::new(), false);
+        let dock = active(app.calendar_popover_host.test_controls()[0]);
+        click(&mut app, calendar, dock);
+        assert!(
+            app.calendar_panel_root_layer(Panel::CalendarPopover)
+                .is_some()
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
     }
 
     #[test]
