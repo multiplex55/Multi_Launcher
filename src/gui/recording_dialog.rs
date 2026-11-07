@@ -184,6 +184,8 @@ pub(crate) struct RecordingDialogState {
     #[cfg(test)]
     compact_stop_button_rect: Option<egui::Rect>,
     #[cfg(test)]
+    compact_stop_button_clip: Option<egui::Rect>,
+    #[cfg(test)]
     test_controls: std::collections::HashMap<&'static str, (egui::Rect, egui::Rect, bool)>,
     #[cfg(test)]
     test_save_choice: Option<Option<PathBuf>>,
@@ -892,6 +894,14 @@ impl RecordingDialogState {
         self.test_accept_target = true;
     }
     #[cfg(test)]
+    pub(crate) fn test_compact_viewport() -> egui::ViewportId {
+        compact_controller_id()
+    }
+    #[cfg(test)]
+    pub(crate) fn test_compact_stop_rect(&self) -> Option<(egui::Rect, egui::Rect)> {
+        self.compact_stop_button_rect.zip(self.compact_stop_button_clip)
+    }
+    #[cfg(test)]
     pub(crate) fn test_control(&self, name: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
         self.test_controls.get(name).copied()
     }
@@ -1138,6 +1148,8 @@ impl RecordingDialogState {
         let mut staged_action = None;
         #[cfg(test)]
         let mut compact_stop_button_rect = None;
+        #[cfg(test)]
+        let mut compact_stop_button_clip = None;
         let state = snapshot.session.state().clone();
         let builder = egui::ViewportBuilder::default()
             .with_title("Recording")
@@ -1204,6 +1216,7 @@ impl RecordingDialogState {
                     #[cfg(test)]
                     if is_recording && stop.enabled() {
                         compact_stop_button_rect = Some(stop.rect);
+                        compact_stop_button_clip = Some(ui.clip_rect());
                     }
                     if stop.clicked() {
                         command = Some(RecordingUiCommand::Stop { generation });
@@ -1242,6 +1255,7 @@ impl RecordingDialogState {
         #[cfg(test)]
         {
             self.compact_stop_button_rect = compact_stop_button_rect;
+            self.compact_stop_button_clip = compact_stop_button_clip;
         }
         if let Some((provenance, command)) = staged_action {
             self.stage_action(provenance, command);

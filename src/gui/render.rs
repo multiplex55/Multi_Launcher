@@ -21611,6 +21611,52 @@ mod tests {
     }
     struct RecordingFixtureBackend;
     struct RecordingFixtureSource;
+    struct RecordingFramesBackend;
+    struct RecordingFramesSource {
+        generation: u64,
+        canvas: crate::recording::CanvasSize,
+        sent: bool,
+    }
+    impl crate::recording::RecordingBackend for RecordingFramesBackend {
+        fn create_source(
+            &self,
+            request: &crate::recording::RecordingRequest,
+            generation: u64,
+        ) -> Result<Box<dyn crate::recording::CaptureSource>, String> {
+            Ok(Box::new(RecordingFramesSource {
+                generation,
+                canvas: request.canvas(),
+                sent: false,
+            }))
+        }
+    }
+    impl crate::recording::CaptureSource for RecordingFramesSource {
+        fn poll(
+            &mut self,
+            max_wait: std::time::Duration,
+            stop: &crate::recording::CaptureStopToken,
+        ) -> crate::recording::CapturePoll {
+            if !self.sent {
+                self.sent = true;
+                return crate::recording::CapturePoll::Frame {
+                    generation: self.generation,
+                    frame: crate::recording::RgbaFrame::new(
+                        self.canvas,
+                        vec![255; self.canvas.rgba_bytes()],
+                    )
+                    .unwrap(),
+                };
+            }
+            if stop.stop_requested() {
+                return crate::recording::CapturePoll::Ended(
+                    crate::recording::RecordingEndReason::UserStopped,
+                );
+            }
+            std::thread::sleep(max_wait.min(std::time::Duration::from_millis(5)));
+            crate::recording::CapturePoll::Pending
+        }
+    }
+
     impl crate::recording::RecordingBackend for RecordingFixtureBackend {
         fn create_source(
             &self,
@@ -21837,6 +21883,222 @@ mod tests {
         assert!(!app.recording_dialog.open);
     }
     #[test]
+    fn recorder_actual_setup_hidden_stop_retires_and_releases_capture_admission() {
+        use crate::plugin::Plugin;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let (pin, pin_generation, pin_frames) =
+            super::super::pinboard::tests::install_fake_live_pin(&mut app.pinboard_capture);
+        let update_pin = |app: &LauncherApp, sequence: u64| {
+            let (processed, done) = std::sync::mpsc::sync_channel(1);
+            pin_frames
+                .send(crate::pinboard::live::test_support::FakeFrame {
+                    generation: pin_generation,
+                    sequence,
+                    content_size: (4, 4),
+                    image: image::RgbaImage::from_pixel(
+                        4,
+                        4,
+                        image::Rgba([sequence as u8, 2, 3, 255]),
+                    ),
+                    processed,
+                })
+                .unwrap();
+            done.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("live pin frame processed");
+            assert_eq!(
+                app.pinboard_capture
+                    .pinboard()
+                    .get(pin)
+                    .unwrap()
+                    .live_frame()
+                    .unwrap()
+                    .sequence,
+                sequence
+            );
+        };
+        update_pin(&app, 2);
+        let wake_ctx = ctx.clone();
+        app.recording_controller = crate::recording::RecordingController::new(
+            std::sync::Arc::new(RecordingFramesBackend),
+            move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
+        );
+        app.recording_dialog.test_install_display();
+        let action = crate::plugins::recording::RecordingPlugin
+            .search("record")
+            .into_iter()
+            .find(|action| action.action == "record:open")
+            .unwrap();
+        let invocation =
+            crate::commands::parse_command(action, None, crate::commands::ActivationSource::Enter)
+                .unwrap();
+        app.dispatch_command_invocation(invocation);
+        assert!(app.recording_dialog.open);
+        assert!(!app.recording_controller.has_active_job());
+        let root = egui::ViewportId::ROOT;
+        let destination = workspace.root().join("joined-recording.gif");
+        app.recording_dialog
+            .queue_save_choice_for_test(Some(destination.clone()));
+        let start = recording_setup_control(&ctx, &mut app, root, "start");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(start, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(start, false),
+            true,
+            false,
+        );
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 0);
+        assert!(!app.recording_controller.has_active_job());
+        app.crop_screenshot_operation = Some(901);
+        click_recording_setup_control(&ctx, &mut app, root, "start");
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 0);
+        assert!(!app.recording_controller.has_active_job());
+        assert!(!destination.exists());
+        app.crop_screenshot_operation = None;
+        click_recording_setup_control(&ctx, &mut app, root, "start");
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 1);
+        update_pin(&app, 3);
+        let request = app
+            .recording_dialog
+            .test_last_request()
+            .cloned()
+            .expect("accepted frozen request");
+        assert_eq!(
+            request.options().format(),
+            crate::recording::RecordingFormat::Gif
+        );
+        let generation = app
+            .recording_controller
+            .snapshot()
+            .active_generation
+            .expect("active recording");
+        crate::gui::send_event(crate::gui::WatchEvent::RecordingStopGeneration(
+            generation.wrapping_add(1),
+        ));
+        app.process_watch_events();
+        assert_eq!(
+            app.recording_controller.snapshot().active_generation,
+            Some(generation)
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.recording_controller.snapshot().session.frames_written() == 0 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!destination.exists());
+        assert!(app.recording_capture_conflict().is_some());
+        assert!(app.screenshot_capture_conflict().is_some());
+        app.begin_crop_screenshot();
+        assert!(app.crop_screenshot_operation.is_none());
+        assert!(app.begin_pinboard_live_capture().is_err());
+        click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.recording_controller.snapshot().active_generation,
+            Some(generation)
+        );
+        assert_eq!(app.recording_dialog.test_last_request(), Some(&request));
+        assert!(!destination.exists());
+        update_pin(&app, 4);
+        let setup_native = super::super::recording_dialog::RecordingDialogState::viewport();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            setup_native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.recording_dialog.open);
+        assert_eq!(
+            app.recording_controller.snapshot().active_generation,
+            Some(generation)
+        );
+        app.request_launcher_visibility(false);
+        let compact = super::super::recording_dialog::RecordingDialogState::test_compact_viewport();
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, compact, Vec::new(), false, false);
+        }
+        let (stop, clip) = app
+            .recording_dialog
+            .test_compact_stop_rect()
+            .expect("actual compact Stop");
+        assert!(stop.is_positive() && clip.contains_rect(stop));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            compact,
+            tool_dialog_pointer_events(stop, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            compact,
+            tool_dialog_pointer_events(stop, false),
+            false,
+            true,
+        );
+        assert_eq!(
+            app.recording_controller.snapshot().active_generation,
+            Some(generation)
+        );
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, compact, Vec::new(), false, false);
+        }
+        let (stop, clip) = app
+            .recording_dialog
+            .test_compact_stop_rect()
+            .expect("compact Stop retry");
+        assert!(stop.is_positive() && clip.contains_rect(stop));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                compact,
+                tool_dialog_pointer_events(stop, pressed),
+                false,
+                false,
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.recording_controller.has_active_job() {
+            run_host_viewport_frame(&ctx, &mut app, compact, Vec::new(), false, false);
+            if destination.exists() {
+                let snapshot = app.recording_controller.snapshot();
+                assert!(!snapshot.session.worker_busy());
+                assert!(snapshot.session.finalization_claimed() || matches!(snapshot.session.state(), crate::recording::RecorderState::Completed(_)));
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(
+            app.recording_controller.snapshot().result,
+            Some(crate::recording::RecordingControllerOutcome::Saved(_))
+        ));
+        let image = image::open(&destination).expect("saved GIF decodes");
+        assert_eq!((image.width(), image.height()), (64, 48));
+        assert!(image.to_rgba8().pixels().any(|pixel| pixel.0[0] != 0));
+        assert!(app.recording_capture_conflict().is_none());
+        assert!(app.screenshot_capture_conflict().is_none());
+        update_pin(&app, 5);
+    }
+
+    #[test]
     fn recorder_setup_start_discards_never_open_chooser_and_accepts_once() {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
@@ -21988,6 +22250,164 @@ mod tests {
             wake.notify_all();
         }
     }
+    #[test]
+    fn file_lock_ui_same_file_release_refresh_retires_old_selection_and_reveal() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let file = workspace.root().join("same-file.txt");
+        let exe = workspace.root().join("synthetic-process.exe");
+        std::fs::write(&file, b"fixture").unwrap();
+        std::fs::write(&exe, b"fixture").unwrap();
+        let gate = std::sync::Arc::new((
+            std::sync::Mutex::new((false, false)),
+            std::sync::Condvar::new(),
+        ));
+        let _release = FileLockTestGate(gate.clone());
+        let worker_gate = gate.clone();
+        let worker_exe = exe.clone();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_calls = calls.clone();
+        let wake_ctx = ctx.clone();
+        app.file_lock_dialog.set_session_for_test(
+            crate::file_lock::FileLockSession::with_test_job(
+                move |path| {
+                    let first = worker_calls.fetch_add(1, Ordering::SeqCst) == 0;
+                    if first {
+                        let (lock, wake) = &*worker_gate;
+                        let mut state = lock.lock().unwrap();
+                        state.0 = true;
+                        wake.notify_all();
+                        while !state.1 {
+                            state = wake.wait(state).unwrap();
+                        }
+                    }
+                    Ok(crate::file_lock::FileLockInspection {
+                        path,
+                        identity: crate::file_operations::NativeFileIdentity::from_parts(
+                            1, [9; 16],
+                        ),
+                        inspected_at: std::time::SystemTime::now(),
+                        processes: if first {
+                            vec![crate::file_lock::FileLockProcess {
+                                process_id: 4242,
+                                creation_filetime: 133_000_000_000_000_000,
+                                application_name: "Synthetic process".into(),
+                                service_name: String::new(),
+                                executable_path: Some(worker_exe.clone()),
+                            }]
+                        } else {
+                            Vec::new()
+                        },
+                    })
+                },
+                move || wake_ctx.request_repaint_of(egui::ViewportId::ROOT),
+            ),
+        );
+        open_file_lock_through_plugin(&mut app, Some(&file));
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FileLockDialogState::viewport();
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(app.file_lock_dialog.session_view_for_test().generation(), 0);
+        click_file_lock_host_control(&ctx, &mut app, root, "inspect");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !gate.0.lock().unwrap().0 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let generation = app.file_lock_dialog.session_view_for_test().generation();
+        click_file_lock_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        {
+            let (lock, wake) = &*gate;
+            lock.lock().unwrap().1 = true;
+            wake.notify_all();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.file_lock_dialog.has_current_inspection_for_test() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        click_file_lock_host_control(&ctx, &mut app, native, "process_row");
+        let selected = app.file_lock_dialog.test_selected_process();
+        assert_eq!(selected, Some((generation, 4242, 133_000_000_000_000_000)));
+        app.file_lock_dialog.set_reveal_result_for_test(Ok(exe));
+        app.file_lock_dialog.test_hold_ready_dispatch(true);
+        click_file_lock_host_control(&ctx, &mut app, native, "reveal");
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        let refresh = file_lock_host_control(&ctx, &mut app, native, "refresh");
+        assert!(app.file_lock_dialog.test_refresh_enabled());
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(refresh, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            tool_dialog_pointer_events(refresh, false),
+            false,
+            true,
+        );
+        assert_eq!(
+            app.file_lock_dialog.session_view_for_test().generation(),
+            generation
+        );
+        assert_eq!(app.file_lock_dialog.test_selected_process(), selected);
+        assert!(app.file_lock_dialog.test_reveal_ready());
+        click_file_lock_host_control(&ctx, &mut app, native, "refresh");
+        let next = app.file_lock_dialog.session_view_for_test().generation();
+        assert!(next > generation);
+        assert!(app.file_lock_dialog.test_selected_process().is_none());
+        assert!(!app.file_lock_dialog.test_reveal_ready());
+        app.file_lock_dialog.test_hold_ready_dispatch(false);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.file_lock_dialog.has_current_inspection_for_test() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let view = app.file_lock_dialog.session_view_for_test();
+        assert_eq!(view.generation(), next);
+        assert_eq!(view.inspection().unwrap().path, file);
+        assert!(view.inspection().unwrap().processes.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            LauncherApp::take_test_root_dialog_effects(&ctx)
+                .iter()
+                .all(|effect| !matches!(
+                    effect,
+                    RootDialogEffect::RevealFileLockExecutable(_)
+                        | RootDialogEffect::CopyText {
+                            owner: DialogCopyOwner::FileLock,
+                            ..
+                        }
+                ))
+        );
+        click_file_lock_host_control(&ctx, &mut app, native, "copy_snapshot");
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::FileLock, text }] if text.contains("No processes reported."))
+        );
+    }
+
     #[test]
     fn file_lock_host_preserves_held_inspection_selection_and_reveal() {
         use super::super::utility_host::UtilityPresentation;
@@ -22338,6 +22758,8 @@ mod tests {
             if let Some((rect, clip)) = app.folder_size_dialog.test_action_rect(name)
                 && rect.is_positive()
                 && clip.contains_rect(rect)
+                && (!matches!(name, "scan" | "refresh" | "cancel" | "host-presentation")
+                    || app.folder_size_dialog.test_action_enabled(name) == Some(true))
             {
                 if previous == Some(rect) {
                     return rect;
@@ -22367,6 +22789,181 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn folder_size_actual_prefill_held_scan_refresh_cancel_survives_host_moves() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, two_results());
+        let scan_root = workspace.root().join("held-folder-size");
+        let wake_ctx = ctx.clone();
+        let (session, control) =
+            crate::folder_size::FolderSizeSession::with_held_test_scan(move || {
+                wake_ctx.request_repaint_of(egui::ViewportId::ROOT)
+            });
+        app.folder_size_dialog.set_session_for_test(session);
+        let action =
+            expose_folder_size_context_action(&ctx, &mut app, workspace.root(), &scan_root);
+        std::fs::write(scan_root.join("data.txt"), b"held scan data").unwrap();
+        click_file_search_at_with_discard(
+            &ctx,
+            &mut app,
+            action.center(),
+            egui::PointerButton::Primary,
+            true,
+        );
+        assert!(!app.folder_size_dialog.open);
+        let action =
+            expose_folder_size_context_action(&ctx, &mut app, workspace.root(), &scan_root);
+        click_file_search_at(
+            &ctx,
+            &mut app,
+            action.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(app.folder_size_dialog.open);
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            0
+        );
+        assert!(control.started().is_empty());
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FolderSizeDialogState::viewport();
+        click_folder_size_host_control(&ctx, &mut app, root, "scan");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while control.progress().is_empty()
+            || !app
+                .folder_size_dialog
+                .session_view_for_test()
+                .progress()
+                .is_some_and(|progress| progress.total_logical_bytes() > 0)
+        {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "held scan must publish progress: started={:?}, emitted={:?}, status={:?}, error={:?}, bytes={:?}, selected={:?}, held={:?}",
+                control.started(),
+                control.progress(),
+                app.folder_size_dialog.session_view_for_test().status(),
+                app.folder_size_dialog.session_view_for_test().error(),
+                app.folder_size_dialog
+                    .session_view_for_test()
+                    .progress()
+                    .map(|p| p.total_logical_bytes()),
+                app.folder_size_dialog
+                    .selected_root_for_test()
+                    .map(|root| root.as_path().to_path_buf()),
+                control.diagnostic()
+            );
+            std::thread::yield_now();
+        }
+        let generation = app.folder_size_dialog.session_view_for_test().generation();
+        assert_eq!(generation, 1);
+        assert!(app.folder_size_dialog.session_view_for_test().is_busy());
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        let hide = Action {
+            label: "Hide launcher".into(),
+            desc: String::new(),
+            action: "launcher:hide".into(),
+            args: None,
+        };
+        let invocation =
+            crate::commands::parse_command(hide, None, crate::commands::ActivationSource::Enter)
+                .unwrap();
+        app.dispatch_command_invocation(invocation);
+        assert!(app.file_search_dialog.open);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            generation
+        );
+        assert!(app.folder_size_dialog.session_view_for_test().is_busy());
+        for name in ["refresh", "cancel"] {
+            let rect = folder_size_host_control(&ctx, &mut app, native, name);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                false,
+                true,
+            );
+            assert_eq!(
+                app.folder_size_dialog.session_view_for_test().generation(),
+                generation
+            );
+            assert!(app.folder_size_dialog.session_view_for_test().is_busy());
+        }
+        click_folder_size_host_control(&ctx, &mut app, native, "cancel");
+        let cancelled = app.folder_size_dialog.session_view_for_test().generation();
+        assert!(cancelled > generation);
+        let frozen = app
+            .folder_size_dialog
+            .session_view_for_test()
+            .progress()
+            .map(|p| p.total_logical_bytes());
+        assert!(frozen.is_some_and(|bytes| bytes > 0));
+        control.request_late();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !control.late_emitted() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(control.late_total().is_some());
+        assert_ne!(control.late_total(), frozen);
+        assert_eq!(
+            app.folder_size_dialog
+                .session_view_for_test()
+                .progress()
+                .map(|p| p.total_logical_bytes()),
+            frozen
+        );
+        click_folder_size_host_control(&ctx, &mut app, native, "refresh");
+        let refreshed = app.folder_size_dialog.session_view_for_test().generation();
+        assert!(refreshed > cancelled);
+        assert_eq!(control.started(), vec![generation]);
+        click_folder_size_host_control(&ctx, &mut app, native, "cancel");
+        let final_generation = app.folder_size_dialog.session_view_for_test().generation();
+        assert!(final_generation > refreshed);
+        click_folder_size_host_control(&ctx, &mut app, native, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.folder_size_dialog.open);
+        control.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.folder_size_dialog.session_view_for_test().is_busy() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled scan must retire"
+            );
+            std::thread::yield_now();
+        }
+        let view = app.folder_size_dialog.session_view_for_test();
+        assert_eq!(view.generation(), final_generation);
+        assert!(view.result().is_none());
+        assert_eq!(control.maximum_active(), 1);
+        assert_eq!(control.started(), vec![generation]);
+        assert!(!app.folder_size_dialog.open);
+        assert!(app.folder_size_dialog.test_navigation_state().1.is_none());
+        assert!(app.folder_size_dialog.test_navigation_state().2.is_none());
+    }
+
     #[test]
     fn folder_size_host_preserves_scan_and_drill_through_hidden_root() {
         use super::super::utility_host::UtilityPresentation;

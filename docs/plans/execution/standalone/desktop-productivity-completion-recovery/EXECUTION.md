@@ -1162,3 +1162,65 @@ Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; all d
 | r05-m5-b-ui-list-2.log | E82C0409371159E2D9CFCAAEA9D579A8EECB7B915707A15F3F0E79824E90D6A1 |
 | r05-m5-b-ui-run-1.log | 1EF6E794D082709B19A4AFEE91DC098FFD328B482BAA6F5B046986150E6F9B1C |
 | r05-m5-b-ui-run-2.log | C12990EB5A312B9C20D08439C21B552615AB53F5A72B9296D52B4A6CB850B0C7 |
+
+
+### R05/M5-C — Existing utility and recorder cooperation closure
+
+This checkpoint adds three bounded actual-control fixtures without changing production behavior: Folder Size held progress/Refresh/Cancel/host lifecycle, same-file File Lock release/Refresh, and real recorder setup Start through hidden compact Stop/output retirement with a genuine fake-backed live pin. Existing scan/session, Restart Manager adapter, recording controller/encoder, capture admission and ordinary host owners remain authoritative. Narrow cfg(test) bridges reuse the existing FolderSizeSession scan-job seam, progress model, Pinboard native presenter/visibility/parking/live-capture fakes and recording response observations. No new production service, native mechanism, dependency or persistent format was added.
+
+Folder Size begins with the actual File Search directory menu: discarded handoff is inert, accepted prefill does not scan, and real Scan starts the controlled job over a disposable real tree. A positive held subtotal is frozen by accepted Cancel; a demonstrably different late old-generation subtotal/publication cannot replace it. Discarded real Refresh/Cancel controls are both enabled and fully clipped before click. Queued Refresh/Cancel does not overlap workers. Actual Pop Out, supported typed launcher:hide through Action/parser/dispatcher/visibility owner, hidden child frames and Dock retain the held scan/current generation. Actual Close occurs before releasing the held worker; later ROOT frames cannot republish a result, selection/current-directory state or reopened tool. Repeated cancel after the pending request is already cancelled is source-defined idempotence; this UI Close calls session.cancel, so its domain generation need not increment again. These assertions preserve the final generation, no-result/no-reopen and max-active-one postconditions.
+
+File Lock opens through the existing typed/plugin path and uses the SAME disposable path for a scripted nonempty first inspection and successful empty Refresh. Real Inspect/process selection/Refresh and host/hidden-ROOT routing preserve identity until accepted replacement. Discarded Refresh is enabled/visible but inert; current Refresh advances generation and retires old selection/ready Reveal. No old request/copy/reveal may act on the current result. The actual copied current status includes truthful No processes reported, not guaranteed unlocked or stale process data. This is UI/session/fencing proof with a scripted provider, not a native Restart Manager or real held-process query.
+
+Recorder opens through the plugin/typed route and uses actual setup Start with a frozen request and owned disposable GIF destination, a real header Pop Out preserving generation/output/request, native setup close through the retained host, then hidden compact Stop. Discarded/stale Stop is inert; accepted current Stop drives production app-frame service to writer retirement, Saved and decoded nonempty GIF. A pre-Stop no-file assertion remains. Publication is checked against its actual owner: after observing a destination, a FRESH snapshot must show capture no longer busy and claimed finalization or Completed. The writer slot/reaper can legitimately remain occupied after publication; the fixture keeps pumping actual app frames until that slot retires and admission releases. Inside finish_and_publish, the publication owner requires capture retirement, no pending mailbox/consumer lease and matching terminal/frame acknowledgements before physical publication; it does not require a writer thread to exit before its own final write. This corrects an overstrong reviewed oracle, not a production publication defect.
+
+The live pin is a real staged/committed existing Pinboard session backed by fake native presenter, visibility, parking and live capture. Processed frame sequence updates before/during/after recording prove continuity, rather than a pin-exists Boolean. Both the visibility coordinator AND the separate PinWindowPresenter are replaced before pin creation, preventing the exercised fixture path from reaching native pin window/capture APIs. Save/clipboard pin adapters are not exercised. Reciprocal still/new-Pinboard capture admission rejects before selector/parking mutation while recording; guards release after exact retirement. No native WGC/display/monitor capture, Explorer mutation or media encoder redesign was introduced.
+
+Before changes, exact seven baselines listed and passed 7/7, 7597 skipped. The first new list failed E0603 on install_fake_live_pin visibility and executed zero tests. The helper was widened only to the GUI test scope. New list2 compiled three but remained diagnostic because fake-presenter isolation changed during that compile; no runtime is attributed to it. Frozen new list3 matched three, then new run1 passed 1/3 with 7604 skipped: File Lock passed, Folder Size timed out on positive progress and Recorder failed the writer-slot publication proxy. Exact-two instrumented list/run matched two and passed 1/2 with 7605 skipped; Recorder happened to pass its old timing-sensitive proxy, while Folder Size still had zero subtotal. That timing pass is not proof of the later corrected finalization oracle.
+
+Exact-one Folder Size result diagnostic listed one and failed 0/1, 7606 skipped. It proved real Scan had dispatched generation1 but returned Failed/zero entries because CreateFileW on ancestor C:/Users/Jay was denied by the agent sandbox. No scanner or control defect was established. Existing R02 precedent and this measured failure justified one normal-user test rerun outside the sandbox for the owned disposable filesystem fixture, preserving every native ancestry/admission guard. Native-access run1 crossed the positive-progress boundary, then failed a distinct ROOT-hide prerequisite assertion (0/1, 7606 skipped). This environment root used initial failure plus two instrumented diagnostics and the native-access retry within the initial+three focused budget; the later hide root was independently reviewed rather than resetting that exhausted environmental diagnosis budget.
+
+The new real File Search handoff leaves its originating dialog open. Assuming one ROOT Escape hides the launcher was wrong for this state. A reviewed two-owner Escape correction also failed in native-access run2 (0/1, 7606 skipped), disproving the unmeasured claim that first Escape closed File Search in this fixture. The accepted correction uses the existing explicit typed launcher:hide user route, not a visibility flag setter or blind Escape loop. It requires File Search to remain open, ROOT hidden and held generation/busy unchanged. This is the same reviewed hide-prerequisite root, resolved within its focused budget, with no production input change. Folder lists2/3/4 each compiled one; superseded inventories and the two failed native-access logs remain preserved. Final enabled-response observations and correct idempotent-cancel assertions were reviewed before the closure run, without relaxing clips or force-enabling widgets.
+
+Set `$f` to trimmed r05-m5-c-final-filter.txt under ignored target/desktop-productivity-completion-recovery. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 10 full-qualified names. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f --no-fail-fast --test-threads 1`, with normal-user native filesystem access outside the agent sandbox for the disposable scan, passed 10/10 with 7597 skipped (15.031s Nextest summary). This includes the three corrected cooperation cases and all seven baselines. Ten is the distinct closure inventory; earlier timing/diagnostic/repeated runs are not added. All new application profiles disable Paste Sequences Next/Cancel before construction; held fixtures use RAII release/cleanup and one app per test.
+
+Exact closure inventory (all package multi_launcher library target):
+
+| Full-qualified case |
+| --- |
+| gui::file_search_dialog::tests::file_search_folder_size_context_action_is_directory_only |
+| gui::recording_dialog::tests::recording_ui_hidden_controller_commits_only_retained_current_stop |
+| gui::recording_dialog::tests::recording_ui_reciprocal_capture_guards_reject_before_mutation |
+| gui::render::tests::file_lock_host_preserves_held_inspection_selection_and_reveal |
+| gui::render::tests::file_lock_ui_file_search_prefill_requires_a_retained_result_menu_action |
+| gui::render::tests::file_lock_ui_same_file_release_refresh_retires_old_selection_and_reveal |
+| gui::render::tests::folder_size_actual_prefill_held_scan_refresh_cancel_survives_host_moves |
+| gui::render::tests::recorder_actual_setup_hidden_stop_retires_and_releases_capture_admission |
+| gui::render::tests::recorder_setup_hosts_preserve_real_controls_popup_and_stale_region |
+| gui::render::tests::recording_ui_exit_waits_for_capture_and_writer_retirement |
+
+All eight changed files are test-only by independent final diff review: folder_size/{model,session}.rs and gui/{file_lock_dialog,folder_size_dialog,pinboard,pinboard_windows,recording_dialog,render}.rs. The only visibility widenings are inside test modules. Scoped fixture/helper formatting and git diff --check pass. Parent explicitly reuses accepted M5-B production-check-2 at 35c85e57cbcb6cc6278f9b91dcbbfebeb96acb65: production paths/configuration are unchanged, so an identical production compile adds no evidence for this cfg(test)-only checkpoint. No fresh production check or native RM/WGC proof is claimed. R06 will compile/test the integrated code and build the final runnable artifact. Independent source, fake isolation, fixture-root/budget and final oracle reviews are clear; no required production fix remains.
+
+Original IDs88/89/119 and M13–M16 now have this cooperation evidence in addition to their accepted domain/native-adapter/artifact and R02 host evidence. Full N9–N12 remain IMPLEMENTED_USER_VALIDATION_PENDING. Parent is pushed M5-B 35c85e57cbcb6cc6278f9b91dcbbfebeb96acb65 on feat/productivity-explorer-utility-completion. Actual checkpoint SHA/push is recorded separately after commit. Next is R05 final category disposition/reporting, then R06/M0-A directly from that actual reporting tip; no R06 source or manual packet has started. Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; failed, superseded and instrumented logs retained):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r05-m5-c-baseline-list.log | B6566AF2B4AA9DD62E7CCCE23AB182C5C37D2C683FE753651A98756F80FD6268 |
+| r05-m5-c-baseline-run.log | 30A425BF07CDCB97E8D7F8A303CB4C299A49FA6B279D624E2E4E1AB03BCA8342 |
+| r05-m5-c-failed-list-1.log | 4656FC6ABF911239A5B273073DA4F59BF2520F5851B67FA82BC05E83804AE884 |
+| r05-m5-c-failed-run-1.log | A9C7FAC561641DCF3770B37C438A04B4C1511B7F657600695F429E109B027C1D |
+| r05-m5-c-final-list-1.log | 640B358735C6590E2D3D609232213B61FD9034BD05C7814A29CBAC68ECB1D08E |
+| r05-m5-c-final-run-1.log | B8E7C0D5F9E182548058C339ACA4FCD4B7CA541117EFD94D072B0DA7E5BBA22E |
+| r05-m5-c-folder-list-1.log | 10BF7453071B6E568D47DE188E27ECC518E782FE670A7516F2171485C9F5D789 |
+| r05-m5-c-folder-list-2.log | 760038DAE487983539687718C41616CD43B8BF54740D9F63C764CBCE8075F60A |
+| r05-m5-c-folder-list-3.log | 760038DAE487983539687718C41616CD43B8BF54740D9F63C764CBCE8075F60A |
+| r05-m5-c-folder-list-4.log | 23488CED6489CBCA49C0501B134A6CBA891FD8C1AA43684AAA9548BAAAFF7015 |
+| r05-m5-c-folder-run-1.log | EC6F1941C8DFF27DF38D7A24C76F5D7BDDE0F682F82B3C058A4B1292CE6C0BEF |
+| r05-m5-c-folder-run-native-1.log | A58BC464022E954B2AADA90AF9D421D41E0321ED7165FFF38463A238FC30EBAB |
+| r05-m5-c-folder-run-native-2.log | 890E10AFD0851DD0B820DBA9E74943340F0FC1CBF434061D7B495B8AD88B02E3 |
+| r05-m5-c-new-list-1.log | 78FDC00B2E10711EBBC9605D3AB493E060F845A60B285F1B6218AA100E68EE6E |
+| r05-m5-c-new-list-2.log | 0794396F772B28FE302790CD690B3AF47275410B57B6792895A4D495012BA022 |
+| r05-m5-c-new-list-3.log | 37F6406FEF5A443C71E6DB5112386B0987AD6189A2916FB7857258EBAA9CF03F |
+| r05-m5-c-new-run-1.log | 34D04DB070EE075851E55CAED26D34DF577A06D5A715D129744347AC8EF311E8 |

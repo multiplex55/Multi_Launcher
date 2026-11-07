@@ -154,6 +154,131 @@ trait FolderSizeScanJob: Send + Sync + 'static {
 
 struct NativeFolderSizeScanJob;
 
+#[cfg(test)]
+pub(crate) struct HeldScanControl {
+    state: Arc<(Mutex<HeldScanState>, std::sync::Condvar)>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct HeldScanState {
+    started: Vec<u64>,
+    progress: Vec<u64>,
+    released: bool,
+    emit_late: bool,
+    late_emitted: bool,
+    late_total: Option<u64>,
+    diagnostic: Option<String>,
+    active: usize,
+    maximum_active: usize,
+}
+
+#[cfg(test)]
+impl HeldScanControl {
+    pub(crate) fn started(&self) -> Vec<u64> {
+        self.state.0.lock().unwrap().started.clone()
+    }
+    pub(crate) fn progress(&self) -> Vec<u64> {
+        self.state.0.lock().unwrap().progress.clone()
+    }
+    pub(crate) fn maximum_active(&self) -> usize {
+        self.state.0.lock().unwrap().maximum_active
+    }
+    pub(crate) fn request_late(&self) {
+        let (lock, wake) = &*self.state;
+        lock.lock().unwrap().emit_late = true;
+        wake.notify_all();
+    }
+    pub(crate) fn late_emitted(&self) -> bool {
+        self.state.0.lock().unwrap().late_emitted
+    }
+    pub(crate) fn late_total(&self) -> Option<u64> {
+        self.state.0.lock().unwrap().late_total
+    }
+    pub(crate) fn diagnostic(&self) -> Option<String> {
+        self.state.0.lock().unwrap().diagnostic.clone()
+    }
+    pub(crate) fn release(&self) {
+        let (lock, wake) = &*self.state;
+        lock.lock().unwrap().released = true;
+        wake.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for HeldScanControl {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(test)]
+struct HeldScanJob(Arc<(Mutex<HeldScanState>, std::sync::Condvar)>);
+
+#[cfg(test)]
+impl FolderSizeScanJob for HeldScanJob {
+    fn run(
+        &self,
+        request: ScanRequest,
+        progress: &mut dyn FnMut(FolderSizeProgress),
+    ) -> FolderSizeResult {
+        let generation = request.generation;
+        {
+            let mut state = self.0.0.lock().unwrap();
+            state.started.push(generation);
+            state.active += 1;
+            state.maximum_active = state.maximum_active.max(state.active);
+        }
+        let mut last = None;
+        let mut relay = |snapshot: FolderSizeProgress| {
+            self.0.0.lock().unwrap().progress.push(generation);
+            last = Some(snapshot.clone());
+            progress(snapshot);
+        };
+        let result = scan_folder_size(
+            request.root,
+            request.recursive,
+            generation,
+            &request.cancellation,
+            &mut relay,
+        );
+        self.0.0.lock().unwrap().diagnostic = Some(format!(
+            "status={:?} entries={} bytes={} issues={:?}",
+            result.status(),
+            result.entries().len(),
+            result.total_logical_bytes(),
+            result.issues()
+        ));
+        if generation == 1 {
+            let (lock, wake) = &*self.0;
+            let mut state = lock.lock().unwrap();
+            while !state.released {
+                if state.emit_late && !state.late_emitted {
+                    drop(state);
+                    let late = last.clone().map(|snapshot| {
+                        let total = snapshot.total_logical_bytes().saturating_add(1);
+                        (snapshot.test_with_total(total), total)
+                    });
+                    if let Some((snapshot, _)) = late.clone() {
+                        progress(snapshot);
+                    }
+                    state = lock.lock().unwrap();
+                    state.late_total = late.map(|(_, total)| total);
+                    state.late_emitted = true;
+                    continue;
+                }
+                state = wake.wait(state).unwrap();
+            }
+            drop(state);
+            if let Some(snapshot) = last {
+                progress(snapshot);
+            }
+        }
+        self.0.0.lock().unwrap().active -= 1;
+        result
+    }
+}
+
 impl FolderSizeScanJob for NativeFolderSizeScanJob {
     fn run(
         &self,
@@ -228,6 +353,19 @@ impl FolderSizeSessionView {
 }
 
 impl FolderSizeSession {
+    #[cfg(test)]
+    pub(crate) fn with_held_test_scan(
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> (Self, HeldScanControl) {
+        let state = Arc::new((
+            Mutex::new(HeldScanState::default()),
+            std::sync::Condvar::new(),
+        ));
+        (
+            Self::with_job_and_wake(Arc::new(HeldScanJob(state.clone())), Arc::new(wake)),
+            HeldScanControl { state },
+        )
+    }
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
         Self::with_job_wake_and_activity(Arc::new(NativeFolderSizeScanJob), Arc::new(wake), None)
     }

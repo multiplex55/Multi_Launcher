@@ -4985,7 +4985,7 @@ mod native {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::pinboard::live::{PinLiveCaptureBackend, test_support::FakePinLiveCaptureBackend};
     use crate::pinboard::source::{PinSourceBinding, PinSourceCrop, PinSourceWindowIdentity};
@@ -5023,6 +5023,10 @@ mod tests {
         windows: Mutex<BTreeMap<usize, FakeNativeWindow>>,
         opacity_attempts: Mutex<Vec<FakeOpacityAttempt>>,
         opacity_failure: Mutex<Option<String>>,
+    }
+
+    pub(in crate::gui) fn fake_presenter() -> PinWindowPresenter {
+        PinWindowPresenter::with_native_api(Arc::new(FakePinNativeApi::default()))
     }
 
     struct FixturePinSavePicker {

@@ -156,6 +156,12 @@ impl FolderSizeProgressRows {
 }
 
 impl FolderSizeProgress {
+    #[cfg(test)]
+    pub(crate) fn test_with_total(mut self, total: u64) -> Self {
+        self.total_logical_bytes = total;
+        self.publication_id = self.publication_id.saturating_add(1);
+        self
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }

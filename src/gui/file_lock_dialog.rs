@@ -145,6 +145,8 @@ pub(crate) struct FileLockDialogState {
     test_hold_ready_dispatch: bool,
     #[cfg(test)]
     test_action_rects: Vec<(String, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_refresh_enabled: bool,
 }
 
 impl FileLockDialogState {
@@ -180,6 +182,8 @@ impl FileLockDialogState {
             test_hold_ready_dispatch: false,
             #[cfg(test)]
             test_action_rects: Vec::new(),
+            #[cfg(test)]
+            test_refresh_enabled: false,
         }
     }
 
@@ -305,6 +309,10 @@ impl FileLockDialogState {
                                 egui::Button::new("Refresh"),
                             );
                             self.record_action_rect("refresh", refresh.rect, ui.clip_rect());
+                            #[cfg(test)]
+                            {
+                                self.test_refresh_enabled = refresh.enabled();
+                            }
                             if refresh.clicked()
                                 && let Some(path) = selected_path.clone()
                             {
@@ -1139,6 +1147,11 @@ impl FileLockDialogState {
             .iter()
             .find(|(candidate, _, _)| candidate == name)
             .map(|(_, rect, clip)| (*rect, *clip))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_refresh_enabled(&self) -> bool {
+        self.test_refresh_enabled
     }
 
     #[cfg(test)]

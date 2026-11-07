@@ -1468,7 +1468,7 @@ fn restore_root_visibility_intent(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::activity::{ActivityLifecycle, ActivityOutcome};
     use crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController;
@@ -1480,6 +1480,86 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Mutex, mpsc};
     use std::time::{Duration, Instant};
+
+    pub(in crate::gui) fn install_fake_live_pin(
+        lifecycle: &mut PinboardCaptureLifecycle,
+    ) -> (
+        crate::pinboard::PinId,
+        PinCaptureGeneration,
+        mpsc::Sender<crate::pinboard::live::test_support::FakeFrame>,
+    ) {
+        lifecycle.windows = super::super::pinboard_windows::tests::fake_presenter();
+        let log = Arc::new(Mutex::new(CaptureFlowLog::default()));
+        lifecycle.set_adapters_for_test(
+            Arc::new(FakeParkingFactory {
+                log: Arc::clone(&log),
+                acknowledge_after: Some(1),
+            }),
+            Box::new(FakePinWindows {
+                log,
+                hide_ack_after: 1,
+                restore_ack_after: 1,
+                hide_failure: None,
+            }),
+        );
+        let identity = lifecycle
+            .board
+            .reserve_live_capture(PinCaptureOperationId::new(71).unwrap())
+            .unwrap();
+        let bounds = ScreenRect::new(0, 0, 4, 4);
+        lifecycle
+            .board
+            .reserve_selected_rect(identity, bounds)
+            .unwrap();
+        let reservation = lifecycle.board.take_live_reservation(identity).unwrap();
+        let binding = PinSourceBinding {
+            window: crate::pinboard::source::PinSourceWindowIdentity {
+                hwnd: 501,
+                process_id: 502,
+                thread_id: 503,
+            },
+            captured_bounds: bounds,
+            crop: crate::pinboard::source::PinSourceCrop {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+            },
+        };
+        let (sender, receiver) = mpsc::channel();
+        let backend = crate::pinboard::live::test_support::FakePinLiveCaptureBackend {
+            first_image: RgbaImage::from_pixel(4, 4, image::Rgba([17, 31, 47, 255])),
+            first_content_size: (4, 4),
+            stream: Mutex::new(Some(receiver)),
+            first_frame_gate: None,
+        };
+        let mut session = backend
+            .start(
+                binding,
+                identity.generation,
+                reservation,
+                lifecycle.board.gpu_budget(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(result) = session.try_first_frame_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fake live pin must publish its first frame"
+            );
+            thread::yield_now();
+        }
+        lifecycle
+            .board
+            .stage_live_capture(identity, binding, session)
+            .unwrap();
+        let pin = lifecycle.board.commit_capture(identity).unwrap();
+        (pin, identity.generation, sender)
+    }
 
     #[derive(Default)]
     struct CaptureFlowLog {

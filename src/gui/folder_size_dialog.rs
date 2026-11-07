@@ -399,6 +399,8 @@ pub(crate) struct FolderSizeDialogState {
     test_folder_picker_calls: usize,
     #[cfg(test)]
     test_action_rects: Vec<(String, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_action_enabled: Vec<(&'static str, bool)>,
 }
 
 impl FolderSizeDialogState {
@@ -451,6 +453,8 @@ impl FolderSizeDialogState {
             test_folder_picker_calls: 0,
             #[cfg(test)]
             test_action_rects: Vec::new(),
+            #[cfg(test)]
+            test_action_enabled: Vec::new(),
         }
     }
 
@@ -523,6 +527,8 @@ impl FolderSizeDialogState {
         }
         #[cfg(test)]
         self.test_action_rects.clear();
+        #[cfg(test)]
+        self.test_action_enabled.clear();
 
         let commit_allowed =
             input_allowed && first_ui_pass && !ctx.will_discard() && !egui::Popup::is_any_open(ctx);
@@ -552,6 +558,9 @@ impl FolderSizeDialogState {
                     button.rect,
                     ui.clip_rect(),
                 ));
+                #[cfg(test)]
+                self.test_action_enabled
+                    .push(("host-presentation", button.enabled()));
                 if button.clicked() && controls_allowed {
                     staged_actions.push(FolderSizeAction::Host(next));
                 }
@@ -575,6 +584,8 @@ impl FolderSizeDialogState {
                         #[cfg(test)]
                         self.test_action_rects
                             .push(("scan".into(), scan.rect, ui.clip_rect()));
+                        #[cfg(test)]
+                        self.test_action_enabled.push(("scan", scan.enabled()));
                         if scan.clicked()
                             && let Some(root) = selected_root.clone()
                         {
@@ -591,6 +602,9 @@ impl FolderSizeDialogState {
                             refresh.rect,
                             ui.clip_rect(),
                         ));
+                        #[cfg(test)]
+                        self.test_action_enabled
+                            .push(("refresh", refresh.enabled()));
                         if refresh.clicked()
                             && let Some(root) = selected_root.clone()
                         {
@@ -604,6 +618,8 @@ impl FolderSizeDialogState {
                         #[cfg(test)]
                         self.test_action_rects
                             .push(("cancel".into(), cancel.rect, ui.clip_rect()));
+                        #[cfg(test)]
+                        self.test_action_enabled.push(("cancel", cancel.enabled()));
                         if cancel.clicked() {
                             staged_actions.push(FolderSizeAction::Cancel {
                                 session_generation: view.generation(),
@@ -1539,6 +1555,14 @@ impl FolderSizeDialogState {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_action_enabled(&self, name: &str) -> Option<bool> {
+        self.test_action_enabled
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, enabled)| *enabled)
+    }
+
+    #[cfg(test)]
     pub(super) fn test_presentation(&self) -> super::utility_host::UtilityPresentation {
         self.host.presentation()
     }
@@ -1566,6 +1590,10 @@ impl FolderSizeDialogState {
     #[cfg(test)]
     pub(crate) fn session_view_for_test(&self) -> crate::folder_size::FolderSizeSessionView {
         self.session.view()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_session_for_test(&mut self, session: FolderSizeSession) {
+        self.session = session;
     }
 }
 
