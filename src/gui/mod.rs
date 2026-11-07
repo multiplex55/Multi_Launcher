@@ -4902,6 +4902,7 @@ impl LauncherApp {
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
             Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
             Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
+            Panel::DateTimeStudioDialog => self.date_time_studio_dialog.root_layer().is_some(),
             Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails => {
                 self.calendar_panel_root_layer(panel).is_some()
             },
@@ -5033,7 +5034,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -6504,6 +6505,14 @@ impl LauncherApp {
         &mut self,
         instant_utc: chrono::DateTime<chrono::Utc>,
     ) -> Result<String, String> {
+        self.prepare_calendar_event_from(instant_utc, utility_host::UtilityPresentation::Docked)
+    }
+
+    fn prepare_calendar_event_from(
+        &mut self,
+        instant_utc: chrono::DateTime<chrono::Utc>,
+        presentation: utility_host::UtilityPresentation,
+    ) -> Result<String, String> {
         if self.calendar_editor_open {
             return Err("The Calendar Event editor is already open.".into());
         }
@@ -6515,8 +6524,8 @@ impl LauncherApp {
             );
         }
         self.calendar_event_editor.open_new_at(local)?;
-        self.calendar_editor_host
-            .initialize(utility_host::UtilityPresentation::Docked);
+        self.calendar_editor_host.initialize(presentation);
+        self.calendar_editor_open = true;
         self.calendar_selected_date = Some(local.date());
         self.focus_panel(Panel::CalendarEventEditor);
         Ok(format!(

@@ -1,3 +1,4 @@
+use super::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::date_arithmetic::{
     DateBetweenEndpoint, DateBetweenRequest, DateOffsetRequest, DateOffsetUnit, DateValue,
     FoldChoice, LocalResolution, NamedTimeZone, ScheduleCadence, SchedulePreviewRequest,
@@ -162,16 +163,57 @@ enum StudioIntent {
     RefreshReference,
 }
 
-struct RootEffects {
-    frame_nr: u64,
-    pass_nr: u64,
+#[derive(Clone)]
+struct StudioPopupAnchor {
+    popup: egui::Id,
+    layer: egui::LayerId,
+    viewport: egui::ViewportId,
+    epoch: u64,
+}
+impl StudioPopupAnchor {
+    fn new(ui: &egui::Ui, response: &egui::Response, epoch: u64) -> Self {
+        Self {
+            popup: response.id.with("popup"),
+            layer: response.layer_id,
+            viewport: ui.ctx().viewport_id(),
+            epoch,
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DeferredStudioFocus {
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    viewport: egui::ViewportId,
+    id: egui::Id,
+}
+
+struct HostedFrame {
+    root: super::utility_host::ViewportPassProvenance,
+    owner: super::utility_host::ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
     draft: Option<StudioDraft>,
     changed: bool,
     focus_id: Option<egui::Id>,
-    consume_focus_pending: bool,
+    consume_focus: bool,
     intent: Option<StudioIntent>,
     effect: Option<DateTimeStudioEffect>,
-    window_open: Option<bool>,
+    close: bool,
+    request: Option<super::utility_host::UtilityPresentation>,
+    info: Option<egui::ViewportInfo>,
+    copies: Vec<String>,
+    installed_focus: Option<DeferredStudioFocus>,
+}
+#[derive(Default)]
+pub(super) struct DateTimeStudioHostOutcome {
+    pub(super) effect: Option<(
+        DateTimeStudioEffect,
+        super::utility_host::UtilityPresentation,
+    )>,
+    pub(super) copies: Vec<String>,
+    pub(super) show_root: bool,
+    pub(super) closed: bool,
 }
 
 #[cfg(test)]
@@ -190,8 +232,20 @@ pub(crate) struct DateTimeStudioDialog {
     focus_pending: bool,
     draft: StudioDraft,
     notice: Option<String>,
-    pending_root_effects: Option<RootEffects>,
     host_close_requested: bool,
+    host: super::utility_host::UtilityHostState,
+    host_epoch: u64,
+    host_pending: Option<HostedFrame>,
+    host_os_close_pending: bool,
+    host_focus: bool,
+    deferred_host_focus: Option<DeferredStudioFocus>,
+    host_popup: Option<(egui::ViewportId, egui::Id)>,
+    retired_host_popups: Vec<(egui::ViewportId, egui::Id)>,
+    host_popups: Vec<StudioPopupAnchor>,
+    #[cfg(test)]
+    host_button: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_owner_focus: Option<egui::Id>,
     #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
     #[cfg(test)]
@@ -209,13 +263,19 @@ pub(crate) struct DateTimeStudioDialog {
 impl DateTimeStudioDialog {
     pub(crate) fn open(&mut self) {
         self.initialize_reference_if_needed();
+        if !self.open {
+            self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+        }
         self.open = true;
         self.host_close_requested = false;
-        self.focus_pending = true;
+        self.request_host_focus();
     }
 
     pub(crate) fn ensure_open(&mut self) {
         self.initialize_reference_if_needed();
+        if !self.open {
+            self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+        }
         self.open = true;
     }
 
@@ -332,75 +392,432 @@ impl DateTimeStudioDialog {
             .is_some_and(|(_, id, _, _)| ctx.memory(|memory| memory.focused()) == Some(*id))
     }
 
+    #[cfg(test)]
     pub(crate) fn show(
         &mut self,
         ctx: &egui::Context,
         first_ui_pass: bool,
         calendar_editor_open: bool,
     ) -> Option<DateTimeStudioEffect> {
+        self.show_hosted(
+            ctx,
+            first_ui_pass,
+            calendar_editor_open,
+            true,
+            true,
+            true,
+            false,
+            true,
+        );
+        None
+    }
+
+    #[cfg(test)]
+    pub(crate) fn on_ui_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Option<DateTimeStudioEffect> {
+        self.on_hosted_frame_complete(ctx)
+            .effect
+            .map(|(effect, _)| effect)
+    }
+
+    pub(super) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+                || self.host.embedded_root_layer().is_some()))
+        .then_some(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("date-time-studio-window"),
+        ))
+    }
+    pub(super) fn needs_root_ui_when_hidden(&self) -> bool {
+        self.open && self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+    pub(super) fn request_host_focus(&mut self) {
+        self.host_focus = true;
+        self.focus_pending = true;
+        self.host.request_focus();
+    }
+    pub(super) fn presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    pub(super) fn viewport() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("date-time-studio-viewport")
+    }
+    fn native_identity(
+        &self,
+        host: super::utility_host::HostIdentity,
+    ) -> super::utility_window_geometry::NativeViewportIdentity {
+        super::utility_window_geometry::NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse("date-time-studio")
+                .expect("stable studio key"),
+            viewport_id: Self::viewport(),
+            owner_generation: self.host_epoch,
+            host_generation: host.generation,
+        }
+    }
+    fn close_retired_popups(&mut self, ctx: &egui::Context) {
+        self.retired_host_popups.retain(|&(viewport, id)| {
+            if ctx.viewport_id() == viewport {
+                egui::Popup::close_id(ctx, id);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn retire_owned_popup(&mut self, ctx: &egui::Context) {
+        if let Some(popup) = self.host_popup.take()
+            && !self.retired_host_popups.contains(&popup)
+        {
+            self.retired_host_popups.push(popup);
+        }
+        self.close_retired_popups(ctx);
+    }
+
+    pub(super) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        self.retire_owned_popup(ctx);
+        self.deferred_host_focus = None;
+        if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
+            let identity = self.native_identity(self.host.identity());
+            super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+        }
+        self.host_pending = None;
+        self.host_os_close_pending = false;
+        self.host_close_requested = false;
+        self.host_focus = false;
+        self.focus_pending = false;
+        self.host_popups.clear();
+        self.host.retire_to_docked();
+        self.open = false;
+    }
+    pub(super) fn owned_popup_layer(
+        &self,
+        ctx: &egui::Context,
+        parent: egui::LayerId,
+    ) -> Option<egui::LayerId> {
+        let anchor = self.host_popups.iter().find(|a| {
+            a.epoch == self.host_epoch
+                && a.viewport == ctx.viewport_id()
+                && a.layer == parent
+                && egui::Popup::is_id_open(ctx, a.popup)
+        })?;
+        let rect = ctx.memory(|m| m.area_rect(anchor.popup))?;
+        let layer = egui::LayerId::new(egui::Order::Foreground, anchor.popup);
+        let top = ctx.memory(|m| {
+            m.layer_ids()
+                .filter(|l| l.order == egui::Order::Foreground && m.areas().visible_last_frame(l))
+                .last()
+        });
+        let sizing =
+            egui::containers::AreaState::load(ctx, anchor.popup).is_some_and(|a| !a.interactable);
+        (rect.is_positive()
+            && top == Some(layer)
+            && (ctx.layer_id_at(rect.center()) == Some(layer) || sizing))
+            .then_some(layer)
+    }
+    #[cfg(test)]
+    pub(super) fn test_selected_schedule_index(&self) -> Option<usize> {
+        self.draft.selected_schedule_index
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_host_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.host_button
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_owner_focus(&self) -> Option<egui::Id> {
+        self.test_owner_focus
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_owner_popup_open(&self) -> bool {
+        self.host_popup.is_some()
+    }
+
+    pub(super) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        calendar_editor_open: bool,
+        root_visible: bool,
+        root_owner: bool,
+        input_allowed: bool,
+        pinned: bool,
+        shortcut_allowed: bool,
+    ) {
+        use super::utility_host::{UtilityPresentation, ViewportPassProvenance};
+        self.host_pending = None;
+        self.close_retired_popups(ctx);
         #[cfg(test)]
         {
             self.test_window_rect = None;
             self.test_controls.clear();
             self.test_focusable_controls.clear();
-            if first_ui_pass {
+            self.host_button = None;
+            if first {
                 self.test_prepare_observation = None;
                 self.test_prepare_effect_staged = false;
                 self.test_prepare_effect_retained = false;
             }
         }
         if !self.open {
-            return None;
+            return;
         }
+        if pinned {
+            self.host_os_close_pending = false;
+        }
+        let host = self.host.identity();
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let mut owner = None;
+        let mut info = None;
+        let mut staged = None;
+        if host.host == UtilityPresentation::Docked {
+            if root_visible {
+                let allowed = root_owner && input_allowed;
+                let shortcut = first
+                    && allowed
+                    && shortcut_allowed
+                    && !pinned
+                    && !egui::Popup::is_any_open(ctx)
+                    && ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                staged = Some(self.hosted_draw(
+                    ctx,
+                    first,
+                    allowed,
+                    calendar_editor_open,
+                    None,
+                    host.host,
+                ));
+                if let Some(result) = &mut staged {
+                    result.close |= shortcut;
+                }
+                owner = Some(root);
+            }
+        } else {
+            let viewport = Self::viewport();
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Date & Time Studio")
+                .with_inner_size([900.0, 720.0])
+                .with_min_inner_size([460.0, 360.0])
+                .with_resizable(true);
+            ctx.show_viewport_immediate(viewport, builder, |child, class| {
+                let c = child.ctx().clone();
+                self.close_retired_popups(&c);
+                let native = class == egui::ViewportClass::Immediate && c.viewport_id() == viewport;
+                let child_first = first && child.current_pass_index() == 0;
+                if child_first {
+                    owner = Some(ViewportPassProvenance::current(&c, c.viewport_id()));
+                    if native {
+                        info = Some(child.input(|i| i.viewport().clone()));
+                    }
+                } else {
+                    owner = None;
+                    info = None;
+                    staged = None;
+                }
+                let parent = if native {
+                    egui::LayerId::background()
+                } else {
+                    egui::LayerId::new(
+                        egui::Order::Middle,
+                        egui::Id::new("date-time-studio-window"),
+                    )
+                };
+                let popup = self.owned_popup_layer(&c, parent);
+                let allowed = if native {
+                    input_allowed
+                        && c.input(|i| i.focused)
+                        && c.memory(|m| m.top_modal_layer().is_none())
+                        && super::jump_mode::ui::visible_top_middle_layer(&c).is_none()
+                        && (!egui::Popup::is_any_open(&c) || popup.is_some())
+                        && super::jump_mode::ui::focused_response_layer(&c)
+                            .is_none_or(|l| l == parent || Some(l) == popup)
+                } else {
+                    root_owner && input_allowed
+                };
+                if native && child_first && child.input(|i| i.viewport().close_requested()) {
+                    child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    if !pinned {
+                        self.host_os_close_pending = true;
+                    }
+                }
+                let shortcut = child_first
+                    && allowed
+                    && shortcut_allowed
+                    && !pinned
+                    && !egui::Popup::is_any_open(&c)
+                    && c.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                let mut result = if native {
+                    let mut result = None;
+                    egui::CentralPanel::default().show(child, |ui| {
+                        result = Some(self.hosted_draw(
+                            &c,
+                            child_first,
+                            allowed,
+                            calendar_editor_open,
+                            Some(ui),
+                            host.host,
+                        ));
+                    });
+                    result
+                } else {
+                    Some(self.hosted_draw(
+                        &c,
+                        child_first,
+                        allowed,
+                        calendar_editor_open,
+                        None,
+                        host.host,
+                    ))
+                };
+                if let Some(result) = &mut result {
+                    if !pinned {
+                        result.close |= shortcut || self.host_os_close_pending;
+                    }
+                }
+                staged = result;
+            });
+        }
+        if let (Some(owner), Some(mut frame)) = (owner, staged) {
+            if pinned {
+                frame.close = false;
+            }
+            frame.root = root;
+            frame.owner = owner;
+            frame.host = host;
+            frame.epoch = self.host_epoch;
+            frame.info = info;
+            if first && !ctx.will_discard() {
+                self.host_pending = Some(frame);
+            }
+        }
+    }
 
-        let frame_nr = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
-        let pass_nr = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
-
-        let content_size = ctx.content_rect().size();
+    fn hosted_draw(
+        &mut self,
+        ctx: &egui::Context,
+        first: bool,
+        allowed: bool,
+        calendar_editor_open: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> HostedFrame {
+        use super::utility_host::ViewportPassProvenance;
+        let installed_focus = self.deferred_host_focus.filter(|focus| {
+            first
+                && allowed
+                && !ctx.will_discard()
+                && focus.host == self.host.identity()
+                && focus.epoch == self.host_epoch
+                && focus.viewport == ctx.viewport_id()
+        });
+        if let Some(focus) = installed_focus {
+            ctx.memory_mut(|memory| memory.request_focus(focus.id));
+        }
         let mut draft = self.draft.clone();
-        let mut window_open = self.open;
-        let mut authorized_pass = false;
         let mut changed = false;
         let mut focus_id = None;
         let mut intent = None;
         let mut effect = None;
-        let output = egui::Window::new("Date & Time Studio")
-            .id(egui::Id::new("date-time-studio-window"))
-            .open(&mut window_open)
-            .resizable(true)
-            .default_size(egui::vec2(900.0, 720.0))
-            .min_size(egui::vec2(460.0, 360.0).min(content_size))
-            .max_size(content_size)
-            .show(ctx, |ui| {
-                authorized_pass =
-                    first_ui_pass && !ctx.will_discard() && ui.is_visible() && !ui.is_sizing_pass();
-                ui.add_enabled_ui(authorized_pass, |ui| {
-                    self.contents_ui(
-                        ui,
-                        &mut draft,
-                        &mut changed,
-                        &mut focus_id,
-                        &mut intent,
-                        &mut effect,
-                        calendar_editor_open,
-                    );
-                });
+        let mut request = None;
+        let mut window_open = self.open;
+        let mut visible = false;
+        let start = ctx.output(|o| o.commands.len());
+        self.host_popups.clear();
+        let mut body = |ui: &mut egui::Ui| {
+            let authorized =
+                first && allowed && ui.is_visible() && !ui.is_sizing_pass() && !ctx.will_discard();
+            visible |= authorized;
+            let (button, target) = super::utility_host::presentation_button(
+                ui,
+                presentation,
+                allowed && ui.is_visible() && !ui.is_sizing_pass(),
+            );
+            #[cfg(test)]
+            {
+                self.host_button = Some((button.rect, ui.clip_rect(), button.enabled()));
+                self.record_focusable_control(ui, "host-presentation", &button);
+            }
+            if authorized && button.clicked() {
+                request = Some(target);
+            }
+            ui.add_enabled_ui(authorized, |ui| {
+                self.contents_ui(
+                    ui,
+                    &mut draft,
+                    &mut changed,
+                    &mut focus_id,
+                    &mut intent,
+                    &mut effect,
+                    calendar_editor_open,
+                )
             });
-
+        };
+        let mut lifecycle = child_ui.is_some();
+        if let Some(ui) = child_ui {
+            body(ui);
+        } else {
+            let size = ctx.content_rect().size();
+            let output = egui::Window::new("Date & Time Studio")
+                .id(egui::Id::new("date-time-studio-window"))
+                .resizable(true)
+                .default_size(egui::vec2(900.0, 720.0))
+                .min_size(egui::vec2(460.0, 360.0).min(size))
+                .max_size(size)
+                .show_utility(
+                    ctx,
+                    "date-time-studio",
+                    egui::Id::new("date-time-studio-window"),
+                    Some(&mut window_open),
+                    super::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        super::utility_dialog_size::UtilityWindowSizeDefault::outer(egui::vec2(
+                            900.0, 720.0,
+                        )),
+                        egui::vec2(460.0, 360.0),
+                        [None, None],
+                    )
+                    .with_maximum(size),
+                    |ui| body(ui),
+                );
+            lifecycle = output
+                .as_ref()
+                .is_some_and(|o| o.response.rect.intersects(ctx.content_rect()));
+            #[cfg(test)]
+            {
+                self.test_window_rect = output.as_ref().map(|o| o.response.rect);
+            }
+        }
+        self.host_popup = self.host_popups.iter().find_map(|anchor| {
+            (anchor.epoch == self.host_epoch
+                && anchor.viewport == ctx.viewport_id()
+                && egui::Popup::is_id_open(ctx, anchor.popup))
+            .then_some((anchor.viewport, anchor.popup))
+        });
         #[cfg(test)]
         {
-            self.test_window_rect = output.as_ref().map(|output| output.response.rect);
+            self.test_owner_focus = ctx.memory(|memory| memory.focused());
         }
-
-        let window_lifecycle_authorized = first_ui_pass
-            && !ctx.will_discard()
-            && output
-                .as_ref()
-                .is_some_and(|output| output.response.rect.intersects(ctx.content_rect()));
-        let content_authorized = authorized_pass && !ctx.will_discard();
-        let close_requested = (window_lifecycle_authorized && self.host_close_requested)
-            || (window_lifecycle_authorized && !window_open);
-        let draft_changed = draft != self.draft;
+        let copies = ctx.output_mut(|output| {
+            let mut copies = Vec::new();
+            for cmd in output.commands.split_off(start) {
+                match cmd {
+                    egui::OutputCommand::CopyText(text) => copies.push(text),
+                    other => output.commands.push(other),
+                }
+            }
+            copies
+        });
         #[cfg(test)]
         if matches!(
             effect.as_ref(),
@@ -408,93 +825,158 @@ impl DateTimeStudioDialog {
         ) {
             self.test_prepare_effect_staged = true;
         }
-        if (content_authorized
-            && (draft_changed
-                || changed
-                || intent.is_some()
-                || effect.is_some()
-                || self.focus_pending))
-            || close_requested
-        {
-            self.pending_root_effects = Some(RootEffects {
-                frame_nr,
-                pass_nr,
-                draft: content_authorized.then_some(draft),
-                changed,
-                focus_id: content_authorized.then_some(focus_id).flatten(),
-                consume_focus_pending: content_authorized && self.focus_pending,
-                intent: content_authorized.then_some(intent).flatten(),
-                effect: content_authorized.then_some(effect).flatten(),
-                window_open: (!window_open || close_requested).then_some(false),
-            });
+        let close = first
+            && !ctx.will_discard()
+            && lifecycle
+            && (self.host_close_requested || (allowed && !window_open));
+        HostedFrame {
+            root: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            owner: ViewportPassProvenance::current(ctx, ctx.viewport_id()),
+            host: self.host.identity(),
+            epoch: self.host_epoch,
+            draft: visible.then_some(draft),
+            changed: visible && changed,
+            focus_id: if visible { focus_id } else { None },
+            consume_focus: visible && self.focus_pending,
+            intent: if visible { intent } else { None },
+            effect: if visible { effect } else { None },
+            close,
+            request: if visible { request } else { None },
+            info: None,
+            installed_focus,
+            copies: if visible { copies } else { Vec::new() },
         }
-        None
     }
-
-    /// Apply draft, focus, and host effects only after ROOT has retained the
-    /// exact frame/pass that produced them.
-    pub(crate) fn on_ui_frame_complete(
+    pub(super) fn on_hosted_frame_complete(
         &mut self,
         ctx: &egui::Context,
-    ) -> Option<DateTimeStudioEffect> {
-        let Some(effects) = self.pending_root_effects.take() else {
-            return None;
+    ) -> DateTimeStudioHostOutcome {
+        use super::utility_host::UtilityPresentation;
+        let Some(frame) = self.host_pending.take() else {
+            return DateTimeStudioHostOutcome::default();
         };
-        let retained = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
-            == effects.frame_nr.saturating_add(1)
-            && ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT)
-                == effects.pass_nr.saturating_add(1);
-        if !retained {
-            return None;
+        if !self.open
+            || frame.epoch != self.host_epoch
+            || frame.host != self.host.identity()
+            || !frame.root.was_retained(ctx)
+            || !frame.owner.was_retained(ctx)
+        {
+            return DateTimeStudioHostOutcome::default();
         }
-
+        let origin = frame.host.host;
+        let identity = self.native_identity(frame.host);
+        if let Some(info) = frame.info.as_ref() {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                egui::ViewportClass::Immediate,
+                true,
+                "Date & Time Studio",
+                identity,
+                info,
+                egui::vec2(900.0, 720.0),
+                Some(egui::vec2(460.0, 360.0)),
+                None,
+            );
+            if self.host_focus {
+                ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
+            }
+        } else if self.host_focus {
+            if let Some(layer) = self.root_layer() {
+                ctx.move_to_top(layer);
+            }
+        }
+        self.host_focus = false;
+        if let Some(draft) = frame.draft {
+            self.draft = draft;
+            if frame.changed {
+                self.notice = None;
+            }
+        }
+        if let Some(StudioIntent::RefreshReference) = frame.intent {
+            self.draft.refresh_reference(Local::now().naive_local());
+            self.notice = Some("Reference refreshed. Existing inputs are unchanged.".into());
+        }
+        if frame.installed_focus.is_some() && frame.installed_focus == self.deferred_host_focus {
+            self.deferred_host_focus = None;
+        }
+        if frame.consume_focus && frame.request.is_none() && !frame.close {
+            if let Some(id) = frame.focus_id {
+                if frame.owner.viewport_id == ctx.viewport_id() {
+                    ctx.memory_mut(|memory| memory.request_focus(id));
+                } else {
+                    self.deferred_host_focus = Some(DeferredStudioFocus {
+                        host: frame.host,
+                        epoch: frame.epoch,
+                        viewport: frame.owner.viewport_id,
+                        id,
+                    });
+                    ctx.request_repaint_of(frame.owner.viewport_id);
+                }
+            }
+            self.focus_pending = false;
+        }
+        if frame.close {
+            self.end_session_with_host(ctx);
+            return DateTimeStudioHostOutcome {
+                closed: true,
+                ..Default::default()
+            };
+        }
+        let show_root = frame.request == Some(UtilityPresentation::Docked);
+        if let Some(next) = frame.request {
+            if self.host.transition(next) {
+                self.retire_owned_popup(ctx);
+                self.deferred_host_focus = None;
+                self.focus_pending = true;
+                if next == UtilityPresentation::Docked {
+                    super::utility_dialog_size::close_native_utility_geometry_viewport(
+                        ctx, identity,
+                    );
+                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+                }
+                self.host_focus = true;
+                ctx.request_repaint();
+            }
+        }
+        if origin == UtilityPresentation::Popout {
+            self.host.complete_bootstrap(
+                frame.host,
+                frame.info.is_none().then_some(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("date-time-studio-window"),
+                )),
+                None,
+            );
+        }
         #[cfg(test)]
         if matches!(
-            effects.effect.as_ref(),
+            frame.effect.as_ref(),
             Some(DateTimeStudioEffect::PrepareCalendar { .. })
         ) {
             self.test_prepare_effect_retained = true;
         }
-
-        let draft_changed = effects
-            .draft
-            .as_ref()
-            .is_some_and(|draft| draft != &self.draft);
-        let needs_repaint = draft_changed
-            || effects.changed
-            || effects.intent.is_some()
-            || effects.effect.is_some()
-            || effects.consume_focus_pending
-            || effects.window_open == Some(false);
-
-        if let Some(draft) = effects.draft {
-            self.draft = draft;
-            if effects.changed {
-                self.notice = None;
-            }
-        }
-        if let Some(StudioIntent::RefreshReference) = effects.intent {
-            self.draft.refresh_reference(Local::now().naive_local());
-            self.notice = Some("Reference refreshed. Existing inputs are unchanged.".into());
-        }
-        if effects.consume_focus_pending {
-            if let Some(focus_id) = effects.focus_id {
-                ctx.memory_mut(|memory| memory.request_focus(focus_id));
-                ctx.request_repaint();
-            }
-            self.focus_pending = false;
-        }
-        if let Some(window_open) = effects.window_open {
-            self.open = window_open;
-            if !window_open {
-                self.host_close_requested = false;
-                self.focus_pending = false;
-            }
-        }
-        if needs_repaint {
+        if frame.changed
+            || frame.effect.is_some()
+            || frame.intent.is_some()
+            || frame.consume_focus
+            || !frame.copies.is_empty()
+        {
             ctx.request_repaint();
         }
-        effects.effect
+        DateTimeStudioHostOutcome {
+            effect: if frame.request.is_none() {
+                frame.effect.map(|effect| (effect, origin))
+            } else {
+                None
+            },
+            copies: if frame.request.is_none() {
+                frame.copies
+            } else {
+                Vec::new()
+            },
+            show_root,
+            closed: false,
+        }
     }
 
     fn initialize_reference_if_needed(&mut self) {
@@ -830,13 +1312,24 @@ impl DateTimeStudioDialog {
                 self.record_focusable_control(ui, "offset_subtract", &subtract);
             }
             let previous = draft.offset_unit;
-            egui::ComboBox::from_id_salt("date-time-studio-offset-unit")
+            let options_enabled = ui.is_enabled();
+            let combo = egui::ComboBox::from_id_salt("date-time-studio-offset-unit")
                 .selected_text(offset_unit_label(draft.offset_unit))
                 .show_ui(ui, |ui| {
-                    for unit in DATE_OFFSET_UNITS {
-                        ui.selectable_value(&mut draft.offset_unit, unit, offset_unit_label(unit));
-                    }
+                    ui.add_enabled_ui(options_enabled, |ui| {
+                        for unit in DATE_OFFSET_UNITS {
+                            ui.selectable_value(
+                                &mut draft.offset_unit,
+                                unit,
+                                offset_unit_label(unit),
+                            );
+                        }
+                    });
                 });
+            self.host_popups
+                .push(StudioPopupAnchor::new(ui, &combo.response, self.host_epoch));
+            #[cfg(test)]
+            self.record_focusable_control(ui, "offset_unit", &combo.response);
             if previous != draft.offset_unit {
                 *changed = true;
             }
@@ -1086,23 +1579,30 @@ impl DateTimeStudioDialog {
         );
         ui.horizontal_wrapped(|ui| {
             let prior_cadence = draft.schedule_cadence;
-            egui::ComboBox::from_id_salt("date-time-studio-schedule-cadence")
+            let options_enabled = ui.is_enabled();
+            let combo = egui::ComboBox::from_id_salt("date-time-studio-schedule-cadence")
                 .selected_text(match draft.schedule_cadence {
                     ScheduleCadence::Daily => "Daily",
                     ScheduleCadence::Weekly => "Weekly",
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut draft.schedule_cadence,
-                        ScheduleCadence::Daily,
-                        "Daily",
-                    );
-                    ui.selectable_value(
-                        &mut draft.schedule_cadence,
-                        ScheduleCadence::Weekly,
-                        "Weekly",
-                    );
+                    ui.add_enabled_ui(options_enabled, |ui| {
+                        ui.selectable_value(
+                            &mut draft.schedule_cadence,
+                            ScheduleCadence::Daily,
+                            "Daily",
+                        );
+                        ui.selectable_value(
+                            &mut draft.schedule_cadence,
+                            ScheduleCadence::Weekly,
+                            "Weekly",
+                        );
+                    });
                 });
+            self.host_popups
+                .push(StudioPopupAnchor::new(ui, &combo.response, self.host_epoch));
+            #[cfg(test)]
+            self.record_focusable_control(ui, "schedule_cadence", &combo.response);
             if draft.schedule_cadence != prior_cadence {
                 *changed = true;
             }
@@ -2386,16 +2886,15 @@ mod tests {
             .map(|(_, rect)| *rect)
             .unwrap();
         frame(&mut dialog, &ctx, size, click_events(copy.center(), true));
-        let mut effect = None;
         let output = ctx.run_ui(input(size, click_events(copy.center(), false)), |ui| {
             let first = ui.ctx().current_pass_index() == 0;
+            let _ = dialog.show(ui.ctx(), first, false);
             if first {
                 ui.ctx().request_discard("Date Studio effect regression");
             }
-            effect = dialog.show(ui.ctx(), first, false);
         });
         output.drop_without_applying_deltas();
-        assert_eq!(effect, None);
+        assert_eq!(dialog.on_ui_frame_complete(&ctx), None);
 
         // A normal release after republishing enabled hit targets still
         // produces the effect, proving the discarded release was rejected.
