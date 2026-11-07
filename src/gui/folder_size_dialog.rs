@@ -23,6 +23,7 @@ pub(crate) enum FolderSizeDialogEffect {
     CopyPath(String),
     OpenPath(PathBuf),
     FocusPanel,
+    ShowRoot,
 }
 
 #[derive(Clone)]
@@ -318,8 +319,54 @@ fn project_row(
     }
 }
 
+#[derive(Clone, Copy)]
+struct FolderCopyReceipt {
+    root: ViewportPassProvenance,
+    owner: ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    eligible: bool,
+}
+#[derive(Default)]
+struct FolderCopyCapture {
+    armed: std::collections::HashMap<egui::ViewportId, FolderCopyReceipt>,
+    captured: Vec<(FolderCopyReceipt, Vec<String>)>,
+}
+impl egui::Plugin for FolderCopyCapture {
+    fn debug_name(&self) -> &'static str {
+        "FolderSizeCopyCapture"
+    }
+    fn output_hook(&mut self, ctx: &egui::Context, output: &mut egui::FullOutput) {
+        // egui restores the parent viewport before invoking output hooks. Identify
+        // the just-ended child from its counters rather than ctx.viewport_id().
+        let ended = self.armed.iter().find_map(|(viewport, receipt)| {
+            (ctx.cumulative_pass_nr_for(*viewport) == receipt.owner.pass_nr.saturating_add(1)
+                && ctx.cumulative_frame_nr_for(*viewport) == receipt.owner.frame_nr)
+                .then_some(*viewport)
+        });
+        let Some(receipt) = ended.and_then(|viewport| self.armed.remove(&viewport)) else {
+            return;
+        };
+        let mut copies = Vec::new();
+        output
+            .platform_output
+            .commands
+            .retain(|command| match command {
+                egui::OutputCommand::CopyText(text) => {
+                    copies.push(text.clone());
+                    false
+                }
+                _ => true,
+            });
+        if receipt.eligible && !copies.is_empty() {
+            self.captured.push((receipt, copies));
+        }
+    }
+}
+
 #[derive(Clone)]
 enum FolderSizeAction {
+    Host(super::utility_host::UtilityPresentation),
     ChooseFolder,
     Prefill(PathBuf),
     SetRecursive(bool),
@@ -364,10 +411,21 @@ enum FolderSizeAction {
 struct PendingFolderSizePass {
     provenance: ViewportPassProvenance,
     actions: Vec<FolderSizeAction>,
+    owner: ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    native: bool,
+    info: Option<egui::ViewportInfo>,
+    projection: Option<Arc<FolderSizeProjection>>,
 }
 
 pub(crate) struct FolderSizeDialogState {
     pub(crate) open: bool,
+    host: super::utility_host::UtilityHostState,
+    host_epoch: u64,
+    host_focus: bool,
+    host_os_close_pending: bool,
+    prefill_pending: Option<PendingFolderSizePass>,
     session: FolderSizeSession,
     selected_root: Option<ExplicitDirectoryRoot>,
     scan_root: Option<ExplicitDirectoryRoot>,
@@ -402,6 +460,7 @@ impl FolderSizeDialogState {
         ctx: &egui::Context,
         activity_center: Option<crate::activity::ActivityCenter>,
     ) -> Self {
+        ctx.add_plugin(FolderCopyCapture::default());
         let wake_context = ctx.clone();
         let session = match activity_center {
             Some(activity_center) => FolderSizeSession::new_with_activity_center(
@@ -414,6 +473,11 @@ impl FolderSizeDialogState {
         };
         Self {
             open: false,
+            host: super::utility_host::UtilityHostState::docked(),
+            host_epoch: 0,
+            host_focus: false,
+            host_os_close_pending: false,
+            prefill_pending: None,
             session,
             selected_root: None,
             scan_root: None,
@@ -435,6 +499,9 @@ impl FolderSizeDialogState {
 
     /// Opening or focusing Folder Size never starts a scan.
     pub(crate) fn open(&mut self) {
+        if !self.open {
+            self.host_epoch = self.host_epoch.wrapping_add(1).max(1);
+        }
         self.open = true;
     }
 
@@ -449,12 +516,24 @@ impl FolderSizeDialogState {
         pass: ViewportPassProvenance,
         path: PathBuf,
     ) {
-        self.stage_with_provenance(pass, vec![FolderSizeAction::Prefill(path)]);
+        self.prefill_pending = Some(PendingFolderSizePass {
+            provenance: pass,
+            owner: pass,
+            host: self.host.identity(),
+            epoch: self.host_epoch,
+            native: false,
+            info: None,
+            projection: None,
+            actions: vec![FolderSizeAction::Prefill(path)],
+        });
     }
 
     pub(crate) fn stage_prefill(&mut self, ctx: &egui::Context, path: PathBuf) {
         if ctx.viewport_id() == egui::ViewportId::ROOT {
-            self.stage(ctx, vec![FolderSizeAction::Prefill(path)]);
+            self.stage_file_search_prefill(
+                ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+                path,
+            );
         }
     }
 
@@ -465,30 +544,31 @@ impl FolderSizeDialogState {
     }
 
     pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
-        self.pending.is_some() || self.session.view().is_busy()
+        self.pending.is_some()
+            || self.prefill_pending.is_some()
+            || self.session.view().is_busy()
+            || (self.open
+                && self.host.presentation() == super::utility_host::UtilityPresentation::Popout)
     }
 
-    pub(crate) fn show(
+    fn render_host_body(
         &mut self,
         ctx: &egui::Context,
-        root_visible: bool,
         input_allowed: bool,
         first_ui_pass: bool,
-    ) {
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> (Vec<FolderSizeAction>, bool) {
         let view = self.session.view();
         self.sync_projection(&view);
         if !self.open {
-            return;
+            return (Vec::new(), false);
         }
         #[cfg(test)]
         self.test_action_rects.clear();
 
-        let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
-        let commit_allowed = input_allowed
-            && root_visible
-            && first_ui_pass
-            && ctx.viewport_id() == egui::ViewportId::ROOT
-            && !egui::Popup::is_any_open(ctx);
+        let commit_allowed =
+            input_allowed && first_ui_pass && !ctx.will_discard() && !egui::Popup::is_any_open(ctx);
         let mut window_open = self.open;
         let projection = self.projection.clone();
         let selected_root = self.selected_root.clone();
@@ -501,180 +581,432 @@ impl FolderSizeDialogState {
         let notice = self.notice.clone();
         let mut staged_actions = Vec::new();
 
-        egui::Window::new(WINDOW_TITLE)
-            .id(egui::Id::new(Some(WINDOW_TITLE)))
-            .collapsible(false)
-            .resizable(true)
-            .default_size((900.0, 620.0))
-            .min_size((560.0, 360.0))
-            .max_size(ctx.content_rect().size())
-            .show_utility(
-                ctx,
-                UTILITY_KEY,
-                egui::Id::new(WINDOW_TITLE),
-                Some(&mut window_open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::vec2(900.0, 620.0),
-                    ),
-                    egui::vec2(560.0, 360.0),
-                    [None, None],
-                )
-                .with_maximum(ctx.content_rect().size()),
+        let mut draw = |ui: &mut egui::Ui| {
+            let controls_allowed = commit_allowed && ui.is_visible() && !ui.is_sizing_pass();
+            if let Some(presentation) = presentation {
+                let (button, next) = super::utility_host::presentation_button(
+                    ui,
+                    presentation,
+                    input_allowed && ui.is_visible() && !ui.is_sizing_pass(),
+                );
+                #[cfg(test)]
+                self.test_action_rects.push((
+                    "host-presentation".into(),
+                    button.rect,
+                    ui.clip_rect(),
+                ));
+                if button.clicked() && controls_allowed {
+                    staged_actions.push(FolderSizeAction::Host(next));
+                }
+            }
+            ui.add_enabled_ui(
+                input_allowed && ui.is_visible() && !ui.is_sizing_pass(),
                 |ui| {
-                    let controls_allowed = commit_allowed && ui.is_visible() && !ui.is_sizing_pass();
-                    ui.add_enabled_ui(controls_allowed, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            let choose = ui.button("Choose folder…");
-                            #[cfg(test)]
-                            self.test_action_rects.push((
-                                "choose_folder".into(),
-                                choose.rect,
-                                ui.clip_rect(),
-                            ));
-                            if choose.clicked() {
-                                staged_actions.push(FolderSizeAction::ChooseFolder);
-                            }
-                            let scan_enabled = selected_root.is_some();
-                            let scan = ui.add_enabled(scan_enabled, egui::Button::new("Scan"));
-                            #[cfg(test)]
-                            self.test_action_rects.push((
-                                "scan".into(),
-                                scan.rect,
-                                ui.clip_rect(),
-                            ));
-                            if scan.clicked()
-                                && let Some(root) = selected_root.clone()
-                            {
-                                staged_actions.push(FolderSizeAction::Scan {
-                                    root,
-                                    session_generation: view.generation(),
-                                    recursive,
-                                });
-                            }
-                            let refresh =
-                                ui.add_enabled(scan_enabled, egui::Button::new("Refresh"));
-                            #[cfg(test)]
-                            self.test_action_rects.push((
-                                "refresh".into(),
-                                refresh.rect,
-                                ui.clip_rect(),
-                            ));
-                            if refresh.clicked()
-                                && let Some(root) = selected_root.clone()
-                            {
-                                staged_actions.push(FolderSizeAction::Refresh {
-                                    root,
-                                    session_generation: view.generation(),
-                                    recursive,
-                                });
-                            }
-                            let cancel =
-                                ui.add_enabled(view.is_busy(), egui::Button::new("Cancel"));
-                            #[cfg(test)]
-                            self.test_action_rects.push((
-                                "cancel".into(),
-                                cancel.rect,
-                                ui.clip_rect(),
-                            ));
-                            if cancel.clicked() {
-                                staged_actions.push(FolderSizeAction::Cancel {
-                                    session_generation: view.generation(),
-                                });
-                            }
-
-                            let selected_target = selected_entry.filter(|(generation, index)| {
-                                projection.as_ref().is_some_and(|projection| {
-                                    projection.contains_row(*generation, *index)
-                                })
+                    ui.horizontal_wrapped(|ui| {
+                        let choose = ui.button("Choose folder…");
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "choose_folder".into(),
+                            choose.rect,
+                            ui.clip_rect(),
+                        ));
+                        if choose.clicked() {
+                            staged_actions.push(FolderSizeAction::ChooseFolder);
+                        }
+                        let scan_enabled = selected_root.is_some();
+                        let scan = ui.add_enabled(scan_enabled, egui::Button::new("Scan"));
+                        #[cfg(test)]
+                        self.test_action_rects
+                            .push(("scan".into(), scan.rect, ui.clip_rect()));
+                        if scan.clicked()
+                            && let Some(root) = selected_root.clone()
+                        {
+                            staged_actions.push(FolderSizeAction::Scan {
+                                root,
+                                session_generation: view.generation(),
+                                recursive,
                             });
-                            let can_copy_or_open = selected_target.is_some() || selected_root.is_some();
-                            if ui
-                                .add_enabled(can_copy_or_open, egui::Button::new("Copy Path"))
-                                .clicked()
-                            {
-                                if let Some((generation, index)) = selected_target {
-                                    staged_actions
-                                        .push(FolderSizeAction::CopyRow { generation, index });
-                                } else if let Some(root) = selected_root.clone() {
-                                    staged_actions.push(FolderSizeAction::CopyRoot(root));
-                                }
-                            }
-                            if ui
-                                .add_enabled(can_copy_or_open, egui::Button::new("Reveal/Open"))
-                                .clicked()
-                            {
-                                if let Some((generation, index)) = selected_target {
-                                    staged_actions
-                                        .push(FolderSizeAction::OpenRow { generation, index });
-                                } else if let Some(root) = selected_root.clone() {
-                                    staged_actions.push(FolderSizeAction::OpenRoot(root));
-                                }
-                            }
-                            if ui.checkbox(&mut recursive, "Include subfolders").changed() {
-                                staged_actions.push(FolderSizeAction::SetRecursive(recursive));
-                            }
+                        }
+                        let refresh = ui.add_enabled(scan_enabled, egui::Button::new("Refresh"));
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "refresh".into(),
+                            refresh.rect,
+                            ui.clip_rect(),
+                        ));
+                        if refresh.clicked()
+                            && let Some(root) = selected_root.clone()
+                        {
+                            staged_actions.push(FolderSizeAction::Refresh {
+                                root,
+                                session_generation: view.generation(),
+                                recursive,
+                            });
+                        }
+                        let cancel = ui.add_enabled(view.is_busy(), egui::Button::new("Cancel"));
+                        #[cfg(test)]
+                        self.test_action_rects
+                            .push(("cancel".into(), cancel.rect, ui.clip_rect()));
+                        if cancel.clicked() {
+                            staged_actions.push(FolderSizeAction::Cancel {
+                                session_generation: view.generation(),
+                            });
+                        }
+
+                        let selected_target = selected_entry.filter(|(generation, index)| {
+                            projection.as_ref().is_some_and(|projection| {
+                                projection.contains_row(*generation, *index)
+                            })
                         });
-
-                        if recursive != original_recursive {
-                            if let Some(FolderSizeAction::Scan {
-                                recursive: scan_recursive,
-                                ..
-                            }) =
-                                staged_actions.iter_mut().find(|action| {
-                                    matches!(action, FolderSizeAction::Scan { .. })
-                                })
-                            {
-                                *scan_recursive = recursive;
-                            }
-                            if let Some(FolderSizeAction::Refresh {
-                                recursive: refresh_recursive,
-                                ..
-                            }) =
-                                staged_actions.iter_mut().find(|action| {
-                                    matches!(action, FolderSizeAction::Refresh { .. })
-                                })
-                            {
-                                *refresh_recursive = recursive;
+                        let can_copy_or_open = selected_target.is_some() || selected_root.is_some();
+                        let copy = ui.add_enabled(can_copy_or_open, egui::Button::new("Copy Path"));
+                        #[cfg(test)]
+                        self.test_action_rects
+                            .push(("copy".into(), copy.rect, ui.clip_rect()));
+                        if copy.clicked() {
+                            if let Some((generation, index)) = selected_target {
+                                staged_actions
+                                    .push(FolderSizeAction::CopyRow { generation, index });
+                            } else if let Some(root) = selected_root.clone() {
+                                staged_actions.push(FolderSizeAction::CopyRoot(root));
                             }
                         }
-
-                        if let Some(root) = selected_root.as_ref() {
-                            ui.label(format!("Root: {}", root.as_path().display()));
-                        } else {
-                            ui.label("Choose a folder to begin. Opening Folder Size does not start a scan.");
+                        if ui
+                            .add_enabled(can_copy_or_open, egui::Button::new("Reveal/Open"))
+                            .clicked()
+                        {
+                            if let Some((generation, index)) = selected_target {
+                                staged_actions
+                                    .push(FolderSizeAction::OpenRow { generation, index });
+                            } else if let Some(root) = selected_root.clone() {
+                                staged_actions.push(FolderSizeAction::OpenRoot(root));
+                            }
                         }
-                        if let Some(message) = notice.as_deref() {
-                            ui.colored_label(ui.visuals().warn_fg_color, message);
-                        }
-
-                        let scan_matches_selection = scan_root.is_some()
-                            && scan_root == selected_root;
-                        if scan_matches_selection {
-                            show_scan_status(ui, &view, projection.as_deref());
-                        }
-                        if let Some(projection) = projection.as_deref() {
-                            show_folder_rows(
-                                ui,
-                                projection,
-                                selected_root.as_ref(),
-                                current_directory,
-                                current_directory_path.as_deref(),
-                                selected_entry,
-                                commit_allowed,
-                                &mut staged_actions,
-                            );
-                        } else if selected_root.is_some() {
-                            ui.label("No scan results yet. Choose Scan when you are ready.");
+                        let recursive_response = ui.checkbox(&mut recursive, "Include subfolders");
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "recursive".into(),
+                            recursive_response.rect,
+                            ui.clip_rect(),
+                        ));
+                        if recursive_response.changed() {
+                            staged_actions.push(FolderSizeAction::SetRecursive(recursive));
                         }
                     });
+
+                    if recursive != original_recursive {
+                        if let Some(FolderSizeAction::Scan {
+                            recursive: scan_recursive,
+                            ..
+                        }) = staged_actions
+                            .iter_mut()
+                            .find(|action| matches!(action, FolderSizeAction::Scan { .. }))
+                        {
+                            *scan_recursive = recursive;
+                        }
+                        if let Some(FolderSizeAction::Refresh {
+                            recursive: refresh_recursive,
+                            ..
+                        }) = staged_actions
+                            .iter_mut()
+                            .find(|action| matches!(action, FolderSizeAction::Refresh { .. }))
+                        {
+                            *refresh_recursive = recursive;
+                        }
+                    }
+
+                    if let Some(root) = selected_root.as_ref() {
+                        let _label = ui.label(format!("Root: {}", root.as_path().display()));
+                        #[cfg(test)]
+                        self.test_action_rects.push((
+                            "root-label".into(),
+                            _label.rect,
+                            ui.clip_rect(),
+                        ));
+                    } else {
+                        ui.label(
+                            "Choose a folder to begin. Opening Folder Size does not start a scan.",
+                        );
+                    }
+                    if let Some(message) = notice.as_deref() {
+                        ui.colored_label(ui.visuals().warn_fg_color, message);
+                    }
+
+                    let scan_matches_selection = scan_root.is_some() && scan_root == selected_root;
+                    if scan_matches_selection {
+                        show_scan_status(ui, &view, projection.as_deref());
+                    }
+                    if let Some(projection) = projection.as_deref() {
+                        show_folder_rows(
+                            ui,
+                            projection,
+                            selected_root.as_ref(),
+                            current_directory,
+                            current_directory_path.as_deref(),
+                            selected_entry,
+                            commit_allowed,
+                            &mut staged_actions,
+                            #[cfg(test)]
+                            &mut self.test_action_rects,
+                        );
+                    } else if selected_root.is_some() {
+                        ui.label("No scan results yet. Choose Scan when you are ready.");
+                    }
                 },
             );
-
-        if !window_open && commit_allowed {
-            staged_actions.push(FolderSizeAction::Close);
+        };
+        if let Some(ui) = child_ui {
+            draw(ui);
+        } else {
+            egui::Window::new(WINDOW_TITLE)
+                .id(egui::Id::new(Some(WINDOW_TITLE)))
+                .collapsible(false)
+                .resizable(true)
+                .default_size((900.0, 620.0))
+                .min_size((560.0, 360.0))
+                .max_size(ctx.content_rect().size())
+                .show_utility(
+                    ctx,
+                    UTILITY_KEY,
+                    egui::Id::new(WINDOW_TITLE),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::vec2(900.0, 620.0),
+                        ),
+                        egui::vec2(560.0, 360.0),
+                        [None, None],
+                    )
+                    .with_maximum(ctx.content_rect().size()),
+                    |ui| draw(ui),
+                );
         }
-        self.stage_with_provenance(pass, staged_actions);
+        if !commit_allowed {
+            staged_actions.clear();
+        }
+        (staged_actions, !window_open && commit_allowed)
+    }
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+                || self.host.embedded_root_layer().is_some()))
+        .then_some(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(Some(WINDOW_TITLE)),
+        ))
+    }
+    pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
+        self.open && self.host.bootstrap_pending()
+    }
+    pub(crate) fn awaiting_root_focus(&self) -> bool {
+        self.host_focus
+            && self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+    }
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host_focus = true;
+        self.host.request_focus();
+    }
+    pub(super) fn presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    pub(crate) fn viewport() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("folder-size-viewport")
+    }
+    fn native_identity(
+        &self,
+        host: super::utility_host::HostIdentity,
+    ) -> super::utility_window_geometry::NativeViewportIdentity {
+        super::utility_window_geometry::NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse(UTILITY_KEY)
+                .expect("stable folder-size key"),
+            viewport_id: Self::viewport(),
+            owner_generation: self.host_epoch,
+            host_generation: host.generation,
+        }
+    }
+    fn retire_host(&mut self, ctx: &egui::Context) {
+        if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
+            let identity = self.native_identity(self.host.identity());
+            super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
+        }
+        self.host.retire_to_docked();
+        self.host_os_close_pending = false;
+        self.host_focus = false;
+    }
+    pub(crate) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        input_allowed: bool,
+        first: bool,
+    ) {
+        self.show_hosted(
+            ctx,
+            root_visible,
+            input_allowed,
+            input_allowed,
+            first,
+            false,
+            true,
+        );
+    }
+    pub(crate) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        root_owner: bool,
+        application_input_allowed: bool,
+        first: bool,
+        pinned: bool,
+        shortcut_allowed: bool,
+    ) {
+        use super::utility_host::UtilityPresentation;
+        let view = self.session.view();
+        self.sync_projection(&view);
+        if !self.open {
+            return;
+        }
+        if pinned {
+            self.host_os_close_pending = false;
+        }
+        let host = self.host.identity();
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let mut owner = None;
+        let mut native = false;
+        let mut info = None;
+        let mut staged = None;
+        if host.host == UtilityPresentation::Docked {
+            if root_visible {
+                let allowed = root_owner && !egui::Popup::is_any_open(ctx);
+                let shortcut = first
+                    && allowed
+                    && shortcut_allowed
+                    && !pinned
+                    && ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                let (actions, close) =
+                    self.render_host_body(ctx, allowed, first, None, Some(host.host));
+                staged = Some((actions, close || shortcut));
+                owner = Some(root);
+            }
+        } else {
+            let viewport = Self::viewport();
+            let builder = egui::ViewportBuilder::default()
+                .with_title(WINDOW_TITLE)
+                .with_inner_size([900.0, 620.0])
+                .with_min_inner_size([560.0, 360.0])
+                .with_resizable(true);
+            ctx.show_viewport_immediate(viewport, builder, |child, class| {
+                let c = child.ctx().clone();
+                let is_native =
+                    class == egui::ViewportClass::Immediate && c.viewport_id() == viewport;
+                let child_first = first && child.current_pass_index() == 0;
+                if child_first {
+                    owner = Some(ViewportPassProvenance::current(&c, c.viewport_id()));
+                    native = is_native;
+                    if is_native {
+                        info = Some(child.input(|i| i.viewport().clone()));
+                    }
+                } else {
+                    owner = None;
+                    info = None;
+                    staged = None;
+                }
+                let allowed = if is_native {
+                    application_input_allowed
+                        && c.input(|i| i.focused)
+                        && c.memory(|m| m.top_modal_layer().is_none())
+                        && super::jump_mode::ui::visible_top_middle_layer(&c).is_none()
+                        && !egui::Popup::is_any_open(&c)
+                        && super::jump_mode::ui::focused_response_layer(&c)
+                            .is_none_or(|l| l == egui::LayerId::background())
+                } else {
+                    root_owner && !egui::Popup::is_any_open(&c)
+                };
+                if is_native && child_first && child.input(|i| i.viewport().close_requested()) {
+                    child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    if !pinned {
+                        self.host_os_close_pending = true;
+                    }
+                }
+                let shortcut = child_first
+                    && allowed
+                    && !pinned
+                    && (is_native || shortcut_allowed)
+                    && c.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                if is_native {
+                    let receipt = FolderCopyReceipt {
+                        root,
+                        owner: ViewportPassProvenance::current(&c, c.viewport_id()),
+                        host,
+                        epoch: self.host_epoch,
+                        eligible: child_first && allowed && !c.will_discard(),
+                    };
+                    c.with_plugin(|plugin: &mut FolderCopyCapture| {
+                        plugin.armed.insert(c.viewport_id(), receipt);
+                    });
+                    egui::CentralPanel::default().show(child, |ui| {
+                        staged = Some(self.render_host_body(
+                            &c,
+                            allowed,
+                            child_first,
+                            Some(ui),
+                            Some(host.host),
+                        ));
+                    });
+                } else {
+                    staged = Some(self.render_host_body(
+                        &c,
+                        allowed,
+                        child_first,
+                        None,
+                        Some(host.host),
+                    ));
+                }
+                if let Some((_, close)) = &mut staged {
+                    *close |= shortcut || (is_native && !pinned && self.host_os_close_pending);
+                }
+            });
+        }
+        if let (Some(owner), Some((mut actions, close))) = (owner, staged) {
+            if close && !pinned {
+                actions = vec![FolderSizeAction::Close];
+            } else if let Some(next) = actions.iter().find_map(|action| {
+                if let FolderSizeAction::Host(next) = action {
+                    Some(*next)
+                } else {
+                    None
+                }
+            }) {
+                actions = vec![FolderSizeAction::Host(next)];
+            }
+            if first && !ctx.will_discard() {
+                if let Some(previous) = self.pending.as_ref()
+                    && previous
+                        .actions
+                        .iter()
+                        .any(|action| matches!(action, FolderSizeAction::Close))
+                {
+                    return;
+                }
+                self.pending = Some(PendingFolderSizePass {
+                    provenance: root,
+                    owner,
+                    host,
+                    epoch: self.host_epoch,
+                    native,
+                    info,
+                    projection: self.projection.clone(),
+                    actions,
+                });
+            }
+        }
     }
 
     pub(crate) fn on_ui_frame_complete(
@@ -683,10 +1015,25 @@ impl FolderSizeDialogState {
     ) -> Vec<FolderSizeDialogEffect> {
         let view = self.session.view();
         self.sync_projection(&view);
-        let Some(pending) = self.pending.take() else {
+        if self.pending.as_ref().is_some_and(|pending| {
+            pending.provenance.was_retained(ctx)
+                && pending.owner.was_retained(ctx)
+                && pending
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, FolderSizeAction::Close))
+        }) {
+            self.prefill_pending = None;
+        }
+        let prefill = self.prefill_pending.is_some();
+        let Some(pending) = self.prefill_pending.take().or_else(|| self.pending.take()) else {
             return Vec::new();
         };
-        if !pending.provenance.was_retained(ctx) {
+        if !pending.provenance.was_retained(ctx)
+            || !pending.owner.was_retained(ctx)
+            || (!prefill
+                && (pending.epoch != self.host_epoch || pending.host != self.host.identity()))
+        {
             if ctx.cumulative_frame_nr_for(pending.provenance.viewport_id)
                 > pending.provenance.frame_nr
             {
@@ -694,22 +1041,138 @@ impl FolderSizeDialogState {
                 // pass. A discarded click has no authority in the next frame.
                 self.pending = None;
             } else {
-                self.pending = Some(pending);
+                if prefill {
+                    self.prefill_pending = Some(pending);
+                } else {
+                    self.pending = Some(pending);
+                }
             }
             return Vec::new();
         }
 
+        if !prefill {
+            let identity = self.native_identity(pending.host);
+            if let Some(info) = pending.info.as_ref() {
+                super::utility_dialog_size::apply_native_utility_geometry_restore(
+                    ctx,
+                    egui::ViewportClass::Immediate,
+                    true,
+                    WINDOW_TITLE,
+                    identity,
+                    info,
+                    egui::vec2(900.0, 620.0),
+                    Some(egui::vec2(560.0, 360.0)),
+                    None,
+                );
+                if self.host_focus {
+                    ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Focus);
+                }
+            } else if self.host_focus {
+                if let Some(layer) = self.root_layer() {
+                    ctx.move_to_top(layer);
+                }
+            }
+            self.host_focus = false;
+            if pending.host.host == super::utility_host::UtilityPresentation::Popout {
+                self.host.complete_bootstrap(
+                    pending.host,
+                    (!pending.native).then(|| {
+                        egui::LayerId::new(egui::Order::Middle, egui::Id::new(Some(WINDOW_TITLE)))
+                    }),
+                    None,
+                );
+            }
+        }
         let mut effects = Vec::new();
+        if !prefill {
+            let copies = ctx
+                .with_plugin(|plugin: &mut FolderCopyCapture| {
+                    let mut accepted = Vec::new();
+                    for (receipt, copies) in plugin.captured.drain(..) {
+                        if receipt.root == pending.provenance
+                            && receipt.owner == pending.owner
+                            && receipt.host == pending.host
+                            && receipt.epoch == pending.epoch
+                        {
+                            accepted.extend(copies);
+                        }
+                    }
+                    accepted
+                })
+                .unwrap_or_default();
+            let local_close_or_move = pending.actions.iter().any(|action| {
+                matches!(action, FolderSizeAction::Close | FolderSizeAction::Host(_))
+            });
+            if !local_close_or_move {
+                effects.extend(copies.into_iter().map(FolderSizeDialogEffect::CopyPath));
+            }
+        }
         let had_actions = !pending.actions.is_empty();
         for action in pending.actions {
             let current = self.session.view();
             self.sync_projection(&current);
+            let row_action = matches!(
+                action,
+                FolderSizeAction::Select { .. }
+                    | FolderSizeAction::Drill { .. }
+                    | FolderSizeAction::Back { .. }
+                    | FolderSizeAction::CopyRow { .. }
+                    | FolderSizeAction::OpenRow { .. }
+            );
+            if row_action
+                && pending.projection.as_ref().is_some_and(|origin| {
+                    !self
+                        .projection
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(origin, current))
+                })
+            {
+                continue;
+            }
             match action {
+                FolderSizeAction::Host(next) => {
+                    if self.host.transition(next) {
+                        if next == super::utility_host::UtilityPresentation::Docked {
+                            let identity = self.native_identity(pending.host);
+                            super::utility_dialog_size::close_native_utility_geometry_viewport(
+                                ctx, identity,
+                            );
+                            ctx.send_viewport_cmd_to(
+                                identity.viewport_id,
+                                egui::ViewportCommand::Close,
+                            );
+                            effects.push(FolderSizeDialogEffect::ShowRoot);
+                        }
+                        self.host_focus = true;
+                    }
+                }
                 FolderSizeAction::ChooseFolder => {
-                    if !self.revalidate_root_pass(ctx, pending.provenance) {
+                    if !pending.provenance.was_retained(ctx) || !pending.owner.was_retained(ctx) {
                         continue;
                     }
-                    if let Some(path) = self.pick_folder() {
+                    let selected_before = self.selected_root.clone();
+                    let generation_before = current.generation();
+                    let identity = pending.native.then(|| self.native_identity(pending.host));
+                    #[cfg(windows)]
+                    let hwnd = super::utility_dialog_size::utility_picker_hwnd(ctx, identity);
+                    #[cfg(not(windows))]
+                    let hwnd = None;
+                    if let Some(path) = self.pick_folder(hwnd) {
+                        if !self.open
+                            || self.host_epoch != pending.epoch
+                            || self.host.identity() != pending.host
+                            || self.selected_root != selected_before
+                            || self.session.view().generation() != generation_before
+                        {
+                            continue;
+                        }
+                        #[cfg(all(windows, not(test)))]
+                        if hwnd.is_none()
+                            || hwnd
+                                != super::utility_dialog_size::utility_picker_hwnd(ctx, identity)
+                        {
+                            continue;
+                        }
                         match ExplicitDirectoryRoot::new(path) {
                             Ok(root) => {
                                 self.apply_selected_root(root, &current);
@@ -849,6 +1312,7 @@ impl FolderSizeDialogState {
                     if current.is_busy() {
                         let _ = self.session.cancel();
                     }
+                    self.retire_host(ctx);
                     self.open = false;
                     self.selected_entry = None;
                     self.current_directory = None;
@@ -859,6 +1323,9 @@ impl FolderSizeDialogState {
         }
         if had_actions {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        if prefill && self.pending.is_some() {
+            effects.extend(self.on_ui_frame_complete(ctx));
         }
         effects
     }
@@ -887,7 +1354,7 @@ impl FolderSizeDialogState {
 
     pub(crate) fn copy_completed(&mut self, result: Result<(), String>) {
         self.notice = Some(match result {
-            Ok(()) => "Path copied to the clipboard.".into(),
+            Ok(()) => "Copied to the clipboard.".into(),
             Err(error) => error,
         });
     }
@@ -1022,6 +1489,12 @@ impl FolderSizeDialogState {
         {
             self.pending = Some(PendingFolderSizePass {
                 provenance,
+                owner: provenance,
+                host: self.host.identity(),
+                epoch: self.host_epoch,
+                native: false,
+                info: None,
+                projection: None,
                 actions: vec![FolderSizeAction::Close],
             });
             return;
@@ -1039,21 +1512,19 @@ impl FolderSizeDialogState {
             _ => {
                 self.pending = Some(PendingFolderSizePass {
                     provenance,
+                    owner: provenance,
+                    host: self.host.identity(),
+                    epoch: self.host_epoch,
+                    native: false,
+                    info: None,
+                    projection: None,
                     actions,
                 });
             }
         }
     }
 
-    fn revalidate_root_pass(
-        &self,
-        ctx: &egui::Context,
-        provenance: ViewportPassProvenance,
-    ) -> bool {
-        provenance.viewport_id == egui::ViewportId::ROOT && provenance.was_retained(ctx)
-    }
-
-    fn pick_folder(&mut self) -> Option<PathBuf> {
+    fn pick_folder(&mut self, hwnd: Option<usize>) -> Option<PathBuf> {
         #[cfg(test)]
         if let Some(choice) = self.test_folder_choice.take() {
             self.test_folder_picker_calls = self.test_folder_picker_calls.saturating_add(1);
@@ -1062,10 +1533,28 @@ impl FolderSizeDialogState {
 
         #[cfg(not(test))]
         {
-            rfd::FileDialog::new().pick_folder()
+            #[cfg(windows)]
+            {
+                let Some(hwnd) = hwnd.and_then(|h| std::num::NonZeroIsize::new(h as isize)) else {
+                    self.notice = Some(
+                        "Cannot verify the folder picker window. Focus Folder Size and try again."
+                            .into(),
+                    );
+                    return None;
+                };
+                rfd::FileDialog::new()
+                    .set_parent(&super::add_action_dialog::NativeDialogParent(hwnd))
+                    .pick_folder()
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = hwnd;
+                rfd::FileDialog::new().pick_folder()
+            }
         }
         #[cfg(test)]
         {
+            let _ = hwnd;
             None
         }
     }
@@ -1088,6 +1577,26 @@ impl FolderSizeDialogState {
             .map(|(_, rect, clip)| (*rect, *clip))
     }
 
+    #[cfg(test)]
+    pub(super) fn test_presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    #[cfg(test)]
+    pub(crate) fn test_navigation_state(
+        &self,
+    ) -> (
+        bool,
+        Option<(u64, usize)>,
+        Option<(u64, usize)>,
+        Option<PathBuf>,
+    ) {
+        (
+            self.recursive,
+            self.selected_entry,
+            self.current_directory,
+            self.current_directory_path.clone(),
+        )
+    }
     #[cfg(test)]
     pub(crate) fn selected_root_for_test(&self) -> Option<&ExplicitDirectoryRoot> {
         self.selected_root.as_ref()
@@ -1169,6 +1678,7 @@ fn show_folder_rows(
     selected_entry: Option<(u64, usize)>,
     commit_allowed: bool,
     staged_actions: &mut Vec<FolderSizeAction>,
+    #[cfg(test)] test_action_rects: &mut Vec<(String, egui::Rect, egui::Rect)>,
 ) {
     let generation = projection.key.generation;
     let current_index = current_directory
@@ -1245,6 +1755,12 @@ fn show_folder_rows(
                                 egui::Button::selectable(selected, row.name.as_str()).truncate(),
                             )
                             .on_hover_text(&row.name);
+                        #[cfg(test)]
+                        test_action_rects.push((
+                            format!("row/{}", row.name),
+                            response.rect,
+                            ui.clip_rect(),
+                        ));
                         if response.clicked() && commit_allowed {
                             staged_actions.push(FolderSizeAction::Select { generation, index });
                         }
@@ -1418,6 +1934,23 @@ mod tests {
             status_label(FolderSizeSessionStatus::Cancelled),
             "Cancelled — last verified subtotal is frozen."
         );
+    }
+
+    #[test]
+    fn folder_size_retained_close_suppresses_same_frame_prefill_focus() {
+        let ctx = egui::Context::default();
+        let mut state = FolderSizeDialogState::new(&ctx);
+        state.open();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let pass = ViewportPassProvenance::current(ui.ctx(), egui::ViewportId::ROOT);
+            state.stage_file_search_prefill(pass, PathBuf::from("unused-prefill"));
+            state.stage_with_provenance(pass, vec![FolderSizeAction::Close]);
+        });
+        let effects = state.on_ui_frame_complete(&ctx);
+        output.drop_without_applying_deltas();
+        assert!(!state.open);
+        assert!(!effects.contains(&FolderSizeDialogEffect::FocusPanel));
+        assert!(state.prefill_pending.is_none());
     }
 
     #[test]

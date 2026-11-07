@@ -2164,7 +2164,7 @@ impl LauncherApp {
             Panel::MultiManagerSettingsDialog => middle(egui::Id::new("MultiManager Settings")),
             Panel::ImageCompareDialog => self.image_compare_dialog.root_layer(),
             Panel::DuplicateFinderDialog => self.duplicate_finder_dialog.root_layer(),
-            Panel::FolderSizeDialog => middle(egui::Id::new(Some("Folder Size"))),
+            Panel::FolderSizeDialog => self.folder_size_dialog.root_layer(),
             Panel::FileLockDialog => middle(egui::Id::new(Some("File Lock Inspector"))),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
             Panel::RecordingDialog => middle(egui::Id::new("recording-setup-window")),
@@ -4805,7 +4805,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 34] {
+    fn viewport_bootstrap_state(&self) -> [bool; 35] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4819,6 +4819,7 @@ impl LauncherApp {
             self.image_compare_dialog.needs_viewport_bootstrap(),
             self.duplicate_finder_dialog.needs_viewport_bootstrap(),
             self.zip_extractor_dialog.needs_viewport_bootstrap(),
+            self.folder_size_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4854,7 +4855,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 34],
+        previously_pending: [bool; 35],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -7183,13 +7184,34 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
         first_ui_pass: bool,
-        owner_transition_pending: bool,
+        _owner_transition_pending: bool,
+        jump_escape_preempted: bool,
     ) {
-        self.folder_size_dialog.show(
+        let input_allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let root_owner = root_visible
+            && input_allowed
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && self.folder_size_dialog.root_layer().is_some_and(|layer| {
+                let top = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+                (top == Some(layer)
+                    || (top.is_none() && self.folder_size_dialog.awaiting_root_focus()))
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                        focus == layer || focus.order == egui::Order::Background
+                    })
+            });
+        self.folder_size_dialog.show_hosted(
             ctx,
             root_visible,
-            !owner_transition_pending && self.native_ui_host_input_allowed(ctx, root_visible),
+            root_owner,
+            input_allowed,
             first_ui_pass,
+            self.pinned_panels.contains(&super::Panel::FolderSizeDialog),
+            !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
         );
     }
 
@@ -9228,6 +9250,7 @@ impl LauncherApp {
             self.show_image_compare(&ctx, false, first_ui_pass, false, false);
             self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
             self.show_zip_host(&ctx, false, first_ui_pass, false);
+            self.show_folder_size(&ctx, false, first_ui_pass, false, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -11078,6 +11101,7 @@ impl LauncherApp {
             self.show_image_compare(&ctx, false, first_ui_pass, false, false);
             self.show_duplicate_finder(&ctx, false, first_ui_pass, false, false);
             self.show_zip_host(&ctx, false, first_ui_pass, false);
+            self.show_folder_size(&ctx, false, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11468,6 +11492,7 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             first_ui_pass,
             owner_transition_pending,
+            jump_session_escape_preempted,
         );
         self.show_file_lock(
             &ctx,
@@ -12550,6 +12575,7 @@ impl LauncherApp {
                 super::FolderSizeDialogEffect::OpenPath(path) => {
                     effects.push(RootDialogEffect::OpenPath(path));
                 }
+                super::FolderSizeDialogEffect::ShowRoot => effects.push(RootDialogEffect::ShowRoot),
                 super::FolderSizeDialogEffect::FocusPanel => {
                     self.focus_panel(super::Panel::FolderSizeDialog);
                     if let Some(layer) =
@@ -19142,6 +19168,384 @@ mod tests {
         }
         click_duplicate_finder_host_control(&ctx, &mut app, native, "close");
         assert!(!app.duplicate_finder_dialog.open);
+    }
+
+    fn folder_size_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..16 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((rect, clip)) = app.folder_size_dialog.test_action_rect(name)
+                && rect.is_positive()
+                && clip.contains_rect(rect)
+            {
+                if previous == Some(rect) {
+                    return rect;
+                }
+                previous = Some(rect);
+            } else {
+                previous = None;
+            }
+        }
+        panic!("Folder Size control {name:?} must be visible");
+    }
+    fn click_folder_size_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        let rect = folder_size_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    #[test]
+    fn folder_size_host_preserves_scan_and_drill_through_hidden_root() {
+        use super::super::utility_host::UtilityPresentation;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::create_dir(scan_root.path().join("nested")).unwrap();
+        std::fs::write(
+            scan_root.path().join("nested").join("data.txt"),
+            b"measured folder",
+        )
+        .unwrap();
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FolderSizeDialogState::viewport();
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            0
+        );
+        click_folder_size_host_control(&ctx, &mut app, root, "recursive");
+        assert!(!app.folder_size_dialog.test_navigation_state().0);
+        click_folder_size_host_control(&ctx, &mut app, root, "recursive");
+        click_folder_size_host_control(&ctx, &mut app, root, "scan");
+        let generation = app.folder_size_dialog.session_view_for_test().generation();
+        assert_eq!(generation, 1);
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.folder_size_dialog.presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.folder_size_dialog.session_view_for_test().is_busy() {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native hidden owner must poll scan"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let result = app
+            .folder_size_dialog
+            .session_view_for_test()
+            .result()
+            .cloned()
+            .expect("scan result");
+        let row = folder_size_host_control(&ctx, &mut app, native, "row/nested");
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(row, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        let navigation = app.folder_size_dialog.test_navigation_state();
+        assert!(navigation.1.is_some());
+        assert!(navigation.2.is_some());
+        click_folder_size_host_control(&ctx, &mut app, native, "host-presentation");
+        assert_eq!(
+            app.folder_size_dialog.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            generation
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &result,
+            app.folder_size_dialog
+                .session_view_for_test()
+                .result()
+                .unwrap()
+        ));
+        assert_eq!(app.folder_size_dialog.test_navigation_state(), navigation);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.folder_size_dialog.open);
+    }
+    #[test]
+    fn folder_size_native_owner_rejects_discarded_choose_scan_copy_and_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        std::fs::write(scan_root.path().join("data.txt"), b"folder size").unwrap();
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FolderSizeDialogState::viewport();
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        for discard_child in [false, true] {
+            let rect = folder_size_host_control(&ctx, &mut app, native, "choose_folder");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.folder_size_dialog.folder_picker_calls_for_test(), 0);
+            assert!(app.folder_size_dialog.selected_root_for_test().is_none());
+        }
+        click_folder_size_host_control(&ctx, &mut app, native, "choose_folder");
+        assert_eq!(app.folder_size_dialog.folder_picker_calls_for_test(), 1);
+        for discard_child in [false, true] {
+            let rect = folder_size_host_control(&ctx, &mut app, native, "scan");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(
+                app.folder_size_dialog.session_view_for_test().generation(),
+                0
+            );
+        }
+        click_folder_size_host_control(&ctx, &mut app, native, "scan");
+        assert_eq!(
+            app.folder_size_dialog.session_view_for_test().generation(),
+            1
+        );
+        for discard_child in [false, true] {
+            let rect = folder_size_host_control(&ctx, &mut app, native, "copy");
+            let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        click_folder_size_host_control(&ctx, &mut app, native, "copy");
+        assert!(matches!(
+            LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),
+            [RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::FolderSize,
+                ..
+            }]
+        ));
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.folder_size_dialog.open);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.folder_size_dialog.open);
+    }
+
+    #[test]
+    fn folder_size_native_label_copy_waits_for_both_viewport_receipts() {
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let scan_root = crate::folder_size::disposable_scan_fixture_root();
+        open_folder_size_through_plugin(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::FolderSizeDialogState::viewport();
+        app.folder_size_dialog
+            .set_folder_choice_for_test(Some(scan_root.path().to_path_buf()));
+        click_folder_size_host_control(&ctx, &mut app, root, "choose_folder");
+        click_folder_size_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let label = folder_size_host_control(&ctx, &mut app, native, "root-label");
+        let start = egui::pos2(label.left() + 5.0, label.center().y);
+        let end = egui::pos2(label.right() - 5.0, label.center().y);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerMoved(end)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(),[RootDialogEffect::CopyText { owner:DialogCopyOwner::FolderSize,text }] if !text.is_empty())
+        );
     }
 
     fn image_compare_host_control(
