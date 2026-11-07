@@ -5,6 +5,7 @@
 
 mod document;
 mod examples;
+mod inspector;
 mod integer;
 mod operators;
 mod persistence;
@@ -19,6 +20,10 @@ pub use document::{
     MAX_NAME_BYTES, MAX_SOURCE_LINES,
 };
 pub(crate) use examples::{CalculationExampleGroup, EXAMPLE_GROUPS};
+pub use inspector::{
+    DocumentIncarnation, InspectorAnnotation, InspectorError, InspectorFormatOptions,
+    InspectorInsertRequest, InspectorSourceOrigin, InspectorSourceSnapshot, ProgrammerInspector,
+};
 pub use integer::{IntegerError, IntegerMode, IntegerSignedness, IntegerWidth, TypedInteger};
 pub use programmer::ProgrammerError;
 pub use quantity::{CalculatedQuantity, QuantityError};
@@ -30,6 +35,6 @@ pub use persistence::{
     PadRecoveryWriter, PadStoreError,
 };
 pub use session::{
-    CalculationPadSession, PendingTransition, SessionError, SessionEvaluation, SessionLineResult,
-    TransitionDecision, TransitionOutcome,
+    CalculationPadSession, InspectorInsertError, PendingTransition, SessionError,
+    SessionEvaluation, SessionLineResult, TransitionDecision, TransitionOutcome,
 };

@@ -1,13 +1,17 @@
 //! Editable Calculation Pad session with bounded history and dirty handling.
 
 use super::document::{
-    CalculationDocument, DocumentDiagnostic, EditError, LineOutcome, MAX_DOCUMENT_BYTES,
-    MAX_SOURCE_LINES,
+    CalculationDocument, CalculationValue, DocumentDiagnostic, EditError, LineOutcome,
+    MAX_DOCUMENT_BYTES, MAX_SOURCE_LINES,
+};
+use super::inspector::{
+    DocumentIncarnation, InspectorInsertRequest, InspectorSourceOrigin, InspectorSourceSnapshot,
 };
 use super::persistence::{
     DocumentId, LineId, LoadedDocument, PadDocumentStore, PadDocumentSummary, PadStoreError,
     StoredDocument,
 };
+use super::{IntegerMode, IntegerWidth, TypedInteger};
 use crate::platform::app_data::AppDataRoot;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -30,6 +34,14 @@ pub struct SessionEvaluation {
     pub revision: u64,
     pub lines: Vec<SessionLineResult>,
     pub diagnostic: Option<DocumentDiagnostic>,
+}
+
+#[derive(Debug)]
+pub enum InspectorInsertError {
+    PendingTransition,
+    StaleSource,
+    InvalidTarget,
+    Edit(SessionError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +219,7 @@ struct DocumentBaseline {
 
 struct ActiveDocument {
     id: DocumentId,
+    incarnation: DocumentIncarnation,
     name: Option<String>,
     source: String,
     line_ids: Vec<LineId>,
@@ -223,6 +236,7 @@ impl ActiveDocument {
         let id = DocumentId::fresh();
         let mut document = Self {
             id,
+            incarnation: DocumentIncarnation(DocumentId::fresh()),
             name: None,
             source: String::new(),
             line_ids: vec![LineId(1)],
@@ -253,6 +267,7 @@ impl ActiveDocument {
         let saved_next_line_id = stored.next_line_id;
         let mut document = Self {
             id: stored.id,
+            incarnation: DocumentIncarnation(DocumentId::fresh()),
             name: Some(stored.name),
             source: stored.source,
             line_ids: stored.line_ids,
@@ -396,6 +411,69 @@ impl CalculationPadSession {
 
     pub fn pending_transition(&self) -> Option<PendingTransition> {
         self.pending.as_ref().map(PendingAction::public_kind)
+    }
+
+    /// Resolve only an already-current cached result; never evaluate as an observation.
+    pub fn inspector_source(&self, line_id: LineId) -> Option<InspectorSourceSnapshot> {
+        let current = self.current.as_ref()?;
+        let evaluation = current.cached_evaluation.as_ref()?;
+        if evaluation.revision != current.revision {
+            return None;
+        }
+        let line = evaluation.lines.iter().find(|line| line.id == line_id)?;
+        let (value, origin) = match &line.outcome {
+            LineOutcome::Value(CalculationValue::Integer(value)) => {
+                (*value, InspectorSourceOrigin::TypedInteger)
+            }
+            LineOutcome::Value(CalculationValue::ExactBase { value, .. }) => {
+                let width = if *value <= u64::MAX as u128 {
+                    IntegerWidth::Bits64
+                } else {
+                    IntegerWidth::Bits128
+                };
+                (
+                    TypedInteger::from_unsigned(*value, IntegerMode::unsigned(width)).ok()?,
+                    InspectorSourceOrigin::LegacyExactBase,
+                )
+            }
+            _ => return None,
+        };
+        Some(InspectorSourceSnapshot {
+            incarnation: current.incarnation,
+            document_id: current.id,
+            revision: current.revision,
+            line_id,
+            source_range: line.source_range.clone(),
+            source_text: current.source.get(line.source_range.clone())?.to_owned(),
+            value,
+            origin,
+        })
+    }
+
+    /// Apply one canonical replacement only while its original source binding remains current.
+    pub fn apply_inspector_insert(
+        &mut self,
+        request: InspectorInsertRequest,
+    ) -> Result<bool, InspectorInsertError> {
+        if self.pending.is_some() {
+            return Err(InspectorInsertError::PendingTransition);
+        }
+        if self.inspector_source(request.source.line_id).as_ref() != Some(&request.source) {
+            return Err(InspectorInsertError::StaleSource);
+        }
+        let current = self
+            .current
+            .as_ref()
+            .ok_or(InspectorInsertError::StaleSource)?;
+        if request.target.start > request.target.end
+            || current.source.get(request.target.clone()).is_none()
+        {
+            return Err(InspectorInsertError::InvalidTarget);
+        }
+        let mut replacement = current.source.clone();
+        replacement.replace_range(request.target, &request.expression);
+        self.replace_source(replacement)
+            .map_err(InspectorInsertError::Edit)
     }
 
     pub fn list_saved_documents(&self) -> Result<Vec<PadDocumentSummary>, SessionError> {
@@ -942,6 +1020,220 @@ mod tests {
     };
     use crate::platform::app_data::AppDataRoot;
     use std::path::PathBuf;
+
+    #[test]
+    fn inspector_observes_exact_values_and_preserves_dirty_binding() {
+        use crate::calculation_pad::{InspectorSourceOrigin, ProgrammerInspector};
+        let (_dir, _root, mut session) = fixture();
+        session
+            .replace_source("123 >> 12\n9007199254740993 dec to hex\n340282366920938463463374607431768211455 dec to hex")
+            .unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        assert!(session.inspector_source(ids[0]).is_none());
+        session.evaluation();
+        let mut inspector = ProgrammerInspector::default();
+        inspector.observe(session.inspector_source(ids[0]));
+        assert_eq!(inspector.value().formatted_decimal(), "0");
+        inspector.toggle_bit(0).unwrap();
+        inspector.observe(session.inspector_source(ids[1]));
+        assert_eq!(inspector.adopted().unwrap().line_id, ids[0]);
+        assert_eq!(
+            inspector.candidate().unwrap().origin,
+            InspectorSourceOrigin::LegacyExactBase
+        );
+        inspector.refresh().unwrap();
+        assert_eq!(inspector.value().formatted_decimal(), "9007199254740993");
+        inspector.observe(session.inspector_source(ids[2]));
+        assert_eq!(inspector.value().formatted_decimal(), u128::MAX.to_string());
+        assert_eq!(inspector.value().mode().type_name(), "u128");
+        assert_eq!(session.evaluation_count(), 1);
+    }
+
+    #[test]
+    fn inspector_insert_checks_binding_and_is_one_undo_step() {
+        use crate::calculation_pad::{InspectorInsertError, ProgrammerInspector};
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("i8(-1)\nα").unwrap();
+        session.save_as("inspector edit atomicity").unwrap();
+        assert!(!session.is_dirty());
+        let id = session.line_id(0).unwrap();
+        session.evaluation();
+        let mut inspector = ProgrammerInspector::default();
+        inspector.observe(session.inspector_source(id));
+        let fingerprint = |session: &CalculationPadSession| {
+            (
+                session.source().map(str::to_owned),
+                session.line_ids().map(<[LineId]>::to_vec),
+                session.revision(),
+                session.is_dirty(),
+                session.history.undo.len(),
+                session.history.redo.len(),
+                session.cached_evaluation_revision(),
+                session.evaluation_count(),
+                session
+                    .current
+                    .as_ref()
+                    .and_then(|document| document.cached_evaluation.clone()),
+            )
+        };
+        let unchanged = fingerprint(&session);
+        let no_op = inspector.insert_request(0..6).unwrap();
+        assert!(!session.apply_inspector_insert(no_op).unwrap());
+        assert_eq!(fingerprint(&session), unchanged);
+        inspector.toggle_bit(0).unwrap();
+        let bad = inspector.insert_request(8..9).unwrap();
+        let before = session.source().unwrap().to_owned();
+        assert!(matches!(
+            session.apply_inspector_insert(bad),
+            Err(InspectorInsertError::InvalidTarget)
+        ));
+        assert_eq!(session.source(), Some(before.as_str()));
+        assert_eq!(fingerprint(&session), unchanged);
+        let undo_entries = session.history.undo.len();
+        let stale = inspector.insert_request(0..6).unwrap();
+        let request = inspector.insert_request(0..6).unwrap();
+        assert!(session.apply_inspector_insert(request).unwrap());
+        assert_eq!(session.history.undo.len(), undo_entries + 1);
+        assert_eq!(session.source(), Some("i8(-2)\nα"));
+        assert!(session.undo());
+        assert_eq!(session.source(), Some(before.as_str()));
+        assert!(session.redo());
+        assert_eq!(session.source(), Some("i8(-2)\nα"));
+        assert!(matches!(
+            session.apply_inspector_insert(stale),
+            Err(InspectorInsertError::StaleSource)
+        ));
+    }
+
+    #[test]
+    fn inspector_rejects_pending_and_reopened_document_identity() {
+        use crate::calculation_pad::{InspectorInsertError, ProgrammerInspector};
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("u64(7)").unwrap();
+        session.save_as("inspector reopen").unwrap();
+        let id = session.current_id().unwrap();
+        assert_eq!(
+            session.request_open(id).unwrap(),
+            TransitionOutcome::Applied
+        );
+        let line = session.line_id(0).unwrap();
+        session.evaluation();
+        let mut inspector = ProgrammerInspector::default();
+        inspector.observe(session.inspector_source(line));
+        let original = inspector.adopted().unwrap().clone();
+        let request = inspector.insert_request(0..6).unwrap();
+        session.replace_source("u64(8)").unwrap();
+        assert_eq!(
+            session.request_open(id).unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert!(matches!(
+            session.apply_inspector_insert(request.clone()),
+            Err(InspectorInsertError::PendingTransition)
+        ));
+        assert_eq!(session.source(), Some("u64(8)"));
+        session
+            .resolve_pending(TransitionDecision::Discard)
+            .unwrap();
+        session.evaluation();
+        let reopened = session.inspector_source(line).unwrap();
+        assert_eq!(original.document_id, reopened.document_id);
+        assert_eq!(original.revision, 0);
+        assert_eq!(original.revision, reopened.revision);
+        assert_ne!(original.incarnation, reopened.incarnation);
+        let mut colliding_saved_binding = reopened.clone();
+        colliding_saved_binding.incarnation = original.incarnation;
+        assert_eq!(original, colliding_saved_binding);
+        assert!(matches!(
+            session.apply_inspector_insert(request),
+            Err(InspectorInsertError::StaleSource)
+        ));
+    }
+
+    #[test]
+    fn inspector_refresh_and_canonical_roundtrip_preserve_pad_until_insert() {
+        use crate::calculation_pad::{
+            IntegerMode, IntegerWidth, ProgrammerInspector, TypedInteger,
+        };
+        let (_dir, _root, mut session) = fixture();
+        session
+            .replace_source("u64(9007199254740993)\nu8(1)")
+            .unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        session.evaluation();
+        let revision = session.revision();
+        let history = session.can_undo();
+        let mut inspector = ProgrammerInspector::default();
+        inspector.observe(session.inspector_source(ids[0]));
+        inspector.toggle_bit(0).unwrap();
+        inspector.toggle_bit(0).unwrap();
+        assert!(!inspector.numeric_dirty());
+        inspector.set_annotation(0..1, "flag".into()).unwrap();
+        inspector.observe(session.inspector_source(ids[1]));
+        assert_eq!(inspector.adopted().unwrap().line_id, ids[0]);
+        inspector.observe(None);
+        assert!(inspector.refresh().is_err());
+        assert_eq!(inspector.adopted().unwrap().line_id, ids[0]);
+        inspector.observe(session.inspector_source(ids[1]));
+        inspector.refresh().unwrap();
+        assert_eq!(inspector.adopted().unwrap().line_id, ids[1]);
+        assert_eq!(inspector.annotations()[0].label, "flag");
+        assert_eq!(session.revision(), revision);
+        assert_eq!(session.evaluation_count(), 1);
+        assert_eq!(session.can_undo(), history);
+        for value in [
+            TypedInteger::from_signed(-1, IntegerMode::signed(IntegerWidth::Bits8)).unwrap(),
+            TypedInteger::from_signed(i128::MIN, IntegerMode::signed(IntegerWidth::Bits128))
+                .unwrap(),
+            TypedInteger::from_unsigned(
+                9_007_199_254_740_993,
+                IntegerMode::unsigned(IntegerWidth::Bits64),
+            )
+            .unwrap(),
+            TypedInteger::from_unsigned(u128::MAX, IntegerMode::unsigned(IntegerWidth::Bits128))
+                .unwrap(),
+        ] {
+            inspector.set_value(value);
+            let expression = inspector.canonical_expression();
+            let document = crate::calculation_pad::CalculationDocument::new(expression);
+            assert!(
+                matches!(&document.evaluate().lines[0].outcome, LineOutcome::Value(CalculationValue::Integer(actual)) if *actual == value)
+            );
+        }
+    }
+
+    #[test]
+    fn inspector_dirty_work_survives_changed_or_missing_candidate() {
+        use crate::calculation_pad::ProgrammerInspector;
+        let (_dir, _root, mut session) = fixture();
+        session.replace_source("x = u8(1)\nx + 1").unwrap();
+        let ids = session.line_ids().unwrap().to_vec();
+        session.evaluation();
+        let mut inspector = ProgrammerInspector::default();
+        inspector.observe(session.inspector_source(ids[1]));
+        let adopted = inspector.adopted().unwrap().clone();
+        inspector.toggle_bit(0).unwrap();
+        let working = inspector.value();
+        session.replace_line(ids[0], "x = u8(2)").unwrap();
+        assert!(session.inspector_source(ids[1]).is_none());
+        session.evaluation();
+        inspector.observe(session.inspector_source(ids[1]));
+        assert_eq!(inspector.adopted(), Some(&adopted));
+        assert_eq!(inspector.value(), working);
+        assert_ne!(inspector.candidate(), inspector.adopted());
+        session.replace_line(ids[1], "1.5").unwrap();
+        session.evaluation();
+        inspector.observe(session.inspector_source(ids[1]));
+        assert!(inspector.candidate().is_none());
+        assert!(inspector.refresh().is_err());
+        assert_eq!(inspector.value(), working);
+        assert_eq!(inspector.adopted(), Some(&adopted));
+        session.replace_source("u8(0)").unwrap();
+        session.evaluation();
+        inspector.observe(session.inspector_source(ids[1]));
+        assert!(inspector.candidate().is_none());
+        assert_eq!(inspector.adopted(), Some(&adopted));
+    }
 
     fn fixture() -> (tempfile::TempDir, AppDataRoot, CalculationPadSession) {
         let directory = tempfile::tempdir().unwrap();
