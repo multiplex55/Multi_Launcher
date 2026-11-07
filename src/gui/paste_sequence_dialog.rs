@@ -266,6 +266,7 @@ struct SourcePickerIdentity {
     source_index: usize,
 }
 
+#[derive(Clone)]
 struct SourcePickerState {
     kind: SourcePickerKind,
     generation: u64,
@@ -284,8 +285,67 @@ struct TestPickerSourceRefresh {
     history: Option<Result<Vec<String>, String>>,
 }
 
+pub(crate) struct PasteSequenceHostRuntime {
+    status: crate::paste_sequence::SequencePlaybackStatus,
+    progress: Option<(usize, usize)>,
+    preview: Option<PreparedSequencePreview>,
+    started: bool,
+    escape_cancel: bool,
+    shortcut_summary: String,
+}
+impl PasteSequenceHostRuntime {
+    pub(crate) fn capture(app: &super::LauncherApp) -> Self {
+        Self {
+            status: app.sequence_playback.status(),
+            progress: app.sequence_playback.current_step_number(),
+            preview: app.sequence_playback.prepared_preview(),
+            started: app.sequence_playback.started_run().is_some(),
+            escape_cancel: app.sequence_playback.escape_cancel_available(),
+            shortcut_summary: app.paste_sequence_shortcut_summary(),
+        }
+    }
+}
+#[derive(Clone)]
+enum PasteSequenceHostEffect {
+    Settings,
+    Prepare {
+        autostart: bool,
+        run_once: bool,
+    },
+    Save,
+    Remove(SequenceId),
+    Start,
+    Next,
+    CancelRun,
+    CancelEditor,
+    Close,
+    ClosePicker,
+    Insert {
+        kind: SourcePickerKind,
+        identity: SourcePickerIdentity,
+    },
+    CopyText(String),
+}
+#[derive(Default)]
+pub(super) struct PasteSequenceHostActions {
+    effects: Vec<PasteSequenceHostEffect>,
+    pub(super) host_request: Option<super::utility_host::UtilityPresentation>,
+    pub(super) close: bool,
+    session_epoch: u64,
+    draft_identity: Option<(SequenceDraft, String)>,
+    #[cfg(test)]
+    pub(super) host_button: Option<(egui::Rect, egui::Rect, bool)>,
+}
+impl PasteSequenceHostActions {
+    pub(crate) fn needs_completion(&self) -> bool {
+        self.close || !self.effects.is_empty()
+    }
+}
+
 pub(crate) struct PasteSequenceDialog {
     suspended_for_playback: bool,
+    host_session_epoch: u64,
+    hosted_actions: Option<Vec<PasteSequenceHostEffect>>,
     pub(crate) open: bool,
     #[cfg(test)]
     layout: DialogLayout,
@@ -328,10 +388,67 @@ pub(crate) struct PasteSequenceDialogQaObservation {
     pub(crate) remove_confirmation_open: bool,
 }
 
+/// Reversible interaction state; context, workers and receivers stay in the owner.
+#[derive(Clone)]
+pub(crate) struct PasteSequenceInteractionCheckpoint {
+    session_epoch: u64,
+    source_generation: u64,
+    draft: SequenceDraft,
+    selected_id: Option<SequenceId>,
+    pending_directory_reveal: Option<SequenceId>,
+    selected_step: Option<usize>,
+    reveal_step: Option<usize>,
+    remove_confirmation: Option<SequenceId>,
+    source_picker: Option<SourcePickerState>,
+    source_picker_scope_to_retire: Option<(SourcePickerKind, u64)>,
+    hotkey_text: String,
+    inline_error: Option<String>,
+    status: Option<String>,
+}
+impl PasteSequenceInteractionCheckpoint {
+    pub(crate) fn capture(dialog: &PasteSequenceDialog) -> Self {
+        Self {
+            session_epoch: dialog.host_session_epoch,
+            source_generation: dialog.source_generation,
+            draft: dialog.draft.clone(),
+            selected_id: dialog.selected_id,
+            pending_directory_reveal: dialog.pending_directory_reveal,
+            selected_step: dialog.selected_step,
+            reveal_step: dialog.reveal_step,
+            remove_confirmation: dialog.remove_confirmation,
+            source_picker: dialog.source_picker.clone(),
+            source_picker_scope_to_retire: dialog.source_picker_scope_to_retire,
+            hotkey_text: dialog.hotkey_text.clone(),
+            inline_error: dialog.inline_error.clone(),
+            status: dialog.status.clone(),
+        }
+    }
+    pub(crate) fn restore(self, dialog: &mut PasteSequenceDialog) {
+        if dialog.host_session_epoch != self.session_epoch {
+            return;
+        }
+        dialog.draft = self.draft;
+        dialog.selected_id = self.selected_id;
+        dialog.pending_directory_reveal = self.pending_directory_reveal;
+        dialog.selected_step = self.selected_step;
+        dialog.reveal_step = self.reveal_step;
+        dialog.remove_confirmation = self.remove_confirmation;
+        if dialog.source_generation == self.source_generation {
+            dialog.source_picker = self.source_picker;
+            dialog.source_picker_scope_to_retire = self.source_picker_scope_to_retire;
+        }
+        dialog.hotkey_text = self.hotkey_text;
+        dialog.inline_error = self.inline_error;
+        dialog.status = self.status;
+    }
+}
+
 impl Default for PasteSequenceDialog {
     fn default() -> Self {
         Self {
             suspended_for_playback: false,
+            host_session_epoch: 0,
+            hosted_actions: None,
             open: false,
             #[cfg(test)]
             layout: DialogLayout::default(),
@@ -436,6 +553,7 @@ impl PasteSequenceDialog {
     }
 
     fn begin_session(&mut self) {
+        self.host_session_epoch = self.host_session_epoch.wrapping_add(1).max(1);
         let store_error = match SequenceStore::new(&self.store_path).load() {
             Ok(snapshot) => {
                 self.snapshot = Some(snapshot);
@@ -456,7 +574,8 @@ impl PasteSequenceDialog {
         self.hotkey_text.clear();
         self.inline_error = store_error;
         self.status = None;
-        self.autostart_when_ready = false;
+        // A preflight promoted from a closed detached editor can still own
+        // this one-shot. Closing/canceling the run is what clears it.
         self.hotkey_update = None;
         self.saved_run = None;
         self.open = true;
@@ -638,6 +757,80 @@ impl PasteSequenceDialog {
             return;
         }
         self.poll_hotkey_update(ctx);
+        let runtime = PasteSequenceHostRuntime::capture(app);
+        let actions = self.render_inner(ctx, &runtime, jump_scope, true, true, false, None, None);
+        self.complete_host_actions(ctx, app, actions);
+    }
+
+    pub(crate) fn host_session_epoch(&self) -> u64 {
+        self.host_session_epoch
+    }
+    pub(crate) fn is_suspended_for_playback(&self) -> bool {
+        self.suspended_for_playback
+    }
+    pub(crate) fn poll_host_background(&mut self, ctx: &egui::Context) -> bool {
+        let pending = self.hotkey_update.is_some();
+        self.poll_hotkey_update(ctx);
+        pending && self.hotkey_update.is_none()
+    }
+
+    pub(super) fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &PasteSequenceHostRuntime,
+        jump_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        owner_current: bool,
+        first: bool,
+        pinned: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: super::utility_host::UtilityPresentation,
+    ) -> PasteSequenceHostActions {
+        self.render_inner(
+            ctx,
+            runtime,
+            jump_scope,
+            owner_current,
+            first,
+            pinned,
+            child_ui,
+            Some(presentation),
+        )
+    }
+
+    fn render_inner(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &PasteSequenceHostRuntime,
+        jump_scope: Option<crate::gui::jump_mode::ui::JumpModeScope>,
+        owner_current: bool,
+        first: bool,
+        pinned: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> PasteSequenceHostActions {
+        let mut actions = PasteSequenceHostActions {
+            session_epoch: self.host_session_epoch,
+            ..Default::default()
+        };
+        if !self.open {
+            return actions;
+        }
+        self.hosted_actions = Some(Vec::new());
+        if presentation.is_some()
+            && owner_current
+            && first
+            && self.source_picker.is_some()
+            && self.remove_confirmation.is_none()
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            if let Some(effects) = &mut self.hosted_actions {
+                effects.push(PasteSequenceHostEffect::ClosePicker);
+            }
+        }
+        let copy_start = presentation
+            .is_some()
+            .then(|| ctx.output(|output| output.commands.len()));
         let mut jump_visual_order = 0;
         let initial_confirmation_id = self.remove_confirmation;
         let initial_picker_identity = self
@@ -652,180 +845,221 @@ impl PasteSequenceDialog {
         let initial_confirmation_scope = self.current_confirmation_jump_scope(jump_scope.as_ref());
         let mut body_dialog_scope_for_footer = None;
         let mut window_open = self.open;
-        let window = egui::Window::new("Paste Sequences")
-            .default_size((760.0, 640.0))
-            .min_width(520.0)
-            .min_height(420.0)
-            .resizable(true)
-            .show_utility(
-                ctx,
-                "paste-sequences",
-                egui::Id::new("Paste Sequences"),
-                Some(&mut window_open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::from((760.0, 640.0)),
-                    ),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                )
-                .with_minimum(egui::vec2(520.0, 420.0)),
-                |ui| {
-                    // Reserve two action rows and the run status before the body requests space.
-                    // A list-only cap cannot bound the sum of controls, preview and saved rows.
-                    let row_height = ui
-                        .spacing()
-                        .interact_size
-                        .y
-                        .max(ui.text_style_height(&egui::TextStyle::Body));
-                    let footer_height = row_height * 3.0 + ui.spacing().item_spacing.y * 4.0;
-                    let body_height = (ui.available_height() - footer_height).max(0.0);
-                    let step_height = (body_height * 0.6).min(260.0);
+        let mut draw_body = |ui: &mut egui::Ui| {
+            let allowed = owner_current && first && ui.is_visible() && !ui.is_sizing_pass();
+            ui.add_enabled_ui(allowed, |ui| {
+                if let Some(current) = presentation {
+                    let (response, requested) =
+                        super::utility_host::presentation_button(ui, current, allowed);
+                    let host_scope = if self.source_picker.is_none() {
+                        initial_dialog_scope.as_ref()
+                    } else {
+                        None
+                    };
+                    register_paste_sequence_jump_target(
+                        host_scope,
+                        ui,
+                        &response,
+                        "host",
+                        if current == super::utility_host::UtilityPresentation::Docked {
+                            "Pop Out"
+                        } else {
+                            "Dock"
+                        },
+                        crate::gui::jump_mode::TargetKind::Button,
+                        &mut jump_visual_order,
+                    );
                     #[cfg(test)]
-                    let mut body_content_origin_y = None;
-                    let body = egui::ScrollArea::vertical()
-                        .id_salt("paste_sequence_body")
-                        .min_scrolled_height(0.0)
-                        .max_height(body_height)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            #[cfg(test)]
-                            {
-                                body_content_origin_y = Some(ui.cursor().min.y);
+                    {
+                        actions.host_button =
+                            Some((response.rect, ui.clip_rect(), response.enabled()));
+                    }
+                    if response.clicked() && allowed && !ctx.will_discard() {
+                        actions.host_request = Some(requested);
+                    }
+                }
+                // Reserve two action rows and the run status before the body requests space.
+                // A list-only cap cannot bound the sum of controls, preview and saved rows.
+                let row_height = ui
+                    .spacing()
+                    .interact_size
+                    .y
+                    .max(ui.text_style_height(&egui::TextStyle::Body));
+                let footer_height = row_height * 3.0 + ui.spacing().item_spacing.y * 4.0;
+                let body_height = (ui.available_height() - footer_height).max(0.0);
+                let step_height = (body_height * 0.6).min(260.0);
+                #[cfg(test)]
+                let mut body_content_origin_y = None;
+                let body = egui::ScrollArea::vertical()
+                    .id_salt("paste_sequence_body")
+                    .min_scrolled_height(0.0)
+                    .max_height(body_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        #[cfg(test)]
+                        {
+                            body_content_origin_y = Some(ui.cursor().min.y);
+                        }
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Saved sequences");
+                            let playback_settings = ui
+                                .button("Playback Settings")
+                                .on_hover_text(&runtime.shortcut_summary);
+                            register_paste_sequence_jump_target(
+                                initial_dialog_scope.as_ref(),
+                                ui,
+                                &playback_settings,
+                                "playback-settings",
+                                "Playback Settings",
+                                crate::gui::jump_mode::TargetKind::Button,
+                                &mut jump_visual_order,
+                            );
+                            if playback_settings.clicked() {
+                                if let Some(effects) = &mut self.hosted_actions {
+                                    effects.push(PasteSequenceHostEffect::Settings);
+                                }
                             }
-                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Saved sequences");
-                                let playback_settings = ui
-                                    .button("Playback Settings")
-                                    .on_hover_text(app.paste_sequence_shortcut_summary());
-                                register_paste_sequence_jump_target(
-                                    initial_dialog_scope.as_ref(),
-                                    ui,
-                                    &playback_settings,
-                                    "playback-settings",
-                                    "Playback Settings",
-                                    crate::gui::jump_mode::TargetKind::Button,
-                                    &mut jump_visual_order,
-                                );
-                                if playback_settings.clicked() {
-                                    app.open_paste_sequence_settings_dialog();
-                                }
-                                let new_sequence = ui.button("New");
-                                register_paste_sequence_jump_target(
-                                    initial_dialog_scope.as_ref(),
-                                    ui,
-                                    &new_sequence,
-                                    "new-sequence",
-                                    "New",
-                                    crate::gui::jump_mode::TargetKind::Button,
-                                    &mut jump_visual_order,
-                                );
-                                if new_sequence.clicked() {
-                                    self.selected_id = None;
-                                    self.selected_step = None;
-                                    self.reveal_step = None;
-                                    self.remove_confirmation = None;
-                                    self.draft = SequenceDraft::new("New sequence", Vec::new());
-                                    self.hotkey_text.clear();
-                                    self.inline_error = None;
-                                }
-                                let remove_saved = ui.add_enabled(
-                                    self.selected_id.is_some() && self.hotkey_update.is_none(),
-                                    egui::Button::new("Remove Saved"),
-                                );
-                                register_paste_sequence_jump_target(
-                                    initial_dialog_scope.as_ref(),
-                                    ui,
-                                    &remove_saved,
-                                    "remove-saved",
-                                    "Remove Saved",
-                                    crate::gui::jump_mode::TargetKind::Button,
-                                    &mut jump_visual_order,
-                                );
-                                if remove_saved.clicked() {
-                                    self.remove_confirmation = self.selected_id;
-                                }
-                            });
-                            // The header may have opened or closed the inline
-                            // confirmation. Select scopes from the live state so
-                            // the remainder of this same UI pass belongs only to
-                            // its actual foreground surface.
-                            let dialog_scope = self.current_dialog_jump_scope(jump_scope.as_ref());
-                            let picker_blocks_parent_targets =
-                                retired_picker_identity.is_some() || self.source_picker.is_some();
-                            let content_scope = (!picker_blocks_parent_targets)
-                                .then_some(dialog_scope.as_ref())
-                                .flatten();
-                            body_dialog_scope_for_footer = if picker_blocks_parent_targets {
-                                None
-                            } else {
-                                dialog_scope.clone()
-                            };
-                            let confirmation_scope =
-                                self.current_confirmation_jump_scope(jump_scope.as_ref());
-                            self.saved_sequence_list(ui, content_scope, &mut jump_visual_order);
-                            self.saved_sequence_remove_confirmation(
+                            let new_sequence = ui.button("New");
+                            register_paste_sequence_jump_target(
+                                initial_dialog_scope.as_ref(),
                                 ui,
-                                ctx,
-                                app,
-                                (!picker_blocks_parent_targets)
-                                    .then_some(confirmation_scope.as_ref())
-                                    .flatten(),
+                                &new_sequence,
+                                "new-sequence",
+                                "New",
+                                crate::gui::jump_mode::TargetKind::Button,
                                 &mut jump_visual_order,
                             );
-                            ui.separator();
-                            self.editor(
+                            if new_sequence.clicked() {
+                                self.selected_id = None;
+                                self.selected_step = None;
+                                self.reveal_step = None;
+                                self.remove_confirmation = None;
+                                self.draft = SequenceDraft::new("New sequence", Vec::new());
+                                self.hotkey_text.clear();
+                                self.inline_error = None;
+                            }
+                            let remove_saved = ui.add_enabled(
+                                self.selected_id.is_some() && self.hotkey_update.is_none(),
+                                egui::Button::new("Remove Saved"),
+                            );
+                            register_paste_sequence_jump_target(
+                                initial_dialog_scope.as_ref(),
                                 ui,
-                                app,
-                                step_height,
-                                dialog_scope.as_ref(),
+                                &remove_saved,
+                                "remove-saved",
+                                "Remove Saved",
+                                crate::gui::jump_mode::TargetKind::Button,
                                 &mut jump_visual_order,
                             );
-                            if picker_blocks_parent_targets || self.source_picker.is_some() {
-                                if let Some(scope) = dialog_scope.as_ref() {
-                                    scope.discard_registered_targets();
-                                }
-                                body_dialog_scope_for_footer = None;
+                            if remove_saved.clicked() {
+                                self.remove_confirmation = self.selected_id;
                             }
                         });
-                    #[cfg(test)]
-                    {
-                        self.layout.body = body.inner_rect;
-                        self.layout.body_content = body.content_size;
-                        self.layout.body_id = Some(body.id);
-                        self.layout.body_offset = body.state.offset.y;
-                        self.layout.body_painted_offset = body.inner_rect.top()
-                            - body_content_origin_y.unwrap_or(body.inner_rect.top());
-                    }
-                    #[cfg(not(test))]
-                    let _ = body;
-                    ui.separator();
-                    let footer = ui.scope(|ui| {
-                        self.editor_footer(
+                        // The header may have opened or closed the inline
+                        // confirmation. Select scopes from the live state so
+                        // the remainder of this same UI pass belongs only to
+                        // its actual foreground surface.
+                        let dialog_scope = self.current_dialog_jump_scope(jump_scope.as_ref());
+                        let picker_blocks_parent_targets =
+                            retired_picker_identity.is_some() || self.source_picker.is_some();
+                        let content_scope = (!picker_blocks_parent_targets)
+                            .then_some(dialog_scope.as_ref())
+                            .flatten();
+                        body_dialog_scope_for_footer = if picker_blocks_parent_targets {
+                            None
+                        } else {
+                            dialog_scope.clone()
+                        };
+                        let confirmation_scope =
+                            self.current_confirmation_jump_scope(jump_scope.as_ref());
+                        self.saved_sequence_list(ui, content_scope, &mut jump_visual_order);
+                        self.saved_sequence_remove_confirmation(
                             ui,
-                            ctx,
-                            app,
-                            body_dialog_scope_for_footer.as_ref(),
+                            (!picker_blocks_parent_targets)
+                                .then_some(confirmation_scope.as_ref())
+                                .flatten(),
                             &mut jump_visual_order,
-                        )
+                        );
+                        ui.separator();
+                        self.editor(
+                            ui,
+                            runtime,
+                            step_height,
+                            dialog_scope.as_ref(),
+                            &mut jump_visual_order,
+                        );
+                        if picker_blocks_parent_targets || self.source_picker.is_some() {
+                            if let Some(scope) = dialog_scope.as_ref() {
+                                scope.discard_registered_targets();
+                            }
+                            body_dialog_scope_for_footer = None;
+                        }
                     });
-                    #[cfg(test)]
-                    {
-                        self.layout.footer = footer.response.rect;
-                    }
-                    #[cfg(not(test))]
-                    let _ = footer;
-                },
-            );
+                #[cfg(test)]
+                {
+                    self.layout.body = body.inner_rect;
+                    self.layout.body_content = body.content_size;
+                    self.layout.body_id = Some(body.id);
+                    self.layout.body_offset = body.state.offset.y;
+                    self.layout.body_painted_offset = body.inner_rect.top()
+                        - body_content_origin_y.unwrap_or(body.inner_rect.top());
+                }
+                #[cfg(not(test))]
+                let _ = body;
+                ui.separator();
+                let footer = ui.scope(|ui| {
+                    self.editor_footer(
+                        ui,
+                        runtime,
+                        pinned,
+                        body_dialog_scope_for_footer.as_ref(),
+                        &mut jump_visual_order,
+                    )
+                });
+                #[cfg(test)]
+                {
+                    self.layout.footer = footer.response.rect;
+                }
+                #[cfg(not(test))]
+                let _ = footer;
+            });
+        };
+        let window = if let Some(ui) = child_ui {
+            draw_body(ui);
+            None
+        } else {
+            egui::Window::new("Paste Sequences")
+                .default_size((760.0, 640.0))
+                .min_width(520.0)
+                .min_height(420.0)
+                .resizable(true)
+                .show_utility(
+                    ctx,
+                    "paste-sequences",
+                    egui::Id::new("Paste Sequences"),
+                    Some(&mut window_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::Vec2::from((760.0, 640.0)),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    )
+                    .with_minimum(egui::vec2(520.0, 420.0)),
+                    draw_body,
+                )
+        };
         #[cfg(test)]
         if let Some(window) = &window {
             self.layout.window = window.response.rect;
         }
         #[cfg(not(test))]
         let _ = window;
-        if self.open && !window_open {
-            self.close_from_window(app);
+        if self.open && !window_open && owner_current && first && !pinned {
+            if let Some(effects) = &mut self.hosted_actions {
+                effects.push(PasteSequenceHostEffect::Close);
+            }
         }
         if initial_confirmation_id.is_some()
             && self.remove_confirmation.is_none()
@@ -846,6 +1080,141 @@ impl PasteSequenceDialog {
             && let Some(scope) = source_picker_jump_scope(jump_scope.as_ref(), kind, generation)
         {
             scope.discard_registered_namespace();
+        }
+        actions.effects = self.hosted_actions.take().unwrap_or_default();
+        if actions.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                PasteSequenceHostEffect::Prepare { .. } | PasteSequenceHostEffect::Save
+            )
+        }) {
+            actions.draft_identity = Some((self.current_draft(), self.hotkey_text.clone()));
+        }
+        if let Some(start) = copy_start {
+            let copies = ctx.output_mut(|output| {
+                let mut copies = Vec::new();
+                for command in output.commands.split_off(start) {
+                    match command {
+                        egui::OutputCommand::CopyText(text) => copies.push(text),
+                        other => output.commands.push(other),
+                    }
+                }
+                copies
+            });
+            if owner_current && first {
+                actions
+                    .effects
+                    .extend(copies.into_iter().map(PasteSequenceHostEffect::CopyText));
+            }
+        }
+        actions.close = actions.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                PasteSequenceHostEffect::Close | PasteSequenceHostEffect::CancelEditor
+            )
+        });
+        actions
+    }
+
+    /// Apply accepted editor intents after the owner is restored to the app.
+    pub(super) fn complete_host_actions(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut super::LauncherApp,
+        actions: PasteSequenceHostActions,
+    ) {
+        if !self.open || self.host_session_epoch != actions.session_epoch {
+            return;
+        }
+        let draft_current = actions
+            .draft_identity
+            .as_ref()
+            .is_some_and(|(draft, hotkey)| {
+                *draft == self.current_draft() && *hotkey == self.hotkey_text
+            });
+        for effect in actions.effects {
+            if actions.close
+                && !matches!(
+                    effect,
+                    PasteSequenceHostEffect::Close | PasteSequenceHostEffect::CancelEditor
+                )
+            {
+                continue;
+            }
+            match effect {
+                PasteSequenceHostEffect::Settings => app.open_paste_sequence_settings_dialog(),
+                PasteSequenceHostEffect::Prepare {
+                    autostart,
+                    run_once,
+                } => {
+                    if draft_current {
+                        self.prepare_current(app, autostart, run_once);
+                    }
+                }
+                PasteSequenceHostEffect::Save => {
+                    if draft_current {
+                        self.save_draft(ctx, app);
+                    }
+                }
+                PasteSequenceHostEffect::Remove(id) => {
+                    if self.remove_confirmation == Some(id) {
+                        self.remove_saved_sequence(ctx, app, id);
+                    }
+                }
+                PasteSequenceHostEffect::Start => match app.start_sequence_playback() {
+                    Ok(()) => {
+                        self.note_playback_started();
+                        if !app.should_keep_paste_sequence_dialog_visible_during_playback() {
+                            self.suspend_for_playback();
+                        }
+                    }
+                    Err(error) => self.inline_error = Some(error.message().into()),
+                },
+                PasteSequenceHostEffect::Next => match app.next_sequence_playback() {
+                    Ok(()) => self.status = Some("Advanced to the next step.".into()),
+                    Err(error) => self.inline_error = Some(error.message().into()),
+                },
+                PasteSequenceHostEffect::CancelRun => {
+                    app.cancel_active_paste_sequence();
+                    self.autostart_when_ready = false;
+                    self.status =
+                        Some("Sequence cancelled; the latest clipboard value is retained.".into());
+                }
+                PasteSequenceHostEffect::CancelEditor => {
+                    app.cancel_active_paste_sequence();
+                    self.end_session();
+                    app.close_paste_sequence_dialog();
+                }
+                PasteSequenceHostEffect::Close => self.close_from_window(app),
+                PasteSequenceHostEffect::ClosePicker => {
+                    self.close_source_picker_for_root_escape();
+                }
+                PasteSequenceHostEffect::Insert { kind, identity } => {
+                    if let Some(mut picker) = self.source_picker.take() {
+                        if picker.kind == kind
+                            && picker.selected == Some(identity)
+                            && picker.generation == self.source_generation
+                        {
+                            if self.refresh_and_insert_source_picker_selection(&mut picker) {
+                                self.retire_source_picker_identity(picker.kind, picker.generation);
+                            } else {
+                                self.source_picker = Some(picker);
+                                ctx.request_repaint();
+                            }
+                        } else {
+                            self.source_picker = Some(picker);
+                        }
+                    }
+                }
+                PasteSequenceHostEffect::CopyText(text) => {
+                    if crate::actions::clipboard::set_text(&text).is_err() {
+                        self.inline_error = Some("Clipboard copy failed.".into());
+                    }
+                }
+            }
+            if !self.open {
+                break;
+            }
         }
     }
 
@@ -963,8 +1332,6 @@ impl PasteSequenceDialog {
     fn saved_sequence_remove_confirmation(
         &mut self,
         ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        app: &mut super::LauncherApp,
         jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         jump_visual_order: &mut u64,
     ) {
@@ -993,7 +1360,9 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if confirm_remove.clicked() {
-                self.remove_saved_sequence(ctx, app, id);
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::Remove(id));
+                }
             }
             let keep = ui.button("Keep");
             register_paste_sequence_jump_target(
@@ -1045,7 +1414,7 @@ impl PasteSequenceDialog {
     fn editor(
         &mut self,
         ui: &mut egui::Ui,
-        app: &mut super::LauncherApp,
+        runtime: &PasteSequenceHostRuntime,
         step_height: f32,
         jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         jump_visual_order: &mut u64,
@@ -1155,8 +1524,8 @@ impl PasteSequenceDialog {
             PlaybackMode::ManualAdvance => "Next pastes into the current eligible application; the delay is the minimum cooldown between steps.",
             PlaybackMode::PasteToAdvance => "One real Ctrl+V pastes one step into the current eligible application. Wait for it to settle, then release V and press again. The last item stays on the clipboard; the next Ctrl+V is an ordinary paste. The stored delay is unused in this mode.",
         });
-        if app.sequence_playback.started_run().is_some() {
-            ui.weak(if app.sequence_playback.escape_cancel_available() {
+        if runtime.started {
+            ui.weak(if runtime.escape_cancel {
                 "End early with Esc, configured Cancel, or Cancel Run."
             } else {
                 "End early with configured Cancel or Cancel Run."
@@ -1253,8 +1622,8 @@ impl PasteSequenceDialog {
         if let Some(status) = &self.status {
             ui.weak(status);
         }
-        if let Some(preview) = app.sequence_playback.prepared_preview() {
-            self.show_preview(ui, &preview);
+        if let Some(preview) = &runtime.preview {
+            self.show_preview(ui, preview);
         }
     }
 
@@ -1353,6 +1722,11 @@ impl PasteSequenceDialog {
             return;
         }
 
+        let picker_layer = ui.layer_id();
+        let first_picker_shape = self.hosted_actions.is_some().then(|| {
+            ui.ctx()
+                .graphics_mut(|layers| layers.entry(picker_layer).next_idx())
+        });
         let query = picker.query.to_lowercase();
         let matching_indices = match picker.kind {
             SourcePickerKind::Snippets if self.snippets_error.is_none() => self
@@ -1577,7 +1951,7 @@ impl PasteSequenceDialog {
                         .as_ref()
                         .err()
                         .copied();
-                    discard_after_insert = true;
+                    discard_after_insert = !insertion_succeeded || self.hosted_actions.is_none();
                 }
                 let cancel = ui.button("Cancel");
                 #[cfg(test)]
@@ -1704,7 +2078,7 @@ impl PasteSequenceDialog {
 
         if cancel_clicked {
             self.retire_source_picker_identity(picker.kind, picker.generation);
-        } else if insert_clicked && insertion_succeeded {
+        } else if insert_clicked && insertion_succeeded && self.hosted_actions.is_none() {
             self.retire_source_picker_identity(picker.kind, picker.generation);
         } else {
             self.source_picker = Some(picker);
@@ -1714,6 +2088,19 @@ impl PasteSequenceDialog {
             self.layout.source_picker = self.source_picker.as_ref().map(|_| layout);
             if self.source_picker.is_none() {
                 self.layout.source_picker = None;
+            }
+        }
+        if insert_clicked && let Some(first) = first_picker_shape {
+            // Acceptance revalidates once more. This release frame must never
+            // publish picker text that the second observation could retire.
+            ui.ctx().graphics_mut(|layers| {
+                let shapes = layers.entry(picker_layer);
+                for index in first.0..shapes.next_idx().0 {
+                    shapes.reset_shape(egui::layers::ShapeIdx(index));
+                }
+            });
+            if let Some(scope) = picker_jump_scope.as_ref() {
+                scope.discard_registered_namespace();
             }
         }
         if discard_after_insert {
@@ -1897,6 +2284,13 @@ impl PasteSequenceDialog {
             }
         };
 
+        if let Some(effects) = &mut self.hosted_actions {
+            effects.push(PasteSequenceHostEffect::Insert {
+                kind: picker.kind,
+                identity,
+            });
+            return true;
+        }
         self.draft.steps.push(step);
         self.selected_step = self.draft.steps.len().checked_sub(1);
         self.reveal_step = self.selected_step;
@@ -1910,12 +2304,12 @@ impl PasteSequenceDialog {
     fn editor_footer(
         &mut self,
         ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        app: &mut super::LauncherApp,
+        runtime: &PasteSequenceHostRuntime,
+        pinned: bool,
         jump_scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
         jump_visual_order: &mut u64,
     ) {
-        let state = app.sequence_playback.status();
+        let state = runtime.status;
         ui.horizontal(|ui| {
             let preview =
                 ui.add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Preview"));
@@ -1929,7 +2323,12 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if preview.clicked() {
-                self.prepare_current(app, false, false);
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::Prepare {
+                        autostart: false,
+                        run_once: false,
+                    });
+                }
             }
             let run_once =
                 ui.add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Run Once"));
@@ -1943,7 +2342,12 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if run_once.clicked() {
-                self.prepare_current(app, true, true);
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::Prepare {
+                        autostart: true,
+                        run_once: true,
+                    });
+                }
             }
             let run = ui.add_enabled(!self.draft.steps.is_empty(), egui::Button::new("Run"));
             register_paste_sequence_jump_target(
@@ -1956,7 +2360,12 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if run.clicked() {
-                self.prepare_current(app, true, false);
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::Prepare {
+                        autostart: true,
+                        run_once: false,
+                    });
+                }
             }
             let save = ui.add_enabled(
                 self.snapshot.is_some() && self.hotkey_update.is_none(),
@@ -1972,7 +2381,9 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if save.clicked() {
-                self.save_draft(ctx, app);
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::Save);
+                }
             }
         });
         ui.horizontal(|ui| {
@@ -1990,15 +2401,8 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if start.clicked() {
-                match app.start_sequence_playback() {
-                    Ok(()) => {
-                        self.note_playback_started();
-                        // Rendering temporarily takes the dialog out of LauncherApp.
-                        if !app.should_keep_paste_sequence_dialog_visible_during_playback() {
-                            self.suspend_for_playback();
-                        }
-                    }
-                    Err(error) => self.inline_error = Some(error.message().into()),
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::Start);
                 }
             }
             let next = ui.add_enabled(
@@ -2015,9 +2419,8 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if next.clicked() {
-                match app.next_sequence_playback() {
-                    Ok(()) => self.status = Some("Advanced to the next step.".into()),
-                    Err(error) => self.inline_error = Some(error.message().into()),
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::Next);
                 }
             }
             let cancel_run = ui.add_enabled(
@@ -2042,12 +2445,11 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if cancel_run.clicked() {
-                app.cancel_active_paste_sequence();
-                self.autostart_when_ready = false;
-                self.status =
-                    Some("Sequence cancelled; the latest clipboard value is retained.".into());
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::CancelRun);
+                }
             }
-            let cancel_editor = ui.button("Cancel Editor");
+            let cancel_editor = ui.add_enabled(!pinned, egui::Button::new("Cancel Editor"));
             register_paste_sequence_jump_target(
                 jump_scope,
                 ui,
@@ -2058,12 +2460,12 @@ impl PasteSequenceDialog {
                 jump_visual_order,
             );
             if cancel_editor.clicked() {
-                app.cancel_active_paste_sequence();
-                self.end_session();
-                app.close_paste_sequence_dialog();
+                if let Some(effects) = &mut self.hosted_actions {
+                    effects.push(PasteSequenceHostEffect::CancelEditor);
+                }
             }
         });
-        self.show_run_status(ui, app);
+        self.show_run_status(ui, runtime);
     }
 
     fn step_editor(&mut self, ui: &mut egui::Ui, max_height: f32) {
@@ -2167,11 +2569,8 @@ impl PasteSequenceDialog {
         }
     }
 
-    fn show_run_status(&self, ui: &mut egui::Ui, app: &super::LauncherApp) {
-        let status = run_status_text(
-            app.sequence_playback.status(),
-            app.sequence_playback.current_step_number(),
-        );
+    fn show_run_status(&self, ui: &mut egui::Ui, runtime: &PasteSequenceHostRuntime) {
+        let status = run_status_text(runtime.status, runtime.progress);
         let message = saved_run_status_text(self.saved_run.as_ref(), status);
         ui.add(egui::Label::new(&message).truncate())
             .on_hover_text(&message);
@@ -2236,7 +2635,6 @@ impl PasteSequenceDialog {
             return;
         };
         self.load_sources();
-        self.autostart_when_ready = autostart;
         let result = app.begin_paste_sequence_draft_preflight_with_context(
             self.current_draft(),
             &self.snippets,
@@ -2245,6 +2643,7 @@ impl PasteSequenceDialog {
         );
         match result {
             Ok(()) => {
+                self.autostart_when_ready = autostart;
                 self.saved_run = None;
                 let prompt_open = app.snippet_prompt_dialog.is_open();
                 self.status = Some(if run_once {
@@ -2273,7 +2672,6 @@ impl PasteSequenceDialog {
                 }
             }
             Err(error) => {
-                self.autostart_when_ready = false;
                 self.inline_error = Some(preflight_error_text(error).into());
             }
         }
@@ -2807,6 +3205,33 @@ fn reconcile_editor_update(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosted_checkpoint_does_not_restore_picker_after_source_scrub() {
+        let mut dialog = super::PasteSequenceDialog::default();
+        dialog.open = true;
+        dialog.host_session_epoch = 7;
+        dialog.source_generation = 1;
+        dialog.draft.name = "before".into();
+        dialog.source_picker = Some(super::SourcePickerState {
+            kind: super::SourcePickerKind::Snippets,
+            generation: 1,
+            query: "private".into(),
+            selected: None,
+            needs_reveal: false,
+            message: None,
+            refresh_failed: false,
+            insert_attempted_frame: None,
+        });
+        let checkpoint = super::PasteSequenceInteractionCheckpoint::capture(&dialog);
+        dialog.draft.name = "after".into();
+        dialog.source_generation = 2;
+        dialog.source_picker.as_mut().unwrap().query.clear();
+        checkpoint.restore(&mut dialog);
+        assert_eq!(dialog.draft.name, "before");
+        assert!(dialog.source_picker.as_ref().unwrap().query.is_empty());
+        assert_eq!(dialog.host_session_epoch(), 7);
+    }
+
     use super::*;
 
     #[test]

@@ -451,7 +451,8 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::MouseGestureSettings
                     | NavigationDialogKind::RadialDesigner,
                 ..
-            } | NavigationOwner::Notes { .. }
+            } | NavigationOwner::PasteSequence { .. }
+                | NavigationOwner::Notes { .. }
                 | NavigationOwner::MkMacro { .. }
                 | NavigationOwner::Settings { .. }
                 | NavigationOwner::XmlOverwriteConfirmation { .. }
@@ -496,6 +497,10 @@ impl NavigationViewportBinding {
             }
             NavigationOwner::SnippetRemoval { .. } => {
                 Some(self.base_layer) == NavigationDialogKind::Snippets.layer_id()
+                    && visible_layer == Some(self.base_layer)
+            }
+            NavigationOwner::PasteSequence { .. } => {
+                self.base_layer == paste_sequence_dialog_layer_id()
                     && visible_layer == Some(self.base_layer)
             }
             NavigationOwner::SnippetPrompt { generation } => {
@@ -1102,7 +1107,7 @@ pub(crate) struct NavigationWindows {
     pub(crate) notes: Option<u64>,
     pub(crate) todo: Option<u64>,
     pub(crate) timer: Option<u64>,
-    pub(crate) paste_sequence: Option<u64>,
+    pub(crate) paste_sequence: Option<(u64, egui::LayerId)>,
     pub(crate) mkmacro: Option<(u64, egui::LayerId)>,
     pub(crate) dashboard_editor_layer: Option<egui::LayerId>,
     pub(crate) mouse_form_layers: [Option<egui::LayerId>; 3],
@@ -1192,10 +1197,8 @@ pub(crate) fn resolve_layer_navigation_owner_parent(
             windows
                 .timer
                 .map(|instance| NavigationOwner::Timer { instance })
-        } else if layer == paste_sequence_dialog_layer_id() {
-            windows
-                .paste_sequence
-                .map(|instance| NavigationOwner::PasteSequence { instance })
+        } else if let Some((instance, _)) = windows.paste_sequence.filter(|(_, owner_layer)| *owner_layer == layer) {
+            Some(NavigationOwner::PasteSequence { instance })
         } else if let Some((instance, _)) = windows.mkmacro.filter(|(_, owner)| *owner == layer) {
             Some(NavigationOwner::MkMacro { instance })
         } else if let Some(kind) = if windows.dashboard_editor_layer == Some(layer) {

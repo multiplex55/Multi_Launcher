@@ -1082,6 +1082,8 @@ pub struct LauncherApp {
     pub(crate) test_sequence_context_capture_forbidden: bool,
     #[cfg(test)]
     pub(crate) test_sequence_context_capture_calls: usize,
+    #[cfg(test)]
+    test_sequence_platform: Option<command_host::tests::AppPastePlatform>,
     pub usage: HashMap<String, u32>,
     pub(crate) target_repair_usage_generation: Arc<AtomicU64>,
     pub(crate) target_repair_usage_barrier: Arc<Mutex<()>>,
@@ -1233,7 +1235,9 @@ pub struct LauncherApp {
     snippet_dialog: SnippetDialog,
     snippet_window_host: utility_window_host::SnippetWindowHost,
     snippet_preview_editor_session: Option<u64>,
+    sequence_prompt_editor_session: Option<u64>,
     paste_sequence_dialog: PasteSequenceDialog,
+    paste_sequence_host: utility_window_host::PasteSequenceWindowHost,
     pub hash_generator_dialog: HashGeneratorDialogState,
     snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
     macro_dialog: MacroDialog,
@@ -3766,6 +3770,8 @@ impl LauncherApp {
             test_sequence_context_capture_forbidden: false,
             #[cfg(test)]
             test_sequence_context_capture_calls: 0,
+            #[cfg(test)]
+            test_sequence_platform: None,
             usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
             target_repair_usage_generation: Arc::new(AtomicU64::new(0)),
             target_repair_usage_barrier: Arc::new(Mutex::new(())),
@@ -3904,7 +3910,9 @@ impl LauncherApp {
             snippet_dialog: SnippetDialog::default(),
             snippet_window_host: Default::default(),
             snippet_preview_editor_session: None,
+            sequence_prompt_editor_session: None,
             paste_sequence_dialog: PasteSequenceDialog::default(),
+            paste_sequence_host: utility_window_host::PasteSequenceWindowHost::default(),
             hash_generator_dialog: HashGeneratorDialogState::default(),
             snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
             macro_dialog: MacroDialog::default(),
@@ -4869,6 +4877,7 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::SnippetDialog => self.snippet_window_host.root_layer().is_some(),
+            Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer().is_some(),
             Panel::SnippetPromptDialog => self.snippet_prompt_has_root_presentation(),
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer().is_some(),
             Panel::SearchReplaceDialog => self.search_replace_host.root_layer().is_some(),
@@ -4950,6 +4959,18 @@ impl LauncherApp {
     fn snippet_prompt_has_root_presentation(&self) -> bool {
         self.snippet_prompt_dialog.is_open()
             && (!self.hosted_snippet_preview_active() || self.snippet_window_host.root_layer().is_some())
+            && (!self.hosted_sequence_prompt_active() || self.paste_sequence_host.root_layer().is_some())
+    }
+
+    fn hosted_sequence_prompt_active(&self) -> bool {
+        self.paste_sequence_dialog.open
+            && self.paste_sequence_host.is_popped_out()
+            && self.sequence_prompt_editor_session == Some(self.paste_sequence_dialog.host_session_epoch())
+            && self.snippet_prompt_dialog.is_sequence_preflight()
+    }
+
+    fn snippet_prompt_has_host_companion(&self) -> bool {
+        self.hosted_snippet_preview_active() || self.hosted_sequence_prompt_active()
     }
 
     fn close_clipboard_history_session(&mut self) {
@@ -4975,7 +4996,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog) || (*panel == Panel::SnippetPromptDialog && self.hosted_snippet_preview_active()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5125,8 +5146,7 @@ impl LauncherApp {
                 self.close_snippet_editor_session();
             }
             Panel::PasteSequenceDialog => {
-                self.paste_sequence_dialog.end_session();
-                self.panel_states.paste_sequence_dialog = false;
+                self.close_paste_sequence_dialog();
             }
             Panel::HashGeneratorDialog => {
                 self.hash_generator_dialog.end_session();
@@ -5384,10 +5404,18 @@ impl LauncherApp {
     }
 
     pub(crate) fn close_paste_sequence_dialog(&mut self) {
+        let retain_prompt = self.sequence_prompt_editor_session.take().is_some()
+            && self.snippet_prompt_dialog.is_sequence_preflight();
+        let autostart = retain_prompt && self.paste_sequence_dialog.take_autostart_when_ready();
+        self.paste_sequence_host.retire(&self.egui_ctx);
         self.paste_sequence_dialog.end_session();
         self.panel_states.paste_sequence_dialog = false;
         self.panel_stack
             .retain(|panel| *panel != Panel::PasteSequenceDialog);
+        if retain_prompt {
+            self.paste_sequence_dialog.set_autostart_when_ready(autostart);
+            self.request_launcher_visibility(true);
+        }
     }
 
     fn close_zip_extractor_dialog(&mut self) {
@@ -5446,8 +5474,7 @@ impl LauncherApp {
                 self.close_snippet_editor_session();
             }
             Panel::PasteSequenceDialog => {
-                self.paste_sequence_dialog.end_session();
-                self.panel_states.paste_sequence_dialog = false;
+                self.close_paste_sequence_dialog();
             }
             Panel::HashGeneratorDialog => {
                 self.hash_generator_dialog.end_session();
@@ -5729,8 +5756,12 @@ impl LauncherApp {
             Panel::ShellCmdDialog => self.shell_cmd_dialog.ensure_open(),
             Panel::SnippetDialog => self.snippet_dialog.ensure_open(),
             Panel::PasteSequenceDialog => {
-                let context = self.paste_sequence_invocation_context_for_open();
-                self.paste_sequence_dialog.open_with_context(context);
+                if !self.paste_sequence_dialog.open
+                    && !self.paste_sequence_dialog.is_suspended_for_playback()
+                {
+                    let context = self.paste_sequence_invocation_context_for_open();
+                    self.paste_sequence_dialog.open_with_context(context);
+                }
             }
             Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
@@ -5860,6 +5891,10 @@ impl LauncherApp {
         } else if panel == Panel::SnippetDialog {
             self.snippet_dialog.ensure_open();
             self.snippet_window_host.request_focus();
+        } else if panel == Panel::PasteSequenceDialog {
+            let context = self.paste_sequence_invocation_context_for_open();
+            self.paste_sequence_dialog.open_with_context(context);
+            self.paste_sequence_host.request_focus();
         } else if panel == Panel::ClipboardDialog {
             self.clipboard_dialog.ensure_open();
             self.clipboard_history_host.request_focus();

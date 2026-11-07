@@ -338,6 +338,9 @@ impl DialogCommandHost for LauncherApp {
         id: crate::paste_sequence::SequenceId,
         source: crate::commands::ActivationSource,
     ) -> Result<(), String> {
+        if self.snippet_prompt_dialog.is_open() {
+            return Err("Paste sequence could not be prepared: SequenceAlreadyActive".to_owned());
+        }
         let snapshot = crate::paste_sequence::SequenceStore::new(
             self.paste_sequence_dialog.sequence_store_path(),
         )
@@ -382,10 +385,16 @@ impl DialogCommandHost for LauncherApp {
                 }
             },
         ) {
-            self.paste_sequence_dialog.set_autostart_when_ready(false);
             return Err(format!("Paste sequence could not be prepared: {error:?}"));
         }
         self.paste_sequence_dialog.set_autostart_when_ready(true);
+        if self.paste_sequence_host.is_popped_out()
+            && self.should_keep_paste_sequence_dialog_visible_during_playback()
+            && self.paste_sequence_dialog.open
+            && self.snippet_prompt_dialog.is_sequence_preflight()
+        {
+            self.sequence_prompt_editor_session = Some(self.paste_sequence_dialog.host_session_epoch());
+        }
         if !self.snippet_prompt_dialog.is_open() {
             self.paste_sequence_dialog.set_autostart_when_ready(false);
             self.start_sequence_playback()
@@ -1594,6 +1603,9 @@ impl HeadlessCommandHost for LauncherApp {
         &mut self,
         intent: crate::commands::SnippetPromptIntent,
     ) -> Result<(), String> {
+        if self.snippet_prompt_dialog.is_sequence_preflight() {
+            return Err(super::snippet_prompt_dialog::SnippetPromptError::SequencePreflightActive.message().to_owned());
+        }
         self.snippet_prompt_dialog
             .begin_execution(&self.egui_ctx, intent);
         self.focus_panel(super::Panel::SnippetPromptDialog);
@@ -1699,7 +1711,10 @@ impl LauncherApp {
         {
             self.panel_stack.push(super::Panel::PasteSequenceDialog);
         }
-        if !self.visible_flag.load(Ordering::SeqCst) {
+        self.paste_sequence_host.request_focus();
+        if self.paste_sequence_host.root_layer().is_some()
+            && !self.visible_flag.load(Ordering::SeqCst)
+        {
             self.request_launcher_visibility(true);
         }
     }
@@ -1936,6 +1951,12 @@ impl LauncherApp {
     pub(crate) fn start_sequence_playback(
         &mut self,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+        #[cfg(test)]
+        if let Some(mut platform) = self.test_sequence_platform.take() {
+            let result = self.start_sequence_playback_using(&mut platform);
+            self.test_sequence_platform = Some(platform);
+            return result;
+        }
         let mut platform =
             crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
         self.start_sequence_playback_using(&mut platform)
@@ -1987,6 +2008,7 @@ impl LauncherApp {
             && !self.should_keep_paste_sequence_dialog_visible_during_playback()
         {
             self.paste_sequence_dialog.suspend_for_playback();
+            self.paste_sequence_host.suspend(&self.egui_ctx);
             self.panel_states.paste_sequence_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::PasteSequenceDialog);
@@ -2003,6 +2025,12 @@ impl LauncherApp {
         &mut self,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
         let now = std::time::Instant::now();
+        #[cfg(test)]
+        if let Some(mut platform) = self.test_sequence_platform.take() {
+            let result = self.next_sequence_playback_using(&mut platform, now);
+            self.test_sequence_platform = Some(platform);
+            return result;
+        }
         let mut platform =
             crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
         self.next_sequence_playback_using(&mut platform, now)
@@ -2074,6 +2102,9 @@ impl LauncherApp {
             current_history,
         )?;
         if let Some(run) = completed {
+            if self.sequence_prompt_editor_session.take().is_some() && self.paste_sequence_dialog.open {
+                self.paste_sequence_host.request_focus();
+            }
             self.panel_states.snippet_prompt_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
@@ -2133,6 +2164,9 @@ impl LauncherApp {
         &mut self,
         draft: crate::plugins::snippets::SnippetEntry,
     ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        if self.snippet_prompt_dialog.is_sequence_preflight() {
+            return Err(super::snippet_prompt_dialog::SnippetPromptError::SequencePreflightActive);
+        }
         let prepared = match crate::plugins::snippets::prepare_snippet_run(&draft) {
             Ok(
                 crate::plugins::snippets::SnippetRunMode::SystemOnly(prepared)
@@ -2219,10 +2253,15 @@ impl LauncherApp {
     ) -> Option<crate::plugins::snippets::SnippetEntry> {
         let was_preview = self.snippet_prompt_dialog.is_preview_only();
         self.snippet_preview_editor_session = None;
+        let was_hosted_sequence = self.sequence_prompt_editor_session.take().is_some();
         let was_sequence = self.snippet_prompt_dialog.is_sequence_preflight();
         let draft = self.snippet_prompt_dialog.cancel(&self.egui_ctx);
         if was_sequence {
+            self.paste_sequence_dialog.set_autostart_when_ready(false);
             self.cancel_sequence_playback();
+            if was_hosted_sequence && self.paste_sequence_dialog.open {
+                self.paste_sequence_host.request_focus();
+            }
         }
         self.panel_states.snippet_prompt_dialog = false;
         self.panel_stack
@@ -2626,6 +2665,14 @@ pub(in crate::gui) mod tests {
 
         pub(crate) fn pasted_values(&self) -> &[(isize, String)] {
             &self.pasted
+        }
+
+        pub(crate) fn publication_count(&self) -> usize {
+            self.publications
+        }
+
+        pub(crate) fn advance(&mut self, elapsed: std::time::Duration) {
+            self.now += elapsed;
         }
     }
 

@@ -2116,7 +2116,7 @@ impl LauncherApp {
             Panel::ShellCmdDialog => middle(egui::Id::new(Some("Shell Commands"))),
             Panel::SnippetDialog => self.snippet_window_host.root_layer(),
             Panel::PasteSequenceDialog => {
-                Some(crate::gui::jump_mode::ui::paste_sequence_dialog_layer_id())
+                self.paste_sequence_host.root_layer()
             }
             Panel::HashGeneratorDialog => middle(egui::Id::new("hash_generator_dialog")),
             Panel::MacroDialog => middle(egui::Id::new(Some("Macros"))),
@@ -4338,6 +4338,9 @@ impl LauncherApp {
         }
         self.multi_manager_drain_runtime_events();
         self.poll_clipboard_modify_runtime(ctx);
+        if self.paste_sequence_dialog.poll_host_background(ctx) {
+            ctx.request_repaint_of(self.paste_sequence_host.owner_viewport());
+        }
         let _ = self.multi_manager.start_pending_automatic_reconnect();
         if self
             .multi_manager
@@ -4431,9 +4434,21 @@ impl LauncherApp {
             self.report_error_message("paste_sequence.physical", error.message());
         }
         if self.sequence_playback.needs_tick() {
-            let mut platform =
-                crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
-            self.sequence_playback.tick(&mut platform, playback_now);
+            #[cfg(test)]
+            let has_test_platform = if let Some(platform) = &mut self.test_sequence_platform {
+                let now = crate::paste_sequence::SequencePlaybackPlatform::now(platform);
+                self.sequence_playback.tick(platform, now);
+                true
+            } else {
+                false
+            };
+            #[cfg(not(test))]
+            let has_test_platform = false;
+            if !has_test_platform {
+                let mut platform =
+                    crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
+                self.sequence_playback.tick(&mut platform, playback_now);
+            }
             if let Err(error) = self.sync_physical_paste_admission() {
                 self.report_error_message("paste_sequence.physical", error.message());
             }
@@ -4782,7 +4797,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 25] {
+    fn viewport_bootstrap_state(&self) -> [bool; 26] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4807,6 +4822,7 @@ impl LauncherApp {
             self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open),
             self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open),
             self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open),
+            self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open),
             self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
             self.mouse_gesture_settings_host.needs_root_ui_when_hidden(self.mouse_gesture_settings_dialog.open),
             self.note_panels.iter().any(|panel| panel.needs_root_ui_when_hidden()),
@@ -4822,7 +4838,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 25],
+        previously_pending: [bool; 26],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5655,6 +5671,80 @@ impl LauncherApp {
                 parent_instance: 0,
                 root_scopes: (None, None),
             },
+        );
+    }
+
+    fn paste_sequence_owns_root_input(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
+        let Some(layer) = self.paste_sequence_host.root_layer() else {
+            return false;
+        };
+        self.paste_sequence_dialog.open
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && visible_top_middle_layer(ctx) == Some(layer)
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background
+            })
+    }
+
+    fn show_paste_sequence_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::utility_window_host::{HostInput, HostedPasteSequenceRuntime, UtilityWindowCompanion};
+        use crate::gui::jump_mode::ui::NavigationOwner;
+
+        if !self.paste_sequence_dialog.open {
+            if self.paste_sequence_dialog.is_suspended_for_playback() {
+                self.paste_sequence_host.suspend(ctx);
+            }
+            return;
+        }
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let scope = if let NavigationOwner::PasteSequence { instance } = owner {
+            self.jump_mode_ui.scope_for_navigation_owner(
+                crate::gui::jump_mode::SurfaceId::dialog("paste-sequence", instance),
+                crate::gui::jump_mode::TargetGeneration(instance),
+                "paste-sequence-dialog",
+                ctx.viewport_id(),
+                owner,
+                false,
+            )
+        } else {
+            None
+        };
+        let companion_active = self.hosted_sequence_prompt_active();
+        let parent_owner = self.paste_sequence_owns_root_input(ctx, root_visible);
+        let root_input = self.native_ui_host_input_allowed_for_snippet_prompt(ctx, root_visible, companion_active);
+        let native_input = self.native_ui_application_input_allowed_for_snippet_prompt(ctx, companion_active)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self.pinned_panels.contains(&super::Panel::PasteSequenceDialog);
+        let runtime = HostedPasteSequenceRuntime {
+            dialog: super::paste_sequence_dialog::PasteSequenceHostRuntime::capture(self),
+            pinned,
+        };
+        let jump_enabled = self.jump_mode_enabled();
+        self.paste_sequence_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        let close_shortcut = !pinned && !self.paste_sequence_dialog.source_picker_is_open();
+        let companion = companion_active.then_some((
+            &mut self.snippet_prompt_dialog as &mut dyn UtilityWindowCompanion,
+            None,
+        ));
+        self.paste_sequence_host.show_with_companion(
+            ctx,
+            &mut self.paste_sequence_dialog,
+            &runtime,
+            HostInput {
+                first, root_visible, root_input, native_input, root_owner: owner,
+                parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut, allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
+            },
+            companion,
         );
     }
 
@@ -6711,6 +6801,7 @@ impl LauncherApp {
             } => {
                 self.paste_sequence_dialog
                     .reveal_saved_sequence_for_hotkey_directory(sequence_id)?;
+                self.paste_sequence_host.request_focus();
             }
             EditDestination::PasteSequence {
                 sequence_id: None,
@@ -7767,7 +7858,7 @@ impl LauncherApp {
         let timer_visibility_changed = self.jump_mode_ui.observe_timer_window(timer_window_title);
         let paste_sequence_visibility_changed = self
             .jump_mode_ui
-            .observe_paste_sequence_visibility(self.paste_sequence_dialog.open);
+            .observe_paste_sequence_visibility(self.paste_sequence_dialog.open && self.paste_sequence_host.root_layer().is_some());
         let mkmacro_visibility_changed = self
             .jump_mode_ui
             .observe_mkmacro_visibility(self.mkmacro_dialog.open);
@@ -7901,7 +7992,9 @@ impl LauncherApp {
                 paste_sequence: self
                     .paste_sequence_dialog
                     .open
-                    .then_some(self.jump_mode_ui.paste_sequence_instance()),
+                    .then(|| self.paste_sequence_host.root_layer()
+                        .map(|layer| (self.jump_mode_ui.paste_sequence_instance(), layer)))
+                    .flatten(),
                 mkmacro: self
                     .mkmacro_dialog
                     .host_layer_if_root()
@@ -8578,7 +8671,7 @@ impl LauncherApp {
             self.query_focus_session = None;
         }
         if first_ui_pass
-            && !self.hosted_snippet_preview_active()
+            && !self.snippet_prompt_has_host_companion()
             && self.snippet_prompt_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
         {
             // Jump Mode gets the exact prompt's event stream first. In
@@ -8625,6 +8718,7 @@ impl LauncherApp {
             self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
+            self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             if first_ui_pass {
                 self.run_background_after_menu();
@@ -9526,54 +9620,7 @@ impl LauncherApp {
                     false
                 };
 
-                let paste_picker_escape_handled = if first_ui_pass
-                    && !action_sheet_blocks_launcher_input
-                    && !owner_transition_pending
-                    && !jump_session_escape_preempted
-                    && self.jump_mode_ui.active_session().is_none()
-                    && self.paste_sequence_dialog.open
-                    && self.paste_sequence_dialog.source_picker_is_open()
-                    && !egui::Popup::is_any_open(&ctx)
-                    && ctx.input(|input| input.key_pressed(egui::Key::Escape))
-                {
-                    let paste_layer = crate::gui::jump_mode::ui::paste_sequence_dialog_layer_id();
-                    let exact_paste_owner =
-                        crate::gui::jump_mode::ui::visible_top_middle_layer(&ctx)
-                            == Some(paste_layer)
-                            && crate::gui::jump_mode::ui::focused_response_layer(&ctx)
-                                .is_none_or(|layer| layer == paste_layer);
-                    if exact_paste_owner
-                        && self.native_ui_host_input_allowed(&ctx, frame_logic.should_be_visible)
-                        && self
-                            .paste_sequence_dialog
-                            .close_source_picker_for_root_escape()
-                    {
-                        let modifiers = ctx.input(|input| {
-                            input.events.iter().rev().find_map(|event| match event {
-                                egui::Event::Key {
-                                    key: egui::Key::Escape,
-                                    pressed: true,
-                                    modifiers,
-                                    ..
-                                } => Some(*modifiers),
-                                _ => None,
-                            })
-                        });
-                        if let Some(modifiers) = modifiers {
-                            ctx.input_mut(|input| {
-                                input.consume_key(modifiers, egui::Key::Escape)
-                            });
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
                 if !table_utility_escape_handled
-                    && !paste_picker_escape_handled
                     && first_ui_pass
                     && !action_sheet_blocks_launcher_input
                     && Self::launcher_escape_handling_enabled(
@@ -9585,6 +9632,7 @@ impl LauncherApp {
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.paste_sequence_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -9669,6 +9717,7 @@ impl LauncherApp {
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.paste_sequence_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
                         .diagram_studio_dialog
                         .embedded_viewer_owns_root_input(&ctx)
@@ -10547,6 +10596,7 @@ impl LauncherApp {
             self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
+            self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
@@ -10766,41 +10816,7 @@ impl LauncherApp {
         shell_dlg.ui(&ctx, self);
         self.shell_cmd_dialog = shell_dlg;
         self.show_snippet_editor_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        let paste_sequence_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let paste_sequence_scope = match paste_sequence_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::PasteSequence { instance } => {
-                self.jump_mode_ui.scope_for_navigation_owner(
-                    crate::gui::jump_mode::SurfaceId::dialog("paste-sequence", instance),
-                    crate::gui::jump_mode::TargetGeneration(instance),
-                    "paste-sequence-dialog",
-                    ctx.viewport_id(),
-                    paste_sequence_owner,
-                    false,
-                )
-            }
-            crate::gui::jump_mode::ui::NavigationOwner::Root
-            | crate::gui::jump_mode::ui::NavigationOwner::Settings { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Notes { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Todo { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Timer { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MkMacro { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Dialog { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::ClipboardRemoval { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::XmlOverwriteConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::BatchRenameConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SearchReplaceConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::DashboardEditorConfirmation { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::SnippetPrompt { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureBinding { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::MouseGestureDelete { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::RadialDesignerChild { .. }
-            | crate::gui::jump_mode::ui::NavigationOwner::Blocked => None,
-        };
-        let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
-        paste_sequence_dlg.ui_with_jump_mode(&ctx, self, paste_sequence_scope);
-        self.paste_sequence_dialog = paste_sequence_dlg;
+        self.show_paste_sequence_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(&ctx, self);
         self.macro_dialog = macro_dlg;
@@ -11307,7 +11323,7 @@ impl LauncherApp {
                 })
             })
             .flatten();
-        if !self.hosted_snippet_preview_active() {
+        if !self.snippet_prompt_has_host_companion() {
             let snippet_prompt_action = self.snippet_prompt_dialog.show_with_jump_mode(
                 &ctx,
                 prompt_scope,
@@ -11940,9 +11956,51 @@ impl LauncherApp {
                 effects.push(RootDialogEffect::ShowRoot);
             }
         }
-        let preview_editor = self.hosted_snippet_preview_active().then(|| self.snippet_dialog.host_session_epoch());
-        if self.snippet_prompt_dialog.complete_hosted_preview(ctx, preview_editor) {
-            let _ = self.cancel_snippet_prompt();
+        if let Some(completion) = self.paste_sequence_host.complete(ctx, &mut self.paste_sequence_dialog) {
+            use super::utility_window_host::PasteSequenceHostCommand;
+            for command in completion.commands {
+                match command {
+                    PasteSequenceHostCommand::Closed => self.close_paste_sequence_dialog(),
+                    PasteSequenceHostCommand::Apply(actions) => {
+                        let prompt_was_open = self.snippet_prompt_dialog.is_open();
+                        let mut dialog = std::mem::take(&mut self.paste_sequence_dialog);
+                        dialog.complete_host_actions(ctx, self, actions);
+                        self.paste_sequence_dialog = dialog;
+                        if !prompt_was_open
+                            && self.snippet_prompt_dialog.is_sequence_preflight()
+                            && self.paste_sequence_host.is_popped_out()
+                            && self.paste_sequence_dialog.open
+                        {
+                            self.sequence_prompt_editor_session = Some(self.paste_sequence_dialog.host_session_epoch());
+                        }
+                        if self.paste_sequence_dialog.is_suspended_for_playback() {
+                            self.paste_sequence_host.suspend(ctx);
+                        } else if !self.paste_sequence_dialog.open {
+                            self.close_paste_sequence_dialog();
+                        }
+                        ctx.request_repaint_of(completion.owner_viewport);
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
+        let prompt_editor = if self.hosted_snippet_preview_active() {
+            Some(self.snippet_dialog.host_session_epoch())
+        } else if self.hosted_sequence_prompt_active() {
+            Some(self.paste_sequence_dialog.host_session_epoch())
+        } else {
+            None
+        };
+        match self.snippet_prompt_dialog.complete_hosted_prompt(ctx, prompt_editor) {
+            Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Cancel) => {
+                let _ = self.cancel_snippet_prompt();
+            }
+            Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Submit) => {
+                let _ = self.submit_snippet_prompt();
+            }
+            None => {}
         }
         if self.diff_dialog.on_host_frame_complete(ctx) {
             effects.push(RootDialogEffect::ShowRoot);
@@ -12330,6 +12388,7 @@ impl eframe::App for LauncherApp {
             || self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open)
             || self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open)
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
+            || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
                 .recording_dialog
                 .needs_root_ui_when_hidden(&self.recording_controller)
@@ -36949,6 +37008,217 @@ mod tests {
     }
 
     #[test]
+    fn paste_sequences_detached_run_and_next_preserve_the_same_playback() {
+        use crate::paste_sequence::{
+            PlaybackMode, SequenceDraft, SequencePlaybackStatus, SequenceStore, SequenceTarget,
+            Step,
+        };
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        app.enabled_plugins = None;
+        app.settings_editor.baseline_settings.paste_sequence.keep_dialog_visible_during_playback = true;
+        let target = SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 91, process_id: 92, thread_id: 93, title: None,
+            },
+            std::process::id(),
+        ).unwrap();
+        app.test_sequence_platform = Some(super::super::command_host::tests::AppPastePlatform::new(target));
+        app.test_sequence_context_capture_forbidden = true;
+        prepare_actual_query_frame(&ctx, &mut app);
+        let path = workspace.root().join(crate::paste_sequence::PASTE_SEQUENCES_FILE);
+        let store = SequenceStore::new(&path);
+        let mut snapshot = store.load().unwrap();
+        let mut draft = SequenceDraft::new(
+            "Host test",
+            vec![Step::LiteralText { text: "first λ".into() }, Step::LiteralText { text: "second 猫".into() }],
+        );
+        draft.mode = PlaybackMode::ManualAdvance;
+        let id = snapshot.upsert(draft).unwrap();
+        store.commit(&mut snapshot).unwrap();
+        app.paste_sequence_dialog.use_test_data_sources(path);
+        app.paste_sequence_dialog.open_with_context(Ok(safe_sequence_invocation_context()));
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let row = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Host test  ·  2 steps")
+            .expect("saved sequence row is visible").clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(row, pressed));
+        }
+        assert_eq!(app.paste_sequence_dialog.test_selected_id(), Some(id));
+        let steps = app.paste_sequence_dialog.test_draft_steps().to_vec();
+        let session = app.paste_sequence_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.paste_sequence_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.paste_sequence_host.root_layer().is_none());
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::PasteSequenceWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let run = app.paste_sequence_host.test_native_target("Run").expect("detached Run");
+        detached(&mut app, tool_dialog_pointer_events(run, true), false);
+        detached(&mut app, tool_dialog_pointer_events(run, false), true);
+        assert!(app.sequence_playback.started_run().is_none());
+        assert_eq!(app.test_sequence_platform.as_ref().unwrap().publication_count(), 0);
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let run = app.paste_sequence_host.test_native_target("Run").expect("retained Run");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(run, pressed), false);
+        }
+        let first = app.sequence_playback.started_run().expect("the retained Run starts playback");
+        assert_eq!(app.sequence_playback.status(), SequencePlaybackStatus::AwaitAdvance);
+        assert_eq!(app.test_sequence_platform.as_ref().unwrap().publication_count(), 1);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let (dock, clip, enabled) = app.paste_sequence_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.sequence_playback.started_run(), Some(first));
+        assert_eq!(app.paste_sequence_dialog.host_session_epoch(), session);
+        assert_eq!(app.paste_sequence_dialog.test_draft_steps(), steps.as_slice());
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        app.test_sequence_platform.as_mut().unwrap().advance(Duration::from_secs(1));
+        let next = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Next")
+            .expect("docked Next").clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(next, pressed));
+        }
+        assert_eq!(app.test_sequence_platform.as_ref().unwrap().publication_count(), 2);
+        assert_eq!(app.sequence_playback.status(), SequencePlaybackStatus::Completed);
+        app.test_sequence_platform.as_mut().unwrap().advance(Duration::from_secs(1));
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        let run = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Run")
+            .expect("docked Run").clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(run, pressed));
+        }
+        let second = app.sequence_playback.started_run().expect("explicit second Run");
+        assert_ne!(first.generation, second.generation);
+        assert_eq!(app.test_sequence_platform.as_ref().unwrap().publication_count(), 3);
+        assert_eq!(app.test_sequence_context_capture_calls, 0);
+        app.cancel_sequence_playback();
+    }
+
+    #[test]
+    fn detached_sequence_preflight_retains_prompt_and_autostart_on_editor_close() {
+        use crate::paste_sequence::{SequenceDraft, SequencePlaybackStatus, Step};
+        use crate::gui::snippet_prompt_dialog::SnippetPromptError;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        app.paste_sequence_dialog.use_test_data_sources(
+            workspace.root().join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        app.paste_sequence_dialog.open_with_context(Ok(safe_sequence_invocation_context()));
+        for _ in 0..4 {
+            run_tool_dialog_frame(&ctx, &mut app, Vec::new(), false).drop_without_applying_deltas();
+        }
+        let session = app.paste_sequence_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.paste_sequence_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            run_tool_dialog_frame(&ctx, &mut app, tool_dialog_pointer_events(popout, pressed), false)
+                .drop_without_applying_deltas();
+        }
+        run_tool_dialog_frame(&ctx, &mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)], false)
+            .drop_without_applying_deltas();
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let mut first = prompted_test_entry();
+        first.fields[0].default_value = "Ada".into();
+        let mut second = first.clone();
+        second.alias = "follow-up".into();
+        let draft = SequenceDraft::new(
+            "Two prompts",
+            [&first, &second].into_iter().map(|entry| Step::SnippetRef { alias: entry.alias.clone() }).collect(),
+        );
+        app.begin_paste_sequence_draft_preflight_with_context(
+            draft, &[first.clone(), second], &[], safe_sequence_invocation_context(),
+        ).unwrap();
+        app.sequence_prompt_editor_session = Some(session);
+        app.paste_sequence_dialog.set_autostart_when_ready(true);
+        assert!(app.hosted_sequence_prompt_active());
+        assert!(!app.snippet_prompt_has_root_presentation());
+        assert_eq!(app.begin_snippet_preview(first), Err(SnippetPromptError::SequencePreflightActive));
+
+        let viewport = crate::gui::utility_window_host::PasteSequenceWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let generation = app.snippet_prompt_dialog.session().unwrap().generation;
+        assert!(app.paste_sequence_host.test_native_target("Prepare snippet sequence").is_none());
+        detached(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)], true);
+        assert_eq!(app.snippet_prompt_dialog.session().unwrap().generation, generation);
+        detached(&mut app, vec![key_release(egui::Key::Enter, egui::Modifiers::CTRL)], false);
+        for _ in 0..2 {
+            detached(&mut app, Vec::new(), false);
+        }
+        detached(&mut app, vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)], false);
+        let next = app.snippet_prompt_dialog.session().unwrap();
+        assert_ne!(next.generation, generation);
+        assert_eq!(next.alias, "follow-up");
+        assert!(app.hosted_sequence_prompt_active());
+        super::with_immediate_viewport_test_close_request(viewport, || {
+            detached(&mut app, Vec::new(), false);
+        });
+        assert!(!app.paste_sequence_dialog.open);
+        assert!(app.snippet_prompt_has_root_presentation());
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.sequence_playback.status(), SequencePlaybackStatus::Preparing);
+        app.paste_sequence_dialog.open_with_context(Ok(safe_sequence_invocation_context()));
+        let busy = crate::commands::DialogCommandHost::run_paste_sequence(
+            &mut app,
+            crate::paste_sequence::SequenceId::from_raw(1).unwrap(),
+            crate::commands::ActivationSource::Click,
+        ).unwrap_err();
+        assert!(busy.contains("SequenceAlreadyActive"));
+        assert!(app.paste_sequence_dialog.take_autostart_when_ready());
+        let _ = app.cancel_snippet_prompt();
+    }
+
+    #[test]
     fn clipboard_modify_detached_preview_and_apply_require_retained_passes() {
         use crate::clipboard_modify::{
             clipboard::{ClipboardService, fake::FakeClipboardBackend},
@@ -42035,26 +42305,29 @@ mod tests {
         assert_eq!(app.paste_sequence_dialog.test_draft_steps(), draft_before);
         assert!(app.paste_sequence_dialog.source_picker_is_open());
         release_dialog_hint_enter(&ctx, &mut app);
-        app.run_root_frame_for_test(
-            &ctx,
-            egui::RawInput {
-                events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
-                ..actual_query_input(true)
-            },
-            false,
-        )
-        .0
-        .drop_without_applying_deltas();
-        app.run_root_frame_for_test(
-            &ctx,
-            egui::RawInput {
-                events: vec![key_release(egui::Key::Enter, egui::Modifiers::NONE)],
-                ..actual_query_input(true)
-            },
-            false,
-        )
-        .0
-        .drop_without_applying_deltas();
+        for event in [
+            key_press(egui::Key::Enter, egui::Modifiers::NONE),
+            key_release(egui::Key::Enter, egui::Modifiers::NONE),
+        ] {
+            let (output, _) = app.run_root_frame_for_test(
+                &ctx,
+                egui::RawInput { events: vec![event], ..actual_query_input(true) },
+                false,
+            );
+            if !app.paste_sequence_dialog.source_picker_is_open() {
+                fn paints_picker_text(shape: &egui::epaint::Shape) -> bool {
+                    match shape {
+                        egui::epaint::Shape::Text(text) => {
+                            matches!(text.galley.text(), "safe picker payload" | "Insert selected")
+                        }
+                        egui::epaint::Shape::Vec(shapes) => shapes.iter().any(paints_picker_text),
+                        _ => false,
+                    }
+                }
+                assert!(!output.shapes.iter().any(|shape| paints_picker_text(&shape.shape)));
+            }
+            output.drop_without_applying_deltas();
+        }
         assert_eq!(
             app.paste_sequence_dialog.test_draft_steps(),
             &[crate::paste_sequence::Step::SnippetRef {

@@ -9,6 +9,10 @@ use super::jump_mode::ui::{
     batch_rename_confirmation_layer_id,
 };
 use super::jump_mode::{SurfaceId, TargetGeneration};
+use super::paste_sequence_dialog::{
+    PasteSequenceDialog, PasteSequenceHostActions, PasteSequenceHostRuntime,
+    PasteSequenceInteractionCheckpoint,
+};
 use super::search_replace_dialog::{SearchReplaceHostActions, SearchReplaceInteractionCheckpoint};
 use super::snippet_dialog::{SnippetHostActions, SnippetHostEffects, SnippetInteractionCheckpoint};
 use super::clipboard_modify_dialog::{
@@ -28,8 +32,9 @@ use super::{
 use crate::file_operations::RenameRuntimeSnapshot;
 
 pub(super) trait HostedUtilityDialog: Sized {
-    const KIND: NavigationDialogKind;
+    const KIND: Option<NavigationDialogKind> = None;
     const KEY: &'static str;
+    const SURFACE_KIND: &'static str = Self::KEY;
     const TITLE: &'static str;
     const SIZE: egui::Vec2;
     const MINIMUM: egui::Vec2;
@@ -39,6 +44,17 @@ pub(super) trait HostedUtilityDialog: Sized {
     type Actions;
     type Checkpoint;
     type Command;
+
+    fn layer() -> egui::LayerId {
+        Self::KIND.and_then(NavigationDialogKind::layer_id).expect("utility window layer")
+    }
+
+    fn navigation_owner(instance: u64) -> NavigationOwner {
+        NavigationOwner::Dialog {
+            kind: Self::KIND.expect("utility window navigation kind"),
+            instance,
+        }
+    }
 
     fn is_open(&self) -> bool;
     fn session(&self) -> u64;
@@ -96,6 +112,17 @@ pub(super) type BatchRenameWindowHost = UtilityWindowHost<BatchRenameDialogState
 pub(super) type SearchReplaceWindowHost = UtilityWindowHost<SearchReplaceDialogState>;
 pub(super) type ClipboardHistoryWindowHost = UtilityWindowHost<ClipboardDialog>;
 pub(super) type ClipboardModifyWindowHost = UtilityWindowHost<ClipboardModifyDialogState>;
+pub(super) type PasteSequenceWindowHost = UtilityWindowHost<PasteSequenceDialog>;
+
+pub(super) struct HostedPasteSequenceRuntime {
+    pub dialog: PasteSequenceHostRuntime,
+    pub pinned: bool,
+}
+
+pub(super) enum PasteSequenceHostCommand {
+    Closed,
+    Apply(PasteSequenceHostActions),
+}
 
 #[cfg(test)]
 pub(super) type ClipboardModifyTestService = std::sync::Arc<
@@ -206,6 +233,9 @@ pub(super) struct CompanionPass {
 
 pub(super) trait UtilityWindowCompanion {
     fn binding(&self, viewport: egui::ViewportId) -> Option<NavigationViewportBinding>;
+    fn permits_jump_mode(&self) -> bool {
+        true
+    }
     fn scope(&self, jump: &JumpModeUi, binding: NavigationViewportBinding)
     -> Option<JumpModeScope>;
     fn render(&mut self, ctx: &egui::Context, scope: Option<JumpModeScope>, pass: CompanionPass);
@@ -213,7 +243,7 @@ pub(super) trait UtilityWindowCompanion {
 
 impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
     fn docked_layer() -> egui::LayerId {
-        D::KIND.layer_id().expect("utility window layer")
+        D::layer()
     }
 
     fn viewport(session: u64) -> egui::ViewportId {
@@ -257,6 +287,10 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         }
     }
 
+    pub(super) fn is_popped_out(&self) -> bool {
+        self.state.presentation() == UtilityPresentation::Popout
+    }
+
     pub(super) fn owner_viewport(&self) -> egui::ViewportId {
         if self.root_layer().is_none()
             && let Some(session) = self.native_session
@@ -296,6 +330,17 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.deferred_close = None;
         self.docked_focus_pending = false;
         self.state.retire_to_docked();
+        self.cancel_jump();
+    }
+
+    pub(super) fn suspend(&mut self, ctx: &egui::Context) {
+        self.close_viewport(ctx);
+        self.pending = None;
+        self.deferred_close = None;
+        self.docked_focus_pending = false;
+        let identity = self.state.identity();
+        self.state.complete_bootstrap(identity, None, None);
+        self.state.complete_focus(identity);
         self.cancel_jump();
     }
 
@@ -501,10 +546,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let parent = NavigationViewportBinding {
             viewport,
             base_layer: layer,
-            owner: NavigationOwner::Dialog {
-                kind: D::KIND,
-                instance,
-            },
+            owner: D::navigation_owner(instance),
         };
         let dialog_child = dialog.confirmation_binding(viewport, instance);
         let companion_binding = companion
@@ -520,7 +562,10 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let owner = self
             .native_jump
             .update_navigation_owner_for_viewport(ctx, binding, input);
-        let jump_current = self.native_jump.is_enabled() && owner == binding.owner;
+        let companion_permits_jump = companion.as_ref()
+            .is_none_or(|(child, _)| child.permits_jump_mode());
+        let jump_current = self.native_jump.is_enabled()
+            && owner == binding.owner && companion_permits_jump;
         let popup_layer = dialog.popup_layer(ctx, layer);
         let parent_current = input
             && child.is_none()
@@ -542,7 +587,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         self.native_jump
             .handle_viewport_input(ctx, jump_current, frame.first, viewport);
         self.native_jump.begin_ui_pass();
-        let surface = SurfaceId::dialog(D::KEY, instance);
+        let surface = SurfaceId::dialog(D::SURFACE_KIND, instance);
         let parent_scope =
             (jump_current && child.is_none() && dialog.parent_targets_allowed(runtime))
                 .then(|| {
@@ -597,7 +642,8 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         {
             let owns = input
                 && binding.base_is_current(ctx)
-                && binding.focus_is_owned(ctx, None)
+                && (binding.focus_is_owned(ctx, None)
+                    || super::jump_mode::ui::focused_response_layer(ctx) == Some(layer))
                 && !egui::Popup::is_any_open(ctx);
             let scope = jump_current
                 .then(|| companion.scope(&self.native_jump, binding))
@@ -901,7 +947,7 @@ fn draw<D: HostedUtilityDialog>(
 }
 
 impl HostedUtilityDialog for BatchRenameDialogState {
-    const KIND: NavigationDialogKind = NavigationDialogKind::BatchRename;
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::BatchRename);
     const KEY: &'static str = "batch-rename";
     const TITLE: &'static str = "Batch Renamer";
     const SIZE: egui::Vec2 = egui::vec2(1040.0, 760.0);
@@ -1010,7 +1056,7 @@ impl HostedUtilityDialog for BatchRenameDialogState {
 }
 
 impl HostedUtilityDialog for SearchReplaceDialogState {
-    const KIND: NavigationDialogKind = NavigationDialogKind::SearchReplace;
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::SearchReplace);
     const KEY: &'static str = "search-replace";
     const TITLE: &'static str = "Search and Replace";
     const SIZE: egui::Vec2 = egui::vec2(1120.0, 820.0);
@@ -1130,7 +1176,7 @@ impl HostedUtilityDialog for SearchReplaceDialogState {
 }
 
 impl HostedUtilityDialog for ClipboardDialog {
-    const KIND: NavigationDialogKind = NavigationDialogKind::ClipboardHistory;
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::ClipboardHistory);
     const KEY: &'static str = "clipboard-history";
     const TITLE: &'static str = "Clipboard History";
     const SIZE: egui::Vec2 = egui::vec2(360.0, 240.0);
@@ -1177,7 +1223,7 @@ impl HostedUtilityDialog for ClipboardDialog {
         let (confirmation_instance, _) = self.jump_mode_pending_removal_identity()?;
         Some(NavigationViewportBinding {
             viewport,
-            base_layer: Self::KIND.layer_id()?,
+            base_layer: Self::layer(),
             owner: NavigationOwner::ClipboardRemoval {
                 parent_instance: instance,
                 confirmation_instance,
@@ -1274,7 +1320,7 @@ impl HostedUtilityDialog for ClipboardDialog {
 }
 
 impl HostedUtilityDialog for SnippetDialog {
-    const KIND: NavigationDialogKind = NavigationDialogKind::Snippets;
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::Snippets);
     const KEY: &'static str = "snippets";
     const TITLE: &'static str = "Snippets";
     const SIZE: egui::Vec2 = egui::vec2(600.0, 500.0);
@@ -1322,7 +1368,7 @@ impl HostedUtilityDialog for SnippetDialog {
         let (confirmation_instance, _) = self.jump_mode_pending_removal_identity()?;
         Some(NavigationViewportBinding {
             viewport,
-            base_layer: Self::KIND.layer_id()?,
+            base_layer: Self::layer(),
             owner: NavigationOwner::SnippetRemoval {
                 parent_instance: instance,
                 confirmation_instance,
@@ -1416,7 +1462,7 @@ impl HostedUtilityDialog for SnippetDialog {
 }
 
 impl HostedUtilityDialog for ClipboardModifyDialogState {
-    const KIND: NavigationDialogKind = NavigationDialogKind::ClipboardModify;
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::ClipboardModify);
     const KEY: &'static str = "clipboard-modify";
     const TITLE: &'static str = "Clipboard Modify";
     const SIZE: egui::Vec2 = egui::vec2(900.0, 640.0);
@@ -1511,6 +1557,109 @@ impl HostedUtilityDialog for ClipboardModifyDialogState {
             vec![ClipboardModifyHostCommand::Closed]
         } else if actions.needs_completion() {
             vec![ClipboardModifyHostCommand::Apply(actions)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
+}
+
+impl HostedUtilityDialog for PasteSequenceDialog {
+    const KEY: &'static str = "paste-sequences";
+    const SURFACE_KIND: &'static str = "paste-sequence";
+    const TITLE: &'static str = "Paste Sequences";
+    const SIZE: egui::Vec2 = egui::vec2(760.0, 640.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(520.0, 420.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = HostedPasteSequenceRuntime;
+    type Actions = PasteSequenceHostActions;
+    type Checkpoint = PasteSequenceInteractionCheckpoint;
+    type Command = PasteSequenceHostCommand;
+
+    fn layer() -> egui::LayerId {
+        super::jump_mode::ui::paste_sequence_dialog_layer_id()
+    }
+
+    fn navigation_owner(instance: u64) -> NavigationOwner {
+        NavigationOwner::PasteSequence { instance }
+    }
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+
+    fn session(&self) -> u64 {
+        self.host_session_epoch()
+    }
+
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        true
+    }
+
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        // Inline picker and confirmation derive exact child scopes from the
+        // current Paste Sequence owner on this same layer.
+        None
+    }
+
+    fn capture(&self) -> Self::Checkpoint {
+        PasteSequenceInteractionCheckpoint::capture(self)
+    }
+
+    fn restore(&mut self, checkpoint: Self::Checkpoint) {
+        checkpoint.restore(self);
+    }
+
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent_input: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(
+            ctx, &runtime.dialog, scopes.0.cloned(), parent_input, first,
+            runtime.pinned, child_ui, presentation,
+        )
+    }
+
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        (!actions.needs_completion()).then_some(actions.host_request).flatten()
+    }
+
+    fn closed_command() -> Self::Command {
+        PasteSequenceHostCommand::Closed
+    }
+
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, PasteSequenceHostCommand::Closed)
+    }
+
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.needs_completion() {
+            vec![PasteSequenceHostCommand::Apply(actions)]
         } else {
             Vec::new()
         }

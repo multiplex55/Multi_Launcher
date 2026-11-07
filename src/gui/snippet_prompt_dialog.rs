@@ -82,26 +82,30 @@ pub(crate) struct SnippetPromptDialog {
     pending_focus: Option<PromptFocusTarget>,
     copy_widget_id: Option<egui::Id>,
     cancel_widget_id: Option<egui::Id>,
-    hosted_preview: Option<HostedPreviewFrame>,
+    hosted_prompt: Option<HostedPromptFrame>,
     #[cfg(test)]
     pub(crate) last_layout: Option<SnippetPromptLayout>,
 }
 
-struct HostedPreviewFrame {
+struct HostedPromptFrame {
     pass: CompanionPass,
     generation: u64,
     values: HashMap<String, String>,
     feedback: Option<SnippetPromptError>,
     focused_generation: Option<u64>,
     pending_focus: Option<PromptFocusTarget>,
-    cancel: bool,
+    action: Option<SnippetPromptUiAction>,
+    copies: Vec<String>,
 }
 
-impl HostedPreviewFrame {
+impl HostedPromptFrame {
     fn restore(self, dialog: &mut SnippetPromptDialog) {
         if let Some(session) = dialog.session.as_mut()
             && session.generation == self.generation
-            && matches!(session.mode, SnippetPromptMode::PreviewOnly { .. })
+            && matches!(
+                session.mode,
+                SnippetPromptMode::PreviewOnly { .. } | SnippetPromptMode::SequencePreflight
+            )
         {
             session.values = self.values;
             dialog.feedback = self.feedback;
@@ -176,6 +180,7 @@ pub(crate) enum SnippetPromptError {
     StaleTemplate,
     ClipboardUnavailable,
     SequencePreflightFailed,
+    SequencePreflightActive,
 }
 
 impl SnippetPromptError {
@@ -194,6 +199,7 @@ impl SnippetPromptError {
             Self::SequencePreflightFailed => {
                 "The sequence could not be prepared. Reopen preflight and try again."
             }
+            Self::SequencePreflightActive => "Finish or cancel the active sequence prompt first.",
         }
     }
 }
@@ -1011,7 +1017,7 @@ impl SnippetPromptDialog {
     /// Cancel and drop entered values. Preview mode returns the exact unsaved draft
     /// so the editor can resume with its pre-preview state.
     pub(crate) fn cancel(&mut self, ctx: &egui::Context) -> Option<SnippetEntry> {
-        self.hosted_preview = None;
+        self.hosted_prompt = None;
         self.clear_widget_state(ctx);
         self.open = false;
         self.feedback = None;
@@ -1028,14 +1034,12 @@ impl SnippetPromptDialog {
         let _ = self.cancel(ctx);
     }
 
-    pub(super) fn complete_hosted_preview(
+    pub(super) fn complete_hosted_prompt(
         &mut self,
         ctx: &egui::Context,
         editor_session: Option<u64>,
-    ) -> bool {
-        let Some(frame) = self.hosted_preview.take() else {
-            return false;
-        };
+    ) -> Option<SnippetPromptUiAction> {
+        let frame = self.hosted_prompt.take()?;
         if editor_session != Some(frame.pass.session)
             || !frame.pass.first
             || !frame.pass.root.was_retained(ctx)
@@ -1046,12 +1050,15 @@ impl SnippetPromptDialog {
                 .is_none_or(|session| session.generation != frame.generation)
         {
             frame.restore(self);
-            return false;
+            return None;
         }
-        if frame.cancel {
+        if frame.action.is_some() {
             ctx.request_repaint_of(frame.pass.owner.viewport_id);
         }
-        frame.cancel
+        for text in frame.copies {
+            let _ = crate::actions::clipboard::set_text(&text);
+        }
+        frame.action
     }
 
     fn clear_widget_state(&self, ctx: &egui::Context) {
@@ -1098,7 +1105,7 @@ impl UtilityWindowCompanion for SnippetPromptDialog {
         use super::jump_mode::ui::{
             NavigationOwner, NavigationViewportBinding, snippet_prompt_layer_id,
         };
-        if !self.open || !self.is_preview_only() {
+        if !self.open || !(self.is_preview_only() || self.is_sequence_preflight()) {
             return None;
         }
         let generation = self.session.as_ref()?.generation;
@@ -1109,11 +1116,18 @@ impl UtilityWindowCompanion for SnippetPromptDialog {
         })
     }
 
+    fn permits_jump_mode(&self) -> bool {
+        self.is_preview_only()
+    }
+
     fn scope(
         &self,
         jump: &super::jump_mode::ui::JumpModeUi,
         binding: super::jump_mode::ui::NavigationViewportBinding,
     ) -> Option<super::jump_mode::ui::JumpModeScope> {
+        if !self.permits_jump_mode() {
+            return None;
+        }
         let generation = self.session.as_ref()?.generation;
         jump.scope_for_viewport_binding(
             super::jump_mode::SurfaceId::dialog("snippet-prompt", generation),
@@ -1129,25 +1143,32 @@ impl UtilityWindowCompanion for SnippetPromptDialog {
         scope: Option<super::jump_mode::ui::JumpModeScope>,
         pass: CompanionPass,
     ) {
-        if let Some(previous) = self.hosted_preview.take() {
+        if let Some(previous) = self.hosted_prompt.take() {
             previous.restore(self);
         }
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let mut frame = HostedPreviewFrame {
+        let sequence = matches!(session.mode, SnippetPromptMode::SequencePreflight);
+        let mut frame = HostedPromptFrame {
             pass,
             generation: session.generation,
             values: session.values.clone(),
             feedback: self.feedback,
             focused_generation: self.focused_generation,
             pending_focus: self.pending_focus.clone(),
-            cancel: false,
+            action: None,
+            copies: Vec::new(),
         };
         let input = frame.pass.first && frame.pass.input_owned;
         if input {
             match consume_prompt_key(ctx) {
-                Some(SnippetPromptKey::Escape) => frame.cancel = true,
+                Some(SnippetPromptKey::Escape) => {
+                    frame.action = Some(SnippetPromptUiAction::Cancel)
+                }
+                Some(SnippetPromptKey::Submit) if sequence => {
+                    frame.action = Some(SnippetPromptUiAction::Submit)
+                }
                 Some(SnippetPromptKey::Tab { backwards }) => self.queue_tab_focus(ctx, backwards),
                 _ => {}
             }
@@ -1155,25 +1176,30 @@ impl UtilityWindowCompanion for SnippetPromptDialog {
         let command_start = ctx.output(|output| output.commands.len());
         let action = self.show_with_jump_mode(
             ctx,
-            scope.filter(|_| input && !frame.cancel),
-            input && !frame.cancel,
+            scope.filter(|_| input && frame.action.is_none() && !sequence),
+            input && frame.action.is_none(),
             frame.pass.first,
             frame.pass.first && frame.pass.initial_focus,
         );
         ctx.output_mut(|output| {
-            let commands = output.commands.split_off(command_start);
-            output.commands.extend(
-                commands
-                    .into_iter()
-                    .filter(|command| !matches!(command, egui::OutputCommand::CopyText(_))),
-            );
+            for command in output.commands.split_off(command_start) {
+                match command {
+                    egui::OutputCommand::CopyText(text) if input && sequence => {
+                        frame.copies.push(text)
+                    }
+                    egui::OutputCommand::CopyText(_) => {}
+                    other => output.commands.push(other),
+                }
+            }
         });
-        if input && matches!(action, Some(SnippetPromptUiAction::Cancel)) {
-            frame.cancel = true;
+        if input && frame.action.is_none() {
+            frame.action = action;
+        }
+        if matches!(frame.action, Some(SnippetPromptUiAction::Cancel)) {
             // The editor owns this prompt until completion accepts the close.
             self.open = true;
         }
-        self.hosted_preview = Some(frame);
+        self.hosted_prompt = Some(frame);
     }
 }
 
