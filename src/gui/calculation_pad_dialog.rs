@@ -3,9 +3,10 @@ use super::utility_host::{
     ViewportPassProvenance,
 };
 use crate::calculation_pad::{
-    CalculationPadSession, DocumentId, EXAMPLE_GROUPS, LineId, LineOutcome, PadDocumentSummary,
-    PadRecoverySnapshot, PadRecoveryStore, PadRecoveryWriteFailure, PadRecoveryWriter,
-    PadStoreError, PendingTransition, SessionError, TransitionDecision, TransitionOutcome,
+    CalculationPadSession, DocumentId, DocumentIncarnation, EXAMPLE_GROUPS,
+    InspectorSourceSnapshot, LineId, LineOutcome, PadDocumentSummary, PadRecoverySnapshot,
+    PadRecoveryStore, PadRecoveryWriteFailure, PadRecoveryWriter, PadStoreError, PendingTransition,
+    SessionError, TransitionDecision, TransitionOutcome,
 };
 use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::platform::app_data::AppDataRoot;
@@ -36,6 +37,12 @@ pub(crate) struct CalculationPadDialog {
     pub(crate) open: bool,
     focus_source: bool,
     session: CalculationPadSession,
+    inspector_selection: Option<InspectorSelection>,
+    inspector_caret: Option<InspectorCaret>,
+    inspector_selection_generation: u64,
+    inspector_caret_generation: u64,
+    inspector_context: std::sync::Arc<InspectorPadContext>,
+    inspector_context_key: Option<(DocumentIncarnation, DocumentId, u64, Option<LineId>, u64)>,
     recovery_writer: PadRecoveryWriter,
     remember_source: bool,
     recovery_attempted: bool,
@@ -63,6 +70,10 @@ pub(crate) struct CalculationPadDialog {
     #[cfg(test)]
     test_line_copy_rects: Vec<(usize, egui::Rect)>,
     #[cfg(test)]
+    test_inspect_rects: Vec<(usize, egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_inspector_reopen: Option<(egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
     test_window_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_discard_rect: Option<egui::Rect>,
@@ -87,6 +98,7 @@ pub(crate) struct CalculationPadDialog {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CalculationPadDialogEffect {
     CopyText(String),
+    OpenInspector,
     ShowRoot,
     SaveRecoveryPreference(bool),
 }
@@ -106,6 +118,10 @@ struct HostEffects {
     pass: Option<ViewportPassProvenance>,
     pass_accepted: bool,
     edited_source: Option<String>,
+    document_basis: Option<(DocumentIncarnation, DocumentId, u64)>,
+    inspector_selection: Option<LineId>,
+    inspector_caret: Option<std::ops::Range<usize>>,
+    open_inspector: bool,
     save_as_name: Option<String>,
     source_focus_requested: bool,
     source_editor_id: Option<egui::Id>,
@@ -118,6 +134,30 @@ struct HostEffects {
     focus_viewport: bool,
     embedded_root_layer: Option<egui::LayerId>,
     embedded_root_focused_id: Option<egui::Id>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InspectorSelection {
+    incarnation: DocumentIncarnation,
+    document: DocumentId,
+    line: LineId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct InspectorCaret {
+    pub(super) incarnation: DocumentIncarnation,
+    pub(super) document: DocumentId,
+    pub(super) revision: u64,
+    pub(super) range: std::ops::Range<usize>,
+    pub(super) generation: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct InspectorPadContext {
+    pub(super) candidate: Option<InspectorSourceSnapshot>,
+    pub(super) caret: Option<InspectorCaret>,
+    pub(super) selection_generation: u64,
+    pub(super) editable: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -172,6 +212,15 @@ impl CalculationPadDialog {
             pass: None,
             pass_accepted: false,
             edited_source: None,
+            document_basis: self
+                .session
+                .document_incarnation()
+                .zip(self.session.current_id())
+                .zip(self.session.revision())
+                .map(|((incarnation, document), revision)| (incarnation, document, revision)),
+            inspector_selection: None,
+            inspector_caret: None,
+            open_inspector: false,
             save_as_name: None,
             source_focus_requested: false,
             source_editor_id: None,
@@ -241,6 +290,12 @@ impl CalculationPadDialog {
             open: false,
             focus_source: false,
             session: CalculationPadSession::new(root),
+            inspector_selection: None,
+            inspector_caret: None,
+            inspector_selection_generation: 0,
+            inspector_caret_generation: 0,
+            inspector_context: std::sync::Arc::new(InspectorPadContext::default()),
+            inspector_context_key: None,
             recovery_writer: PadRecoveryWriter::new(PadRecoveryStore::new(root)),
             remember_source: false,
             recovery_attempted: false,
@@ -267,6 +322,10 @@ impl CalculationPadDialog {
             test_save_rect: None,
             #[cfg(test)]
             test_line_copy_rects: Vec::new(),
+            #[cfg(test)]
+            test_inspect_rects: Vec::new(),
+            #[cfg(test)]
+            test_inspector_reopen: None,
             #[cfg(test)]
             test_window_rect: None,
             #[cfg(test)]
@@ -879,6 +938,9 @@ impl CalculationPadDialog {
                         &mut effects.intent,
                         &mut effects.host_request,
                         &mut effects.result_copy,
+                        &mut effects.inspector_selection,
+                        &mut effects.inspector_caret,
+                        &mut effects.open_inspector,
                         identity,
                         viewport_id,
                     );
@@ -934,6 +996,20 @@ impl CalculationPadDialog {
             return delivered;
         }
 
+        let current_basis = self
+            .session
+            .document_incarnation()
+            .zip(self.session.current_id())
+            .zip(self.session.revision())
+            .map(|((incarnation, document), revision)| (incarnation, document, revision));
+        if host.document_basis != current_basis {
+            host.edited_source = None;
+            host.editor_history_action = None;
+            host.inspector_selection = None;
+            host.inspector_caret = None;
+            host.open_inspector = false;
+        }
+
         let needs_repaint = host.edited_source.is_some()
             || host.save_as_name.is_some()
             || host.source_focus_requested
@@ -947,6 +1023,11 @@ impl CalculationPadDialog {
         let host_request_requested = host.host_request.is_some();
         let accepted_source_or_history =
             host.edited_source.is_some() || host.editor_history_action.is_some();
+        let before_document = self
+            .session
+            .document_incarnation()
+            .zip(self.session.current_id());
+        let source_was_edited = host.edited_source.is_some();
 
         if let Some(source) = host.edited_source.take() {
             if let Err(error) = self.session.replace_source(source) {
@@ -1040,6 +1121,67 @@ impl CalculationPadDialog {
             {
                 self.set_recovery_error(error.to_string());
             }
+        }
+        let after_document = self
+            .session
+            .document_incarnation()
+            .zip(self.session.current_id());
+        if before_document == after_document
+            && let Some((incarnation, document)) = after_document
+        {
+            if let Some(line) = host.inspector_selection.take()
+                && self
+                    .session
+                    .line_ids()
+                    .is_some_and(|ids| ids.contains(&line))
+            {
+                let selected = InspectorSelection {
+                    incarnation,
+                    document,
+                    line,
+                };
+                if self.inspector_selection.as_ref() != Some(&selected) {
+                    self.inspector_selection = Some(selected);
+                    self.inspector_selection_generation =
+                        self.inspector_selection_generation.wrapping_add(1);
+                }
+            }
+            if host.editor_history_action.is_none()
+                && let Some(range) = host.inspector_caret.take()
+                && let Some(revision) = self.session.revision()
+                && self
+                    .session
+                    .source()
+                    .and_then(|source| source.get(range.clone()))
+                    .is_some()
+            {
+                let next = InspectorCaret {
+                    incarnation,
+                    document,
+                    revision,
+                    range,
+                    generation: self.inspector_caret_generation,
+                };
+                if self.inspector_caret.as_ref().is_none_or(|old| {
+                    old.incarnation != next.incarnation
+                        || old.document != next.document
+                        || old.revision != next.revision
+                        || old.range != next.range
+                }) {
+                    self.inspector_caret_generation =
+                        self.inspector_caret_generation.wrapping_add(1);
+                    self.inspector_caret = Some(InspectorCaret {
+                        generation: self.inspector_caret_generation,
+                        ..next
+                    });
+                }
+            } else if source_was_edited || host.editor_history_action.is_some() {
+                self.inspector_caret = None;
+            }
+        }
+        self.sync_inspector_context();
+        if host.open_inspector && !host.close_requested && host.host_request.is_none() {
+            delivered.push(CalculationPadDialogEffect::OpenInspector);
         }
         if host.close_requested {
             self.host_close_requested = false;
@@ -1166,7 +1308,117 @@ impl CalculationPadDialog {
         if self.host_state.bootstrap_pending() || host_request_requested {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
+        self.sync_inspector_context();
         delivered
+    }
+
+    fn sync_inspector_context(&mut self) {
+        let identity = self
+            .session
+            .document_incarnation()
+            .zip(self.session.current_id());
+        if self.inspector_selection.as_ref().is_some_and(|selected| {
+            identity != Some((selected.incarnation, selected.document))
+                || !self
+                    .session
+                    .line_ids()
+                    .is_some_and(|ids| ids.contains(&selected.line))
+        }) {
+            self.inspector_selection = None;
+            self.inspector_selection_generation =
+                self.inspector_selection_generation.wrapping_add(1);
+        }
+        if self.inspector_caret.as_ref().is_some_and(|caret| {
+            identity != Some((caret.incarnation, caret.document))
+                || self.session.revision() != Some(caret.revision)
+        }) {
+            self.inspector_caret = None;
+            self.inspector_caret_generation = self.inspector_caret_generation.wrapping_add(1);
+        }
+        let key =
+            identity
+                .zip(self.session.revision())
+                .map(|((incarnation, document), revision)| {
+                    (
+                        incarnation,
+                        document,
+                        revision,
+                        self.inspector_selection
+                            .as_ref()
+                            .map(|selection| selection.line),
+                        self.inspector_selection_generation,
+                    )
+                });
+        let mut context = None;
+        if key != self.inspector_context_key {
+            let selected = self
+                .inspector_selection
+                .as_ref()
+                .map(|selection| selection.line);
+            if selected.is_some() {
+                self.session.evaluation();
+            }
+            let candidate = selected.and_then(|line| self.session.inspector_source(line));
+            context = Some(InspectorPadContext {
+                candidate,
+                caret: self.inspector_caret.clone(),
+                selection_generation: self.inspector_selection_generation,
+                editable: self.session.pending_transition().is_none(),
+            });
+            self.inspector_context_key = key;
+        }
+        if context.is_none()
+            && (self.inspector_context.caret != self.inspector_caret
+                || self.inspector_context.selection_generation
+                    != self.inspector_selection_generation
+                || self.inspector_context.editable != self.session.pending_transition().is_none())
+        {
+            let mut updated = (*self.inspector_context).clone();
+            updated.caret = self.inspector_caret.clone();
+            updated.selection_generation = self.inspector_selection_generation;
+            updated.editable = self.session.pending_transition().is_none();
+            context = Some(updated);
+        }
+        if let Some(context) = context {
+            self.inspector_context = std::sync::Arc::new(context);
+        }
+    }
+
+    pub(super) fn inspector_context(&self) -> std::sync::Arc<InspectorPadContext> {
+        std::sync::Arc::clone(&self.inspector_context)
+    }
+
+    pub(super) fn apply_inspector_insert(
+        &mut self,
+        ctx: &egui::Context,
+        context: &InspectorPadContext,
+        request: crate::calculation_pad::InspectorInsertRequest,
+    ) -> bool {
+        self.sync_inspector_context();
+        if self.inspector_context.as_ref() != context
+            || context.candidate.as_ref() != Some(request.source())
+            || context
+                .caret
+                .as_ref()
+                .is_none_or(|caret| &caret.range != request.target())
+        {
+            return false;
+        }
+        match self.session.apply_inspector_insert(request) {
+            Ok(changed) => {
+                if changed {
+                    self.inspector_caret = None;
+                    self.schedule_recovery_snapshot(ctx);
+                    self.request_source_focus();
+                }
+                self.sync_inspector_context();
+                changed
+            }
+            Err(error) => {
+                self.error = Some(format!("Inspector insert refused: {error:?}"));
+                false
+            }
+        }
     }
 
     fn apply_host_request(&mut self, ctx: &egui::Context, requested_host: PadHost) -> bool {
@@ -1223,6 +1475,9 @@ impl CalculationPadDialog {
         intent: &mut Option<DialogIntent>,
         host_request: &mut Option<PadHost>,
         result_copy: &mut Option<ResultCopyIntent>,
+        inspector_selection: &mut Option<LineId>,
+        inspector_caret: &mut Option<std::ops::Range<usize>>,
+        open_inspector: &mut bool,
         host_identity: PadHostIdentity,
         viewport_id: egui::ViewportId,
     ) {
@@ -1254,6 +1509,15 @@ impl CalculationPadDialog {
             }
             if examples.clicked() {
                 *intent = Some(DialogIntent::OpenExamples);
+            }
+            let inspector = ui.button("Programmer Inspector…");
+            #[cfg(test)]
+            {
+                self.test_inspector_reopen =
+                    Some((inspector.rect, ui.clip_rect(), inspector.enabled()));
+            }
+            if inspector.clicked() {
+                *open_inspector = true;
             }
             let (host_button, requested_host) =
                 super::utility_host::presentation_button(ui, host_identity.host, true);
@@ -1320,6 +1584,7 @@ impl CalculationPadDialog {
                     authorized_pass,
                     source_focus_requested,
                     edited_source,
+                    inspector_caret,
                 );
                 self.results_ui(
                     &mut columns[1],
@@ -1328,6 +1593,8 @@ impl CalculationPadDialog {
                     result_copy,
                     host_identity,
                     viewport_id,
+                    inspector_selection,
+                    open_inspector,
                 );
             });
         } else {
@@ -1340,6 +1607,7 @@ impl CalculationPadDialog {
                 authorized_pass,
                 source_focus_requested,
                 edited_source,
+                inspector_caret,
             );
             self.results_ui(
                 ui,
@@ -1348,6 +1616,8 @@ impl CalculationPadDialog {
                 result_copy,
                 host_identity,
                 viewport_id,
+                inspector_selection,
+                open_inspector,
             );
         }
     }
@@ -1432,6 +1702,7 @@ impl CalculationPadDialog {
         authorized_pass: bool,
         source_focus_requested: &mut bool,
         edited_source: &mut Option<String>,
+        inspector_caret: &mut Option<std::ops::Range<usize>>,
     ) {
         ui.heading("Source");
         let response = ui
@@ -1440,19 +1711,62 @@ impl CalculationPadDialog {
                     .id_salt("calculation-pad-editor-scroll")
                     .max_height(max_height)
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(source)
-                                .id(editor_id)
-                                .desired_rows(12)
-                                .desired_width(ui.available_width())
-                                .font(egui::TextStyle::Monospace)
-                                .hint_text("total = 2 + 3\nr1 * 4"),
-                        )
+                        egui::TextEdit::multiline(source)
+                            .id(editor_id)
+                            .desired_rows(12)
+                            .desired_width(ui.available_width())
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("total = 2 + 3\nr1 * 4")
+                            .show(ui)
                     })
                     .inner
             })
             .inner;
 
+        let response = &response.response;
+        let cursor_interaction = response.clicked()
+            || response.dragged()
+            || response.changed()
+            || ui.input(|input| {
+                input.events.iter().any(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => {
+                        matches!(
+                            key,
+                            egui::Key::ArrowLeft
+                                | egui::Key::ArrowRight
+                                | egui::Key::ArrowUp
+                                | egui::Key::ArrowDown
+                                | egui::Key::Home
+                                | egui::Key::End
+                        ) || (*key == egui::Key::A && modifiers.command)
+                    }
+                    _ => false,
+                })
+            });
+        if authorized_pass && response.has_focus() && cursor_interaction {
+            if let Some(range) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                .and_then(|state| state.cursor.char_range())
+            {
+                let to_byte = |index: usize| {
+                    source
+                        .char_indices()
+                        .map(|(offset, _)| offset)
+                        .chain(std::iter::once(source.len()))
+                        .nth(index)
+                };
+                if let (Some(a), Some(b)) = (
+                    to_byte(range.primary.index.into()),
+                    to_byte(range.secondary.index.into()),
+                ) {
+                    *inspector_caret = Some(a.min(b)..a.max(b));
+                }
+            }
+        }
         #[cfg(test)]
         {
             self.test_editor_id = Some(editor_id);
@@ -1475,6 +1789,8 @@ impl CalculationPadDialog {
         result_copy: &mut Option<ResultCopyIntent>,
         host_identity: PadHostIdentity,
         viewport_id: egui::ViewportId,
+        inspector_selection: &mut Option<LineId>,
+        open_inspector: &mut bool,
     ) {
         ui.horizontal(|ui| {
             ui.heading("Results");
@@ -1497,6 +1813,8 @@ impl CalculationPadDialog {
 
         #[cfg(test)]
         self.test_line_copy_rects.clear();
+        #[cfg(test)]
+        self.test_inspect_rects.clear();
 
         egui::ScrollArea::vertical()
             .id_salt("calculation-pad-results")
@@ -1537,6 +1855,15 @@ impl CalculationPadDialog {
                                         .formatted_result()
                                         .unwrap_or_else(|| "unavailable".into());
                                     ui.label(&formatted);
+                                    if matches!(value, crate::calculation_pad::CalculationValue::Integer(_) | crate::calculation_pad::CalculationValue::ExactBase { .. }) {
+                                        let inspect = ui.small_button("Inspect bits…");
+                                        #[cfg(test)]
+                                        self.test_inspect_rects.push((line.line_index, inspect.rect, ui.clip_rect(), inspect.enabled()));
+                                        if inspect.clicked() {
+                                            *inspector_selection = Some(line.id);
+                                            *open_inspector = true;
+                                        }
+                                    }
                                     if value.is_approximate() {
                                         ui.weak("approx.");
                                     }
@@ -1875,6 +2202,22 @@ impl CalculationPadDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_inspect_button(
+        &self,
+        index: usize,
+    ) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_inspect_rects
+            .iter()
+            .find(|(line, _, _, _)| *line == index)
+            .map(|(_, rect, clip, enabled)| (*rect, *clip, *enabled))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_inspector_reopen(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_inspector_reopen
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_editor_has_focus(&self, ctx: &egui::Context) -> bool {
         self.test_editor_id
             .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id)))
@@ -1916,7 +2259,7 @@ impl CalculationPadDialog {
     }
 
     #[cfg(test)]
-    fn test_open_document(&mut self, id: DocumentId) {
+    pub(crate) fn test_open_document(&mut self, id: DocumentId) {
         self.apply_intent(DialogIntent::Open(id));
     }
 }
@@ -1962,6 +2305,27 @@ mod tests {
     use eframe::egui;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn inspector_pad_receipt_rejects_stale_source_selection_and_caret() {
+        let (_directory, _root, mut dialog) = fixture();
+        let ctx = egui::Context::default();
+        dialog.open();
+        dialog.test_replace_source("u8(1)");
+        dialog.session.evaluation();
+        let line = dialog.session.line_id(0).unwrap();
+        let mut old = dialog.empty_host_effects(egui::ViewportId::ROOT);
+        old.pass_accepted = true;
+        old.edited_source = Some("u8(2)".into());
+        old.inspector_selection = Some(line);
+        old.inspector_caret = Some(0..5);
+        old.open_inspector = true;
+        dialog.test_replace_source("u8(3)");
+        assert!(complete_host_effects(&mut dialog, &ctx, old).is_empty());
+        assert_eq!(dialog.test_source(), Some("u8(3)"));
+        assert!(dialog.inspector_context().candidate.is_none());
+        assert!(dialog.inspector_context().caret.is_none());
+    }
 
     fn fixture() -> (TempDir, AppDataRoot, CalculationPadDialog) {
         let directory = tempfile::tempdir().expect("create isolated pad data root");

@@ -66,6 +66,14 @@ pub(super) trait HostedUtilityDialog: Sized {
     }
     fn parent_targets_allowed(&self, runtime: &Self::Runtime) -> bool;
     fn parent_input_allowed(&self) -> bool;
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        popup: Option<egui::LayerId>,
+    ) -> bool {
+        binding.base_is_current(ctx) && binding.focus_is_owned(ctx, popup)
+    }
     fn confirmation_can_close() -> bool {
         false
     }
@@ -298,6 +306,9 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
 
     pub(super) fn is_popped_out(&self) -> bool {
         self.state.presentation() == UtilityPresentation::Popout
+    }
+    pub(super) fn identity(&self) -> HostIdentity {
+        self.state.identity()
     }
 
     pub(super) fn owner_viewport(&self) -> egui::ViewportId {
@@ -579,8 +590,7 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         let parent_current = input
             && child.is_none()
             && dialog.parent_input_allowed()
-            && parent.base_is_current(ctx)
-            && parent.focus_is_owned(ctx, popup_layer)
+            && dialog.native_parent_current(parent, ctx, popup_layer)
             && (!egui::Popup::is_any_open(ctx) || popup_layer.is_some());
         let confirmation_owner = if input
             && companion_binding.is_none()
@@ -1769,6 +1779,107 @@ impl HostedUtilityDialog for JsonUtilityDialogState {
         }
     }
 
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
+}
+
+pub(super) type ProgrammerInspectorWindowHost =
+    UtilityWindowHost<super::programmer_inspector_dialog::ProgrammerInspectorDialog>;
+pub(super) enum ProgrammerInspectorHostCommand {
+    Closed,
+    Apply(super::programmer_inspector_dialog::InspectorActions),
+}
+impl HostedUtilityDialog for super::programmer_inspector_dialog::ProgrammerInspectorDialog {
+    const KEY: &'static str = "programmer-inspector";
+    const TITLE: &'static str = "Programmer Inspector";
+    const SIZE: egui::Vec2 = egui::vec2(720.0, 650.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(360.0, 280.0);
+    const SCROLL_NATIVE_WINDOW: bool = true;
+    type Runtime = super::programmer_inspector_dialog::InspectorRuntime;
+    type Actions = super::programmer_inspector_dialog::InspectorActions;
+    type Checkpoint = ();
+    type Command = ProgrammerInspectorHostCommand;
+    fn layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("programmer-inspector-window"),
+        )
+    }
+    fn navigation_owner(_: u64) -> NavigationOwner {
+        NavigationOwner::Blocked
+    }
+    fn is_open(&self) -> bool {
+        self.open
+    }
+    fn session(&self) -> u64 {
+        self.epoch()
+    }
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+    fn native_parent_current(
+        &self,
+        binding: NavigationViewportBinding,
+        ctx: &egui::Context,
+        _: Option<egui::LayerId>,
+    ) -> bool {
+        ctx.viewport_id() == binding.viewport
+            && ctx.input(|input| input.focused)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && super::jump_mode::ui::visible_top_middle_layer(ctx)
+                .is_none_or(|layer| layer == binding.base_layer)
+            && super::jump_mode::ui::focused_response_layer(ctx).is_none_or(|layer| {
+                layer == binding.base_layer || layer == egui::LayerId::background()
+            })
+    }
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+    fn confirmation_binding(
+        &self,
+        _: egui::ViewportId,
+        _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+    fn capture(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        self.render_host(ctx, runtime, parent, first, child, presentation)
+    }
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+    fn closed_command() -> Self::Command {
+        ProgrammerInspectorHostCommand::Closed
+    }
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, ProgrammerInspectorHostCommand::Closed)
+    }
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![ProgrammerInspectorHostCommand::Closed]
+        } else {
+            vec![ProgrammerInspectorHostCommand::Apply(actions)]
+        }
+    }
     #[cfg(test)]
     fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
         actions.host_button

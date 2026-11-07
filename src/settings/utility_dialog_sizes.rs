@@ -62,6 +62,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "image-crop-editor",
     "image-viewer",
     "json-utility",
+    "programmer-inspector",
     "legacy-macros",
     "markdown-studio",
     "mkmacro",

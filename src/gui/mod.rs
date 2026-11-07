@@ -9,6 +9,7 @@ mod utility_window_host;
 mod bookmark_alias_dialog;
 mod brightness_dialog;
 mod calculation_pad_dialog;
+mod programmer_inspector_dialog;
 mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
@@ -767,6 +768,7 @@ pub enum Panel {
     ZipExtractorDialog,
     RegexTesterDialog,
     CalculationPadDialog,
+    ProgrammerInspectorDialog,
     DateTimeStudioDialog,
     DiagramStudioDialog,
     MarkdownStudioDialog,
@@ -839,6 +841,7 @@ impl Panel {
             Self::ZipExtractorDialog => "ZIP Extractor",
             Self::RegexTesterDialog => "Regex Tester",
             Self::CalculationPadDialog => "Calculation Pad",
+            Self::ProgrammerInspectorDialog => "Programmer Inspector",
             Self::DateTimeStudioDialog => "Date & Time Studio",
             Self::DiagramStudioDialog => "Diagram Studio",
             Self::MarkdownStudioDialog => "Markdown Studio",
@@ -912,6 +915,7 @@ struct PanelStates {
     zip_extractor_dialog: bool,
     regex_tester_dialog: bool,
     calculation_pad_dialog: bool,
+    programmer_inspector_dialog: bool,
     date_time_studio_dialog: bool,
     diagram_studio_dialog: bool,
     markdown_studio_dialog: bool,
@@ -1311,6 +1315,8 @@ pub struct LauncherApp {
     pub(crate) archive_session: crate::archive::ArchiveSession,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
+    programmer_inspector_dialog: programmer_inspector_dialog::ProgrammerInspectorDialog,
+    programmer_inspector_host: utility_window_host::ProgrammerInspectorWindowHost,
     pub(crate) date_time_studio_dialog: DateTimeStudioDialog,
     pub(crate) diagram_studio_dialog: DiagramStudioDialog,
     pub(crate) markdown_studio_dialog: MarkdownStudioDialog,
@@ -4000,6 +4006,8 @@ impl LauncherApp {
             archive_session,
             regex_tester_dialog,
             calculation_pad_dialog,
+            programmer_inspector_dialog: Default::default(),
+            programmer_inspector_host: Default::default(),
             date_time_studio_dialog: DateTimeStudioDialog::default(),
             diagram_studio_dialog,
             markdown_studio_dialog,
@@ -4738,7 +4746,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 67] = [
+    const TRACKED_PANELS: [Panel; 68] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -4777,6 +4785,7 @@ impl LauncherApp {
         Panel::ZipExtractorDialog,
         Panel::RegexTesterDialog,
         Panel::CalculationPadDialog,
+        Panel::ProgrammerInspectorDialog,
         Panel::DateTimeStudioDialog,
         Panel::DiagramStudioDialog,
         Panel::MarkdownStudioDialog,
@@ -4848,6 +4857,7 @@ impl LauncherApp {
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::CalculationPadDialog => self.calculation_pad_dialog.open,
+            Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open,
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.open,
             Panel::DiagramStudioDialog => self.diagram_studio_dialog.open,
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.open,
@@ -4900,6 +4910,7 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
+            Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer().is_some(),
             Panel::TableUtilityDialog => self.table_utility_dialog.root_layer().is_some(),
             Panel::TimerDialog => self.timer_dialog.root_layer().is_some(),
             Panel::DateTimeStudioDialog => self.date_time_studio_dialog.root_layer().is_some(),
@@ -5040,7 +5051,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::ProgrammerInspectorDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog | Panel::TableUtilityDialog | Panel::TimerDialog | Panel::CalendarPopover | Panel::CalendarEventEditor | Panel::CalendarEventDetails | Panel::DateTimeStudioDialog | Panel::ImageCompareDialog | Panel::DuplicateFinderDialog | Panel::ZipExtractorDialog | Panel::FolderSizeDialog | Panel::FileLockDialog | Panel::RecordingDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5371,6 +5382,7 @@ impl LauncherApp {
                 self.panel_states.activity_dialog = false;
             }
             Panel::RecordingDialog => self.close_recording_setup(),
+            Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
             Panel::JsonUtilityDialog => {
                 self.close_json_utility_session();
             }
@@ -5678,6 +5690,7 @@ impl LauncherApp {
                 self.panel_states.activity_dialog = false;
             }
             Panel::RecordingDialog => self.close_recording_setup(),
+            Panel::ProgrammerInspectorDialog => { self.programmer_inspector_dialog.request_close(); }
             Panel::JsonUtilityDialog => {
                 self.close_json_utility_session();
             }
@@ -5837,6 +5850,7 @@ impl LauncherApp {
                 }
             }
             Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
+            Panel::ProgrammerInspectorDialog => self.programmer_inspector_dialog.open(),
             Panel::ZipExtractorDialog => {
                 #[cfg(windows)]
                 self.zip_extractor_dialog
@@ -5931,6 +5945,9 @@ impl LauncherApp {
         self.panel_stack.push(panel);
         if panel == Panel::CalculationPadDialog {
             self.calculation_pad_dialog.open();
+            if let Some(layer) = self.calculation_pad_dialog.host_layer_if_root() {
+                self.egui_ctx.move_to_top(layer);
+            }
         } else if panel == Panel::DateTimeStudioDialog {
             self.date_time_studio_dialog.open();
         } else if panel == Panel::NotesDialog {
@@ -5992,6 +6009,17 @@ impl LauncherApp {
             self.xml_toolkit_dialog.open();
         } else if panel == Panel::RegexTesterDialog {
             self.regex_tester_dialog.open();
+        } else if panel == Panel::ProgrammerInspectorDialog {
+            self.programmer_inspector_dialog.open();
+            if let Some(pad_layer) = self.calculation_pad_dialog.host_layer_if_root()
+                && crate::gui::jump_mode::ui::focused_response_layer(&self.egui_ctx)
+                    == Some(pad_layer)
+                && let Some(focused) = self.egui_ctx.memory(|memory| memory.focused())
+            {
+                self.egui_ctx
+                    .memory_mut(|memory| memory.surrender_focus(focused));
+            }
+            self.programmer_inspector_host.request_focus();
         } else if panel == Panel::JsonUtilityDialog {
             if !self.json_utility_dialog.open {
                 self.json_utility_dialog.reopen_existing();
@@ -6133,6 +6161,7 @@ impl LauncherApp {
         check!(zip_extractor_dialog, Panel::ZipExtractorDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(calculation_pad_dialog, Panel::CalculationPadDialog);
+        check!(programmer_inspector_dialog, Panel::ProgrammerInspectorDialog);
         check!(date_time_studio_dialog, Panel::DateTimeStudioDialog);
         check!(diagram_studio_dialog, Panel::DiagramStudioDialog);
         check!(markdown_studio_dialog, Panel::MarkdownStudioDialog);

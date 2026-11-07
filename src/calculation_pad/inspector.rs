@@ -19,7 +19,7 @@ pub struct InspectorSourceSnapshot {
     pub revision: u64,
     pub line_id: LineId,
     pub source_range: Range<usize>,
-    pub source_text: String,
+    pub source_text: std::sync::Arc<str>,
     pub value: TypedInteger,
     pub origin: InspectorSourceOrigin,
 }

@@ -20,6 +20,7 @@ type SourceStateBeforeFrame = (
 enum DialogCopyOwner {
     MouseGestures,
     CalculationPad,
+    ProgrammerInspector,
     Converter,
     DateTimeStudio,
     ImageCompare,
@@ -2139,6 +2140,7 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_host.root_layer(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
+            Panel::ProgrammerInspectorDialog => self.programmer_inspector_host.root_layer(),
             Panel::ZipExtractorDialog => self.zip_extractor_dialog.root_layer(),
             Panel::RegexTesterDialog => self.regex_tester_dialog.root_layer(),
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
@@ -4824,7 +4826,7 @@ impl LauncherApp {
             self.file_lock_dialog.needs_viewport_bootstrap(),
             self.recording_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
-            self.calculation_pad_dialog.needs_root_ui_when_hidden(),
+            self.calculation_pad_dialog.needs_root_ui_when_hidden() || self.programmer_inspector_host.needs_root_ui_when_hidden(self.programmer_inspector_dialog.open),
             self.pin_windows_need_bootstrap(),
             self.file_lock_dialog.needs_root_ui_when_hidden(),
             self.recording_dialog
@@ -5284,6 +5286,58 @@ impl LauncherApp {
         }
     }
 
+    fn show_programmer_inspector(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use super::jump_mode::ui::{
+            NavigationOwner, focused_response_layer, visible_top_middle_layer,
+        };
+        use super::utility_window_host::HostInput;
+        if !self.programmer_inspector_dialog.open {
+            return;
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let layer = self.programmer_inspector_host.root_layer();
+        let owner = root_input
+            && layer.is_some()
+            && visible_top_middle_layer(ctx) == layer
+            && !egui::Popup::is_any_open(ctx)
+            && focused_response_layer(ctx)
+                .is_none_or(|focus| Some(focus) == layer || focus.order == egui::Order::Background);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let pinned = self
+            .pinned_panels
+            .contains(&super::Panel::ProgrammerInspectorDialog);
+        let runtime = super::programmer_inspector_dialog::InspectorRuntime {
+            context: self.calculation_pad_dialog.inspector_context(),
+            root: super::utility_host::ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            host: self.programmer_inspector_host.identity(),
+            pinned,
+        };
+        self.programmer_inspector_host
+            .configure_jump(&self.jump_mode_ui, false);
+        self.programmer_inspector_host.show(
+            ctx,
+            &mut self.programmer_inspector_dialog,
+            &runtime,
+            HostInput {
+                first,
+                root_visible,
+                root_input,
+                native_input,
+                root_owner: NavigationOwner::Blocked,
+                parent_owner: owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned,
+                allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked,
+                parent_instance: 0,
+                root_scopes: (None, None),
+            },
+        );
+    }
     fn show_markdown_studio(
         &mut self,
         ctx: &egui::Context,
@@ -9334,6 +9388,7 @@ impl LauncherApp {
             self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_json_utility_host(&ctx, first_ui_pass, false);
+            self.show_programmer_inspector(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
@@ -11156,6 +11211,7 @@ impl LauncherApp {
             self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
             self.show_json_utility_host(&ctx, first_ui_pass, false);
+            self.show_programmer_inspector(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
@@ -11645,6 +11701,7 @@ impl LauncherApp {
         self.qr_dialog.show(&ctx);
         self.show_diagram_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_calculation_pad(&ctx, first_ui_pass, frame_logic.should_be_visible);
+        self.show_programmer_inspector(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_markdown_studio(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_date_time_studio_host(
             &ctx, first_ui_pass, frame_logic.should_be_visible, jump_session_escape_preempted,
@@ -12557,11 +12614,41 @@ impl LauncherApp {
                         text,
                     });
                 }
+                super::CalculationPadDialogEffect::OpenInspector => {
+                    self.focus_panel(super::Panel::ProgrammerInspectorDialog);
+                    effects.push(RootDialogEffect::ShowRoot);
+                }
                 super::CalculationPadDialogEffect::SaveRecoveryPreference(enabled) => {
                     self.request_calculation_pad_recovery_preference_save(ctx, enabled);
                 }
             }
         }
+        let current_inspector_context = self.calculation_pad_dialog.inspector_context();
+        if let Some(completion) = self.programmer_inspector_host.complete(ctx, &mut self.programmer_inspector_dialog) {
+            use super::utility_window_host::ProgrammerInspectorHostCommand;
+            for command in completion.commands {
+                match command {
+                    ProgrammerInspectorHostCommand::Closed => {
+                        if completion.owner_viewport != egui::ViewportId::ROOT {
+                            ctx.with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
+                                plugin.armed.remove(&completion.owner_viewport);
+                                plugin.captured.retain(|(receipt, _)| receipt.owner.viewport_id != completion.owner_viewport);
+                            });
+                        }
+                        self.programmer_inspector_dialog.finish_close();
+                        self.panel_stack.retain(|panel| *panel != super::Panel::ProgrammerInspectorDialog);
+                    }
+                    ProgrammerInspectorHostCommand::Apply(actions) => {
+                        let source_context = std::sync::Arc::clone(&actions.context);
+                        let (copy, insert) = self.programmer_inspector_dialog.commit(actions, &current_inspector_context);
+                        if let Some(text) = copy { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }); }
+                        if let Some(request) = insert { self.calculation_pad_dialog.apply_inspector_insert(ctx, &source_context, request); }
+                    }
+                }
+            }
+            if completion.show_root { effects.push(RootDialogEffect::ShowRoot); }
+        }
+        self.programmer_inspector_dialog.publish(self.calculation_pad_dialog.inspector_context());
         #[cfg(windows)] {
             let zip = self.zip_extractor_dialog.on_hosted_frame_complete(ctx, &mut self.archive_session);
             for text in zip.copies { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ZipExtractor, text }); }
@@ -12829,6 +12916,9 @@ impl LauncherApp {
                         DialogCopyOwner::CalculationPad => {
                             self.calculation_pad_dialog.copy_completed(result)
                         }
+                        DialogCopyOwner::ProgrammerInspector => {
+                            if let Err(error) = result { self.report_error_message("programmer_inspector.copy", error); }
+                        }
                         DialogCopyOwner::Converter => self.convert_panel.copy_completed(result),
                         DialogCopyOwner::DateTimeStudio => {
                             self.date_time_studio_dialog.copy_completed(result)
@@ -12967,6 +13057,7 @@ impl eframe::App for LauncherApp {
             || self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open)
             || self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open)
             || self.json_utility_host.needs_root_ui_when_hidden(self.json_utility_dialog.open)
+            || self.programmer_inspector_host.needs_root_ui_when_hidden(self.programmer_inspector_dialog.open)
             || self.xml_toolkit_dialog.needs_root_ui_when_hidden()
             || self.regex_tester_dialog.needs_root_ui_when_hidden()
             || self.table_utility_dialog.needs_root_ui_when_hidden()
@@ -18225,6 +18316,802 @@ mod tests {
         }
     }
 
+    fn inspector_visible_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut last = None;
+        for _ in 0..16 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            let (rect, clip, enabled) = if name == "host-presentation" {
+                app.programmer_inspector_host
+                    .test_button
+                    .expect("Inspector host control rendered")
+            } else {
+                app.programmer_inspector_dialog
+                    .test_control(name)
+                    .expect("Inspector control rendered")
+            };
+            last = Some((rect, clip, enabled, super::super::jump_mode::ui::visible_top_middle_layer(ctx), super::super::jump_mode::ui::focused_response_layer(ctx)));
+            if enabled && clip.contains_rect(rect) {
+                return rect;
+            }
+            if !enabled && clip.contains_rect(rect) {
+                continue;
+            }
+            let direction = if rect.center().y > clip.center().y {
+                -140.0
+            } else {
+                140.0
+            };
+            let wheel_position = egui::pos2(
+                clip.center().x,
+                if direction < 0.0 {
+                    clip.bottom() - 4.0
+                } else {
+                    clip.top() + 4.0
+                },
+            );
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                vec![
+                    egui::Event::PointerMoved(wheel_position),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, direction),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+                false,
+            );
+        }
+        panic!("Inspector control {name} did not become visible: {last:?}");
+    }
+
+    #[test]
+    fn programmer_inspector_real_pad_selection_and_retained_bit_insert() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        let original = "u64(9007199254740993)\n# α";
+        app.calculation_pad_dialog.test_replace_source(original);
+        let root = egui::ViewportId::ROOT;
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let editor = app
+            .calculation_pad_dialog
+            .test_editor_rect()
+            .expect("real Pad editor");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        let (inspect, clip, enabled) = app
+            .calculation_pad_dialog
+            .test_inspect_button(0)
+            .expect("integer result has an Inspect bits control");
+        assert!(enabled && clip.contains_rect(inspect));
+        let context_before = app.calculation_pad_dialog.inspector_context();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(inspect, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(inspect, false),
+            true,
+            false,
+        );
+        assert!(!app.programmer_inspector_dialog.open);
+        assert_eq!(
+            app.calculation_pad_dialog.inspector_context(),
+            context_before
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (inspect, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
+        assert!(enabled && clip.contains_rect(inspect));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(inspect, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (bit, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("bit-63")
+            .expect("numbered bit control");
+        assert!(enabled && clip.contains_rect(bit));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(bit, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            (1_u128 << 63) | 9_007_199_254_740_993
+        );
+        let (host, clip, enabled) = app
+            .programmer_inspector_host
+            .test_button
+            .expect("real Pop Out");
+        assert!(enabled && clip.contains_rect(host));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(host, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(host, false),
+            true,
+            false,
+        );
+        assert!(!app.programmer_inspector_host.is_popped_out());
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (host, clip, enabled) = app
+            .programmer_inspector_host
+            .test_button
+            .expect("Pop Out retry");
+        assert!(enabled && clip.contains_rect(host));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(host, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.programmer_inspector_host.is_popped_out());
+        app.request_launcher_visibility(false);
+        let native =
+            super::super::utility_window_host::ProgrammerInspectorWindowHost::test_viewport(
+                app.programmer_inspector_dialog.epoch(),
+            );
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        let (next_bit, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("bit-62")
+            .expect("native bit control");
+        assert!(enabled && clip.contains_rect(next_bit));
+        let before = app.programmer_inspector_dialog.test_value();
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(next_bit, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(next_bit, false),
+                discard_root,
+                discard_child,
+            );
+            assert_eq!(app.programmer_inspector_dialog.test_value(), before);
+            for _ in 0..2 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let (next_bit, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("bit-62")
+            .expect("native retry control");
+        assert!(enabled && clip.contains_rect(next_bit));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(next_bit, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_clicked_bit(),
+            Some(62),
+            "native retry response must register the real click"
+        );
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            (1_u128 << 63) | (1_u128 << 62) | 9_007_199_254_740_993
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        let (copy, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("copy-Decimal")
+            .expect("native decimal Copy");
+        assert!(enabled && clip.contains_rect(copy));
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for (discard_root, discard_child) in [(true, false), (false, true)] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(copy, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(copy, false),
+                discard_root,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+            for _ in 0..2 {
+                run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            }
+        }
+        let copy = inspector_visible_control(&ctx, &mut app, native, "copy-Decimal");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(copy, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }] if text == "13844065254536904705")
+        );
+        let dock = inspector_visible_control(&ctx, &mut app, native, "host-presentation");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(dock, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (insert, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("insert")
+            .expect("Insert control");
+        assert!(
+            enabled && clip.contains_rect(insert),
+            "Insert enabled={enabled}, rect={insert:?}, clip={clip:?}, context={:?}",
+            app.calculation_pad_dialog.inspector_context()
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(insert, true),
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(insert, false),
+            true,
+            false,
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (insert, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("insert")
+            .unwrap();
+        assert!(enabled && clip.contains_rect(insert));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(insert, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.calculation_pad_dialog.test_source(),
+            Some("u64(13844065254536904705)")
+        );
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Z, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::Z, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some(original));
+    }
+
+    #[test]
+    fn programmer_inspector_stale_work_refresh_and_reopen_reject_old_caret() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        let root = egui::ViewportId::ROOT;
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        app.calculation_pad_dialog.test_replace_source("u8(1)");
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (inspect, clip, enabled) = app.calculation_pad_dialog.test_inspect_button(0).unwrap();
+        assert!(enabled && clip.contains_rect(inspect));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(inspect, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        for name in ["signed", "checked-cast"] {
+            let (control, clip, enabled) =
+                app.programmer_inspector_dialog.test_control(name).unwrap();
+            assert!(enabled && clip.contains_rect(control));
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(control, pressed),
+                    false,
+                    false,
+                );
+            }
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog
+                .test_value()
+                .mode()
+                .type_name(),
+            "i8"
+        );
+        let (bit, clip, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("bit-7")
+            .unwrap();
+        assert!(enabled && clip.contains_rect(bit));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(bit, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            129
+        );
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let editor = app.calculation_pad_dialog.test_editor_rect().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        let before_discard = app.calculation_pad_dialog.inspector_context();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                egui::Event::Text("u8(3)".into()),
+            ],
+            true,
+            false,
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("u8(1)"));
+        assert_eq!(
+            app.calculation_pad_dialog.inspector_context(),
+            before_discard
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        for _ in 0..2 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let editor = app.calculation_pad_dialog.test_editor_rect().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.calculation_pad_dialog.test_editor_has_focus(&ctx));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::Text("u8(4)".into())],
+            false,
+            false,
+        );
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("u8(4)"));
+        app.focus_panel(super::super::Panel::ProgrammerInspectorDialog);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            129
+        );
+        let (_, _, enabled) = app
+            .programmer_inspector_dialog
+            .test_control("insert")
+            .unwrap();
+        assert!(!enabled, "stale adopted source cannot be inserted");
+        let copy = inspector_visible_control(&ctx, &mut app, root, "copy-Decimal");
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(copy, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            matches!(LauncherApp::take_test_root_dialog_effects(&ctx).as_slice(), [RootDialogEffect::CopyText { owner: DialogCopyOwner::ProgrammerInspector, text }] if text == "-127")
+        );
+        let refresh = inspector_visible_control(&ctx, &mut app, root, "refresh");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(refresh, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(
+            app.programmer_inspector_dialog.test_value().bit_pattern(),
+            4
+        );
+        let value_label = inspector_visible_control(&ctx, &mut app, root, "value-Decimal");
+        if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        let start = egui::pos2(value_label.left() + 1.0, value_label.center().y);
+        let end = egui::pos2(value_label.right() - 1.0, value_label.center().y);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::PointerMoved(end)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discarded in [true, false] {
+            let output = run_tool_dialog_frame_at_size(
+                &ctx,
+                &mut app,
+                vec![egui::Event::Copy],
+                discarded,
+                egui::vec2(1100.0, 900.0),
+            );
+            assert!(
+                !output
+                    .platform_output
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::OutputCommand::CopyText(_)))
+            );
+            output.drop_without_applying_deltas();
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+        }
+        for (name, text) in [
+            ("label-start", "0"),
+            ("label-end", "1"),
+            ("label-text", "flag"),
+        ] {
+            let control = inspector_visible_control(&ctx, &mut app, root, name);
+            for pressed in [true, false] {
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    root,
+                    tool_dialog_pointer_events(control, pressed),
+                    false,
+                    false,
+                );
+            }
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                vec![egui::Event::Text(text.into())],
+                false,
+                false,
+            );
+        }
+        let add_label = inspector_visible_control(&ctx, &mut app, root, "add-label");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(add_label, pressed),
+                false,
+                false,
+            );
+        }
+        assert_eq!(app.programmer_inspector_dialog.test_annotation_count(), 1);
+        let prefix = inspector_visible_control(&ctx, &mut app, root, "prefix");
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(prefix, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(app.programmer_inspector_dialog.test_format_options().prefix);
+        assert_eq!(app.calculation_pad_dialog.test_source(), Some("u8(4)"));
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.programmer_inspector_dialog.open);
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let (reopen, clip, enabled) = app
+            .calculation_pad_dialog
+            .test_inspector_reopen()
+            .expect("Pad reopen entry");
+        assert!(enabled && clip.contains_rect(reopen));
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(reopen, pressed),
+                false,
+                false,
+            );
+        }
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert_eq!(app.programmer_inspector_dialog.test_annotation_count(), 1);
+        assert!(app.programmer_inspector_dialog.test_format_options().prefix);
+        app.calculation_pad_dialog
+            .test_apply_save_as("inspector collision");
+        let document = app
+            .calculation_pad_dialog
+            .test_current_document_id()
+            .unwrap();
+        app.calculation_pad_dialog.test_open_document(document);
+        app.focus_panel(super::super::Panel::CalculationPadDialog);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let editor = app.calculation_pad_dialog.test_editor_rect().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        let before = app.calculation_pad_dialog.inspector_context();
+        assert!(before.caret.is_some());
+        app.calculation_pad_dialog.test_open_document(document);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        let after = app.calculation_pad_dialog.inspector_context();
+        assert!(
+            after.caret.is_none(),
+            "same saved document reopened at revision zero must retire the old caret"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::F12, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(
+            app.calculation_pad_dialog
+                .inspector_context()
+                .caret
+                .is_none(),
+            "an unrelated key must not rebind the old widget cursor"
+        );
+        let editor = app.calculation_pad_dialog.test_editor_rect().unwrap();
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(editor, pressed),
+                false,
+                false,
+            );
+        }
+        assert!(
+            app.calculation_pad_dialog
+                .inspector_context()
+                .caret
+                .is_some(),
+            "a genuine editor click captures the new incarnation"
+        );
+    }
     fn reveal_studio_host_control(
         ctx: &egui::Context,
         app: &mut LauncherApp,

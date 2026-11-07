@@ -413,6 +413,11 @@ impl CalculationPadSession {
         self.pending.as_ref().map(PendingAction::public_kind)
     }
 
+    /// Identity of this installed document, including same-file reopenings.
+    pub fn document_incarnation(&self) -> Option<DocumentIncarnation> {
+        self.current.as_ref().map(|document| document.incarnation)
+    }
+
     /// Resolve only an already-current cached result; never evaluate as an observation.
     pub fn inspector_source(&self, line_id: LineId) -> Option<InspectorSourceSnapshot> {
         let current = self.current.as_ref()?;
@@ -444,7 +449,7 @@ impl CalculationPadSession {
             revision: current.revision,
             line_id,
             source_range: line.source_range.clone(),
-            source_text: current.source.get(line.source_range.clone())?.to_owned(),
+            source_text: std::sync::Arc::from(current.source.get(line.source_range.clone())?),
             value,
             origin,
         })
