@@ -38,6 +38,23 @@ impl ArchiveSelection {
         &self.targets
     }
 
+    pub(crate) fn all_physical(catalog: &ArchiveCatalog) -> Result<Self, SelectionAddError> {
+        let entries = catalog.entries();
+        if entries.len() > catalog.limits().max_selection_entries {
+            return Err(SelectionAddError::LimitExceeded);
+        }
+        let mut targets = Vec::new();
+        targets
+            .try_reserve_exact(entries.len())
+            .map_err(|_| SelectionAddError::Allocation)?;
+        targets.extend(
+            entries
+                .iter()
+                .map(|entry| SelectionTarget::Entry(entry.id())),
+        );
+        Ok(Self { targets })
+    }
+
     pub fn add(
         &mut self,
         target: SelectionTarget,

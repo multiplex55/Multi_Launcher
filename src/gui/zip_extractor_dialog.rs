@@ -111,6 +111,8 @@ enum SessionAction {
     Preview,
     Confirm(crate::archive::PreviewToken),
     Cancel,
+    SelectAll,
+    ClearSelection,
     SetSelection {
         target: crate::archive::SelectionTarget,
         selected: bool,
@@ -354,7 +356,7 @@ impl ZipExtractorDialog {
             }
             ui.add_enabled_ui(visible, |ui| {
                     ui.label("Choose a ZIP archive, select entries, and review the destination before extraction.");
-                    ui.label("Only supported Stored entries can be extracted. Existing files are never overwritten.");
+                    ui.label("Supported Stored and Deflated entries can be extracted. Existing files are never overwritten.");
 
                     ui.horizontal(|ui| {
                         let response = ui.button("Choose ZIP…");
@@ -385,6 +387,18 @@ impl ZipExtractorDialog {
                             if response.clicked() {
                                 actions.push(UiAction::Session(SessionAction::OpenSelected));
                             }
+                        }
+                    });
+
+                    ui.horizontal_wrapped(|ui| {
+                        let enabled = owner && catalog.is_some() && !matches!(phase, Some(crate::archive::ArchiveSessionPhase::Extracting | crate::archive::ArchiveSessionPhase::Closing));
+                        for (label, key, action) in [
+                            ("Select All", "select-all", SessionAction::SelectAll),
+                            ("Clear Selection", "clear-selection", SessionAction::ClearSelection),
+                        ] {
+                            let response = ui.add_enabled(enabled, egui::Button::new(label));
+                            register_target(jump_scope, ui, &response, key, label, crate::gui::jump_mode::TargetKind::Action, &mut visual_order);
+                            if response.clicked() { actions.push(UiAction::Session(action)); }
                         }
                     });
 
@@ -690,7 +704,7 @@ impl ZipExtractorDialog {
                                     continue;
                                 };
                                 let id = entry.id();
-                                let target = if entry.kind() == crate::archive::EntryKind::Directory {
+                                let target = if entry.kind() == crate::archive::EntryKind::Directory && !selected_entries.contains(&id) {
                                     crate::archive::SelectionTarget::FolderSubtree(id)
                                 } else {
                                     crate::archive::SelectionTarget::Entry(id)
@@ -1469,6 +1483,8 @@ impl ZipExtractorDialog {
                 session.request_open(path)
             }
             SessionAction::Preview => session.request_preview(),
+            SessionAction::SelectAll => session.select_all(),
+            SessionAction::ClearSelection => session.clear_selection(),
             SessionAction::Confirm(token) => {
                 if self.confirmed_token != Some(token) {
                     self.status_message =
@@ -1624,6 +1640,12 @@ fn request_error_label(error: crate::archive::ArchiveSessionRequestError) -> &'s
         }
         crate::archive::ArchiveSessionRequestError::SpawnFailed => {
             "The archive operation could not be started."
+        }
+        crate::archive::ArchiveSessionRequestError::SelectionLimit => {
+            "The archive has more entries than the selection limit."
+        }
+        crate::archive::ArchiveSessionRequestError::SelectionAllocation => {
+            "Could not allocate the archive selection."
         }
     }
 }
@@ -2025,6 +2047,183 @@ mod tests {
     }
 
     #[test]
+    fn rendered_bulk_and_directory_selection_cover_all_physical_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("source.zip");
+        let file = fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.add_directory("folder/", SimpleFileOptions::default())
+            .unwrap();
+        zip.start_file("folder/file.bin", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"file").unwrap();
+        zip.start_file("../unsafe", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"unsafe").unwrap();
+        zip.finish().unwrap();
+        let ctx = egui::Context::default();
+        let mut dialog = ZipExtractorDialog::default();
+        dialog.open();
+        let mut session =
+            crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+        dialog.load_archive_path(archive, &mut session);
+        let opened = settle(&mut session, &mut dialog);
+        let catalog = opened.catalog.as_ref().unwrap();
+        assert_eq!(opened.selection.len(), 3);
+        assert!(catalog.entries().iter().any(|entry| !entry.is_supported()));
+        let directory = catalog.entries()[0].id();
+        dialog.apply_ui_action(UiAction::SetFilter("folder/".into()), &mut session, &ctx);
+        let mut jump = crate::gui::jump_mode::ui::JumpModeUi::new(true);
+        let mut frame = 0;
+        for _ in 0..3 {
+            render_dialog_frame(
+                &ctx,
+                &mut dialog,
+                &mut session,
+                &mut jump,
+                &mut frame,
+                vec![],
+            );
+        }
+        click_registered_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            "Clear Selection",
+        );
+        assert!(session.snapshot().selection.is_empty());
+        render_dialog_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_registered_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            "Select archive entry folder/",
+        );
+        assert_eq!(
+            session.snapshot().selection.as_ref(),
+            &[crate::archive::SelectionTarget::FolderSubtree(directory)]
+        );
+        render_dialog_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_registered_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            "Clear Selection",
+        );
+        render_dialog_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_registered_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            "Select All",
+        );
+        assert_eq!(
+            session.snapshot().selection.len(),
+            3,
+            "filter does not limit bulk selection"
+        );
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        dialog.select_destination_path(destination, &mut session);
+        session.request_preview().unwrap();
+        let rejected = settle(&mut session, &mut dialog);
+        assert_eq!(
+            rejected.phase,
+            crate::archive::ArchiveSessionPhase::PreviewRejected
+        );
+        assert!(rejected.plan_issues.is_some());
+        render_dialog_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_registered_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            "Select archive entry folder/",
+        );
+        assert!(
+            !session
+                .snapshot()
+                .selection
+                .contains(&crate::archive::SelectionTarget::Entry(directory))
+        );
+        assert_eq!(session.snapshot().selection.len(), 2);
+        for _ in 0..2 {
+            render_dialog_frame(
+                &ctx,
+                &mut dialog,
+                &mut session,
+                &mut jump,
+                &mut frame,
+                vec![],
+            );
+        }
+        assert_eq!(session.snapshot().selection.len(), 2);
+        let mut subtree = crate::archive::ArchiveSelection::new();
+        subtree
+            .add(
+                crate::archive::SelectionTarget::FolderSubtree(directory),
+                &catalog.limits(),
+            )
+            .unwrap();
+        session.set_selection(subtree).unwrap();
+        dialog.update_session_snapshot(session.snapshot(), Instant::now());
+        render_dialog_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_registered_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut jump,
+            &mut frame,
+            "Select archive entry folder/",
+        );
+        assert!(session.snapshot().selection.is_empty());
+    }
+
+    #[test]
     fn zip_extractor_actions_select_physical_duplicate_and_publish_one_stored_file() {
         let temp = tempfile::tempdir().expect("create task-owned extractor fixture");
         let archive = temp.path().join("source.zip");
@@ -2048,6 +2247,12 @@ mod tests {
         assert_eq!(catalog.entries()[0].name().display_lossy(), "same.bin");
         assert_eq!(catalog.entries()[1].name().display_lossy(), "same.bin");
         assert_ne!(first, second);
+
+        dialog.apply_ui_action(
+            UiAction::Session(SessionAction::ClearSelection),
+            &mut session,
+            &ctx,
+        );
 
         dialog.apply_ui_action(
             UiAction::Session(SessionAction::SetSelection {
@@ -2188,6 +2393,11 @@ mod tests {
                 .expect("rendered workflow has an opened catalog")
                 .entries()[0]
                 .id();
+            dialog.apply_ui_action(
+                UiAction::Session(SessionAction::ClearSelection),
+                &mut session,
+                &ctx,
+            );
             dialog.apply_ui_action(
                 UiAction::Session(SessionAction::SetSelection {
                     target: crate::archive::SelectionTarget::Entry(selected),

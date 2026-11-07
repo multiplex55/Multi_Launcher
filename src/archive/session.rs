@@ -71,6 +71,8 @@ pub(crate) enum ArchiveSessionRequestError {
     StalePreview,
     GenerationExhausted,
     SpawnFailed,
+    SelectionLimit,
+    SelectionAllocation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -436,6 +438,29 @@ impl ArchiveSession {
         self.plan_issues = None;
         self.failure = None;
         Ok(())
+    }
+
+    pub(crate) fn select_all(&mut self) -> Result<(), ArchiveSessionRequestError> {
+        if matches!(self.active.as_ref(), Some(ActiveWorker::Extraction { .. })) {
+            return Err(ArchiveSessionRequestError::Busy);
+        }
+        let catalog = self
+            .catalog
+            .as_ref()
+            .ok_or(ArchiveSessionRequestError::NoCatalog)?;
+        let selection = ArchiveSelection::all_physical(catalog).map_err(|error| match error {
+            super::plan::SelectionAddError::LimitExceeded => {
+                ArchiveSessionRequestError::SelectionLimit
+            }
+            super::plan::SelectionAddError::Allocation => {
+                ArchiveSessionRequestError::SelectionAllocation
+            }
+        })?;
+        self.set_selection(selection)
+    }
+
+    pub(crate) fn clear_selection(&mut self) -> Result<(), ArchiveSessionRequestError> {
+        self.set_selection(ArchiveSelection::new())
     }
 
     pub(crate) fn request_preview(&mut self) -> Result<(), ArchiveSessionRequestError> {
@@ -834,9 +859,31 @@ impl ArchiveSession {
                 }
                 match result {
                     Ok((source, catalog)) => {
+                        let selection = ArchiveSelection::all_physical(&catalog);
                         self.source = Some(source);
                         self.catalog = Some(Arc::new(catalog));
-                        self.failure = None;
+                        match selection {
+                            Ok(selection) => {
+                                match (
+                                    next_revision(self.selection_revision),
+                                    next_revision(self.preview_generation),
+                                ) {
+                                    (Ok(selection_revision), Ok(preview_generation)) => {
+                                        self.selection_revision = selection_revision;
+                                        self.preview_generation = preview_generation;
+                                        self.selection = selection;
+                                        self.failure = None;
+                                    }
+                                    _ => self.failure = Some(ArchiveSessionFailure::PlanLimit),
+                                }
+                            }
+                            Err(super::plan::SelectionAddError::LimitExceeded) => {
+                                self.failure = Some(ArchiveSessionFailure::PlanLimit)
+                            }
+                            Err(super::plan::SelectionAddError::Allocation) => {
+                                self.failure = Some(ArchiveSessionFailure::PlanAllocation)
+                            }
+                        }
                     }
                     Err(failure) => {
                         self.source_revision = None;
@@ -1234,6 +1281,81 @@ mod tests {
     }
 
     #[test]
+    fn default_and_bulk_selection_are_transactional_and_revisioned() {
+        let fixture = Fixture::with_physical_duplicate_names();
+        let mut session = ArchiveSession::new(ArchiveLimits::default());
+        let opened = start_open(&mut session, &fixture);
+        let catalog = opened.catalog.as_ref().unwrap();
+        let all: Vec<_> = catalog
+            .entries()
+            .iter()
+            .map(|entry| SelectionTarget::Entry(entry.id()))
+            .collect();
+        assert_eq!(opened.selection.as_ref(), all);
+        assert_ne!(catalog.entries()[0].id(), catalog.entries()[1].id());
+        session
+            .select_destination(fixture.destination.clone())
+            .unwrap();
+        session.set_selection(selected(catalog, &[0])).unwrap();
+        session.request_preview().unwrap();
+        let token = settle(&mut session).preview.unwrap().token;
+        let revision = session.selection_revision;
+        let preview_generation = session.preview_generation;
+        session.clear_selection().unwrap();
+        assert!(session.snapshot().preview.is_none());
+        assert_eq!(
+            session.confirm(token),
+            Err(ArchiveSessionRequestError::StalePreview)
+        );
+        assert_eq!(session.selection_revision, revision + 1);
+        assert_eq!(session.preview_generation, preview_generation + 1);
+        for _ in 0..3 {
+            session.poll();
+            assert!(session.snapshot().selection.is_empty());
+        }
+        session.select_all().unwrap();
+        assert_eq!(session.selection_revision, revision + 2);
+        assert_eq!(session.preview_generation, preview_generation + 2);
+        assert_eq!(session.snapshot().selection.as_ref(), all);
+        session.clear_selection().unwrap();
+        let reloaded = start_open(&mut session, &fixture);
+        let reloaded_catalog = reloaded.catalog.unwrap();
+        assert_eq!(
+            reloaded.selection.as_ref(),
+            reloaded_catalog
+                .entries()
+                .iter()
+                .map(|entry| SelectionTarget::Entry(entry.id()))
+                .collect::<Vec<_>>()
+        );
+        session
+            .request_open(fixture._temp.path().join("missing.zip"))
+            .unwrap();
+        assert!(session.snapshot().selection.is_empty());
+        let failed = settle(&mut session);
+        assert!(failed.catalog.is_none());
+        assert!(failed.selection.is_empty());
+
+        let mut limits = ArchiveLimits::default();
+        limits.max_selection_entries = 1;
+        let mut limited = ArchiveSession::new(limits);
+        let opened = start_open(&mut limited, &fixture);
+        assert_eq!(opened.failure, Some(ArchiveSessionFailure::PlanLimit));
+        assert!(opened.selection.is_empty());
+        let catalog = opened.catalog.unwrap();
+        limited.set_selection(selected(&catalog, &[0])).unwrap();
+        let before = limited.snapshot();
+        let generation = limited.preview_generation;
+        assert_eq!(
+            limited.select_all(),
+            Err(ArchiveSessionRequestError::SelectionLimit)
+        );
+        assert_eq!(limited.snapshot().selection, before.selection);
+        assert_eq!(limited.selection_revision, before.selection_revision);
+        assert_eq!(limited.preview_generation, generation);
+    }
+
+    #[test]
     fn session_tokens_invalidate_on_selection_and_duplicate_names_use_physical_ids() {
         let fixture = Fixture::with_physical_duplicate_names();
         let mut session = ArchiveSession::new(ArchiveLimits::default());
@@ -1458,6 +1580,7 @@ mod tests {
         );
         assert_eq!(settle(&mut session).phase, ArchiveSessionPhase::Closed);
         assert!(session.snapshot().catalog.is_none());
+        assert!(session.snapshot().selection.is_empty());
 
         let reopened = start_open(&mut session, &fixture);
         assert_eq!(reopened.phase, ArchiveSessionPhase::Ready);

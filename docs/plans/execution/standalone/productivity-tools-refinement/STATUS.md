@@ -28,7 +28,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M1-C | Executable searchable catalogue and independent reference host | complete |
 | M2-A | Checked working modes, grid groups, named bit spans | complete |
 | M3-A | Bounded Deflate extraction | complete |
-| M3-B | New-load and bulk physical member selection | pending |
+| M3-B | New-load and bulk physical member selection | complete |
 | M3-C | Safe multi-source ZIP creation domain | pending |
 | M3-D | ZIP creation UI and accepted chooser effects | pending |
 | M4-A | Visual navigation, fonts, marquee and viewer sizing | pending |
@@ -154,7 +154,7 @@ Final normal-user serial run `5eb43408-dbcd-4e5e-adb5-f7391f2fac60`: 13/13 passe
 
 Passing coverage: mixed Stored/Deflated, incompressible multi-native-read stream, empty Deflated file/directory and preview boundary, descriptor/ZIP64 consistency/conflict, corrupt/truncated/size/CRC/quota failures, mid-decode cancellation/owned-stage cleanup, omitted-record overlap, held-source identity, one-character publication and competitor/no-clobber behavior. Shared decoder enforces exact compressed span/end marker/output size/CRC; file output uses common pre-write actual quotas/progress and cancellation/staging/publication path. Directory decode validates empty content before mutation. Minimal direct flate2 uses already locked Rust backend because pinned ZIP exposes no suitable public raw bounded decoder. No native_io rewrite or pathname convenience extraction.
 
-Parent reviewed actual writer/plan/native/Cargo diffs; targeted rustfmt and git diff --check passed. No diagnostic prints remain. Original user ZIP was not identified; these fixes do not claim every possible ZIP-layout failure shares a cause. Native UI ZIP workflow pending M8. Commit/push pending parent action.
+Parent reviewed actual writer/plan/native/Cargo diffs; targeted rustfmt and git diff --check passed. No diagnostic prints remain. Original user ZIP was not identified; these fixes do not claim every possible ZIP-layout failure shares a cause. Native UI ZIP workflow pending M8. Checkpoint `da0f494d2a0919b864aeb0ff6764dac0c0abf3b6` committed and normal push succeeded; tree clean at commit completion.
 
 Final command:
 
@@ -167,6 +167,18 @@ Additional directly affected safety anchors `16a2cd6b-2bda-49b5-b633-08d1cd08ee9
 ## M3-B prepared handoff
 
 Accepted apply_preparation_completion(Opened) is the owner for one-time all-selection. Build bounded transactional Entry(id) selection for every physical record (including directories/duplicates/blocked), install only after existing owner/source checks with observable revision. set_selection already invalidates preview once and rejects extraction-time changes; bulk actions should reuse it once. Rendering must never reinitialize selection. GUI directory checkboxes currently use FolderSubtree(id), so default Entry(id) directories must render checked and remove the corresponding physical target on uncheck; preserve existing subtree capability. Add qualified SessionAction controls, archive-wide under filters, correct disabled state. Test new/reload/stale/failed load, poll persistence, one revision/preview invalidation per bulk, directory checkbox, transactional selection limits. Existing duplicate-extraction GUI test must clear selection explicitly before selecting one duplicate, preserving its physical-ID assertion.
+
+### M3-B result
+
+Accepted Opened completion builds all physical Entry IDs transactionally after existing owner/source checks, including explicit directories/duplicates/unsafe records. Limit/allocation failure reports error without partial selection. Select All/Clear use one set_selection revision/preview invalidation; UI mirrors session and filtered views never constrain all-selection. Default directory Entry can be unchecked directly; after clearing, manual directory checking retains FolderSubtree behavior. Unsafe selection still blocks preview through normal planner validation. Existing single-member tests explicitly clear defaults first.
+
+Unsandboxed normal-user serial run `7e636bf5-7560-45cc-8254-3cb77b73286b`: 7/7 passed, 7634 skipped, 0.558s execution after 1m49s compilation. Sandbox choice follows demonstrated M3-A native temporary-ancestry denial, not relaxed filesystem checks. Exact command:
+
+```text
+cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -j 1 -E 'test(archive::session::tests::default_and_bulk_selection_are_transactional_and_revisioned) | test(archive::session::tests::session_tokens_invalidate_on_selection_and_duplicate_names_use_physical_ids) | test(archive::session::tests::session_source_replacement_invalidates_completed_preview_token) | test(archive::session::tests::session_close_cancels_and_joins_before_a_new_open) | test(gui::zip_extractor_dialog::tests::rendered_bulk_and_directory_selection_cover_all_physical_entries) | test(gui::zip_extractor_dialog::tests::zip_extractor_actions_select_physical_duplicate_and_publish_one_stored_file) | test(gui::zip_extractor_dialog::tests::workflow_controls_stay_reachable_and_drive_preview_confirmation_and_extract)'
+```
+
+Checks include default/reload/bulk exact revisions and preview-token invalidation, over-limit state retention, failed-open/close empty selection, duplicate physical IDs, actual filtered bulk/directory controls and unsafe preview refusal. Parent reviewed scoped plan/session/dialog diff; targeted rustfmt/git diff --check passed, no debug code. Native end-to-end pending M8. Commit/push pending parent action.
 
 ## M3-C prepared handoff
 
