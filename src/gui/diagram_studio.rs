@@ -14773,6 +14773,7 @@ mod tests {
         }));
         let before_discard = dialog.documents.visual_scene().unwrap().clone();
         let before_revision = dialog.documents.visual_revision();
+        reveal_visual_action(&mut dialog, &ctx, "visual_apply_properties");
         click_action_with_child_discard(&mut dialog, &ctx, "visual_apply_properties");
         assert_eq!(dialog.documents.visual_scene().unwrap(), &before_discard);
         assert_eq!(dialog.documents.visual_revision(), before_revision);
@@ -20213,6 +20214,7 @@ mod tests {
             &ctx,
             "visual_connector_direction_option_both_ends",
         );
+        reveal_visual_action(&mut dialog, &ctx, "visual_connector_label");
         click_action(&mut dialog, &ctx, "visual_connector_label");
         frame_with_child_events(
             &mut dialog,
@@ -20226,6 +20228,7 @@ mod tests {
             .object
             .clone();
         let revision_before_discard = dialog.documents.visual_revision().unwrap();
+        reveal_visual_action(&mut dialog, &ctx, "visual_apply_properties");
         click_action_with_child_discard(&mut dialog, &ctx, "visual_apply_properties");
         assert_eq!(
             dialog.documents.visual_revision(),
@@ -20278,11 +20281,13 @@ mod tests {
         assert!(dialog.documents.can_undo());
 
         frame(&mut dialog, &ctx);
+        reveal_visual_action(&mut dialog, &ctx, "open_viewer");
         let projection_builds = dialog.test_visual_projection_build_count;
         open_viewer(&mut dialog, &ctx);
         assert_eq!(dialog.test_visual_projection_build_count, projection_builds);
         assert_eq!(dialog.test_viewer_visual_projection_items, 4);
         let before_remove = dialog.documents.visual_revision().unwrap();
+        reveal_visual_action(&mut dialog, &ctx, "visual_remove_object");
         click_action(&mut dialog, &ctx, "visual_remove_object");
         assert_eq!(dialog.documents.visual_revision(), Some(before_remove + 1));
         assert!(

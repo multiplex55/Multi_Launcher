@@ -49246,7 +49246,6 @@ mod tests {
         drop(workspace);
     }
 
-    #[cfg(feature = "qa-framebuffer-capture")]
     #[test]
     fn timer_jump_escape_cancels_first() {
         let ctx = egui::Context::default();
@@ -49271,7 +49270,6 @@ mod tests {
         drop(workspace);
     }
 
-    #[cfg(feature = "qa-framebuffer-capture")]
     #[test]
     fn timer_popup_escape_closes_popup_before_parent_and_jump_escape_cancels_first() {
         use crate::gui::jump_mode::ui::NavigationOwner;
@@ -49316,14 +49314,14 @@ mod tests {
         press_dialog_hint_with_enter(&ctx, &mut app, &option_hint);
         release_dialog_hint_enter(&ctx, &mut app);
         tap_root_key(&ctx, &mut app, egui::Key::Enter);
-        assert_eq!(app.timer_dialog.qa_observation().sound_index, 1);
+        assert_eq!(app.timer_dialog.test_sound_index(), 1);
         assert!(egui::Popup::is_any_open(&ctx));
         assert!(app.jump_mode_ui.active_session().is_none());
 
         tap_root_key(&ctx, &mut app, egui::Key::Escape);
         assert!(!egui::Popup::is_any_open(&ctx));
         assert!(app.timer_dialog.open);
-        assert_eq!(app.timer_dialog.qa_observation().sound_index, 1);
+        assert_eq!(app.timer_dialog.test_sound_index(), 1);
 
         tap_root_key(&ctx, &mut app, egui::Key::Escape);
         assert!(!app.timer_dialog.open);
@@ -52603,17 +52601,11 @@ mod tests {
         output.0.drop_without_applying_deltas();
     }
 
-    fn prepare_batch_rename_generated_fixture(
+    fn prepare_batch_rename_generated_fixture_in(
         ctx: &egui::Context,
-    ) -> (
-        crate::performance::workloads::IsolatedWorkspace,
-        LauncherApp,
-        std::path::PathBuf,
-        tempfile::TempDir,
-    ) {
-        let repository_root =
-            std::env::current_dir().expect("read repository root before isolation");
-        let (workspace, mut app) = root_list_test_app(ctx, Vec::new());
+        app: &mut LauncherApp,
+        repository_root: &std::path::Path,
+    ) -> (std::path::PathBuf, tempfile::TempDir) {
         let scan_parent = repository_root.join("target/productivity_expansion");
         std::fs::create_dir_all(&scan_parent).expect("create repository-local scan fixture parent");
         let root_guard = tempfile::Builder::new()
@@ -52626,7 +52618,7 @@ mod tests {
 
         app.set_jump_mode_enabled(true);
         app.batch_rename_dialog.open = true;
-        prepare_actual_query_frame(ctx, &mut app);
+        prepare_actual_query_frame(ctx, app);
         app.handle_batch_rename_ui_command(crate::gui::BatchRenameUiCommand::SelectRoot(
             root.clone(),
         ));
@@ -52655,9 +52647,9 @@ mod tests {
             app.batch_rename_dialog.test_scan_diagnostic()
         );
         for _ in 0..2 {
-            batch_rename_test_frame(ctx, &mut app, Vec::new());
+            batch_rename_test_frame(ctx, app, Vec::new());
         }
-        (workspace, app, root, root_guard)
+        (root, root_guard)
     }
 
     #[test]
@@ -52665,7 +52657,10 @@ mod tests {
         let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         ctx.all_styles_mut(|style| style.animation_time = 0.0);
-        let (_workspace, mut app, root, _files) = prepare_batch_rename_generated_fixture(&ctx);
+        let repository_root = std::env::current_dir().unwrap();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, _files) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
         let entry = app
             .batch_rename_dialog
             .test_prepare_ready_apply_preview()
@@ -52734,7 +52729,10 @@ mod tests {
             style.animation_time = 0.0;
             style.scroll_animation = egui::style::ScrollAnimation::none();
         });
-        let (_workspace, mut app, root, _files) = prepare_batch_rename_generated_fixture(&ctx);
+        let repository_root = std::env::current_dir().unwrap();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, _files) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
         let entry = app.batch_rename_dialog.test_prepare_ready_apply_preview().unwrap();
         let session = app.batch_rename_dialog.jump_mode_target_generation();
         batch_rename_test_frame(&ctx, &mut app, Vec::new());
@@ -52868,7 +52866,10 @@ mod tests {
         use crate::gui::jump_mode::TargetKind;
 
         let ctx = egui::Context::default();
-        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let repository_root = std::env::current_dir().unwrap();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, root_guard) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
         let original_bytes = ["alpha.txt", "beta.txt"]
             .into_iter()
             .map(|name| std::fs::read(root.join(name)).unwrap())
@@ -52981,7 +52982,10 @@ mod tests {
         use crate::gui::jump_mode::TargetKind;
 
         let ctx = egui::Context::default();
-        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let repository_root = std::env::current_dir().unwrap();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, root_guard) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
         let original_bytes = ["alpha.txt", "beta.txt"]
             .into_iter()
             .map(|name| std::fs::read(root.join(name)).unwrap())
@@ -53089,7 +53093,10 @@ mod tests {
         use crate::gui::jump_mode::{SurfaceId, ui::NavigationOwner};
 
         let ctx = egui::Context::default();
-        let (workspace, mut app, root, root_guard) = prepare_batch_rename_generated_fixture(&ctx);
+        let repository_root = std::env::current_dir().unwrap();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let (root, root_guard) =
+            prepare_batch_rename_generated_fixture_in(&ctx, &mut app, &repository_root);
         ctx.global_style_mut(|style| {
             style.scroll_animation = egui::style::ScrollAnimation::none();
         });
@@ -58858,6 +58865,11 @@ mod tests {
         LauncherApp,
     ) {
         let (workspace, mut app) = root_list_test_app(ctx, two_results());
+        configure_launcher_show_focus_test_app(&mut app, query);
+        (workspace, app)
+    }
+
+    fn configure_launcher_show_focus_test_app(app: &mut LauncherApp, query: &str) {
         app.query = query.to_owned();
         app.last_search_query = app.query.clone();
         app.last_results_valid = true;
@@ -58866,8 +58878,7 @@ mod tests {
         app.last_visible = false;
         app.focus_query = false;
         app.move_cursor_end = false;
-        install_owned_root_for_test(&mut app);
-        (workspace, app)
+        install_owned_root_for_test(app);
     }
 
     fn launcher_show_owner_input(focused: bool, size: egui::Vec2) -> egui::RawInput {
@@ -60246,7 +60257,8 @@ mod tests {
         let screen_size = egui::vec2(1600.0, 1200.0);
         for jump_mode in [false, true] {
             let ctx = egui::Context::default();
-            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "mouse query");
+            let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+            configure_launcher_show_focus_test_app(&mut app, "mouse query");
             app.set_jump_mode_enabled(jump_mode);
             app.notes_dialog
                 .test_set_edit_draft("unsaved Quick Notes draft");
@@ -60450,7 +60462,8 @@ mod tests {
         let screen_size = egui::vec2(1600.0, 1200.0);
         for jump_mode in [false, true] {
             let ctx = egui::Context::default();
-            let (_workspace, mut app) = launcher_show_focus_test_app(&ctx, "hint query");
+            let (_workspace, mut app) = root_list_test_app(&ctx, two_results());
+            configure_launcher_show_focus_test_app(&mut app, "hint query");
             app.set_jump_mode_enabled(jump_mode);
             app.notes_dialog
                 .test_set_edit_draft("unsaved Quick Notes hint draft");

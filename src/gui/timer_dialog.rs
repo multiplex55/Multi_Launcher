@@ -283,6 +283,11 @@ impl TimerDialog {
         &self.duration
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_sound_index(&self) -> usize {
+        self.sound_idx
+    }
+
     fn capture_host_draft(&self) -> TimerHostDraft {
         TimerHostDraft {
             duration: self.duration.clone(),

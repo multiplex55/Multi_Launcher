@@ -1269,3 +1269,347 @@ M6-A now owns one cumulative affected-case verification and evidence audit. Use 
 The audit must account individually for all 50 selected IDs, 38 original milestones, 37 ordinary host rows and 12 full native flows, using accepted current owner/entry/test evidence without broad unrelated exploration. Full native N1–N12 and draw.io external-reader rendering remain user-pending, distinct from earlier narrow native artifacts/adapters and current fakes. Real task-related regressions are fixed narrowly with one source writer and reviewed root budgets. Preserve old tests/profile/configuration/vendor behavior, Nextest TOML and production Paste Sequences defaults. New app tests disable Next/Cancel before construction.
 
 Parent owns branch/Git/canonical documents; configured Terra/medium implementer will own M6-A source/Cargo/evidence after this M0-A is committed, direct-parent checked and pushed. M6-B prepares the one consolidated user packet only after code/verification closure; M6-C provides the actual final committed/pushed receipt and code/build equivalence. Do not mark the Goal complete or presume any user result now. No intermediate user test request. Goal active.
+
+
+## R06/M6-A — Cumulative affected verification, source/evidence audit and runnable artifact
+
+Verification ran on test/productivity-native-acceptance-closeout from M0-A f04c2eccaf7219eb7acc1c04b9cdd2153c717da5, whose direct parent is R05 final report 1a47fb3f91e69a50b1c80f26d0e2735a906aaf00. Parent independently verified all six M0 direct parents, base 1852f264dae69056f79bc0c3b593c70331fa620f ancestry, no new-range merges, matching upstreams and one worktree. Current Recovery Goal/Kickstart Git blobs exactly match 05153ac1. Final-tip ancestry and artifact/code-input equivalence are rerun after commit; the commit cannot include its own computed SHA.
+
+### Reconciled inventory and exact execution
+
+The original 444 accepted baseline is initial 443/444 plus its exact 1/1 correction, not a fabricated single 444/444 run. Explicitly curated accepted R01–R05 runtime/correction sources produce 836 historical package/target/FQName identities. Four early R02 Markdown/Quick Notes logs have tracked accepted narrative/count/checkpoint support but no historical hash citation; their current computed hashes identify the inputs and are qualified accordingly. They contribute 13 otherwise absent cases; duplicate evidence is not counted again. All other cited hashes and accepted source commits were reconciled. The frozen assembly/enrichment scripts retain the actual original M17 runtime/correction paths, accepted commits/sections/omission metadata and bounded task-history lookup, rather than a stale generator or blind PASS-file glob.
+
+One old initial-candidate Markdown runtime location is an alias of the committed gui::render::tests case already present; its oracle is preserved and deduplicated. Two accepted Timer ROOT Jump/popup cases were QA-feature-gated with no fully equivalent default replacement. Read-only dependency review showed only an existing sound-index observation dependency, so their original assertions now run under ordinary cfg(test), using an equivalent getter in timer_dialog.rs. No Cargo feature/profile, QA API, production behavior or assertion was weakened. The final current required set is 835: 831 library and 4 main-bin identities. An earlier 833 default list is preserved as inventory work before the Timer migration, not runtime.
+
+The direct full-name trie was 52,199 characters, exceeding the Windows process command-line limit. A 10,576-character end-anchored suffix selector was derived against current function names. Its syntax is not intrinsically full-qualified exact matching: the acceptance gate is actual machine-readable Nextest package/binary/FQName set equality on frozen source/filter. That check passed 835 expected=835 selected, with zero missing/extra/duplicate/ignored. Source-name uniqueness alone was not accepted as proof. Frozen filter SHA256 is 45FAEDA6F7B2792AF8D77791CD36ACC6D48D7BEBF8668051FD6993A3ACF6DF8E; accepted list2 JSON SHA256 is 0917B331571F9E78C48F8D376CFFA5575DC60ECCF53E551EDA1E4A6110EA6F78.
+
+Set `$f` to trimmed ignored r06-m6-a-filter.txt. Commands were:
+
+```text
+cargo nextest list --locked --offline -p multi_launcher --lib --bin multi_launcher --cargo-profile fast-dev --message-format json -E $f
+cargo nextest run --locked --offline -p multi_launcher --lib --bin multi_launcher --cargo-profile fast-dev --no-fail-fast --test-threads 1 -E $f
+```
+
+The one serial cumulative runtime used normal-user native filesystem access outside the agent sandbox for selected disposable filesystem cases, following measured earlier ancestry-read denials; production guards remained unchanged. No ignored tests, opt-in native probes, native UI/WGC/Explorer action or executable launch was enabled. Initial execution ran 835: 829 passed, 6 failed, 6845 skipped in 199.538s. The six exact failures were:
+
+| Required case | Initial failure / responsible fixture boundary |
+| --- | --- |
+| gui::diagram_studio::tests::diagram_studio_visual_connector_controls_create_edit_select_and_delete | Ordinary Visual ScrollArea control below fold: connector-label bottom 752.9 vs clip 752. |
+| gui::diagram_studio::tests::diagram_studio_visual_container_controls_create_and_edit_swimlane | Property Apply below fold: bottom 758 vs clip 752. |
+| gui::render::tests::batch_rename_detached_confirmation_requires_a_retained_owner_pass | Stack overflow through an extra by-value App setup/return layer. |
+| gui::render::tests::batch_rename_real_host_buttons_retain_the_same_verified_preview | Same owned-App fixture construction boundary. |
+| gui::render::tests::jump_mode_batch_rename_confirmation_apply_hint_requires_fresh_cancel | Same owned-App fixture construction boundary. |
+| gui::render::tests::notes_query_hint_focuses_actual_query_and_returns_to_quick_notes_draft | Analogous extra by-value Notes App setup layer. |
+
+Only test fixtures changed. Diagram cases reuse the accepted real owner-wheel reveal helper, preserve the ordinary viewport and strict fully clipped enabled controls, reacquire rectangles and place the Viewer projection-reuse baseline after reveal immediately before the Viewer action. They do not call internal transforms or relax clip tolerances. Batch/Notes each retain one App but now construct it once at the caller and borrow it into the same setup, preserving the pre-isolation repository root and all settings/actions/assertions. No production boxing, stack size, Nextest TOML, default hotkey, dependency or profile change was used.
+
+Correction1 exactly listed 9: the six failures plus three directly affected setup callers outside the historical835. It passed 6/9 with 7671 skipped: all original six failures passed, while the three extra callers exposed the same remaining owned-return pattern. Those callers were migrated to the same borrowed setup; the now-unused owned Batch wrapper was removed. Correction2 exactly listed/ran those 3 and passed 3/3, 7677 skipped. Its extra cases are jump_mode_batch_rename_rows_focus_only_and_native_ids_follow_sort, jump_mode_file_operations_integration_sort_headers_are_focus_only_and_current, and notes_query_mouse_quick_notes_round_trip_in_both_jump_modes (all gui::render::tests). Reviews confirmed equivalent setup, repository path authority, no domain recursion/production change and preserved oracles. The stack-layout root is supported by the narrow construction-only correction passing; no broad stack-setting workaround was made. These roots stayed within their focused correction budgets.
+
+Honest result: 835 required current cases have passing evidence across initial 829 plus 6 corrected, and 3 additional directly affected callers passed separately (838 distinct current cases with passing evidence). This is NOT a single uninterrupted835/835 run. No automatic rerun of the full union followed local fixture corrections. The initial source was base f04c2ecc plus the recorded Timer-test diff hash638F4DA00ECEEF44CDD4E8FB6AD7E1C29F121F5999EAACFC39F42B074AB8C06F; later fixture corrections and final build are separately identified below.
+
+### Scoped Clippy, warnings and build identity
+
+```text
+cargo clippy --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev --no-deps
+cargo build --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev --message-format=json-render-diagnostics
+```
+
+Clippy exited 0 (1m58s), with 117 application-library and 3 main-bin first-party warning findings, plus 3 workspace table-core dependency warnings and other dependency/vendor messages. The location-by-location TSV classifies all 120 against the recovery base source: 8 unchanged constructs in untouched files, 38 unchanged constructs in touched files, 5 touched existing constructs, 56 recovery-introduced/materially changed constructs and 13 findings in recovery-introduced files. These are finding/location counts, not files, and source comparison does not prove an old Clippy run emitted or lacked each diagnostic under older types/toolchains. The six familiar rustc Note Panel/Table warnings were baseline relative to recent checkpoints; three Note Panel constructs are recovery changes, so they are not all pre-goal/unrelated. This final source-origin classification supersedes any broader reading of earlier phase-relative wording.
+
+Independent material-warning review found finite staged size carriers (288B Settings/Clipboard,864B Inspector,384B Explorer,1128B MkMacro), owned error/rollback data (184/152B) and style/argument/unused-code suggestions, without a task-related correctness fix. No blanket cleanup, lint suppression, dependency/vendor edit or behavior-changing boxing was warranted. Warnings remain visible and classified, not falsely reported as zero or all legacy.
+
+The one actual production build exited 0 in 3m02s. Cargo compiler-artifact metadata identifies G:/Repos/rust/Multi_Launcher/target/fast-dev/multi_launcher.exe, 143,680,000 bytes, SHA256 E393FD9F07B58758105C429DAE9467AC41A914226A1D288631A756901F6F8BC8. It was not launched. Toolchain is rustc1.99.1/cargo1.99.1, Nextest0.9.135, target x86_64-pc-windows-msvc, profile fast-dev. The artifact was built with base HEAD f04c2eccaf7219eb7acc1c04b9cdd2153c717da5 plus the FINAL three-file test-only diff SHA256 735AD635ACB4C67D1F553A0AC9AD09503CAAA76EE8D27E2093B9E57290BA3781. The 1,225 tracked production/build-input content manifest SHA256 is 1FC89C5D61CFE09F33C5259E15AF08EA0ECD635F4A94A7A6A09EF94A4B8E9ABB. This is a working-tree content identity, not a claimed clean base or embedded future commit SHA.
+
+Parent independently rehashed every recorded evidence file and the executable, checked all 1,225 current inputs and the exact source patch: zero mismatches. An input-equivalence receipt after commit binds this built content to the accepted code commit; later docs-only tips must retain that equality rather than invent a binary SHA/commit from its filename. Original build/artifact metadata stays immutable. A test-generated root clipboard_modifiers.json (absent before the run) was moved intact into ignored r06-m6-a-test-generated-clipboard-modifiers.json, SHA256 83056CDDBB642660F6077E1C8D64495A65E3C6476ED486601BE238BF9C9DE5E2; it is neither source nor discarded/user data.
+
+### Coverage and compatibility audit
+
+Parent read the complete bounded audit and mechanically verified all 50 requested IDs, 38 exact original milestone keys/titles, 37 exact ordinary host names/order and 12 full native flows. All 80 concrete representative FQName references resolve into the required 835 inventory. Independent review checked ownership/normal routes and evidence attribution; no generic-host test substitutes for individual surface wiring. Numeric labels retain the original E.4 groups without invented per-number micro-titles. The tables below supersede historical partial status only where locally proved; all full native flows remain user-pending. The source compatibility/support limits remain explicit. M6-B/M6-C and original M17-B are not complete yet.
+
+### Accepted closure keys
+
+| Key | Accepted ownership / checkpoint |
+| --- | --- |
+| C1 | R01/M1-A `9057106f13492004bc25a57e8900d916d27aa290`; R01/M1-B/final `b8c3f259cbd55d483fb1346b262026ed42d5d820`: reference host clicks, geometry, focus and picker authority. R02 host checkpoints complete the ordinary migrations; R03 Inspector and R05 Explorer close the two future surfaces. |
+| C2 | R03/M3-A `4ff5350d64c42141ea1171c268a5cbc9e0b45d62`, M3-B `b15579575b7317186e378838d2cb12b580f86f93`, M3-C `103e8b17cae696e7676885a83fb703765a5e53c6`; final report `00e199e00df7513153ceb00a42e8cb5cb1f5b9e0`. Exact engine retained, independent Inspector/comparison/reference delivered. |
+| C3 | R04/M4-A `47bee821f16f33473aa0a0da4d113c9a2b27f64e`, M4-B `06d61ae88fb312720a500509c2e4bf7c39f06623`, M4-C `d3f8bf3a9ca4a66be9e9428b3dc2c11801df04f8`, M4-D `a797430bae48e9c40a66d81e59ec3bac9d0e9889`; final report `102eaf9fbe291530acf0901f641bf6f822fcbc0f`. Source identities read from the accepted per-checkpoint receipts/ledger. |
+| C4 | R05/M5-A/B above: actual guarded Explorer backend, saved-list store/editor, typed/plugin/catalog/configurable activation, one retiring job and ordinary host. |
+| C5 | Original M13 algorithm/accounting plus R02/M2-D.1 `70820b485e6665bf9f61a2f73ca42d7ff924506e`; R05/M5-C adds held progressive/Refresh/Cancel/File Search cooperation. |
+| C6 | Original M14 read-only Restart Manager plus R02/M2-D.2 `ee678f1de638de7e48809c402deb19ba3c23dcdc`; R05/M5-C adds same-file scripted release/Refresh invalidation. |
+| C7 | Original M15–M16 capture/media/controller/interlocks plus R02/M2-D.3 `85f5ba8711df522aa08f0661276fab860e5b5445`; R05/M5-C adds actual setup-to-hidden-Stop/GIF/fake-live-pin cooperation. |
+
+R02 final report is `7912a9f591c301d7a161a0675eea650d07d9148e`. Its per-host checkpoint references below are the canonical accepted sections, not claims that the final report added product code. Per-checkpoint totals overlap: R03 11/10/19, R04 22/12/25/24, R05 35/12/10 must not be summed as distinct tests.
+
+### Individual original ID accounting — exactly 50 rows
+
+All rows are `LOCAL`; the referenced current cases have passing M6-A evidence across the initial run and narrow corrections, not a claimed uninterrupted all-green run. Native column is the full flow still pending. Normal routes and concrete host/domain case keys are expanded below.
+
+| ID | Original E.4 owner group (not an individual micro-label) | Current owner and normal route | Accepted closure / concrete cases | Full native pending |
+| --- | --- | --- | --- | --- |
+| 1 | C02/M5 exact integer types, grammar, operations, compatibility | `calculation_pad` evaluator/document through Calculation Pad text entry | C2; K1, H30 | N5 |
+| 2 | C02/M5 exact integer types, grammar, operations, compatibility | Same authoritative evaluator/document and Pad | C2; K1, H30 | N5 |
+| 3 | C02/M5 exact integer types, grammar, operations, compatibility | Same authoritative evaluator/document and Pad | C2; K1, H30 | N5 |
+| 4 | C02/M5 exact integer types, grammar, operations, compatibility | Same authoritative evaluator/document and Pad | C2; K1, H30 | N5 |
+| 5 | C02/M6 separate inspector, bitfields, copying, comparison | Independent `calculation_pad::inspector`/comparison; Pad result to hosted Inspector | C2 M3-A/B/C; K2, K3, H33 | N5 |
+| 6 | C02/M6 separate inspector, bitfields, copying, comparison | Same independent working-copy/comparison owner and retained UI | C2; K2, K3, H33 | N5 |
+| 7 | C02/M5 exact integer types, grammar, operations, compatibility | `calculation_pad` evaluator/document through ordinary Pad | C2; K1 | N5 |
+| 8 | C02/M6 separate inspector, bitfields, copying, comparison | Independent Inspector/comparison; explicit retained Copy/Insert | C2; K2, K3, H33 | N5 |
+| 9 | C02/M7 dimensional arithmetic, examples, references | Pad document/quantity evaluation; ordinary source/target-unit grammar | C2 retains M7-A; K4 | N5 |
+| 10 | C02/M5 exact integer types, grammar, operations, compatibility | `calculation_pad` evaluator/document through ordinary Pad | C2; K1 | N5 |
+| 11 | C02/M6 separate inspector, bitfields, copying, comparison | Independent Inspector/comparison; frozen result context and explicit Insert | C2; K2, K3, H33 | N5 |
+| 12 | C02/M7 dimensional arithmetic, examples, references | Executable examples/help plus Inspector format-only preferences | C2 M3-C; K4, K5 | N5 |
+| 13 | C01/M2 Notes, Markdown, MkMacro hosting | Individual document owners and typed GUI open routes | R02 M2-A.1/.2a/.2b/.3; H01–H04 | N2 |
+| 14 | C01/M2 Notes, Markdown, MkMacro hosting | Same document-owner group; no ID-specific label asserted | Same; H01–H04 | N2 |
+| 15 | C01/M2 Notes, Markdown, MkMacro hosting | Same document-owner group; no ID-specific label asserted | Same; H01–H04 | N2 |
+| 16 | C01/M3 Main/Dashboard and mouse/gesture hosting | Settings/draft/gesture owners; normal settings/editor routes | R02 M2-B.1–.4; H05–H09 | N3 |
+| 17 | C01/M3 Main/Dashboard and mouse/gesture hosting | Same settings/gesture-owner group | Same; H05–H09 | N3 |
+| 18 | C01/M3 Main/Dashboard and mouse/gesture hosting | Same settings/gesture-owner group | Same; H05–H09 | N3 |
+| 19 | C01/M4 remaining required utility families | Existing file/clipboard/developer/time/image owners through normal typed routes | R02 M2-C; H10–H29 | N4 |
+| 20 | C01/M4 remaining required utility families | Same required utility-owner group | Same; H10–H29 | N4 |
+| 21 | C01/M4 remaining required utility families | Same required utility-owner group | Same; H10–H29 | N4 |
+| 22 | C01/M4 remaining required utility families | Same required utility-owner group | Same; H10–H29 | N4 |
+| 23 | C01/M4 remaining required utility families | Same required utility-owner group | Same; H10–H29 | N4 |
+| 24 | C01/M1 plus every migration: one session, geometry, focus, return | Shared host/geometry/provenance with each live tool owner | C1 plus all 37 host rows H01–H37 | N1–N4 and family native flows |
+| 25 | C01/M1 plus every migration: one session, geometry, focus, return | Same shared and individual ownership; no generic-test substitution | Same | Same |
+| 26 | C01/M1 plus every migration: one session, geometry, focus, return | Same shared and individual ownership; no generic-test substitution | Same | Same |
+| 27 | C03/M8 authoring model, shapes/style/layers, compatibility | Diagram document/visual/codec; typed Studio opener | C3; D1, H31 | N6/N7 |
+| 28 | C03/M8 authoring model, shapes/style/layers, compatibility | Same discriminated Mermaid/Visual authority | C3; D1, H31 | N6/N7 |
+| 29 | C03/M9 manipulation, connectors, containers, assets, navigation | Diagram visual/scene/canvas; actual Studio controls | C3 M4-A plus retained M9; D2, D3 | N6/N7 |
+| 30 | C03/M9 manipulation, connectors, containers, assets, navigation | Same current scene/canvas owners | Same; D2, D3 | N6/N7 |
+| 31 | C03/M9 manipulation, connectors, containers, assets, navigation | Same current scene/canvas owners | Same; D2, D3 | N6/N7 |
+| 32 | C03/M9 manipulation, connectors, containers, assets, navigation | Same current scene/canvas owners | Same; D2, D3 | N6/N7 |
+| 33 | C03/M9 manipulation, connectors, containers, assets, navigation | Same current scene/canvas owners | Same; D2, D3 | N6/N7 |
+| 34 | C03/M8 authoring model, shapes/style/layers, compatibility | Diagram document/visual/codec; typed Studio opener | C3; D1, H31 | N6/N7 |
+| 35 | C03/M8 authoring model, shapes/style/layers, compatibility | Same discriminated Mermaid/Visual authority | C3; D1, H31 | N6/N7 |
+| 36 | C03/M9 manipulation, connectors, containers, assets, navigation | Diagram visual/scene/canvas and retained asset owner | C3; D2, D3 | N6/N7 |
+| 37 | C03/M9 manipulation, connectors, containers, assets, navigation | Same scene/canvas/asset owners | C3; D2, D3 | N6/N7 |
+| 38 | C03/M10 templates, assistance, export, conversion, library | Diagram template/export/conversion/recents plus Studio action owner | C3 M4-B/C; D4–D6 | N6/N7 |
+| 39 | C03/M9 manipulation, connectors, containers, assets, navigation | Diagram scene/canvas; current tool/selection ownership | C3; D2, D3 | N6/N7 |
+| 40 | C03/M9 manipulation, connectors, containers, assets, navigation | Same scene/canvas/asset owners | C3; D2, D3 | N6/N7 |
+| 41 | C03/M9 manipulation, connectors, containers, assets, navigation | Same scene/canvas/asset owners | C3; D2, D3 | N6/N7 |
+| 42 | C03/M10 templates, assistance, export, conversion, library | Diagram templates/export/conversion/recents and Studio intents | C3; D4–D6 | N6/N7 |
+| 43 | C03/M10 templates, assistance, export, conversion, library | Same bounded domain/GUI owners | C3; D4–D6 | N6/N7 |
+| 44 | C03/M11 documented draw.io subset | `diagram::drawio`, reviewed Studio import/new-copy/Open and export | C3 M4-D; D7 | N6/N7; external reader pending |
+| 45 | C03/M10 templates, assistance, export, conversion, library | Same templates/export/conversion/recents owners | C3; D4–D6 | N6/N7 |
+| 46 | C03/M10 templates, assistance, export, conversion, library | Same bounded domain/GUI owners | C3; D4–D6 | N6/N7 |
+| 61 | C04/M12 Explorer multi-tab folder lists | `ExplorerTabsJob`/native evidence + saved-ID utility/plugin typed routes | C4; H34, E1 | N8 |
+| 88 | C05/M13 folder size analyzer | `FolderSizeSession`; foldersize/File Search -> retained analyzer | C5; H35 | N9 |
+| 89 | C06/M14 file lock inspector | `FileLockSession`; filelock/File Search -> retained inspector | C6; H36 | N10 |
+| 119 | C07/M15–M16 silent recording/native integration | `RecordingController`; record Open/setup Start/compact Stop | C7; H37 | N11/N12 |
+
+### All original milestones — exactly 38 rows
+
+Scopes retain the exact canonical original titles. `LOCAL` is accepted source/local evidence; M17-A verification is locally complete, while M17-B delivery and M6-B/M6-C remain pending.
+
+| Original milestone | Original scope | Current owner / normal route and accepted recovery closure | Concrete evidence / disposition |
+| --- | --- | --- | --- |
+| M0-B | Bounded baseline and host inventory | Original baseline retained; current canonical 50/38/37/12 inventories | Original 444 manifest/list, accepted ledgers and current reconciled cumulative evidence above |
+| M1-A | Reusable single-session host lifecycle | Shared host plus individual owners; R01/M1-A and R02 migrations | LOCAL; H30–H32 and H01–H37 |
+| M1-B | Geometry, focus and host controls | `utility_dialog_size`/geometry/provenance; R01/M1-B | LOCAL; H30–H32; real DPI/picker N1/family checks pending |
+| M2-A | Notes and Markdown hosting | `NotesDialog`, per-instance `NotePanel`, `MarkdownStudioDialog`; R02 M2-A.1/.2a/.2b | LOCAL; H01–H03 |
+| M2-B | MkMacro editor hosting | `MkMacroDialog`, independent playback/children; R02 M2-A.3 | LOCAL; H04 |
+| M3-A | Main Settings and Dashboard Settings hosting | Settings host/editor and DashboardEditorDialog; R02 M2-B.1/.2 | LOCAL; H05/H06 |
+| M3-B | Mouse Settings and Gesture hosting | Mouse settings, gesture settings/editor/recorder; R02 M2-B.3/.4 | LOCAL; H07–H09 |
+| M4-A | File workflow dialogs | File Search/Diff/Batch Rename/Search & Replace owners; R02 M2-C.1/.2/.3 | LOCAL; H10–H13 |
+| M4-B | Clipboard workflow dialogs | History/Snippets/Modify/Paste owners; R02 M2-C.4/.5 | LOCAL; H14–H17; prompt/runtime remain owned separately |
+| M4-C | Developer utility dialogs | JSON/XML/Regex/Table owners; R02 M2-C.6 | LOCAL; H18–H21 |
+| M4-D | Time and image/file utility dialogs; host coverage closure | Timer/Calendar/DateTime/Image/DFF/ZIP; R02 M2-C.7/.8 | LOCAL; H22–H29; all 37 rows now wired |
+| M5-A | Exact integer domain and checked operations | Accepted evaluator retained; Pad -> typed integer results | LOCAL; C2/K1 |
+| M5-B | Grammar, references and compatibility | Pad document/evaluator, row/variable resolver | LOCAL; C2/K1/K4; scalar/units semantics retained |
+| M6-A | Separate programmer result inspector | Independent Inspector working copy; R03/M3-A/B | LOCAL; K2/H33; explicit Insert is qualified/undoable |
+| M6-B | Side-by-side calculation comparison | Immutable current-context slots; R03/M3-C | LOCAL; K3; no source or working-bit mutation |
+| M7-A | Dimensional arithmetic | Existing quantity/evaluator owner retained | LOCAL; K4; original nonlinear/unit grammar maintained |
+| M7-B | Examples, reference and calculator acceptance | Shared executable examples/help/preferences; R03/M3-C | LOCAL; K5; full N5 pending |
+| M8-A | Authoring modes and backward-compatible document format | Diagram controller/codec; original source + R04 compatibility | LOCAL; D1; no legacy source rewrite |
+| M8-B | Rich scene objects, styles and layers | Visual model/history/shared projection; R04/M4-A foundation | LOCAL; D1–D3 |
+| M9-A | Direct manipulation and navigation | Canvas geometry/gesture owner; R04/M4-A recovered visible drag | LOCAL; D2; native pointer/DPI pending |
+| M9-B | Connectors, containers and reusable assets | World-space scene hierarchy/connectors/assets; R04/M4-A | LOCAL; D2/D3; atomic Group/Ungroup/history |
+| M10-A | Mermaid assistance, templates, conversion and library | Accepted Mermaid assistance/copy/recents; R04/M4-B five starters | LOCAL; D4/D6; rich-to-Mermaid conversion not claimed |
+| M10-B | Current-scene exports and viewer parity | Immutable snapshot/encoder + Studio staged worker; R04/M4-C | LOCAL; D5/H32; independent Viewer camera |
+| M11-A | Bounded draw.io XML interchange | Current adapter/Studio review; R04/M4-D supported grouped profile | LOCAL; D7; unsupported fields refuse before bytes/publication |
+| M11-B | Diagram usability acceptance and documentation | Studio help/portable fixture/current source references; R04 final | LOCAL; D1/D5/D7; external rendering/full N6/N7 pending |
+| M12-A | Targeted Explorer tab operation | Guarded native port, job/lease and evidence; R05/M5-A | LOCAL; E1; positive Win11 provider/N8 pending |
+| M12-B | Saved folder lists and command integration | Store + retained editor/typed routes; R05/M5-B | LOCAL; H34; no new default global shortcut |
+| M13-A | Bounded progressive scan and accounting | Original metadata scanner/session + R05/M5-C cooperation | LOCAL; H35; real disposable filesystem proof narrower than N9 |
+| M13-B | Folder-size interface and launcher actions | Existing typed/File Search routes + R02 host + R05/M5-C | LOCAL; H35 |
+| M14-A | Restart Manager inspection boundary | Original read-only native/session identity guards retained | LOCAL; original held/released-file adapter proof; no unlock/kill |
+| M14-B | File lock inspector UI and actions | R02 host + R05/M5-C same-file Refresh/old-Reveal rejection | LOCAL; H36; scripted release is not native RM proof |
+| M15-A | Recording target and bounded capture lifecycle | Original session/backend; R02 setup + R05/M5-C actual Start | LOCAL; H37; real target/monitor selection pending |
+| M15-B | Streaming animated GIF output | Existing writer/finalization; R05/M5-C real GIF from fake frames | LOCAL; H37 + inherited owned-HWND decoded GIF |
+| M15-C | Video-only MP4 output | Original MF/H.264 owner retained | LOCAL; inherited synthetic/owned-HWND MP4 proof, no audio |
+| M16-A | Recorder controls and command integration | Existing typed Open/Stop/optional chord, R02 host and M5-C | LOCAL; H37, S1 |
+| M16-B | Recording interoperability and cleanup acceptance | Exact capture/publication/worker owners + fake live pin/interlocks | LOCAL; H37/S2; full N12 pending |
+| M17-A | Scoped cumulative verification and final review | Current R06/M6-A worker/parent | LOCAL COMPLETE; exact835 inventory, initial829+6 corrected, scoped Clippy/build and audited coverage above |
+| M17-B | Final delivery, status and next-tip handoff | Existing R06/M6-B/M6-C parent ownership | PENDING; no packet/final-goal-complete claim in this draft |
+
+### Exact ordinary host rows — 37
+
+Names below match the original canonical row text, including `Each note editor`, the three Calendar rows and the combined Recorder row. All use accepted per-surface retained action/host wiring, with ordinary geometry/focus/pin/close/hidden-ROOT duties shared through the existing host layers. The case references are per-surface representatives, not a claim that a generic host test proves every surface.
+
+| Original exact host row | Current owner and normal entry route | Accepted checkpoint / concrete case | Native limit |
+| --- | --- | --- | --- |
+| Quick Notes | `gui/notes_dialog.rs::NotesDialog`; `NoteCommandHost::open_notes_dialog` | R02/M2-A.2a; H01 | Full N2 pending |
+| Each note editor | `gui/note_panel.rs::NotePanel`, independent persistent note identity; note Open/Edit -> its panel | R02/M2-A.2b; H02 | Full N2; independent per-note focus/pickers pending |
+| Markdown Studio | `gui/markdown_studio.rs::MarkdownStudioDialog`; `open_markdown_studio_dialog` | R02/M2-A.1; H03 | Full N2 pending |
+| MkMacro | `gui/mkmacro_dialog::MkMacroDialog`; `open_mkmacro_dialog` | R02/M2-A.3; H04 | Full N2; fake playback is not native execution |
+| Main Settings | `SettingsWindowHost` + existing settings editor; typed `DialogCommand::Settings` | R02/M2-B.2; H05 | Full N3 pending |
+| Dashboard Settings | `DashboardEditorDialog`; `open_dashboard_settings_dialog` -> `open_dashboard_editor` | R02/M2-B.1; H06 | Full N3 pending |
+| Mouse Settings | `gui/mouse_settings_dialog.rs`; `open_mouse_settings` | R02/M2-B.3; H07 | Full N3/input-hook checks pending |
+| Mouse Gestures | `gui/mouse_gestures_dialog.rs`; existing Mouse/Gestures editor route | R02/M2-B.4; H08 | Full N3/real recorder input pending |
+| Gesture Settings | `gui/mouse_gesture_settings_dialog.rs`; existing gesture-settings route | R02/M2-B.3; H09 | Full N3 pending |
+| File Search | `gui/file_search_dialog.rs`, same coordinator/preview; `open_file_search` | R02/M2-C.1; H10 | Full N4/native focus/picker pending |
+| Diff | `gui/diff_dialog` workspace/worker; typed Diff payload -> `open_diff` | R02/M2-C.2; H11 | Full N4 pending |
+| Batch Rename | `BatchRenameDialogState`/existing plan session; `open_batch_rename` | R02/M2-C.3a; H12 | Full N4; real publication UI pending |
+| Search & Replace | `SearchReplaceDialogState`; `open_search_replace` | R02/M2-C.3b; H13 | Full N4; real filesystem/confirmation UI pending |
+| Clipboard History | `gui/clipboard_dialog.rs::ClipboardDialog`; `open_clipboard_dialog` | R02/M2-C.4a; H14 | Full N4; real private clipboard untouched by tests |
+| Snippets | `gui/snippet_dialog.rs::SnippetDialog`; `open_snippet_dialog` | R02/M2-C.4b; H15 | Full N4; owned prompt remains separate |
+| Clipboard Modify | `ClipboardModifyDialogState`; existing typed Modify opener | R02/M2-C.4c; H16 | Full N4; clipboard overwrite ownership pending native |
+| Paste Sequences | `PasteSequenceDialog` plus existing independent playback/prompt owner; `open_paste_sequence_dialog` | R02/M2-C.5; H17 | Full N4 including real repeated playback pending |
+| JSON | `JsonUtilityDialogState`; typed Json intent -> `open_json_utility` | R02/M2-C.6a; H18 | Full N4 pending |
+| XML | `XmlToolkitDialogState`; `open_xml_toolkit` | R02/M2-C.6b; H19 | Full N4/native picker pending |
+| Regex | `RegexTesterDialogState`; `open_regex_tester_dialog` | R02/M2-C.6c; H20 | Full N4 pending |
+| Table | `TableUtilityDialogState`/session; typed profile -> `open_table_utility` | R02/M2-C.6d; H21 | Full N4/native export/picker pending |
+| Timer/alarm authoring | `TimerDialog`; `open_timer_dialog` / `open_alarm_dialog` | R02/M2-C.7a; H22 | Full N4/audio-device interaction pending |
+| Calendar root | `CalendarPopover`/runtime and calendar host; `open_calendar_popover(date)` | R02/M2-C.7b; H23 | Full N4 pending |
+| Calendar event editor | `CalendarEventEditor` and independent draft host; root/details Edit/New -> captured source | R02/M2-C.7b; H24 | Full N4/native owned-child focus pending |
+| Calendar event details | `CalendarEventDetails`; root occurrence Open -> captured occurrence | R02/M2-C.7b; H25 | Full N4/native owned-child focus pending |
+| Date & Time Studio | `DateTimeStudioDialog`; `open_date_time_studio_dialog`; explicit Calendar Prepare | R02/M2-C.7c; H26 | Full N4; machine-local/DST/picker user path pending |
+| Image Compare | `gui/image_compare_dialog.rs`, same worker/camera; `open_image_compare_dialog` | R02/M2-C.8a; H27 | Full N4/native image clipboard/picker pending |
+| Duplicate Finder | `gui/duplicate_finder_dialog.rs`, existing scan/verified-alias action proof; `open_duplicate_finder_dialog` | R02/M2-C.8b; H28 | Full N4/native picker and current-alias action ownership pending |
+| ZIP Extractor | `gui/zip_extractor_dialog.rs`, inspection/selected-output token; `open_zip_extractor_dialog` | R02/M2-C.8c; H29 | Full N4; native picker and safe selected output UI pending |
+| Calculation Pad | `CalculationPadDialog` plus Pad session; `open_calculation_pad_dialog` | R01/M1-B reference; H30 | Full N1 pending |
+| Diagram Studio | `DiagramStudioDialog`/document controller; `open_diagram_studio_dialog` | R01 reference + R04/M4-A/B/C/D; H31 | Full N6/N7/native picker/DPI pending |
+| Diagram viewer | Same Studio owner, independent viewer host/camera; actual Open Viewer/Focus Viewer | R01 reference; H32 | Full N6/N7 pending |
+| Programmer inspector | `gui/programmer_inspector_dialog.rs` + independent working model; Pad selection/Inspector entry | R03/M3-A/B/C closes future row; H33 | Full N5/native host pending |
+| Explorer saved-list editor/launcher | `gui/explorer_tabs_dialog.rs`/store plus independent `ExplorerTabsJob`; `explorertabs` and typed Open/Run/Cancel | R05/M5-A/B closes future row; H34 | Full N8 requires supported observed Win11 provider |
+| Folder Size Analyzer | `FolderSizeDialogState`/`FolderSizeSession`; foldersize/OpenFolderSize File Search intent | R02/M2-D.1 + R05/M5-C; H35 | Full N9 pending; real disposable filesystem proof narrower |
+| File Lock Inspector | `FileLockDialogState`/`FileLockSession`; filelock/InspectFileUsers File Search intent | R02/M2-D.2 + R05/M5-C; H36 | Full N10 pending; scripted Refresh is not native RM |
+| Silent recorder setup / compact controller | `RecordingDialogState` ordinary setup; independent `RecordingController` and specialized compact controller; record Open/setup Start | R02/M2-D.3 + R05/M5-C; H37 | Full N11/N12 pending; compact is not an ordinary-host migration |
+
+Specialized rectangle/region selection, countdown, drawing/recording overlays, prompt/modal decisions and compact recorder control keep their existing independent lifecycle and exact owner receipts. They are described where relevant above but are **not extra ordinary rows**. Calendar/editor/details and per-note instance ownership must not be collapsed into a generic parent-only assertion.
+
+### Full native flow accounting — exactly 12 rows
+
+All full flows below remain `IMPLEMENTED_USER_VALIDATION_PENDING`; no user result is presumed. This is status/evidence data, not an ordered manual test script.
+
+| Original native flow | Current owner / available local evidence | Narrow actual evidence already accepted (if any) | Remaining full-flow limitation |
+| --- | --- | --- | --- |
+| N1 — Reference host | Pad/reference hosts and shared geometry; H30–H32 | No complete native reference-host flow established | Native dirty/edit/undo/copy/Dock/focus/Jump/DPI/picker sequence unobserved |
+| N2 — Document and macro hosts | Independent Notes/Markdown/MkMacro owners; H01–H04 | CPU controls/fake playback are not native positive execution | Real detached editing, owned prompts/pickers and harmless exactly-once macro flow unobserved |
+| N3 — Settings/mouse hosts | Settings/Dashboard/Mouse/Gestures; H05–H09 | Scoped editor/retained/input contracts, not full hook/OS proof | Real save/cancel/record/cancel and residual input suppression behavior unobserved |
+| N4 — Remaining utility families | Per-row owners H10–H29 plus shared host state; representative real CPU controls | Isolated disposable/file artifacts do not establish every native utility flow | Real clipboard, repeated sequence, native pickers/focus, time/calendar and file/image UI unobserved |
+| N5 — Programmer tools | Exact evaluator, independent Inspector and comparison; K1–K5/H33 | Exact model/CPU bit/Copy/Insert/Undo contracts only | Full actual large-result→bit edit→chosen format→insert/undo→comparison user flow unobserved |
+| N6 — Mermaid legacy | Diagram controller/codec/current source exports/viewer; D1/D5/H31/H32 | Saved artifacts and exact source/legacy codec checks; no full interactive gate | Real legacy edit, stale/invalid preview, viewer and export/dirty decisions unobserved |
+| N7 — Rich diagram | Current scene/hierarchy/assets/templates/exports/draw.io; D2–D7 | Independent XML syntax/reference checks plus app import/export/reimport; no external draw.io renderer | Native canvas/picker/DPI and external reader rendering unobserved; unsupported profiles stay explicit refusals |
+| N8 — Explorer tabs | Real conditional Windows port + job/store/host; E1/H34 | Fake-port/evidence and typed/control checks only; no native Explorer action ran | Supported Win11 New Tab/provider/pane/Shell-PIDL attribution and same-window ordering/unrelated-window preservation unobserved |
+| N9 — Folder sizes | Scanner/session/host; H35 | Original disposable Windows accounting/hard-link proof; M5-C real sandbox-external disposable scan/progress | Full native progressive/sort/cancel/refresh/host/focus/picker flow unobserved |
+| N10 — File users | Read-only RM/session/guarded Reveal; H36 | Earlier exact owned held/released helper with process creation identity | Full real inspector held→release→Refresh/host/reveal flow unobserved; current scripted empty result is separate |
+| N11 — Recording | WGC session, GIF/MF writers, setup/compact owner; H37/S1/S2 | Earlier verified owned HWND capture/GIF decode, synthetic video-only MF MP4 decode, owned-HWND controller MP4 | Actual launcher GIF/MP4, native target/region/display selection, hidden-root Stop/optional chord and non-primary/DPI unobserved |
+| N12 — Cleanup | Exact generation/claim/retirement owners, capture admission/Pinboard; H37/S1/S2 | Earlier controlled capture/MP4 repeated active discard and exact owned cleanup; current fake live pin processed frames | Full real selection/countdown/loss/repeat/exit, keyboard/mouse/still capture/live-Pinboard coexistence unobserved |
+
+Inherited opt-in native case identities are provenance only, **not new executions**: `file_lock::windows` native `native_reports_disposable_holder_then_release`; recorder `native_owned_hwnd_capture_observes_paint_and_retires`, `native_owned_hwnd_capture_writes_decodable_gif`, `native_mf_video_only_mp4_round_trips_through_source_reader`, `native_owned_hwnd_controller_mp4_save_and_discard_retire`. Their original accepted ledger sections retain exact target/module/run details. No ignored/native probe is proposed here.
+
+### Concrete representative case index
+
+Log paths below are relative to ignored `target/desktop-productivity-completion-recovery/`. All entries were observed as PASS in accepted checkpoint evidence or the accepted final ledger's exact inventory. A case shared by several rows remains one execution identity. Parent joined all 80 concrete full-qualified references to the required835 inventory; source counts are not summed as cumulative totals.
+
+| Key | Full-qualified representative case(s) | Accepted checkpoint evidence |
+| --- | --- | --- |
+| H01 | `gui::render::tests::quick_notes_visible_host_buttons_move_the_same_draft_and_discard_stale_host_intent` | R02/M2-A.2a; `r02-m2-a2a-run-01.log` |
+| H02 | `gui::note_panel::tests::note_panel_visible_host_buttons_move_the_same_dirty_note_and_discard_rejected_draft` | R02/M2-A.2b; `r02-m2-a2b-run-01.log` plus accepted final/correction section |
+| H03 | `gui::markdown_studio::tests::markdown_studio_visible_host_buttons_pop_out_and_dock_the_same_document` | R02/M2-A.1; `r02-m2-a1-run-04.log` |
+| H04 | `gui::mkmacro_dialog::tests::mkmacro_visible_pop_out_and_dock_run_same_macro_once` | R02/M2-A.3; `r02-m2-a3-run-02.log` |
+| H05 | `gui::render::tests::main_settings_popout_preserves_draft_with_launcher_hidden_and_docks_back` | R02/M2-B.2; `r02-m2-b2-run-01.log` |
+| H06 | `gui::render::tests::dashboard_editor_detached_launcher_route_renders_hidden_and_docks_back`; `gui::dashboard_editor_dialog::persistence_tests::dashboard_editor_visible_host_buttons_pop_out_and_dock_the_same_draft` | R02/M2-B.1; `r02-m2-b1-run-03.log` |
+| H07 | `gui::render::tests::mouse_settings_popout_stays_live_when_root_hides_and_docks_back` | R02/M2-B.3; `r02-m2-b3-run-1.log` |
+| H08 | `gui::render::tests::mouse_gestures_detached_child_confirmation_and_dock_keep_the_same_editor` | R02/M2-B.4; `r02-m2-b4-run-4.log` |
+| H09 | `gui::mouse_gesture_settings_dialog::tests::gesture_settings_visible_host_button_preserves_pending_draft`; `gui::render::tests::jump_mode_mouse_gesture_settings_focus_save_close_and_reopen_preserve_live_semantics` | R02/M2-B.3; `r02-m2-b3-run-1.log` |
+| H10 | `gui::render::tests::file_search_moves_the_same_running_search_and_edits_while_root_is_hidden` | R02/M2-C.1; `r02-m2-c1-run-4.log` |
+| H11 | `gui::render::tests::diff_moves_the_same_busy_folder_workspace_and_polls_while_root_is_hidden` | R02/M2-C.2; `r02-m2-c2-run-8.log` |
+| H12 | `gui::render::tests::batch_rename_real_host_buttons_retain_the_same_verified_preview` | R02/M2-C.3a; `r02-m2-c3a-run-3.log` |
+| H13 | `gui::render::tests::search_replace_detached_confirmation_applies_once_after_retention` | R02/M2-C.3b; `r02-m2-c3b-run-2.log` |
+| H14 | `gui::render::tests::clipboard_history_detached_save_and_copy_require_retained_passes` | R02/M2-C.4a; `r02-m2-c4a-run-4.log` |
+| H15 | `gui::render::tests::snippets_detached_preview_returns_to_the_same_unsaved_draft` | R02/M2-C.4b; `r02-m2-c4b-run-6.log` |
+| H16 | `gui::render::tests::clipboard_modify_detached_preview_and_apply_require_retained_passes` | R02/M2-C.4c and subsequent accepted M2-C.5; `r02-m2-c5-run-4.log` |
+| H17 | `gui::render::tests::paste_sequences_detached_run_and_next_preserve_the_same_playback`; `gui::command_host::tests::saved_paste_to_advance_run_repeats_three_times_through_app_and_physical_admission` | R02/M2-C.5; `r02-m2-c5-run-4.log` |
+| H18 | `gui::render::tests::json_utility_detached_search_and_copy_retain_the_same_document`; `gui::json_utility_dialog::tests::hosted_checkpoint_restores_draft_without_reissuing_projection` | R02/M2-C.6a; `r02-m2-c6a-run-2.log` and `r02-m2-c6a-run-3.log` |
+| H19 | `gui::render::tests::xml_toolkit_host_moves_keep_the_session_and_discarded_replace_keeps_the_file` | R02/M2-C.6b; `r02-m2-c6b-run-2.log` |
+| H20 | `gui::render::tests::regex_tester_host_moves_retain_revision_and_copy_only_after_accepted_child_input` | R02/M2-C.6c; `r02-m2-c6c-run-1.log` |
+| H21 | `gui::render::tests::table_utility_moves_the_same_held_file_page_and_selection_between_hosts`; `gui::render::tests::table_utility_native_replace_rejects_discarded_passes_and_writes_the_captured_export` | R02/M2-C.6d; `r02-m2-c6d-run-2.log` |
+| H22 | `gui::render::tests::timer_and_alarm_authoring_keep_their_drafts_across_actual_host_moves` | R02/M2-C.7a; `r02-m2-c7a-run-2.log` |
+| H23 | `gui::render::tests::detached_calendar_retains_occurrence_and_saves_and_deletes_only_on_accepted_passes` | R02/M2-C.7b; `r02-m2-c7b-run-4.log`; root/children actual workflow |
+| H24 | H23 plus `gui::calendar_event_editor::persistence_tests::retained_editor_update_and_split_cannot_restore_a_deleted_event` | R02/M2-C.7b; `r02-m2-c7b-run-3.log` and run-4 |
+| H25 | H23 plus `gui::calendar_event_details::persistence_tests::stale_details_occurrence_cannot_delete_or_duplicate_the_changed_series` | R02/M2-C.7b; `r02-m2-c7b-run-3.log` and run-4 |
+| H26 | `gui::render::tests::date_time_studio_host_moves_preserve_draft_reference_selection_and_popup_ownership` | R02/M2-C.7c; `r02-m2-c7c-run-3.log` |
+| H27 | `gui::render::tests::imgdiff_host_moves_retain_inflight_pair_worker_and_camera_with_root_hidden` | R02/M2-C.8a; `r02-m2-c8a-run-2.log` |
+| H28 | `gui::render::tests::dff_host_gated_scan_survives_moves_cancel_drain_restart_and_close` | R02/M2-C.8b; `r02-m2-c8b-run-1.log` |
+| H29 | `gui::render::tests::zip_host_preview_confirm_survives_moves_and_rejects_discarded_actions` | R02/M2-C.8c; `r02-m2-c8c-run-1.log` |
+| H30 | `gui::calculation_pad_dialog::tests::native_popout_child_discard_and_os_close_keep_the_edited_session` | R01/M1-B; `r01-m1-b-run-02.log` |
+| H31 | `gui::diagram_studio::tests::diagram_owner_dock_and_pop_out_keep_the_same_document_generation` | R01/M1-A/B; `r01-m1-b-run-02.log` |
+| H32 | `gui::diagram_studio::tests::focused_docked_viewer_owns_root_close_shortcuts_from_docked_owner` | R01/M1-A/B; `r01-m1-b-run-02.log` |
+| H33 | `gui::render::tests::programmer_inspector_real_pad_selection_and_retained_bit_insert`; `gui::render::tests::programmer_inspector_stale_work_refresh_and_reopen_reject_old_caret` | R03/M3-B/C; `r03-m3-c-run-1.log`, final/correction acceptance in ledger |
+| H34 | `gui::render::tests::explorer_tabs_actual_saved_run_waits_for_owner_and_root_receipts`; `gui::render::tests::explorer_tabs_plugin_and_hotkey_dispatch_use_one_retained_saved_run` | R05/M5-B; `r05-m5-b-final-run.log` (12/12 full inventory, not just these two) |
+| H35 | `gui::render::tests::folder_size_actual_prefill_held_scan_refresh_cancel_survives_host_moves` | R05/M5-C; `r05-m5-c-final-run-1.log` 10/10 closure |
+| H36 | `gui::render::tests::file_lock_ui_same_file_release_refresh_retires_old_selection_and_reveal`; `gui::render::tests::file_lock_host_preserves_held_inspection_selection_and_reveal` | R02/M2-D.2 + R05/M5-C; `r05-m5-c-final-run-1.log` |
+| H37 | `gui::render::tests::recorder_actual_setup_hidden_stop_retires_and_releases_capture_admission`; `gui::render::tests::recorder_setup_hosts_preserve_real_controls_popup_and_stale_region` | R02/M2-D.3 + R05/M5-C; `r05-m5-c-final-run-1.log` |
+| K1 | `calculation_pad::document::tests::programmer_integer_operators_are_exact_and_select_explicit_modes`; `calculation_pad::document::tests::supports_remainder_and_contextual_euclidean_mod_without_reserving_mod`; `calculation_pad::document::tests::legacy_scalar_min_coexists_with_minutes` | R03/M3-C baselines; `r03-m3-c-run-1.log` |
+| K2 | `calculation_pad::session::tests::inspector_insert_checks_binding_and_is_one_undo_step`; `calculation_pad::inspector::tests::inspector_bits_labels_and_formats_stay_exact` | R03/M3-A; `r03-m3-a-run-1.log` plus corrected accepted case |
+| K3 | `calculation_pad::comparison::tests::comparison_integer_modes_and_full_width_differences_are_exact`; `calculation_pad::comparison::tests::comparison_selected_result_rejects_same_document_reopen_collision` | R03/M3-C; `r03-m3-c-run-1.log` |
+| K4 | `calculation_pad::document::tests::evaluates_dimensional_arithmetic_references_and_unit_targets`; `calculation_pad::comparison::tests::comparison_preserves_duplicate_failed_names_and_unit_semantics` | R03/M3-C; `r03-m3-c-run-1.log` |
+| K5 | `calculation_pad::examples::tests::shared_examples_evaluate_to_their_documented_results`; `settings_save::tests::inspector_preferences_owned_save_and_stale_editor_reconciliation` | R03/M3-C; `r03-m3-c-run-2.log` / run-1; executable 31-example catalog, format-only preference owner |
+| D1 | `diagram::document::tests::diagram_document_frozen_v1_invalid_draft_reopens_exactly_without_rewriting`; `diagram::codec::tests::diagram_codec_migrates_frozen_visual_v2_title_to_one_deterministic_text_object`; `diagram::codec::tests::diagram_codec_visual_container_v3_without_membership_field_keeps_legacy_scene_wire` | R04/M4-D; `r04-m4-d-final-run.log` |
+| D2 | `gui::diagram_studio::tests::diagram_studio_visual_container_controls_membership_and_group_drag_once`; `gui::diagram_studio::tests::diagram_studio_visual_group_and_ungroup_controls_are_atomic_and_retained` | R04/M4-A; both named cases passed in `r04-m4-a-run-1.log` (initial 21/22). The exact export-style fixture correction later passed 1/1: 22 distinct cases passed across runs, not an uninterrupted 22/22 run. |
+| D3 | `diagram::visual_canvas::tests::visual_frame_property_transform_moves_rotates_and_uniformly_scales_descendants_once`; `gui::diagram_studio::tests::diagram_studio_visual_asset_import_embeds_and_shares_one_decoded_texture` | R04/M4-A/C accepted inventories; shared geometry/asset evidence retained |
+| D4 | `diagram::visual_templates::tests::visual_authoring_template_catalog_projects_all_five_native_starters`; `gui::diagram_studio::tests::diagram_studio_visual_authoring_template_uses_accepted_dirty_transition` | R04/M4-B; recovered actual menu and final accepted 12-case inventory |
+| D5 | `gui::diagram_studio::tests::diagram_studio_visual_export_controls_apply_scale_background_and_publish_png`; `gui::diagram_studio::tests::diagram_studio_visual_export_svg_and_transparent_png_use_actual_controls` | R04/M4-C accepted 25-case inventory; original PNG/property pair actually passed |
+| D6 | `gui::diagram_studio::tests::diagram_recent_panel_and_open_use_accepted_dirty_document_transitions`; `gui::diagram_studio::tests::diagram_studio_same_frame_source_export_follows_edit_and_rejected_edit_aborts_picker` | R04/M4-D regression closure; `r04-m4-d-final-run.log`; accepted assistance/conversion retained separately |
+| D7 | `diagram::drawio::tests::diagram_drawio_wire_nested_group_import_resolves_parent_local_geometry`; `gui::diagram_studio::tests::diagram_drawio_workflow_import_copy_then_open_uses_dirty_transition`; `gui::diagram_studio::tests::diagram_drawio_workflow_export_review_is_atomic_and_preserves_native_document` | R04/M4-D symmetric/final accepted logs, final 24-case inventory |
+| E1 | `explorer_tabs::backend::tests::explorer_tabs_backend_drives_ordered_duplicate_paths_and_final_validation`; `explorer_tabs::native_uia::tests::explorer_tabs_backend_shared_root_pane_cannot_authorize_unique_shell_view`; `explorer_tabs::windows::native_relation_tests::explorer_tabs_backend_bootstrap_receipt_rejects_preexisting_and_ambiguous_windows` | R05/M5-A `r05-m5-a-final-run.log`, final 35-case inventory; real production runner/admission with fake native ports; not Win11 positive proof |
+| S1 | `gui::recording_dialog::tests::recording_ui_hidden_controller_commits_only_retained_current_stop`; `gui::recording_dialog::tests::recording_ui_reciprocal_capture_guards_reject_before_mutation` | R05/M5-C final closure reuses these exact accepted cases |
+| S2 | `gui::render::tests::recording_ui_exit_waits_for_capture_and_writer_retirement` | R05/M5-C final closure; capture/publication/retirement evidence, not full native cleanup |
+
+The original444 also contains main-binary recording route cases, e.g. **main binary** `hotkey_directory_runtime_tests::recording_stop_directory_receipt_requires_the_recorder_trigger_identity` and `tests::recording_stop_is_absent_from_shared_and_legacy_routes_by_default`. Preserve their binary identity in the cumulative worker's provenance; they are not lib cases; both were included under their main-binary identities in the cumulative run.
+
+### Supported-profile and evidence limitations to preserve when appending
+
+- Calculator: default `u64`, required 8/16/32/64 signed/unsigned, exact existing128 compatibility; no scalar `^`/mod/min/minute/unit grammar regression. Inspector bits/labels/comparison drafts do not save Pad source. Copy/Insert/source/caret freshness and reopen identity remain qualified; comparisons reuse immutable current context. Optional128 is preserved compatibility, not a newly required UI expansion.
+- Diagram: one Mermaid/Visual authoring authority; exact legacy v1/v2/current v3 and late Save As no-clobber remain. Five visual starters are distinct from Mermaid templates. Export captures current committed projection/revision and retains independent Viewer camera. Grouped draw.io supports the documented uncompressed one-page representable profile: nested unrotated frames/groups, rotated leaves, layers/anchors/labels/styles. Compressed/multipage/active/external content, relative ports/offsets/waypoints, unsupported styles/assets/presets, rotated parents with descendants, cross-layer membership and unrepresentable tree/paint order are explicit refusals. Bare-group faithfulness is provided by the accepted bounded native representation/discriminator; do not relabel all groups as unsupported or claim arbitrary draw.io support. Independent XML parser/reference checks are not external rendering.
+- Explorer: actual guarded mutation is implemented, but OS build alone does not prove provider support. Absent/ambiguous observed affordance/pane/Shell-PIDL evidence refuses before speculative mutation. Capabilities absent before bootstrap mean zero native mutation; provider facts found missing after attributed bootstrap produce an honest partial bootstrap/owned-resource diagnostic, not verified tabs. Fakes do not establish positive Win11 order/attribution.
+- Folder Size: logical-per-entry metrics/partial status, literal source prefill and generation-qualified progress/result remain. M5-C normal-user disposable filesystem execution is a narrow actual proof; an agent-sandbox ancestor access failure was environmental and was not fixed by weakening production path guards.
+- File Lock: Windows-reported processes, exact PID/creation/file identity, truthful empty/failure distinction. No unlocking/process kill/elevation. M5-C release is scripted; earlier real helper observation remains separately attributed.
+- Recorder: no audio; one capture/writer/controller; accepted app-frame publication checks capture retirement and frozen terminal/frame acknowledgements. The writer may still hold its slot while performing/finishing its own publication; tests wait for retirement to prove subsequent admission, rather than falsely requiring writer exit before its last write. Current Pinboard continuity uses a real Pinboard session with fake native presenter/visibility/capture and processed frame updates, not live WGC proof.
+
+
+
+### M6-A disposition and next work
+
+All required local M6-A checks and scoped reviews are complete: one exact cumulative run with honest focused corrections, scoped Clippy with classified advisories, real runnable build, current compatibility/50–38–37–12/ancestry evidence and preserved failures. Source changes are only the three reviewed cfg(test) files (gui/{diagram_studio,render,timer_dialog}.rs). Scoped formatting and git diff --check pass. No native full-flow result is presumed. Full N1–N12, external draw.io rendering and positive Win11 provider behavior remain IMPLEMENTED_USER_VALIDATION_PENDING, not implementation failures silently waived by CPU tests.
+
+Next is M6-B: create the single requested MANUAL_WINDOWS_11_ACCEPTANCE.md at the end with short exact setup/steps/expected outcomes, PASS/FAIL/NOT_RUN fields, actual code/artifact identity, safe disposable fixtures, a recommended 20–30 minute smoke subset and optional deeper checks. Then M6-C audits the final committed state, normal push and code/build equivalence, writes the actual final SHA externally and reports truthful implementation/user-validation status. Do not open/merge a PR, change default branch, launch a probe or ask for intermediate user tests. Goal remains active until those existing deliverables are complete.
+
+### M6-A evidence hashes
+
+Large manifests/logs/scripts remain ignored target evidence. Current hashes were independently checked by the parent:
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r06-m6-a-provenance.json | D3227F9301886A73BECAD974B37A32CC432814F6F3E61046CC5DAF10BC68D226 |
+| r06-m6-a-case-reconciliation.tsv | 6B3F4B99B2A2C36FD53E677EB0CD1A9938AAEFA6DD6628C8A12262839D5B8C2D |
+| r06-m6-a-test-names.tsv | 76663E66550700033D926DBC76354AFB73D68AD305102E268FC633125C9323EE |
+| r06-m6-a-filter.txt | 45FAEDA6F7B2792AF8D77791CD36ACC6D48D7BEBF8668051FD6993A3ACF6DF8E |
+| r06-m6-a-list-2.json | 0917B331571F9E78C48F8D376CFFA5575DC60ECCF53E551EDA1E4A6110EA6F78 |
+| r06-m6-a-run.log | 583A8760A80746CEE1ED6EE46415CF8E5DBEDC96B4CEFE2590F8014A47F0234B |
+| r06-m6-a-correction-list-1.json | 13BEDA88DB6B6AB020F76037F10660BFFFFD2E1BB171711474B52C787B91D864 |
+| r06-m6-a-correction-run-1.log | C6C3B8189CE49ABF9F94185D33D633522F6FB9DB68FAFC950C32D5FFC7BC0430 |
+| r06-m6-a-correction-list-2.json | FE7D4EF824074818F34D944D12F38630605DED9159DEED265AAC1E011271F959 |
+| r06-m6-a-correction-run-2.log | 7F75FE5E94FC65DD17D539C15246104806D3AB027F5644A393DECBF32B51657B |
+| r06-m6-a-clippy.log | 70C403DA747A206276F9A3A301543A1A2A0039A6EAD84A8087FEF508025BF94F |
+| r06-m6-a-clippy-first-party.tsv | F7508E79925621F4134E80643ADB99BE791300D091837010A3D5EC635ED3F58B |
+| r06-m6-a-build.log | EC50D65174AB623CF0F7A265A6430EE1A88432DB4A22CEBE58D50A7AD6EC60A5 |
+| r06-m6-a-build-artifacts.jsonl | FEC2F7EBB2660352C9847F901414CAD0EF80E485EAA306CDC68ECCA40758E6C6 |
+| r06-m6-a-artifact.json | D88AFC0205FB9D8ACAD5347EF51C496B2178580CF094C321DDD16700EF224A44 |
+| r06-m6-a-worker-evidence.json | 82913459040770F8349B240884E902BF0EB5A17BAA9D6214A08B45D2A514B84B |
+| r06-m6-a-build-input-manifest.json | 458AE8891075A91E1CD5306B7BE30A399795D96E084070A54F490E7515F0872D |
+| r06-parent-ancestry-audit.json | C4FA9523F47DA67311087F33C612375813CFB4B6D77DDB17129F1D0FD7C63964 |
+| r06-parent-coverage-reference-check.json | 66303D6B60FB4DD4BA6D93442EBAD83D08E4AA51892EF18827CC930C7AC2FB1A |
+| r06-parent-artifact-evidence-check.json | 63F725B038C11CBF9159F57EE6A520D7076C5984960DFE396B3550ACAD2D21D0 |
