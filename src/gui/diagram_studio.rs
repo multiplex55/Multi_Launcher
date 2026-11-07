@@ -811,6 +811,7 @@ enum DocumentIntent {
     Open,
     ImportMermaid,
     ApplyTemplate(DiagramTemplate),
+    ApplyVisualTemplate(crate::diagram::VisualAuthoringTemplate),
     AutoLayout,
     Save,
     SaveAs,
@@ -845,7 +846,8 @@ impl DocumentIntent {
     fn requires_action_fence(&self) -> bool {
         matches!(
             self,
-            Self::ConvertMermaidCopy
+            Self::ApplyVisualTemplate(_)
+                | Self::ConvertMermaidCopy
                 | Self::OpenRecent(_)
                 | Self::DuplicateRecent(_)
                 | Self::DrawioImport
@@ -1109,6 +1111,8 @@ pub(crate) struct DiagramStudioDialog {
     #[cfg(test)]
     test_action_enabled: Vec<(String, bool)>,
     #[cfg(test)]
+    test_visual_scroll_rect: Option<egui::Rect>,
+    #[cfg(test)]
     test_generic_preview_drawn: bool,
     #[cfg(test)]
     test_preview_status_text: Option<String>,
@@ -1300,6 +1304,8 @@ impl DiagramStudioDialog {
             test_visual_canvas_id: None,
             #[cfg(test)]
             test_action_enabled: Vec::new(),
+            #[cfg(test)]
+            test_visual_scroll_rect: None,
             #[cfg(test)]
             test_generic_preview_drawn: false,
             #[cfg(test)]
@@ -2929,6 +2935,7 @@ impl DiagramStudioDialog {
         if source_mutation_requested
             && mutation_succeeded
             && !is_drawio_intent
+            && !matches!(effects.document_intent.as_ref(), Some(DocumentIntent::ApplyVisualTemplate(_)))
             && let Some(fence) = document_action_fence.as_mut()
             && fence.document == self.render_document
             && fence.owner_generation == self.owner_generation
@@ -3192,11 +3199,18 @@ impl DiagramStudioDialog {
             ));
             return false;
         }
+        if matches!(&intent, DocumentIntent::ApplyVisualTemplate(_))
+            && self.documents.authoring_kind() != Some(crate::diagram::DiagramAuthoringKind::Visual)
+        {
+            self.message = Some(StudioNotice::error("Visual templates require an active Visual document."));
+            return false;
+        }
         if self.documents.pending_transition().is_some()
             && matches!(
                 &intent,
                 DocumentIntent::ImportMermaid
                     | DocumentIntent::ApplyTemplate(_)
+                    | DocumentIntent::ApplyVisualTemplate(_)
                     | DocumentIntent::AutoLayout
                     | DocumentIntent::Export(_, _)
                     | DocumentIntent::UseSourceInMarkdown(_)
@@ -3367,6 +3381,12 @@ impl DiagramStudioDialog {
                     Err(error) => {
                         self.show_document_error("apply template", None, error);
                     }
+                }
+            }
+            DocumentIntent::ApplyVisualTemplate(template) => {
+                match self.documents.request_visual_template(template) {
+                    Ok(outcome) => { self.finish_transition(outcome, false); }
+                    Err(error) => self.show_document_error("apply visual template", None, error),
                 }
             }
             DocumentIntent::AutoLayout => match self.documents.auto_layout() {
@@ -6677,80 +6697,10 @@ impl DiagramStudioDialog {
                     ui.clip_rect(),
                 ));
 
-                if let Some(scope) = active_menu_scope.as_ref() {
-                    if actions_allowed
-                        && !closing_requested
-                        && !scope.sizing_pass
-                        && !scope.item_ids.is_empty()
-                    {
-                        let navigation = ui.input_mut(|input| {
-                            if consume_menu_key(input, egui::Key::Tab, egui::Modifiers::SHIFT) {
-                                Some(false)
-                            } else if consume_menu_key(input, egui::Key::Tab, egui::Modifiers::NONE)
-                                || consume_menu_key(
-                                    input,
-                                    egui::Key::ArrowDown,
-                                    egui::Modifiers::NONE,
-                                )
-                                || consume_menu_key(
-                                    input,
-                                    egui::Key::ArrowRight,
-                                    egui::Modifiers::NONE,
-                                )
-                            {
-                                Some(true)
-                            } else if consume_menu_key(
-                                input,
-                                egui::Key::ArrowUp,
-                                egui::Modifiers::NONE,
-                            ) || consume_menu_key(
-                                input,
-                                egui::Key::ArrowLeft,
-                                egui::Modifiers::NONE,
-                            ) {
-                                Some(false)
-                            } else {
-                                None
-                            }
-                        });
-                        if navigation.is_some() {
-                            // egui's pass-level focus traversal is computed before
-                            // these menu responses are drawn. Clear that traversal
-                            // so it cannot move focus behind the popup after the
-                            // retained menu target is applied.
-                            ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
-                        }
-                        let focused_index = scope
-                            .item_ids
-                            .iter()
-                            .position(|id| Some(*id) == focused_at_start);
-                        let target_index = match (focused_index, navigation) {
-                            (Some(index), Some(true)) => Some((index + 1) % scope.item_ids.len()),
-                            (Some(index), Some(false)) => Some(if index == 0 {
-                                scope.item_ids.len() - 1
-                            } else {
-                                index - 1
-                            }),
-                            (None, Some(true)) | (None, None) => Some(0),
-                            (None, Some(false)) => Some(scope.item_ids.len() - 1),
-                            (Some(_), None) => None,
-                        };
-                        if let Some(index) = target_index {
-                            draw_effects.menu_focus_request = Some(MenuFocusRequest {
-                                popup_id: scope.popup_id,
-                                destination: MenuFocusDestination::Item(scope.item_ids[index]),
-                            });
-                        }
-                    }
-                } else if actions_allowed
-                    && ui.input(|input| input.key_pressed(egui::Key::Escape))
-                    && let Some(scope) = previous_menu_scope.as_ref()
-                {
-                    draw_effects.menu_focus_request = Some(MenuFocusRequest {
-                        popup_id: scope.popup_id,
-                        destination: MenuFocusDestination::Trigger(scope.trigger_id),
-                    });
-                }
+                draw_effects.menu_focus_request = menu_focus_request_for_ui(
+                    ui, active_menu_scope.as_ref(), previous_menu_scope.as_ref(), actions_allowed,
+                    closing_requested, focused_at_start,
+                );
                 draw_effects.active_menu_scope = active_menu_scope;
 
                 if let Some(transition) = pending_transition.as_ref() {
@@ -6774,6 +6724,7 @@ impl DiagramStudioDialog {
                             PendingDiagramTransition::ApplyTemplate(template) => {
                                 format!("using the {} template", template.name())
                             }
+                            PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
                             PendingDiagramTransition::Close => "closing this diagram".to_owned(),
                         };
                         ui.label(format!("Save changes before {description}?"));
@@ -7136,6 +7087,8 @@ impl DiagramStudioDialog {
             }
             self.upload_visual_asset_textures(ui.ctx());
         }
+        let focused_at_start = ui.memory(|memory| memory.focused());
+        let previous_menu_scope = self.active_menu_scope.clone();
         let document_actions_allowed = actions_allowed
             && !closing_requested
             && pending_transition.is_none()
@@ -7196,7 +7149,7 @@ impl DiagramStudioDialog {
         let mut stage_history: Option<bool> = None;
         let mut clear_visual_draft = false;
         let mut canvas_interaction_authorized = false;
-        egui::ScrollArea::vertical()
+        let _visual_scroll = egui::ScrollArea::vertical()
             .id_salt("diagram-studio-visual-document-scroll")
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -7288,6 +7241,34 @@ impl DiagramStudioDialog {
                         if response.clicked() && document_intent.is_none() {
                             *document_intent = Some(intent);
                         }
+                    }
+                    let template_allowed = actions_allowed && !closing_requested && pending_transition.is_none() && pending.is_none() && !visual_draft_active;
+                    let mut template_item_ids = Vec::new();
+                    let mut template_sizing_pass = false;
+                    let templates = ui.add_enabled_ui(template_allowed, |ui| ui.menu_button("Visual templates", |menu_ui| {
+                        template_sizing_pass = menu_ui.is_sizing_pass();
+                        for template in crate::diagram::VisualAuthoringTemplate::ALL {
+                            let response = menu_ui.add_enabled(template_allowed, egui::Button::new(template.name()));
+                            if response.enabled() { template_item_ids.push(response.id); }
+                            #[cfg(test)] {
+                                let action = format!("visual_authoring_template_{}", template.slug());
+                                self.test_action_enabled.push((action.clone(), response.enabled() && menu_ui.is_visible() && !menu_ui.is_sizing_pass()));
+                                self.test_action_rects.push((action.clone(), response.rect, menu_ui.clip_rect()));
+                                self.test_action_focus_ids.push((action, response.id));
+                            }
+                            if response.clicked() && document_intent.is_none() {
+                                *document_intent = Some(DocumentIntent::ApplyVisualTemplate(template));
+                                menu_ui.close();
+                            }
+                        }
+                    })).inner;
+                    #[cfg(test)] {
+                        self.test_action_rects.push(("menu_visual_templates".into(), templates.response.rect, ui.clip_rect()));
+                        self.test_action_focus_ids.push(("menu_visual_templates".into(), templates.response.id));
+                    }
+                    let template_popup_id = egui::Popup::default_response_id(&templates.response);
+                    if egui::Popup::is_id_open(ui.ctx(), template_popup_id) {
+                        effects.active_menu_scope = Some(MenuFocusScope { popup_id: template_popup_id, trigger_id: templates.response.id, item_ids: template_item_ids, sizing_pass: template_sizing_pass });
                     }
                     if let Some(path) = path.as_deref() {
                         ui.weak(path.file_name().and_then(|name| name.to_str()).unwrap_or("diagram.mld"));
@@ -9049,19 +9030,21 @@ impl DiagramStudioDialog {
                         PendingDiagramTransition::ImportMermaid(file) => format!("importing {}", file.path().display()),
                         PendingDiagramTransition::CopySource(_) => "copying Mermaid source from Markdown".to_owned(),
                         PendingDiagramTransition::ApplyTemplate(template) => format!("using the {} template", template.name()),
+                        PendingDiagramTransition::ApplyVisualTemplate(template) => format!("using the {} visual template", template.name()),
                         PendingDiagramTransition::Close => "closing this document".to_owned(),
                     };
                     ui.group(|ui| {
                         ui.label(format!("Save changes before {description}?"));
                         ui.horizontal_wrapped(|ui| {
-                            for (label, decision) in [
-                                ("Save", TransitionDecision::Save),
-                                ("Discard", TransitionDecision::Discard),
-                                ("Cancel", TransitionDecision::Cancel),
+                            for (_name, label, decision) in [
+                                ("decision_save", "Save", TransitionDecision::Save),
+                                ("decision_discard", "Discard", TransitionDecision::Discard),
+                                ("decision_cancel", "Cancel", TransitionDecision::Cancel),
                             ] {
-                                if ui.add_enabled(actions_allowed && !closing_requested, egui::Button::new(label)).clicked()
-                                    && document_intent.is_none()
-                                {
+                                let response = ui.add_enabled(actions_allowed && !closing_requested, egui::Button::new(label));
+                                #[cfg(test)]
+                                self.test_action_rects.push((_name.into(), response.rect, ui.clip_rect()));
+                                if response.clicked() && document_intent.is_none() {
                                     *document_intent = Some(DocumentIntent::ResolvePending(decision));
                                 }
                             }
@@ -9069,6 +9052,8 @@ impl DiagramStudioDialog {
                     });
                 }
             });
+        #[cfg(test)]
+        { self.test_visual_scroll_rect = Some(_visual_scroll.inner_rect); }
         if selected_object != selection_state.primary {
             selection_state.objects.clear();
             if let Some(id) = selected_object {
@@ -9118,6 +9103,10 @@ impl DiagramStudioDialog {
             closing_requested,
             pending,
             document_intent.is_some(),
+        );
+        effects.menu_focus_request = menu_focus_request_for_ui(
+            ui, effects.active_menu_scope.as_ref(), previous_menu_scope.as_ref(), actions_allowed,
+            closing_requested, focused_at_start,
         );
         effects.visual_selection = Some(selection_state);
         effects.visual_canvas_editing_allowed = canvas_interaction_authorized;
@@ -11994,6 +11983,67 @@ fn take_history_shortcut(ui: &mut egui::Ui) -> Option<PendingMutation> {
     })
 }
 
+fn menu_focus_request_for_ui(
+    ui: &mut egui::Ui,
+    scope: Option<&MenuFocusScope>,
+    previous: Option<&MenuFocusScope>,
+    actions_allowed: bool,
+    closing_requested: bool,
+    focused_at_start: Option<egui::Id>,
+) -> Option<MenuFocusRequest> {
+    if let Some(scope) = scope {
+        if !actions_allowed || closing_requested || scope.sizing_pass || scope.item_ids.is_empty() {
+            return None;
+        }
+        let navigation = ui.input_mut(|input| {
+            if consume_menu_key(input, egui::Key::Tab, egui::Modifiers::SHIFT) {
+                Some(false)
+            } else if consume_menu_key(input, egui::Key::Tab, egui::Modifiers::NONE)
+                || consume_menu_key(input, egui::Key::ArrowDown, egui::Modifiers::NONE)
+                || consume_menu_key(input, egui::Key::ArrowRight, egui::Modifiers::NONE)
+            {
+                Some(true)
+            } else if consume_menu_key(input, egui::Key::ArrowUp, egui::Modifiers::NONE)
+                || consume_menu_key(input, egui::Key::ArrowLeft, egui::Modifiers::NONE)
+            {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        // Clear egui's pass-level traversal so it cannot move focus behind the popup.
+        if navigation.is_some() {
+            ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+        }
+        let focused_index = scope
+            .item_ids
+            .iter()
+            .position(|id| Some(*id) == focused_at_start);
+        let index = match (focused_index, navigation) {
+            (Some(index), Some(true)) => Some((index + 1) % scope.item_ids.len()),
+            (Some(index), Some(false)) => Some(if index == 0 {
+                scope.item_ids.len() - 1
+            } else {
+                index - 1
+            }),
+            (None, Some(true)) | (None, None) => Some(0),
+            (None, Some(false)) => Some(scope.item_ids.len() - 1),
+            (Some(_), None) => None,
+        }?;
+        Some(MenuFocusRequest {
+            popup_id: scope.popup_id,
+            destination: MenuFocusDestination::Item(scope.item_ids[index]),
+        })
+    } else if actions_allowed && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        previous.map(|scope| MenuFocusRequest {
+            popup_id: scope.popup_id,
+            destination: MenuFocusDestination::Trigger(scope.trigger_id),
+        })
+    } else {
+        None
+    }
+}
+
 fn consume_menu_key(
     input: &mut egui::InputState,
     key: egui::Key,
@@ -14677,10 +14727,83 @@ mod tests {
             .iter()
             .find(|(action, _, _)| action == name)
             .map(|(_, rect, clip)| {
-                assert!(clip.contains_rect(*rect));
+                assert!(
+                    clip.contains_rect(*rect),
+                    "control {name} is clipped: rect={rect:?}, clip={clip:?}, pending={:?}",
+                    dialog.documents.pending_transition()
+                );
                 rect.center()
             })
-            .expect("the named Diagram Studio control is visible")
+            .unwrap_or_else(|| {
+                panic!(
+                    "control {name} missing; menu_scope={:?}, pending={:?}, actions={:?}",
+                    dialog.active_menu_scope,
+                    dialog.documents.pending_transition(),
+                    dialog
+                        .test_action_rects
+                        .iter()
+                        .map(|(action, _, _)| action)
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    fn reveal_visual_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
+        for _ in 0..12 {
+            frame(dialog, ctx);
+            let (_, rect, clip) = dialog
+                .test_action_rects
+                .iter()
+                .find(|(action, _, _)| action == name)
+                .unwrap_or_else(|| panic!("missing {name} while scrolling"));
+            if clip.contains_rect(*rect) {
+                return;
+            }
+            let direction = if rect.bottom() > clip.bottom() {
+                -120.0
+            } else {
+                120.0
+            };
+            let scroll = dialog
+                .test_visual_scroll_rect
+                .expect("visual owner scroll rect");
+            let pos = egui::pos2(
+                scroll.right() - 4.0,
+                if direction < 0.0 {
+                    scroll.bottom() - 4.0
+                } else {
+                    scroll.top() + 4.0
+                },
+            );
+            assert!(
+                scroll.contains(pos),
+                "wheel point must be inside the owner scroll area"
+            );
+            assert!(
+                !dialog
+                    .test_visual_canvas_rect
+                    .is_some_and(|canvas| canvas.contains(pos)),
+                "wheel point must not target canvas zoom"
+            );
+            frame_with_child_events(
+                dialog,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, direction),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let observation = dialog
+            .test_action_rects
+            .iter()
+            .find(|(action, _, _)| action == name);
+        panic!("control {name} remains clipped after owner scrolling: {observation:?}");
     }
 
     fn click_action(dialog: &mut DiagramStudioDialog, ctx: &egui::Context, name: &str) {
@@ -17353,6 +17476,202 @@ mod tests {
             &pending.message,
             Some(StudioNotice::Error(message)) if message.contains("pending document action")
         ));
+    }
+
+    #[test]
+    fn diagram_studio_visual_authoring_template_uses_accepted_dirty_transition() {
+        let mut dialog = initialized_visual_dialog();
+        dialog
+            .documents
+            .replace_visual_label("Current visual")
+            .unwrap();
+        dialog.refresh_cache();
+        let original_document = dialog.render_document.clone();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        click_action(&mut dialog, &ctx, "menu_visual_templates");
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        for template in crate::diagram::VisualAuthoringTemplate::ALL {
+            let action = format!("visual_authoring_template_{}", template.slug());
+            assert!(
+                dialog
+                    .test_action_rects
+                    .iter()
+                    .any(|(name, rect, clip)| name == &action && clip.contains_rect(*rect)),
+                "missing {action}"
+            );
+            assert_eq!(
+                dialog.test_action_enabled(&action),
+                Some(true),
+                "{action} should remain enabled inside its own menu"
+            );
+        }
+        click_action(&mut dialog, &ctx, "visual_authoring_template_architecture");
+        assert_eq!(
+            dialog.documents.pending_transition(),
+            Some(&PendingDiagramTransition::ApplyVisualTemplate(
+                crate::diagram::VisualAuthoringTemplate::Architecture
+            )),
+            "accepted visual template action failed: {:?}",
+            dialog.message
+        );
+        reveal_visual_action(&mut dialog, &ctx, "decision_cancel");
+        click_action(&mut dialog, &ctx, "decision_cancel");
+        assert_eq!(dialog.documents.visual_label(), Some("Current visual"));
+        assert_eq!(dialog.render_document, original_document);
+        assert!(dialog.documents.is_dirty());
+
+        reveal_visual_action(&mut dialog, &ctx, "menu_visual_templates");
+        click_action(&mut dialog, &ctx, "menu_visual_templates");
+        click_action(&mut dialog, &ctx, "visual_authoring_template_architecture");
+        assert_eq!(
+            dialog.documents.pending_transition(),
+            Some(&PendingDiagramTransition::ApplyVisualTemplate(
+                crate::diagram::VisualAuthoringTemplate::Architecture
+            ))
+        );
+        reveal_visual_action(&mut dialog, &ctx, "decision_discard");
+        click_action(&mut dialog, &ctx, "decision_discard");
+        assert_eq!(
+            dialog.documents.visual_label(),
+            Some("Architecture starter")
+        );
+        assert_eq!(
+            dialog.documents.authoring_kind(),
+            Some(crate::diagram::DiagramAuthoringKind::Visual)
+        );
+        assert_ne!(dialog.render_document, original_document);
+        assert!(dialog.documents.is_dirty());
+    }
+
+    #[test]
+    fn diagram_studio_visual_template_menu_keyboard_selects_once() {
+        let mut dialog = initialized_visual_dialog();
+        let old = dialog.render_document.clone();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        open_menu_with_keyboard(
+            &mut dialog,
+            &ctx,
+            "menu_visual_templates",
+            "visual_authoring_template_flowchart",
+        );
+        send_child_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::ArrowDown,
+            egui::Modifiers::NONE,
+        );
+        assert!(dialog.test_action_has_focus("visual_authoring_template_architecture"));
+        send_child_key(&mut dialog, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_ne!(dialog.render_document, old);
+        assert_eq!(
+            dialog.documents.visual_label(),
+            Some("Architecture starter")
+        );
+        assert!(dialog.documents.pending_transition().is_none());
+    }
+
+    #[test]
+    fn diagram_studio_visual_templates_all_create_editable_starters_once() {
+        for template in crate::diagram::VisualAuthoringTemplate::ALL {
+            let mut dialog = initialized_visual_dialog();
+            let original_identity = dialog.render_document.clone();
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                frame(&mut dialog, &ctx);
+            }
+            click_action(&mut dialog, &ctx, "menu_visual_templates");
+            for _ in 0..2 {
+                frame(&mut dialog, &ctx);
+            }
+            let action = format!("visual_authoring_template_{}", template.slug());
+            assert_eq!(dialog.test_action_enabled(&action), Some(true));
+            click_action(&mut dialog, &ctx, &action);
+            assert!(dialog.documents.pending_transition().is_none());
+            assert_ne!(dialog.render_document, original_identity);
+            let expected = template.create_document().unwrap();
+            assert_eq!(dialog.documents.visual_scene(), Some(expected.scene()));
+            assert!(dialog.documents.is_dirty());
+            let revision = dialog.documents.visual_revision().unwrap();
+            click_action(&mut dialog, &ctx, "visual_add_shape");
+            let edited = dialog.documents.visual_scene().unwrap().clone();
+            assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+            click_action(&mut dialog, &ctx, "visual_undo");
+            assert_eq!(dialog.documents.visual_scene(), Some(expected.scene()));
+            click_action(&mut dialog, &ctx, "visual_redo");
+            assert_eq!(dialog.documents.visual_scene(), Some(&edited));
+        }
+    }
+
+    #[test]
+    fn diagram_studio_visual_template_discarded_root_and_decisions_preserve_state() {
+        let mut dialog = initialized_visual_dialog();
+        dialog.documents.replace_visual_label("Original").unwrap();
+        let original_scene = dialog.documents.visual_scene().unwrap().clone();
+        let original_identity = dialog.render_document.clone();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "menu_visual_templates");
+        click_action_with_root_discard(&mut dialog, &ctx, "visual_authoring_template_architecture");
+        assert!(dialog.documents.pending_transition().is_none());
+        assert_eq!(dialog.documents.visual_scene(), Some(&original_scene));
+        assert_eq!(dialog.render_document, original_identity);
+        click_action(&mut dialog, &ctx, "menu_visual_templates");
+        click_action(&mut dialog, &ctx, "visual_authoring_template_architecture");
+        let pending = dialog.documents.pending_transition().cloned();
+        assert!(matches!(
+            pending,
+            Some(PendingDiagramTransition::ApplyVisualTemplate(
+                crate::diagram::VisualAuthoringTemplate::Architecture
+            ))
+        ));
+        reveal_visual_action(&mut dialog, &ctx, "decision_discard");
+        click_action_with_child_discard(&mut dialog, &ctx, "decision_discard");
+        assert_eq!(dialog.documents.pending_transition(), pending.as_ref());
+        assert_eq!(dialog.documents.visual_scene(), Some(&original_scene));
+        assert_eq!(dialog.render_document, original_identity);
+        click_action_with_root_discard(&mut dialog, &ctx, "decision_discard");
+        assert_eq!(dialog.documents.pending_transition(), pending.as_ref());
+        assert_eq!(dialog.documents.visual_scene(), Some(&original_scene));
+        assert_eq!(dialog.render_document, original_identity);
+    }
+
+    #[test]
+    fn diagram_studio_visual_authoring_template_discarded_child_pass_keeps_current_document() {
+        let mut dialog = initialized_visual_dialog();
+        dialog
+            .documents
+            .replace_visual_label("Current visual")
+            .unwrap();
+        dialog.refresh_cache();
+        let original_document = dialog.render_document.clone();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        click_action(&mut dialog, &ctx, "menu_visual_templates");
+        click_action_with_child_discard(
+            &mut dialog,
+            &ctx,
+            "visual_authoring_template_architecture",
+        );
+
+        assert!(dialog.test_child_discard_requested);
+        assert!(dialog.documents.pending_transition().is_none());
+        assert_eq!(dialog.documents.visual_label(), Some("Current visual"));
+        assert_eq!(dialog.render_document, original_document);
+        assert!(dialog.documents.is_dirty());
     }
 
     #[test]

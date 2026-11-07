@@ -12,6 +12,7 @@ use super::visual::{
     VisualDiagramDocument, VisualDocumentError, VisualOperation, VisualScene,
     VisualTransactionOutcome,
 };
+use super::visual_templates::VisualAuthoringTemplate;
 use crate::common::atomic_file::save_atomic;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,6 +25,7 @@ pub enum PendingDiagramTransition {
     ImportMermaid(MermaidFile),
     CopySource(DiagramSourceCopy),
     ApplyTemplate(DiagramTemplate),
+    ApplyVisualTemplate(VisualAuthoringTemplate),
     Close,
 }
 
@@ -256,6 +258,10 @@ impl ActiveDocument {
             path: None,
             disk_digest: None,
         }
+    }
+
+    fn untitled_visual(visual: VisualDiagramDocument) -> Self {
+        Self { payload: ActivePayload::Visual(visual), path: None, disk_digest: None }
     }
 
     fn authoring_kind(&self) -> DiagramAuthoringKind {
@@ -642,6 +648,24 @@ impl DiagramDocumentController {
         Ok(TransitionOutcome::Applied)
     }
 
+    /// Request a fresh visual starter through the existing dirty-document decision.
+    pub fn request_visual_template(
+        &mut self,
+        template: VisualAuthoringTemplate,
+    ) -> Result<TransitionOutcome, DiagramDocumentError> {
+        let requested = PendingDiagramTransition::ApplyVisualTemplate(template);
+        if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
+            return Ok(outcome);
+        }
+        let candidate = template.create_document()?;
+        if self.is_dirty() {
+            self.pending = Some(requested);
+            return Ok(TransitionOutcome::DecisionRequired);
+        }
+        self.active = Some(ActiveDocument::untitled_visual(candidate));
+        Ok(TransitionOutcome::Applied)
+    }
+
     pub fn request_close(&mut self) -> Result<TransitionOutcome, DiagramDocumentError> {
         let requested = PendingDiagramTransition::Close;
         if let Some(outcome) = self.repeat_or_reject_pending(&requested)? {
@@ -753,6 +777,9 @@ impl DiagramDocumentController {
             PendingDiagramTransition::ApplyTemplate(template) => {
                 self.active = Some(ActiveDocument::untitled(template.create_session()?, None));
             }
+            PendingDiagramTransition::ApplyVisualTemplate(template) => {
+                self.active = Some(ActiveDocument::untitled_visual(template.create_document()?));
+            }
         }
         self.pending = None;
         Ok(TransitionOutcome::Applied)
@@ -859,6 +886,7 @@ mod tests {
         VisualObjectKind, VisualOperation, VisualPrimitiveShape, VisualStyle, VisualTransform,
     };
     use std::fs;
+    use crate::diagram::VisualAuthoringTemplate;
     use std::io::Write;
     use std::path::Path;
 
@@ -1530,6 +1558,104 @@ mod tests {
             TransitionOutcome::Applied
         );
         assert_eq!(controller.source_copy_origin(), None);
+    }
+
+    #[test]
+    fn visual_authoring_template_dirty_replacement_cancels_or_discards_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let native_path = directory.path().join("before-visual-template.mld");
+        let mut controller = DiagramDocumentController::new();
+        controller
+            .replace_source("flowchart TD\nOld[\"Current\"]\n")
+            .unwrap();
+        controller.save_as(&native_path).unwrap();
+        controller
+            .replace_source("flowchart TD\nOld[\"Edited current\"]\n")
+            .unwrap();
+        let original = controller.session().unwrap().draft().to_owned();
+        let revision = controller.session().unwrap().revision();
+        let undo_depth = controller.session().unwrap().undo_depth();
+
+        assert_eq!(
+            controller
+                .request_visual_template(VisualAuthoringTemplate::Architecture)
+                .unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        assert_eq!(
+            controller.pending_transition(),
+            Some(&PendingDiagramTransition::ApplyVisualTemplate(
+                VisualAuthoringTemplate::Architecture
+            ))
+        );
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Cancel)
+                .unwrap(),
+            TransitionOutcome::Cancelled
+        );
+        assert_eq!(controller.session().unwrap().draft(), original);
+        assert_eq!(controller.session().unwrap().revision(), revision);
+        assert_eq!(controller.session().unwrap().undo_depth(), undo_depth);
+        assert_eq!(controller.path(), Some(native_path.as_path()));
+        assert!(controller.is_dirty());
+
+        assert_eq!(
+            controller
+                .request_visual_template(VisualAuthoringTemplate::Architecture)
+                .unwrap(),
+            TransitionOutcome::DecisionRequired
+        );
+        let old_disk = std::fs::read(&native_path).unwrap();
+        assert!(
+            controller
+                .resolve_pending_with_writer(TransitionDecision::Save, |_, _| Err(anyhow::anyhow!(
+                    "injected save failure"
+                )))
+                .is_err()
+        );
+        assert!(matches!(
+            controller.pending_transition(),
+            Some(PendingDiagramTransition::ApplyVisualTemplate(
+                VisualAuthoringTemplate::Architecture
+            ))
+        ));
+        assert_eq!(controller.session().unwrap().draft(), original);
+        assert_eq!(controller.path(), Some(native_path.as_path()));
+        assert_eq!(std::fs::read(&native_path).unwrap(), old_disk);
+        assert_eq!(
+            controller
+                .resolve_pending(TransitionDecision::Discard)
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(
+            controller.authoring_kind(),
+            Some(DiagramAuthoringKind::Visual)
+        );
+        assert!(controller.session().is_none());
+        assert_eq!(controller.visual_label(), Some("Architecture starter"));
+        assert_eq!(controller.path(), None);
+        assert!(controller.is_dirty());
+        let starter = controller.visual_scene().unwrap().clone();
+        controller.replace_visual_label("Edited starter").unwrap();
+        assert!(controller.undo().unwrap());
+        assert_eq!(controller.visual_scene().unwrap(), &starter);
+        assert!(controller.redo().unwrap());
+        let edited = controller.visual_scene().unwrap().clone();
+        let starter_path = directory.path().join("starter.mld");
+        controller.save_as(&starter_path).unwrap();
+        assert!(!controller.is_dirty());
+        assert_eq!(std::fs::read(&native_path).unwrap(), old_disk);
+        assert_eq!(
+            controller.request_new_visual().unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(
+            controller.request_open(&starter_path).unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert_eq!(controller.visual_scene().unwrap(), &edited);
     }
 
     #[test]

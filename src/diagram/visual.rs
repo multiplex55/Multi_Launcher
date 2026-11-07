@@ -912,6 +912,17 @@ impl VisualDiagramDocument {
         Ok(document)
     }
 
+    /// A selected starter is a fresh unsaved document, independent of conversion.
+    pub(super) fn from_unsaved_starter_scene(
+        scene: VisualScene,
+    ) -> Result<Self, VisualDocumentError> {
+        let mut document = Self::from_fresh_scene(scene)?;
+        document.saved_baseline = VisualScene::new("Untitled visual diagram");
+        document.revision = 1;
+        document.validate()?;
+        Ok(document)
+    }
+
     pub(super) fn from_legacy_title(
         title: impl Into<String>,
         revision: u64,

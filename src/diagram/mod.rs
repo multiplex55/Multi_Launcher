@@ -19,6 +19,7 @@ mod templates;
 mod visual;
 mod visual_canvas;
 mod visual_scene;
+mod visual_templates;
 
 pub(crate) use assets::{
     DecodedVisualAsset, PreparedVisualAsset, decode_visual_asset_payload,
@@ -131,3 +132,5 @@ pub use session::{
     SavedContentSnapshot, SessionStatus,
 };
 pub use templates::{DiagramTemplate, DiagramTemplateCapability, DiagramTemplateError};
+
+pub use visual_templates::VisualAuthoringTemplate;

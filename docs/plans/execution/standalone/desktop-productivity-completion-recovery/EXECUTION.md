@@ -849,3 +849,57 @@ Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; all o
 | r04-m4-a-recovered-run-4.log | A2C7B14EA756FA709439D97DBBE66F854E7A81918A8AF908E8DA85BB08FA1AAA |
 | r04-m4-a-run-1.log | 2C72F77988642BBCB53E078904D6028E5F4972AA2AF2454045084566335CBF40 |
 | r04-m4-a-run-2.log | 2C0DDCBC5B50548FB4CBD11CF7710262741F2149CC2FC531DC6D4A8DBA753A35 |
+
+
+### R04/M4-B — Five owned Visual starters and recovered enabled menu
+
+Five distinct editable Visual starters (Flowchart, Architecture, Mind map, Sequence-style and Dependencies) now live in the diagram domain catalog. Scenes use current bounded VisualScene/from_fresh_scene validation, IDs, connectors and M4-A metadata. A narrow from_unsaved_starter_scene constructor gives template choices a blank saved baseline, revision 1 and fresh history; existing clean conversion construction is unchanged. No external assets or additional UML semantics are introduced. DiagramDocumentController owns typed ApplyVisualTemplate requests and fresh untitled Visual payloads through the existing pending Save/Discard/Cancel transition. Candidate validation precedes mutation; competing pending requests are rejected. Cancel preserves old identity/content/history/path and clears the pending choice; failed Save preserves those states, the pending choice and old file bytes. Accepted replacement has a fresh runtime identity/history even at an equal numeric revision, and ordinary edits/Undo/Redo and save/reopen remain functional.
+
+Studio stages typed document intents through existing document/revision/owner/ROOT fences. The discoverable Visual Templates menu uses popup-independent menu eligibility and exact MenuFocusScope trigger/item/sizing receipts; unrelated modals, pending/property gates and invalid/discarded owners remain blocked. Existing presentation invalidation resets old selection/property/projection identity only after an applied transition. Shared menu_focus_request_for_ui factors the accepted Mermaid keyboard policy for both scopes, preserving key order/wrapping/default focus/traversal/Escape. Real pointer and keyboard choices apply once. Existing Mermaid templates/assistance/conversion/host/viewer behavior is preserved and focused baselines pass.
+
+The M10-A.1 preserved patch exists and was rehashed to required SHA-256 DAA2CC401B7F5E57CB8DFF9034F10B4C0EDD3153927BF29EBAE95C434669DA63. Only starter/transition concepts were selectively adapted; accepted Mermaid assistance was not overwritten. Five exact baselines listed and passed 5/5 before editing. The first recovered exact pair listed 2 and run 1 passed 0/2 (both failed) with 7558 skipped: populated catalog scenes were unexpectedly clean, and the real Flowchart response was Some(false) inside its popup, reproducing the original enablement boundary. No assertion was weakened.
+
+The following independently reviewed causes and bounded corrections explain the runtime sequence; they are not a reset based only on a later assertion or another test name:
+
+| Root and first failure | Measured/source cause | Correction and result |
+| --- | --- | --- |
+| Catalog unsaved state, run 1 | from_fresh_scene intentionally supplies a clean conversion baseline | Starter-only validated dirty constructor; correction 1 catalog passes run 2. Conversion unchanged. |
+| Original menu item enablement, run 1 | Instrumented run 2: actions_allowed/template_allowed=true, but menu_enabled=false, visible=false, sizing=true. egui builds invisible measuring UI in its sizing pass. | Correction1 instrumented; correction 2 allows two ordinary owner frames after the real trigger. The unchanged all-five enabled/full-clip checks pass run 3 and later full flows. No force-enabled ancestor or internal template invocation. |
+| Visual decision observation, first reached run 3 | run 4 confirms pending ApplyVisualTemplate(Architecture), visible enabled menu, but no decision_cancel observation. The actual Visual buttons lacked the response registrations already present in Mermaid. | Diagnostic correction 1 run 4; correction 2 captures each existing Save/Discard/Cancel response.rect and ui.clip_rect, using the same response.clicked for existing ResolvePending. Run5 reaches the actual button, resolving this observation gap. |
+| Footer scroll visibility, first reached run 5 | run 6 measures decision_cancel y756.9..774.9 against enabled outer ScrollArea clip ending 752. The footer follows canvas/authoring/properties, requiring ordinary navigation; it is not the old popup gate or missing observation. | Independent source/data review explicitly records a separate causal root. Diagnostic correction 1 run 6; actual owner-wheel correction 2 passes run 7, retaining strict containment, Architecture selection, Cancel and Discard. |
+
+The durable reviewed scroll decision and resolution are in ignored r04-m4-b-reviewed-scroll-root.json (hash below). There was no silent budget restart: the constructor, sizing, missing-observation and physical-scroll fixes have different first responsible boundaries and measured evidence. Each used at most two corrections after its own initial manifestation, below the authorized three. During the scroll correction, read-only review caught a prospective wheel point derived from the content clip outside the actual ScrollArea; the test observes ScrollAreaOutput.inner_rect and requires real wheel input inside it and outside the canvas, then recaptures current full-clip geometry. It scrolls upward to the menu after Cancel. List 7 was kept compile-only. After the actual inner-rectangle correction, list 8 preceded the first authorized wheel runtime, recovered run 7. No direct camera/scroll/model mutation, viewport enlargement, clipping relaxation or fake observer rectangle was used.
+
+The recovered selector remained catalog plus gui::diagram_studio::tests::diagram_studio_visual_authoring_template_uses_accepted_dirty_transition for its first runtime. Subsequent diagnostic/correction runs used exact lists before runtime; after the catalog passed, failed GUI-only filters were used. Recovered run 3 repeated the small catalog alongside the shared pair gate, not as another constructor correction. All original logs remain. Root-observation instrumentation now identifies action, rect/clip, owner/pending and popup sizing state rather than replacing real controls.
+
+Set `$f` to trimmed `r04-m4-b-filter-1.txt` in the ignored evidence directory. `cargo nextest list --locked --offline -p multi_launcher --lib --cargo-profile fast-dev -E $f` matched exactly 12 fully qualified names. `cargo nextest run --locked --offline -p multi_launcher --lib --cargo-profile fast-dev --no-fail-fast -E $f` passed 12/12 with 7551 skipped on the final frozen source. The subset includes five existing baselines plus catalog, controller transition/Save failure/reopen, recovered GUI, discarded child, discarded ROOT/pending decisions, keyboard and all-five actual menu flows. All five real choices produce the intended fresh scene, dirty state and runtime identity once; ordinary model edit/Undo/Redo remains meaningful. Keyboard uses actual focus/Enter. Discarded passes preserve both active document and pending choice. Injected production save-writer failure preserves the old file/path/draft/pending, followed by successful starter save/reopen.
+
+Production `cargo check --locked --offline -p multi_launcher --lib --bin multi_launcher --profile fast-dev` exited 0 with only six existing Note Panel/Table warnings and existing dependency warnings; no introduced Diagram warnings. Scoped Rustfmt and git diff --check passed. Independent final source/oracle review is clear. These are CPU/owner/file fixtures, not native HWND/GUI user acceptance. Full N6/N7 remain IMPLEMENTED_USER_VALIDATION_PENDING; no user run is requested here.
+
+Source scope is new diagram/visual_templates.rs, diagram/{document,mod,visual}.rs and gui/diagram_studio.rs. The visual.rs constructor is the narrow owner-level addition required to keep conversion clean while starters are dirty. Parent is pushed M4-A 47bee821f16f33473aa0a0da4d113c9a2b27f64e on feat/productivity-diagram-completion. Actual checkpoint SHA/push is recorded outside tracked source after commit. Next is M4-C actual rich SVG/PNG workflow on the same branch; its read-only plan verified the preserved patch, current encoder and publication owner. No M4-C source implementation has started. Grouped draw.io remains M4-D, then R05/R06. Goal active.
+
+Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; original failure/diagnostic files retained):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| r04-m4-b-baseline-list.log | F44BAE8044DCC161FE8A5DF2A3E1459DF60A7BE0590F35A0EBE8F3F54A3807D1 |
+| r04-m4-b-baseline-run.log | E000776F9C65AF909D8966F50C83943EBDBBFAFECB5EABC789B3C13CEC08E1DE |
+| r04-m4-b-list-1.log | 7E355D6DC8E961485963792ED4B998E508F92B336FA804E39FAB996D3CE7C5F2 |
+| r04-m4-b-production-check.log | 6595FBB52C8D2D3F9385454C95A681372F30B5F5A52F4D00A314FF384A3AE834 |
+| r04-m4-b-recovered-list-1.log | 5ECEB7F5BAEC7544F94DCD9BEDFA95F622703034EDF77C32C96EA46505B015C4 |
+| r04-m4-b-recovered-list-2.log | 6E842E691B9548C53572CB19180B50B3AAE5AD6EAC8A7BCE858A667D7F457071 |
+| r04-m4-b-recovered-list-3.log | F06410195E303DD268C2EE31354D6AB0339E893B2D89A6DF303136A354D4BEFA |
+| r04-m4-b-recovered-list-4.log | DA4F46ED7246F5D483AC8CF6389670EFFF5EE5349BBAC3210FE87DE398AAD73E |
+| r04-m4-b-recovered-list-5.log | 87EB736333C5C596B4F3E370FC942AE148130444981F6E2F24E29F36C973E193 |
+| r04-m4-b-recovered-list-6.log | FA0A633027FA03AA21E601F9DDFED3DA16A630BCF9DB95C1C48406E32C5EA0F5 |
+| r04-m4-b-recovered-list-7.log | DC09C70CC014F4BACC5DE44F2FEAFFEE794C8A1885B522298EF28B3308BB0958 |
+| r04-m4-b-recovered-list-8.log | 6D450CFE3F8528823533600F58884645C6CE5A468D1BE72EBD9B01B21A225856 |
+| r04-m4-b-recovered-run-1.log | A7F5401944AC567FDA5DEB70372B61F1CA92B3DA0B7C11D8305F79E9A75836AD |
+| r04-m4-b-recovered-run-2.log | CA5706029328B15AA62D994081E9800FD6E6C4A1384687821570B5137EB92C07 |
+| r04-m4-b-recovered-run-3.log | 71B15F88BD8D3525F04AAF177B82D4E9A2C5409937874FE560D72B0E9B5D5B18 |
+| r04-m4-b-recovered-run-4.log | 6156E4BBDC27B5DF9A01F1EFE9291C39CE4A69602499F1747F0D5E089F748314 |
+| r04-m4-b-recovered-run-5.log | 363E2ECF5DA12A440B851E53E4C6E0F4E76998C910E190250C601786EC78D659 |
+| r04-m4-b-recovered-run-6.log | 1143C7DB992A724B99DD0981E8A98323EEEF3E1200C0B014781B445EB58583D1 |
+| r04-m4-b-recovered-run-7.log | 30087A7B86E8FA2A6814BAFE344953CAD0497013D4D234AC43120880F3D426DD |
+| r04-m4-b-run-1.log | DE57B2CB2227E86BFB3CF9D5A5A3AA803ED87DC8029F42E77A72AC5BDF7F8C5C |
+| r04-m4-b-reviewed-scroll-root.json | 80CA351B9712CF19905840CC41F68BCD3EABBCEFBD5A531AF6D2F9EF4B065EF8 |
