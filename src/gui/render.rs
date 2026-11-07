@@ -2168,7 +2168,7 @@ impl LauncherApp {
             Panel::FolderSizeDialog => self.folder_size_dialog.root_layer(),
             Panel::FileLockDialog => self.file_lock_dialog.root_layer(),
             Panel::ActivityDialog => NavigationDialogKind::Activity.layer_id(),
-            Panel::RecordingDialog => middle(egui::Id::new("recording-setup-window")),
+            Panel::RecordingDialog => self.recording_dialog.root_layer(),
             Panel::DiagramStudioDialog | Panel::RadialEditor => None,
             Panel::NotePanel | Panel::ImagePanel => None,
             Panel::CompletionDialog | Panel::SnippetPromptDialog | Panel::CropDialog => None,
@@ -4806,7 +4806,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 36] {
+    fn viewport_bootstrap_state(&self) -> [bool; 37] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4822,6 +4822,7 @@ impl LauncherApp {
             self.zip_extractor_dialog.needs_viewport_bootstrap(),
             self.folder_size_dialog.needs_viewport_bootstrap(),
             self.file_lock_dialog.needs_viewport_bootstrap(),
+            self.recording_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4857,7 +4858,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 36],
+        previously_pending: [bool; 37],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -7217,6 +7218,47 @@ impl LauncherApp {
         );
     }
 
+    fn show_recording_setup(
+        &mut self,
+        ctx: &egui::Context,
+        root_visible: bool,
+        first: bool,
+        jump_escape_preempted: bool,
+    ) {
+        let catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
+        let input_allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let root_owner = root_visible
+            && input_allowed
+            && self.native_ui_host_input_allowed(ctx, root_visible)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && self.recording_dialog.root_layer().is_some_and(|layer| {
+                let top = crate::gui::jump_mode::ui::visible_top_middle_layer(ctx);
+                let popup = self.recording_dialog.popup_layer(ctx, layer);
+                (top == Some(layer)
+                    || (top.is_none() && self.recording_dialog.awaiting_root_focus()))
+                    && crate::gui::jump_mode::ui::focused_response_layer(ctx).is_none_or(|focus| {
+                        focus == layer
+                            || focus.order == egui::Order::Background
+                            || Some(focus) == popup
+                    })
+            });
+        self.recording_dialog.show_hosted(
+            ctx,
+            &catalog,
+            &self.recording_controller,
+            root_visible,
+            root_owner,
+            input_allowed,
+            first,
+            self.pinned_panels.contains(&super::Panel::RecordingDialog),
+            !jump_escape_preempted && self.jump_mode_ui.active_session().is_none(),
+        );
+    }
+
     fn show_file_lock(
         &mut self,
         ctx: &egui::Context,
@@ -9275,6 +9317,7 @@ impl LauncherApp {
             self.show_zip_host(&ctx, false, first_ui_pass, false);
             self.show_folder_size(&ctx, false, first_ui_pass, false, false);
             self.show_file_lock(&ctx, false, first_ui_pass, false, false);
+            self.show_recording_setup(&ctx, false, first_ui_pass, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -11127,6 +11170,7 @@ impl LauncherApp {
             self.show_zip_host(&ctx, false, first_ui_pass, false);
             self.show_folder_size(&ctx, false, first_ui_pass, false, false);
             self.show_file_lock(&ctx, false, first_ui_pass, false, false);
+            self.show_recording_setup(&ctx, false, first_ui_pass, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11526,7 +11570,7 @@ impl LauncherApp {
             owner_transition_pending,
             jump_session_escape_preempted,
         );
-        self.show_recording_setup(&ctx, frame_logic.should_be_visible);
+        self.show_recording_setup(&ctx, frame_logic.should_be_visible, first_ui_pass, jump_session_escape_preempted);
         self.render_hotfolder_manager(&ctx, first_ui_pass);
         for action in self.activity_dialog.show(
             &ctx,
@@ -12917,6 +12961,7 @@ impl eframe::App for LauncherApp {
             || self.markdown_studio_dialog.needs_root_ui_when_hidden()
             || self.folder_size_dialog.needs_root_ui_when_hidden()
             || self.file_lock_dialog.needs_root_ui_when_hidden()
+            || self.recording_dialog.needs_setup_root_ui_when_hidden()
             || self.batch_rename_host.needs_root_ui_when_hidden(self.batch_rename_dialog.open)
             || self.search_replace_needs_root_ui_when_hidden()
             || self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open)
@@ -19205,6 +19250,377 @@ mod tests {
         }
         click_duplicate_finder_host_control(&ctx, &mut app, native, "close");
         assert!(!app.duplicate_finder_dialog.open);
+    }
+
+    fn recording_setup_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) -> egui::Rect {
+        let mut prior = None;
+        for _ in 0..16 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((rect, clip, true)) = app.recording_dialog.test_control(name)
+                && rect.is_positive()
+                && clip.contains_rect(rect)
+            {
+                if prior == Some(rect) {
+                    return rect;
+                }
+                prior = Some(rect);
+            } else {
+                prior = None;
+            }
+        }
+        panic!("Recorder control {name:?} must be visible and enabled")
+    }
+    fn click_recording_setup_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &str,
+    ) {
+        let rect = recording_setup_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+    struct RecordingFixtureBackend;
+    struct RecordingFixtureSource;
+    impl crate::recording::RecordingBackend for RecordingFixtureBackend {
+        fn create_source(
+            &self,
+            _: &crate::recording::RecordingRequest,
+            _: u64,
+        ) -> Result<Box<dyn crate::recording::CaptureSource>, String> {
+            Ok(Box::new(RecordingFixtureSource))
+        }
+    }
+    impl crate::recording::CaptureSource for RecordingFixtureSource {
+        fn poll(
+            &mut self,
+            _: std::time::Duration,
+            _: &crate::recording::CaptureStopToken,
+        ) -> crate::recording::CapturePoll {
+            crate::recording::CapturePoll::Ended(crate::recording::RecordingEndReason::TargetLost)
+        }
+    }
+    #[test]
+    fn recorder_setup_hosts_preserve_real_controls_popup_and_stale_region() {
+        use super::super::utility_host::UtilityPresentation;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.recording_dialog.test_install_display();
+        app.open_recording_setup();
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::recording_dialog::RecordingDialogState::viewport();
+        click_recording_setup_control(&ctx, &mut app, root, "format");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(
+            app.recording_dialog.open,
+            "ROOT popup Escape must not close setup"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        click_recording_setup_control(&ctx, &mut app, root, "format");
+        click_recording_setup_control(&ctx, &mut app, root, "format-mp4");
+        assert_eq!(
+            app.recording_dialog.test_selection().2,
+            crate::recording::RecordingFormat::Mp4
+        );
+        click_recording_setup_control(&ctx, &mut app, root, "fps");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        let _ = app.recording_dialog.take_test_copies();
+        let mut input = actual_query_input(true);
+        input.events = vec![egui::Event::Copy];
+        let output = app.run_root_frame_for_test(&ctx, input, true).0;
+        assert!(
+            !output
+                .platform_output
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::OutputCommand::CopyText(_))),
+            "discarded numeric copy must not reach ROOT platform output"
+        );
+        output.drop_without_applying_deltas();
+        assert!(app.recording_dialog.take_test_copies().is_empty());
+        run_host_viewport_frame(&ctx, &mut app, root, vec![egui::Event::Copy], false, false);
+        assert_eq!(
+            app.recording_dialog.take_test_copies(),
+            vec!["30".to_owned()]
+        );
+        let before = app.recording_dialog.test_selection();
+        click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.recording_dialog.test_presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.recording_dialog.test_selection(), before);
+        click_recording_setup_control(&ctx, &mut app, native, "cursor");
+        assert_ne!(app.recording_dialog.test_selection().6, before.6);
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let label = recording_setup_control(&ctx, &mut app, native, "preview-label");
+        let start = egui::pos2(label.left() + 5.0, label.center().y);
+        let end = egui::pos2(label.right() - 5.0, label.center().y);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerMoved(end)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let _ = app.recording_dialog.take_test_copies();
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.recording_dialog.take_test_copies().is_empty());
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        let label_copies = app.recording_dialog.take_test_copies();
+        assert!(matches!(label_copies.as_slice(), [text] if !text.is_empty()));
+        app.recording_dialog
+            .selector_terminal(before.1, Ok(crate::mkmacro::ScreenRect::new(1, 1, 10, 10)));
+        assert_eq!(app.recording_dialog.test_selection().7, before.7);
+        click_recording_setup_control(&ctx, &mut app, native, "format");
+        click_recording_setup_control(&ctx, &mut app, native, "format-gif");
+        assert_eq!(
+            app.recording_dialog.test_selection().2,
+            crate::recording::RecordingFormat::Gif
+        );
+        click_recording_setup_control(&ctx, &mut app, native, "format");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(
+            app.recording_dialog.open,
+            "popup Escape must not close setup"
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        let selection = app.recording_dialog.test_selection();
+        click_recording_setup_control(&ctx, &mut app, native, "host-presentation");
+        assert_eq!(
+            app.recording_dialog.test_presentation(),
+            UtilityPresentation::Docked
+        );
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.recording_dialog.test_selection(), selection);
+        assert!(!app.recording_controller.has_active_job());
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.recording_dialog.open);
+    }
+    #[test]
+    fn recorder_setup_start_discards_never_open_chooser_and_accepts_once() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.recording_controller = crate::recording::RecordingController::new(
+            std::sync::Arc::new(RecordingFixtureBackend),
+            || {},
+        );
+        app.recording_dialog.test_install_display();
+        app.open_recording_setup();
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::recording_dialog::RecordingDialogState::viewport();
+        app.recording_dialog.queue_save_choice_for_test(None);
+        for discard_child in [false, true] {
+            let rect = recording_setup_control(&ctx, &mut app, root, "start");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                root,
+                tool_dialog_pointer_events(rect, false),
+                true,
+                discard_child,
+            );
+            assert_eq!(app.recording_dialog.chooser_calls_for_test(), 0);
+            assert!(!app.recording_controller.has_active_job());
+        }
+        click_recording_setup_control(&ctx, &mut app, root, "start");
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 1);
+        assert!(!app.recording_controller.has_active_job());
+        for kind in [1, 2] {
+            app.recording_dialog.queue_save_choice_for_test(Some(
+                workspace.root().join(format!("stale-{kind}.gif")),
+            ));
+            app.recording_dialog.test_invalidate_next_chooser(kind);
+            click_recording_setup_control(&ctx, &mut app, root, "start");
+            assert!(
+                !app.recording_controller.has_active_job(),
+                "changed setup lifetime or host rejects the chooser return"
+            );
+            assert!(!workspace.root().join(format!("stale-{kind}.gif")).exists());
+        }
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 3);
+        click_recording_setup_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        app.recording_dialog
+            .queue_save_choice_for_test(Some(workspace.root().join("accepted-host.gif")));
+        for discard_child in [false, true] {
+            let rect = recording_setup_control(&ctx, &mut app, native, "start");
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, true),
+                false,
+                false,
+            );
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                tool_dialog_pointer_events(rect, false),
+                !discard_child,
+                discard_child,
+            );
+            assert_eq!(app.recording_dialog.chooser_calls_for_test(), 3);
+            assert!(!app.recording_controller.has_active_job());
+        }
+        click_recording_setup_control(&ctx, &mut app, native, "start");
+        assert_eq!(app.recording_dialog.chooser_calls_for_test(), 4);
+        let frozen = app
+            .recording_dialog
+            .test_last_request()
+            .expect("accepted frozen request");
+        assert_eq!(
+            frozen.options().format(),
+            crate::recording::RecordingFormat::Gif
+        );
+        assert!(app.recording_controller.has_active_job());
+        if let Some(generation) = app.recording_controller.snapshot().active_generation {
+            let _ = app.recording_controller.discard(generation);
+        }
+        app.recording_controller.request_shutdown();
     }
 
     fn file_lock_host_control(

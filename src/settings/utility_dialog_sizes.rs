@@ -72,6 +72,7 @@ const STABLE_TOOL_KEYS: &[&str] = &[
     "mkmacro-package-export",
     "mkmacro-package-import",
     "mkmacro-parameters",
+    "screen-recording",
     "mkmacro-recording-review",
     "mkmacro-reference-crop",
     "mkmacro-runtime-prompt",

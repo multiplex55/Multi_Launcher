@@ -109,6 +109,12 @@ impl Default for RecordingSelection {
     }
 }
 
+struct RecordingSetupFrame {
+    owner: ViewportPassProvenance,
+    receipt: RecordingSetupReceipt,
+    info: Option<egui::ViewportInfo>,
+    copies: Vec<String>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecordingUiCommand {
     ChoosePath { revision: u64 },
@@ -117,23 +123,47 @@ enum RecordingUiCommand {
     Stop { generation: u64 },
     Discard { generation: u64 },
     CloseSetup,
+    Host(super::utility_host::UtilityPresentation),
     RegionAcknowledged { revision: u64 },
+}
+
+#[derive(Clone, Copy)]
+struct RecordingSetupReceipt {
+    root: ViewportPassProvenance,
+    host: super::utility_host::HostIdentity,
+    epoch: u64,
+    native: bool,
+}
+#[derive(Clone, Copy)]
+struct RecordingPopupAnchor {
+    popup: egui::Id,
+    layer: egui::LayerId,
+    viewport: egui::ViewportId,
+    epoch: u64,
 }
 
 #[derive(Clone, Copy)]
 struct PendingAction {
     provenance: ViewportPassProvenance,
+    setup: Option<RecordingSetupReceipt>,
     command: RecordingUiCommand,
 }
 
 struct PendingSelection {
     provenance: ViewportPassProvenance,
+    setup: Option<RecordingSetupReceipt>,
     selection: RecordingSelection,
 }
 
 #[derive(Default)]
 pub(crate) struct RecordingDialogState {
     pub(crate) open: bool,
+    host: super::utility_host::UtilityHostState,
+    host_focus: bool,
+    host_os_close_pending: bool,
+    host_popups: Vec<RecordingPopupAnchor>,
+    setup_pass: Option<RecordingSetupFrame>,
+    accepted_chooser: Option<RecordingSetupReceipt>,
     selection: RecordingSelection,
     selection_revision: u64,
     pending_selection: Option<PendingSelection>,
@@ -153,6 +183,20 @@ pub(crate) struct RecordingDialogState {
     preview_cache: Option<(u64, u64, CaptureTarget)>,
     #[cfg(test)]
     compact_stop_button_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_controls: std::collections::HashMap<&'static str, (egui::Rect, egui::Rect, bool)>,
+    #[cfg(test)]
+    test_save_choice: Option<Option<PathBuf>>,
+    #[cfg(test)]
+    test_chooser_calls: usize,
+    #[cfg(test)]
+    test_accept_target: bool,
+    #[cfg(test)]
+    test_copies: Vec<String>,
+    #[cfg(test)]
+    test_chooser_invalidation: u8,
+    #[cfg(test)]
+    test_last_request: Option<RecordingRequest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +207,8 @@ pub(crate) enum RetainedRecordingAction {
     Stop { generation: u64 },
     Discard { generation: u64 },
     CloseSetup,
+    ShowRoot,
+    CopyText(String),
     RegionAcknowledged { selection_revision: u64 },
 }
 
@@ -177,6 +223,7 @@ impl RecordingDialogState {
     pub(crate) fn close(&mut self) {
         self.setup_epoch = self.setup_epoch.wrapping_add(1);
         self.open = false;
+        self.setup_pass = None;
         self.selection_revision = self.selection_revision.wrapping_add(1);
         self.pending_region = None;
         self.pending_region_revision = None;
@@ -394,22 +441,25 @@ impl RecordingDialogState {
         self.target_refresh.is_some()
     }
 
-    pub(crate) fn show_setup(
+    fn render_setup_body(
         &mut self,
         ctx: &egui::Context,
         window_catalog: &WindowCatalog,
         controller: &crate::recording::RecordingController,
-        visible: bool,
+        owner_allowed: bool,
+        first: bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: Option<super::utility_host::UtilityPresentation>,
+    ) -> (
+        RecordingSelection,
+        Vec<RecordingUiCommand>,
+        bool,
+        Vec<String>,
     ) {
-        if !self.open || !visible {
-            return;
-        }
         self.refresh_window_snapshot(window_catalog);
         if !self.targets_loaded && self.target_refresh.is_none() {
             self.refresh_targets(ctx, window_catalog);
         }
-        let pass = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
-        self.drop_expired_staging(ctx, pass);
         let mut draft = self.selection.clone();
         if let Some(Ok(region)) = self
             .pending_region
@@ -432,26 +482,32 @@ impl RecordingDialogState {
         let mut keep_open = true;
         let snapshot = controller.snapshot();
         let has_job = snapshot.active_generation.is_some();
-        egui::Window::new("Screen Recorder")
-            .id(egui::Id::new("recording-setup-window"))
-            .default_size([480.0, 470.0])
-            .show_utility(
-                ctx,
-                "screen-recording",
-                egui::Id::new("Screen Recorder"),
-                Some(&mut keep_open),
-                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                        egui::Vec2::new(480.0, 470.0),
-                    ),
-                    egui::Vec2::ZERO,
-                    [None, None],
-                ),
-                |ui| {
+        self.host_popups.clear();
+        let output_start = ctx.output(|output| output.commands.len());
+        let mut draw = |ui: &mut egui::Ui| {
+            if let Some(presentation) = presentation {
+                let can_move = owner_allowed
+                    && !self.has_selector_operation()
+                    && ui.is_visible()
+                    && !ui.is_sizing_pass();
+                let (button, next) =
+                    super::utility_host::presentation_button(ui, presentation, can_move);
+                #[cfg(test)]
+                {
+                    self.test_controls.insert(
+                        "host-presentation",
+                        (button.rect, ui.clip_rect(), button.enabled()),
+                    );
+                }
+                if button.clicked() && first && !ctx.will_discard() {
+                    commands.push(RecordingUiCommand::Host(next));
+                }
+            }
+            ui.add_enabled_ui(owner_allowed, |ui| {
                     ui.add_enabled_ui(!has_job && !self.target_refresh_pending(), |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Source");
-                            egui::ComboBox::from_id_salt("recording-target-kind")
+                            let combo = egui::ComboBox::from_id_salt("recording-target-kind")
                                 .selected_text(match draft.target_kind {
                                     RecordingTargetKind::Display => "Display / region",
                                     RecordingTargetKind::Window => "Window",
@@ -468,6 +524,8 @@ impl RecordingDialogState {
                                         "Window",
                                     );
                                 });
+                            self.host_popups.push(RecordingPopupAnchor { popup:combo.response.id.with("popup"), layer:combo.response.layer_id, viewport:ui.ctx().viewport_id(), epoch:self.setup_epoch });
+                            #[cfg(test)] { self.test_controls.insert("source", (combo.response.rect,ui.clip_rect(),combo.response.enabled())); }
                             if ui.small_button("Refresh").clicked() {
                                 commands.push(RecordingUiCommand::RefreshTargets {
                                     revision: self.selection_revision,
@@ -487,7 +545,7 @@ impl RecordingDialogState {
                                     })
                                     .map(|display| display.device_name.as_str())
                                     .unwrap_or("Select display");
-                                egui::ComboBox::from_id_salt("recording-display")
+                                let combo = egui::ComboBox::from_id_salt("recording-display")
                                     .selected_text(label)
                                     .show_ui(ui, |ui| {
                                         for display in &self.displays {
@@ -499,6 +557,8 @@ impl RecordingDialogState {
                                             );
                                         }
                                     });
+                            self.host_popups.push(RecordingPopupAnchor { popup:combo.response.id.with("popup"), layer:combo.response.layer_id, viewport:ui.ctx().viewport_id(), epoch:self.setup_epoch });
+                            #[cfg(test)] { self.test_controls.insert("display", (combo.response.rect,ui.clip_rect(),combo.response.enabled())); }
                                 if draft.display != display_before {
                                     draft.region = None;
                                 }
@@ -525,7 +585,7 @@ impl RecordingDialogState {
                                     })
                                     .map(|window| window.title.as_str())
                                     .unwrap_or("Select window");
-                                egui::ComboBox::from_id_salt("recording-window")
+                                let combo = egui::ComboBox::from_id_salt("recording-window")
                                     .selected_text(label)
                                     .show_ui(ui, |ui| {
                                         for window in &self.windows {
@@ -536,6 +596,8 @@ impl RecordingDialogState {
                                             );
                                         }
                                     });
+                            self.host_popups.push(RecordingPopupAnchor { popup:combo.response.id.with("popup"), layer:combo.response.layer_id, viewport:ui.ctx().viewport_id(), epoch:self.setup_epoch });
+                            #[cfg(test)] { self.test_controls.insert("window", (combo.response.rect,ui.clip_rect(),combo.response.enabled())); }
                                 if draft.region.take().is_some() {
                                     // Region selection belongs to display capture.
                                 }
@@ -545,30 +607,27 @@ impl RecordingDialogState {
                         ui.separator();
                         ui.horizontal(|ui| {
                             ui.label("Format");
-                            egui::ComboBox::from_id_salt("recording-format")
+                            let combo = egui::ComboBox::from_id_salt("recording-format")
                                 .selected_text(format_label(draft.format))
                                 .show_ui(ui, |ui| {
                                     for format in [RecordingFormat::Gif, RecordingFormat::Mp4] {
-                                        if ui
-                                            .selectable_value(
-                                                &mut draft.format,
-                                                format,
-                                                format_label(format),
-                                            )
-                                            .changed()
-                                        {
+                                        let response = ui.selectable_value(&mut draft.format, format, format_label(format));
+                                        #[cfg(test)] { self.test_controls.insert(if format == RecordingFormat::Mp4 { "format-mp4" } else { "format-gif" }, (response.rect,ui.clip_rect(),response.enabled())); }
+                                        if response.changed() {
                                             draft.frames_per_second = format.default_frame_rate();
                                         }
                                     }
                                 });
+                            self.host_popups.push(RecordingPopupAnchor { popup:combo.response.id.with("popup"), layer:combo.response.layer_id, viewport:ui.ctx().viewport_id(), epoch:self.setup_epoch });
+                            #[cfg(test)] { self.test_controls.insert("format", (combo.response.rect,ui.clip_rect(),combo.response.enabled())); }
                             ui.label("FPS");
-                            ui.add(
-                                egui::DragValue::new(&mut draft.frames_per_second).range(1..=60),
-                            );
+                            let fps = ui.add(egui::DragValue::new(&mut draft.frames_per_second).range(1..=60));
+                            #[cfg(test)] { self.test_controls.insert("fps",(fps.rect,ui.clip_rect(),fps.enabled())); }
+                            #[cfg(not(test))] let _ = fps;
                         });
                         ui.horizontal(|ui| {
                             ui.label("Output scale");
-                            egui::ComboBox::from_id_salt("recording-output-scale")
+                            let combo = egui::ComboBox::from_id_salt("recording-output-scale")
                                 .selected_text(scale_label(draft.scale))
                                 .show_ui(ui, |ui| {
                                     for scale in
@@ -581,12 +640,16 @@ impl RecordingDialogState {
                                         );
                                     }
                                 });
+                            self.host_popups.push(RecordingPopupAnchor { popup:combo.response.id.with("popup"), layer:combo.response.layer_id, viewport:ui.ctx().viewport_id(), epoch:self.setup_epoch });
+                            #[cfg(test)] { self.test_controls.insert("scale", (combo.response.rect,ui.clip_rect(),combo.response.enabled())); }
                             ui.label("Duration (seconds)");
                             ui.add(
                                 egui::DragValue::new(&mut draft.duration_seconds).range(1..=120),
                             );
                         });
-                        ui.checkbox(&mut draft.include_cursor, "Include cursor");
+                        let cursor = ui.checkbox(&mut draft.include_cursor, "Include cursor");
+                        #[cfg(test)] { self.test_controls.insert("cursor",(cursor.rect,ui.clip_rect(),cursor.enabled())); }
+                        #[cfg(not(test))] let _ = cursor;
                     });
 
                     if self.target_refresh_pending() {
@@ -607,22 +670,23 @@ impl RecordingDialogState {
                     }
                     if let Some(request) = preview.as_ref() {
                         let (width, height) = request.encoded_dimensions();
-                        ui.label(format!(
+                        let label = ui.label(format!(
                             "Frozen canvas: {} × {} → {} × {}",
                             request.canvas().width(),
                             request.canvas().height(),
                             width,
                             height
                         ));
+                        #[cfg(test)] { self.test_controls.insert("preview-label",(label.rect,ui.clip_rect(),label.enabled())); }
+                        #[cfg(not(test))] let _ = label;
                     } else {
                         ui.label("Choose a valid display or window to preview output size.");
                     }
 
                     ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(!has_job, egui::Button::new("Choose output and record…"))
-                            .clicked()
-                        {
+                        let start = ui.add_enabled(!has_job, egui::Button::new("Choose output and record…"));
+                        #[cfg(test)] { self.test_controls.insert("start",(start.rect,ui.clip_rect(),start.enabled())); }
+                        if start.clicked() {
                             commands.push(RecordingUiCommand::ChoosePath {
                                 revision: self.selection_revision,
                             });
@@ -660,8 +724,29 @@ impl RecordingDialogState {
                             }
                         }
                     }
-                },
-            );
+                    });
+        };
+        if let Some(ui) = child_ui {
+            draw(ui);
+        } else {
+            egui::Window::new("Screen Recorder")
+                .id(egui::Id::new("recording-setup-window"))
+                .default_size([480.0, 470.0])
+                .show_utility(
+                    ctx,
+                    "screen-recording",
+                    egui::Id::new("Screen Recorder"),
+                    Some(&mut keep_open),
+                    crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                        crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                            egui::Vec2::new(480.0, 470.0),
+                        ),
+                        egui::Vec2::ZERO,
+                        [None, None],
+                    ),
+                    |ui| draw(ui),
+                );
+        }
         if !keep_open {
             commands.push(RecordingUiCommand::CloseSetup);
         }
@@ -670,12 +755,367 @@ impl RecordingDialogState {
                 revision: self.selection_revision,
             });
         }
-        if draft != self.selection {
-            self.stage_selection(pass, draft);
+        let copies = ctx.output_mut(|output| {
+            let mut copies = Vec::new();
+            for command in output.commands.split_off(output_start) {
+                match command {
+                    egui::OutputCommand::CopyText(text) => copies.push(text),
+                    other => output.commands.push(other),
+                }
+            }
+            copies
+        });
+        (
+            draft,
+            commands,
+            keep_open,
+            if owner_allowed && first && !ctx.will_discard() {
+                copies
+            } else {
+                Vec::new()
+            },
+        )
+    }
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+                || self.host.embedded_root_layer().is_some()))
+        .then_some(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("recording-setup-window"),
+        ))
+    }
+    pub(crate) fn needs_setup_root_ui_when_hidden(&self) -> bool {
+        self.open && self.host.presentation() == super::utility_host::UtilityPresentation::Popout
+    }
+    pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
+        self.open && self.host.bootstrap_pending()
+    }
+    pub(crate) fn request_host_focus(&mut self) {
+        self.host_focus = true;
+        self.host.request_focus();
+    }
+    pub(crate) fn awaiting_root_focus(&self) -> bool {
+        self.host_focus
+            && self.host.presentation() == super::utility_host::UtilityPresentation::Docked
+    }
+    pub(crate) fn viewport() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("screen-recording-setup-viewport")
+    }
+    fn native_identity(
+        &self,
+        host: super::utility_host::HostIdentity,
+    ) -> super::utility_window_geometry::NativeViewportIdentity {
+        super::utility_window_geometry::NativeViewportIdentity {
+            key: crate::settings::UtilityToolKey::parse("screen-recording")
+                .expect("stable recording key"),
+            viewport_id: Self::viewport(),
+            owner_generation: self.setup_epoch,
+            host_generation: host.generation,
         }
-        for command in commands {
-            self.stage_action(pass, command);
+    }
+    fn retire_host(&mut self, ctx: &egui::Context) {
+        if self.host.presentation() == super::utility_host::UtilityPresentation::Popout {
+            let identity = self.native_identity(self.host.identity());
+            super::utility_dialog_size::close_native_utility_geometry_viewport(ctx, identity);
+            ctx.send_viewport_cmd_to(identity.viewport_id, egui::ViewportCommand::Close);
         }
+        self.host.retire_to_docked();
+        self.host_focus = false;
+        self.host_os_close_pending = false;
+        self.setup_pass = None;
+        self.host_popups.clear();
+    }
+    pub(crate) fn popup_layer(
+        &self,
+        ctx: &egui::Context,
+        parent: egui::LayerId,
+    ) -> Option<egui::LayerId> {
+        let anchor = self.host_popups.iter().find(|a| {
+            a.epoch == self.setup_epoch
+                && a.viewport == ctx.viewport_id()
+                && a.layer == parent
+                && egui::Popup::is_id_open(ctx, a.popup)
+        })?;
+        let rect = ctx.memory(|m| m.area_rect(anchor.popup))?;
+        let layer = egui::LayerId::new(egui::Order::Foreground, anchor.popup);
+        let top = ctx.memory(|m| {
+            m.layer_ids()
+                .filter(|l| l.order == egui::Order::Foreground && m.areas().visible_last_frame(l))
+                .last()
+        });
+        let sizing =
+            egui::containers::AreaState::load(ctx, anchor.popup).is_some_and(|a| !a.interactable);
+        (rect.is_positive()
+            && top == Some(layer)
+            && (ctx.layer_id_at(rect.center()) == Some(layer) || sizing))
+            .then_some(layer)
+    }
+    #[cfg(test)]
+    pub(super) fn test_presentation(&self) -> super::utility_host::UtilityPresentation {
+        self.host.presentation()
+    }
+    #[cfg(test)]
+    pub(crate) fn test_selection(
+        &self,
+    ) -> (
+        u64,
+        u64,
+        RecordingFormat,
+        u8,
+        u32,
+        OutputScale,
+        bool,
+        Option<ScreenRect>,
+    ) {
+        (
+            self.setup_epoch,
+            self.selection_revision,
+            self.selection.format,
+            self.selection.frames_per_second,
+            self.selection.duration_seconds,
+            self.selection.scale,
+            self.selection.include_cursor,
+            self.selection.region,
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn test_install_display(&mut self) {
+        let device = "fixture-display".to_owned();
+        let bounds = ScreenRect::new(0, 0, 64, 48);
+        self.displays = vec![crate::recording::RecordingDisplayTarget {
+            target: CaptureTarget::display(77, device.clone(), bounds).unwrap(),
+            device_name: device.clone(),
+        }];
+        self.selection.display = Some((77, device));
+        self.targets_loaded = true;
+        self.test_accept_target = true;
+    }
+    #[cfg(test)]
+    pub(crate) fn test_control(&self, name: &str) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.test_controls.get(name).copied()
+    }
+    pub(crate) fn show_setup(
+        &mut self,
+        ctx: &egui::Context,
+        catalog: &WindowCatalog,
+        controller: &crate::recording::RecordingController,
+        visible: bool,
+    ) {
+        self.show_hosted(
+            ctx, catalog, controller, visible, visible, visible, true, false, true,
+        );
+    }
+    pub(crate) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        catalog: &WindowCatalog,
+        controller: &crate::recording::RecordingController,
+        root_visible: bool,
+        root_owner: bool,
+        input_allowed: bool,
+        first: bool,
+        pinned: bool,
+        shortcut_allowed: bool,
+    ) {
+        use super::utility_host::UtilityPresentation;
+        if !self.open {
+            return;
+        }
+        ctx.add_plugin(super::utility_host::HostedCopyCapture::default());
+        if pinned {
+            self.host_os_close_pending = false;
+        }
+        let host = self.host.identity();
+        let root = ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT);
+        let mut staged = None;
+        let mut owner = None;
+        let mut info = None;
+        let mut native = false;
+        let mut owner_allowed = false;
+        #[cfg(test)]
+        self.test_controls.clear();
+        if host.host == UtilityPresentation::Docked {
+            if root_visible {
+                let parent = egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("recording-setup-window"),
+                );
+                let popup = self.popup_layer(ctx, parent);
+                let allowed = root_owner
+                    && (!egui::Popup::is_any_open(ctx) || popup.is_some())
+                    && !self.has_selector_operation();
+                owner_allowed = allowed;
+                let shortcut = first
+                    && allowed
+                    && popup.is_none()
+                    && !egui::Popup::is_any_open(ctx)
+                    && shortcut_allowed
+                    && !pinned
+                    && ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                let (draft, mut commands, _, copies) = self.render_setup_body(
+                    ctx,
+                    catalog,
+                    controller,
+                    allowed,
+                    first,
+                    None,
+                    Some(host.host),
+                );
+                if shortcut {
+                    commands.push(RecordingUiCommand::CloseSetup);
+                }
+                staged = Some((draft, commands, copies));
+                owner = Some(root);
+            }
+        } else {
+            let viewport = Self::viewport();
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Screen Recorder")
+                .with_inner_size([480.0, 470.0])
+                .with_resizable(true);
+            ctx.show_viewport_immediate(viewport, builder, |child, class| {
+                let c = child.ctx().clone();
+                let is_native =
+                    class == egui::ViewportClass::Immediate && c.viewport_id() == viewport;
+                let child_first = first && child.current_pass_index() == 0;
+                if child_first {
+                    owner = Some(ViewportPassProvenance::current(&c, c.viewport_id()));
+                    native = is_native;
+                    if is_native {
+                        info = Some(child.input(|i| i.viewport().clone()));
+                    }
+                } else {
+                    owner = None;
+                    info = None;
+                    staged = None;
+                }
+                let parent = if is_native {
+                    egui::LayerId::background()
+                } else {
+                    egui::LayerId::new(egui::Order::Middle, egui::Id::new("recording-setup-window"))
+                };
+                let popup = self.popup_layer(&c, parent);
+                let allowed = if is_native {
+                    input_allowed
+                        && !self.has_selector_operation()
+                        && c.input(|i| i.focused)
+                        && c.memory(|m| m.top_modal_layer().is_none())
+                        && super::jump_mode::ui::visible_top_middle_layer(&c).is_none()
+                        && (!egui::Popup::is_any_open(&c) || popup.is_some())
+                        && super::jump_mode::ui::focused_response_layer(&c)
+                            .is_none_or(|l| l == parent || Some(l) == popup)
+                } else {
+                    root_owner && !self.has_selector_operation()
+                };
+                owner_allowed = allowed;
+                if is_native && child_first && child.input(|i| i.viewport().close_requested()) {
+                    child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    if !pinned && !self.has_selector_operation() {
+                        self.host_os_close_pending = true;
+                    }
+                }
+                let shortcut = child_first
+                    && allowed
+                    && !pinned
+                    && popup.is_none()
+                    && !egui::Popup::is_any_open(&c)
+                    && (is_native || shortcut_allowed)
+                    && c.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    });
+                if is_native {
+                    let receipt = super::utility_host::HostedCopyReceipt {
+                        root,
+                        owner: ViewportPassProvenance::current(&c, c.viewport_id()),
+                        host,
+                        epoch: self.setup_epoch,
+                        eligible: child_first && allowed && !c.will_discard(),
+                    };
+                    c.with_plugin(|p: &mut super::utility_host::HostedCopyCapture| {
+                        p.armed.insert(c.viewport_id(), receipt);
+                    });
+                    egui::CentralPanel::default().show(child, |ui| {
+                        let (draft, mut commands, _, copies) = self.render_setup_body(
+                            &c,
+                            catalog,
+                            controller,
+                            allowed,
+                            child_first,
+                            Some(ui),
+                            Some(host.host),
+                        );
+                        if shortcut || (!pinned && self.host_os_close_pending) {
+                            commands.push(RecordingUiCommand::CloseSetup);
+                        }
+                        staged = Some((draft, commands, copies));
+                    });
+                } else {
+                    let (draft, mut commands, _, copies) = self.render_setup_body(
+                        &c,
+                        catalog,
+                        controller,
+                        allowed,
+                        child_first,
+                        None,
+                        Some(host.host),
+                    );
+                    if shortcut {
+                        commands.push(RecordingUiCommand::CloseSetup);
+                    }
+                    staged = Some((draft, commands, copies));
+                }
+            });
+        }
+        if let (Some(owner), Some((draft, mut commands, copies))) = (owner, staged) {
+            if pinned {
+                commands.retain(|command| !matches!(command, RecordingUiCommand::CloseSetup));
+            }
+            if first && !ctx.will_discard() && (owner_allowed || self.host_os_close_pending) {
+                let receipt = RecordingSetupReceipt {
+                    root,
+                    host,
+                    epoch: self.setup_epoch,
+                    native,
+                };
+                self.drop_expired_staging(ctx, owner);
+                if draft != self.selection {
+                    self.pending_selection = Some(PendingSelection {
+                        provenance: owner,
+                        setup: Some(receipt),
+                        selection: draft,
+                    });
+                }
+                for command in commands {
+                    self.stage_action(owner, command);
+                    if let Some(last) = self.pending_actions.last_mut() {
+                        last.setup = Some(receipt);
+                    }
+                }
+                self.setup_pass = Some(RecordingSetupFrame {
+                    owner,
+                    receipt,
+                    info,
+                    copies,
+                });
+            }
+        }
+    }
+    fn setup_receipt_retained(
+        &self,
+        ctx: &egui::Context,
+        owner: ViewportPassProvenance,
+        receipt: RecordingSetupReceipt,
+    ) -> bool {
+        owner.was_retained(ctx)
+            && receipt.root.was_retained(ctx)
+            && receipt.host == self.host.identity()
+            && receipt.epoch == self.setup_epoch
+            && self.open
     }
 
     pub(crate) fn show_compact_controller(
@@ -815,7 +1255,11 @@ impl RecordingDialogState {
         let mut accepted = Vec::new();
         let mut committed_selection_pass = None;
         if let Some(pending) = self.pending_selection.take() {
-            if pending.provenance.was_retained(ctx) {
+            if pending.provenance.was_retained(ctx)
+                && pending.setup.is_none_or(|receipt| {
+                    self.setup_receipt_retained(ctx, pending.provenance, receipt)
+                })
+            {
                 if pending.selection != self.selection {
                     let previous_revision = self.selection_revision;
                     self.selection = pending.selection;
@@ -835,7 +1279,19 @@ impl RecordingDialogState {
         let mut retained = Vec::new();
         let mut waiting = Vec::new();
         for pending in std::mem::take(&mut self.pending_actions) {
-            if pending.provenance.was_retained(ctx) {
+            if pending.setup.is_none()
+                && !matches!(
+                    pending.command,
+                    RecordingUiCommand::Stop { .. } | RecordingUiCommand::Discard { .. }
+                )
+            {
+                continue;
+            }
+            if pending.provenance.was_retained(ctx)
+                && pending.setup.is_none_or(|receipt| {
+                    self.setup_receipt_retained(ctx, pending.provenance, receipt)
+                })
+            {
                 retained.push(pending);
             } else if ctx.cumulative_frame_nr_for(pending.provenance.viewport_id)
                 <= pending.provenance.frame_nr
@@ -844,7 +1300,117 @@ impl RecordingDialogState {
             }
         }
         self.pending_actions = waiting;
+        let close_setup = retained.iter().any(|item| {
+            item.setup.is_some() && matches!(item.command, RecordingUiCommand::CloseSetup)
+        });
+        let host_move = retained.iter().find_map(|item| {
+            if item.setup.is_some() {
+                if let RecordingUiCommand::Host(next) = item.command {
+                    Some(next)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        if let Some(frame) = self.setup_pass.take() {
+            if self.setup_receipt_retained(ctx, frame.owner, frame.receipt) {
+                let identity = self.native_identity(frame.receipt.host);
+                if let Some(info) = frame.info.as_ref() {
+                    super::utility_dialog_size::apply_native_utility_geometry_restore(
+                        ctx,
+                        egui::ViewportClass::Immediate,
+                        true,
+                        "Screen Recorder",
+                        identity,
+                        info,
+                        egui::vec2(480.0, 470.0),
+                        None,
+                        None,
+                    );
+                    if self.host_focus {
+                        ctx.send_viewport_cmd_to(
+                            identity.viewport_id,
+                            egui::ViewportCommand::Focus,
+                        );
+                    }
+                } else if self.host_focus {
+                    if let Some(layer) = self.root_layer() {
+                        ctx.move_to_top(layer);
+                    }
+                }
+                self.host_focus = false;
+                if frame.receipt.host.host == super::utility_host::UtilityPresentation::Popout {
+                    self.host.complete_bootstrap(
+                        frame.receipt.host,
+                        (!frame.receipt.native).then_some(egui::LayerId::new(
+                            egui::Order::Middle,
+                            egui::Id::new("recording-setup-window"),
+                        )),
+                        None,
+                    );
+                }
+                let copies = ctx
+                    .with_plugin(|plugin: &mut super::utility_host::HostedCopyCapture| {
+                        let mut found = Vec::new();
+                        let mut other = Vec::new();
+                        for (receipt, copies) in plugin.captured.drain(..) {
+                            if receipt.owner.viewport_id != frame.owner.viewport_id {
+                                other.push((receipt, copies));
+                            } else if receipt.root == frame.receipt.root
+                                && receipt.owner == frame.owner
+                                && receipt.host == frame.receipt.host
+                                && receipt.epoch == frame.receipt.epoch
+                            {
+                                found.extend(copies);
+                            }
+                        }
+                        plugin.captured = other;
+                        found
+                    })
+                    .unwrap_or_default();
+                if !close_setup && host_move.is_none() {
+                    accepted.extend(
+                        frame
+                            .copies
+                            .into_iter()
+                            .chain(copies)
+                            .map(RetainedRecordingAction::CopyText),
+                    );
+                }
+            }
+        }
         for pending in retained {
+            if pending.setup.is_some()
+                && ((close_setup && !matches!(pending.command, RecordingUiCommand::CloseSetup))
+                    || (!close_setup
+                        && host_move.is_some()
+                        && !matches!(pending.command, RecordingUiCommand::Host(_))))
+            {
+                continue;
+            }
+            if let RecordingUiCommand::Host(next) = pending.command {
+                if !self.has_selector_operation() && self.host.transition(next) {
+                    self.host_popups.clear();
+                    if next == super::utility_host::UtilityPresentation::Docked {
+                        if let Some(receipt) = pending.setup {
+                            let identity = self.native_identity(receipt.host);
+                            super::utility_dialog_size::close_native_utility_geometry_viewport(
+                                ctx, identity,
+                            );
+                            ctx.send_viewport_cmd_to(
+                                identity.viewport_id,
+                                egui::ViewportCommand::Close,
+                            );
+                        }
+                        accepted.push(RetainedRecordingAction::ShowRoot);
+                    }
+                    self.host_focus = true;
+                    ctx.request_repaint();
+                }
+                continue;
+            }
             let command_revision = match pending.command {
                 RecordingUiCommand::ChoosePath { revision }
                 | RecordingUiCommand::PickRegion { revision }
@@ -866,6 +1432,9 @@ impl RecordingDialogState {
             if command_revision.is_some() && effective_revision.is_none() {
                 continue;
             }
+            if matches!(pending.command, RecordingUiCommand::ChoosePath { .. }) {
+                self.accepted_chooser = pending.setup;
+            }
             accepted.push(match pending.command {
                 RecordingUiCommand::ChoosePath { .. } => RetainedRecordingAction::ChoosePath {
                     selection_revision: effective_revision.unwrap_or(self.selection_revision),
@@ -885,6 +1454,7 @@ impl RecordingDialogState {
                     RetainedRecordingAction::Discard { generation }
                 }
                 RecordingUiCommand::CloseSetup => RetainedRecordingAction::CloseSetup,
+                RecordingUiCommand::Host(_) => unreachable!("host handled before action mapping"),
                 RecordingUiCommand::RegionAcknowledged { revision } => {
                     let revision = effective_revision.unwrap_or(revision);
                     if self.pending_region_revision == Some(revision) {
@@ -1038,31 +1608,65 @@ impl RecordingDialogState {
             == 1
     }
 
-    pub(crate) fn choose_save_path(&self, format: RecordingFormat) -> Option<PathBuf> {
+    fn choose_save_path(
+        &mut self,
+        format: RecordingFormat,
+        hwnd: Option<usize>,
+    ) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(choice) = self.test_save_choice.take() {
+            self.test_chooser_calls += 1;
+            match std::mem::take(&mut self.test_chooser_invalidation) {
+                1 => self.selection_revision = self.selection_revision.wrapping_add(1),
+                2 => {
+                    self.host
+                        .transition(super::utility_host::UtilityPresentation::Popout);
+                    self.host
+                        .transition(super::utility_host::UtilityPresentation::Docked);
+                }
+                _ => {}
+            }
+            return choice;
+        }
         let extension = match format {
             RecordingFormat::Gif => "gif",
             RecordingFormat::Mp4 => "mp4",
         };
-        rfd::FileDialog::new()
+        let picker = rfd::FileDialog::new()
             .add_filter(
                 format!("{} recording", extension.to_ascii_uppercase()),
                 &[extension],
             )
-            .set_file_name(format!("Recording.{extension}"))
-            .save_file()
+            .set_file_name(format!("Recording.{extension}"));
+        #[cfg(windows)]
+        let picker = {
+            let hwnd = hwnd.and_then(|h| std::num::NonZeroIsize::new(h as isize))?;
+            picker.set_parent(&super::add_action_dialog::NativeDialogParent(hwnd))
+        };
+        #[cfg(not(windows))]
+        let _ = hwnd;
+        picker.save_file()
     }
-
-    fn stage_selection(
-        &mut self,
-        provenance: ViewportPassProvenance,
-        selection: RecordingSelection,
-    ) {
-        self.pending_selection = Some(PendingSelection {
-            provenance,
-            selection,
-        });
+    #[cfg(test)]
+    pub(crate) fn queue_save_choice_for_test(&mut self, path: Option<PathBuf>) {
+        self.test_save_choice = Some(path);
     }
-
+    #[cfg(test)]
+    pub(crate) fn test_invalidate_next_chooser(&mut self, kind: u8) {
+        self.test_chooser_invalidation = kind;
+    }
+    #[cfg(test)]
+    pub(crate) fn test_last_request(&self) -> Option<&RecordingRequest> {
+        self.test_last_request.as_ref()
+    }
+    #[cfg(test)]
+    pub(crate) fn chooser_calls_for_test(&self) -> usize {
+        self.test_chooser_calls
+    }
+    #[cfg(test)]
+    pub(crate) fn take_test_copies(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.test_copies)
+    }
     fn stage_action(&mut self, provenance: ViewportPassProvenance, command: RecordingUiCommand) {
         const PENDING_ACTION_LIMIT: usize = 8;
         if self.pending_actions.len() == PENDING_ACTION_LIMIT {
@@ -1070,6 +1674,7 @@ impl RecordingDialogState {
         }
         self.pending_actions.push(PendingAction {
             provenance,
+            setup: None,
             command,
         });
     }
@@ -1092,7 +1697,11 @@ impl LauncherApp {
     pub(crate) fn open_recording_setup(&mut self) {
         self.recording_dialog.open();
         self.focus_panel(super::Panel::RecordingDialog);
-        self.request_launcher_state(Some(true), Some(true));
+        if self.recording_dialog.root_layer().is_some() {
+            self.request_launcher_state(Some(true), Some(true));
+        } else {
+            self.recording_dialog.request_host_focus();
+        }
     }
 
     pub(crate) fn poll_recording_region(&mut self, ctx: &egui::Context) {
@@ -1144,12 +1753,6 @@ impl LauncherApp {
         }
         let catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
         self.recording_dialog.poll_target_refresh(ctx, &catalog);
-    }
-
-    pub(crate) fn show_recording_setup(&mut self, ctx: &egui::Context, visible: bool) {
-        let catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
-        self.recording_dialog
-            .show_setup(ctx, &catalog, &self.recording_controller, visible);
     }
 
     pub(crate) fn show_recording_compact_controller(&mut self, ctx: &egui::Context) {
@@ -1220,6 +1823,17 @@ impl LauncherApp {
                     }
                 }
                 RetainedRecordingAction::CloseSetup => self.close_recording_setup(),
+                RetainedRecordingAction::ShowRoot => {
+                    self.request_launcher_visibility(true);
+                }
+                RetainedRecordingAction::CopyText(text) => {
+                    #[cfg(test)]
+                    self.recording_dialog.test_copies.push(text);
+                    #[cfg(not(test))]
+                    if let Err(error) = crate::actions::clipboard::set_text(&text) {
+                        self.report_error_message("recording.copy", error.to_string());
+                    }
+                }
                 RetainedRecordingAction::RegionAcknowledged { .. } => {}
             }
         }
@@ -1248,9 +1862,41 @@ impl LauncherApp {
                 return;
             }
         };
+        #[cfg(test)]
+        {
+            self.recording_dialog.test_last_request = Some(request.clone());
+        }
+        let Some(owner) = self.recording_dialog.accepted_chooser.take() else {
+            return;
+        };
+        let host = self.recording_dialog.host.identity();
+        let epoch = self.recording_dialog.setup_epoch;
+        if owner.host != host || owner.epoch != epoch {
+            return;
+        }
+        let identity = owner
+            .native
+            .then(|| self.recording_dialog.native_identity(owner.host));
+        #[cfg(windows)]
+        let hwnd = super::utility_dialog_size::utility_picker_hwnd(&self.egui_ctx, identity);
+        #[cfg(not(windows))]
+        let hwnd = None;
         let path = self
             .recording_dialog
-            .choose_save_path(request.options().format());
+            .choose_save_path(request.options().format(), hwnd);
+        if !self.recording_dialog.open
+            || self.recording_dialog.setup_epoch != epoch
+            || self.recording_dialog.host.identity() != host
+            || self.recording_dialog.selection_revision() != selection_revision
+        {
+            return;
+        }
+        #[cfg(all(windows, not(test)))]
+        if hwnd.is_none()
+            || hwnd != super::utility_dialog_size::utility_picker_hwnd(&self.egui_ctx, identity)
+        {
+            return;
+        }
         self.complete_recording_output_choice(selection_revision, request, path);
     }
 
@@ -1277,7 +1923,13 @@ impl LauncherApp {
             self.report_error_message("recording.start", reason);
             return;
         }
-        if let Err(error) = crate::recording::validate_recording_target(request.target()) {
+        #[cfg(test)]
+        let validate_target = !self.recording_dialog.test_accept_target;
+        #[cfg(not(test))]
+        let validate_target = true;
+        if validate_target
+            && let Err(error) = crate::recording::validate_recording_target(request.target())
+        {
             self.report_error_message("recording.start", error);
             return;
         }
@@ -1296,6 +1948,7 @@ impl LauncherApp {
                 .visual_overlay_controller()
                 .cancel_recording_region_operation(operation);
         }
+        self.recording_dialog.retire_host(&self.egui_ctx);
         self.recording_dialog.close();
         self.panel_states.recording_dialog = false;
         self.panel_stack
