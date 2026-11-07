@@ -614,8 +614,155 @@ fn visual_transform_corners(transform: VisualTransform) -> [(f64, f64); 4] {
     })
 }
 
+/// A versioned clipboard graph validated with the ordinary scene invariants.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualClipboardFragment {
+    version: u8,
+    scene: VisualScene,
+}
+
+impl VisualClipboardFragment {
+    pub fn capture(
+        scene: &VisualScene,
+        selection: &std::collections::BTreeSet<VisualObjectId>,
+    ) -> Result<Self, VisualDocumentError> {
+        if selection.len() > MAX_VISUAL_OBJECTS {
+            return Err(VisualDocumentError::TooManyObjects {
+                max_objects: MAX_VISUAL_OBJECTS,
+            });
+        }
+        scene.validate()?;
+        let mut included = selection.clone();
+        included.remove(&TITLE_OBJECT_ID);
+        if included.is_empty() || included.len() > MAX_VISUAL_OBJECTS {
+            return Err(VisualDocumentError::InvalidState(
+                "Select a visual object to copy.".into(),
+            ));
+        }
+        for id in &included {
+            if !scene.objects.iter().any(|object| object.id == *id) {
+                return Err(VisualDocumentError::UnknownObject(*id));
+            }
+        }
+        loop {
+            let before = included.len();
+            for (child, parent) in &scene.parent_by_child {
+                if included.contains(parent) {
+                    included.insert(*child);
+                }
+            }
+            if included.len() == before {
+                break;
+            }
+        }
+        for object in &scene.objects {
+            if let VisualObjectKind::Connector { connector } = &object.kind {
+                let endpoints = included.contains(&connector.from.object_id)
+                    && included.contains(&connector.to.object_id);
+                if included.contains(&object.id) && !endpoints {
+                    return Err(VisualDocumentError::InvalidState(
+                        "Copy a connector together with both endpoints.".into(),
+                    ));
+                }
+                if endpoints {
+                    included.insert(object.id);
+                }
+            }
+        }
+        let mut copied = VisualScene::new("");
+        copied.objects.extend(
+            scene
+                .objects
+                .iter()
+                .filter(|object| included.contains(&object.id))
+                .cloned(),
+        );
+        copied.layers = scene
+            .layers
+            .iter()
+            .filter(|layer| {
+                layer.id == DEFAULT_LAYER_ID
+                    || copied
+                        .objects
+                        .iter()
+                        .any(|object| object.layer_id == layer.id)
+            })
+            .cloned()
+            .collect();
+        copied.presets = scene
+            .presets
+            .iter()
+            .filter(|preset| {
+                copied.objects.iter().any(|object| {
+                    matches!(&object.kind, VisualObjectKind::PresetInstance { preset_id } if *preset_id == preset.id)
+                })
+            })
+            .cloned()
+            .collect();
+        copied.assets = scene
+            .assets
+            .iter()
+            .filter(|asset| {
+                copied.objects.iter().any(|object| {
+                    matches!(&object.kind, VisualObjectKind::ImageReference { asset_id } if *asset_id == asset.id)
+                })
+            })
+            .cloned()
+            .collect();
+        copied.parent_by_child = scene
+            .parent_by_child
+            .iter()
+            .filter(|(child, parent)| included.contains(child) && included.contains(parent))
+            .map(|(child, parent)| (*child, *parent))
+            .collect();
+        copied.validate()?;
+        Ok(Self {
+            version: 1,
+            scene: copied,
+        })
+    }
+
+    pub fn encode(&self) -> Result<String, VisualDocumentError> {
+        let text = serde_json::to_string(self)
+            .map_err(|error| VisualDocumentError::InvalidState(error.to_string()))?;
+        if text.len() > MAX_VISUAL_SCENE_BYTES {
+            return Err(VisualDocumentError::InvalidState(
+                "Clipboard fragment is too large.".into(),
+            ));
+        }
+        Ok(text)
+    }
+
+    pub fn decode(text: &str) -> Result<Self, VisualDocumentError> {
+        if text.len() > MAX_VISUAL_SCENE_BYTES {
+            return Err(VisualDocumentError::InvalidState(
+                "Clipboard fragment is too large.".into(),
+            ));
+        }
+        let fragment: Self = serde_json::from_str(text).map_err(|error| {
+            VisualDocumentError::InvalidState(format!("Invalid visual clipboard: {error}"))
+        })?;
+        if fragment.version != 1 || fragment.scene.objects.len() < 2 {
+            return Err(VisualDocumentError::InvalidState(
+                "Unsupported or empty visual clipboard fragment.".into(),
+            ));
+        }
+        fragment.scene.validate()?;
+        if fragment.scene.objects.iter().any(|object| matches!(&object.kind, VisualObjectKind::Connector { connector } if connector.from.object_id == TITLE_OBJECT_ID || connector.to.object_id == TITLE_OBJECT_ID)) {
+            return Err(VisualDocumentError::InvalidState("Clipboard connectors cannot reference the title.".into()));
+        }
+        Ok(fragment)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum VisualOperation {
+    InsertClipboard {
+        fragment: VisualClipboardFragment,
+        offset: f64,
+    },
+    DeleteSelection(Vec<VisualObjectId>),
     AddObject(VisualObjectDraft),
     /// Atomically adds (or reuses) embedded bytes and creates their reference.
     AddImageReference {
@@ -1223,6 +1370,140 @@ fn apply_visual_operation(
     outcome: &mut VisualTransactionOutcome,
 ) -> Result<(), VisualDocumentError> {
     match operation {
+        VisualOperation::InsertClipboard { fragment, offset } => {
+            fragment.scene.validate()?;
+            if fragment.version != 1 || !offset.is_finite() {
+                return Err(VisualDocumentError::InvalidState(
+                    "Invalid clipboard fragment.".into(),
+                ));
+            }
+            let mut layers = BTreeMap::new();
+            for layer in fragment.scene.layers.iter().filter(|layer| {
+                fragment
+                    .scene
+                    .objects
+                    .iter()
+                    .any(|object| object.id != TITLE_OBJECT_ID && object.layer_id == layer.id)
+            }) {
+                let id = allocate_layer_id(allocator)?;
+                layers.insert(layer.id, id);
+                scene.layers.push(VisualLayer {
+                    id,
+                    name: layer.name.clone(),
+                });
+                outcome.created_layers.push(id);
+            }
+            let mut presets = BTreeMap::new();
+            for preset in &fragment.scene.presets {
+                let id = allocate_preset_id(allocator)?;
+                presets.insert(preset.id, id);
+                let mut copy = preset.clone();
+                copy.id = id;
+                scene.presets.push(copy);
+                outcome.created_presets.push(id);
+            }
+            for asset in &fragment.scene.assets {
+                if let Some(existing) = scene.assets.iter().find(|item| item.id == asset.id) {
+                    if existing != asset {
+                        return Err(VisualDocumentError::AssetIdCollision(asset.id.clone()));
+                    }
+                } else {
+                    scene.assets.push(asset.clone());
+                }
+            }
+            let mut objects = BTreeMap::new();
+            for object in fragment
+                .scene
+                .objects
+                .iter()
+                .filter(|object| object.id != TITLE_OBJECT_ID)
+            {
+                objects.insert(object.id, allocate_object_id(allocator)?);
+            }
+            for object in fragment
+                .scene
+                .objects
+                .iter()
+                .filter(|object| object.id != TITLE_OBJECT_ID)
+            {
+                let mut copy = object.clone();
+                copy.id = objects[&object.id];
+                copy.layer_id = layers[&object.layer_id];
+                if !matches!(copy.kind, VisualObjectKind::Connector { .. }) {
+                    copy.transform.x += offset;
+                    copy.transform.y += offset;
+                }
+                match &mut copy.kind {
+                    VisualObjectKind::PresetInstance { preset_id } => {
+                        *preset_id = presets[&*preset_id]
+                    }
+                    VisualObjectKind::Connector { connector } => {
+                        connector.from.object_id =
+                            *objects.get(&connector.from.object_id).ok_or_else(|| {
+                                VisualDocumentError::InvalidState(
+                                    "Clipboard connector endpoint missing.".into(),
+                                )
+                            })?;
+                        connector.to.object_id =
+                            *objects.get(&connector.to.object_id).ok_or_else(|| {
+                                VisualDocumentError::InvalidState(
+                                    "Clipboard connector endpoint missing.".into(),
+                                )
+                            })?;
+                    }
+                    _ => {}
+                }
+                outcome.created_objects.push(copy.id);
+                scene.objects.push(copy);
+            }
+            for (child, parent) in &fragment.scene.parent_by_child {
+                let child = *objects.get(child).ok_or_else(|| {
+                    VisualDocumentError::InvalidState("Clipboard member missing.".into())
+                })?;
+                let parent = *objects.get(parent).ok_or_else(|| {
+                    VisualDocumentError::InvalidState("Clipboard parent missing.".into())
+                })?;
+                scene.parent_by_child.insert(child, parent);
+            }
+        }
+        VisualOperation::DeleteSelection(ids) => {
+            if ids.len() > MAX_VISUAL_OBJECTS {
+                return Err(VisualDocumentError::TooManyObjects {
+                    max_objects: MAX_VISUAL_OBJECTS,
+                });
+            }
+            let mut removed: std::collections::BTreeSet<_> = ids
+                .iter()
+                .copied()
+                .filter(|id| *id != TITLE_OBJECT_ID)
+                .collect();
+            for id in &removed {
+                if !scene.objects.iter().any(|object| object.id == *id) {
+                    return Err(VisualDocumentError::UnknownObject(*id));
+                }
+            }
+            loop {
+                let before = removed.len();
+                for (child, parent) in &scene.parent_by_child {
+                    if removed.contains(parent) {
+                        removed.insert(*child);
+                    }
+                }
+                for object in &scene.objects {
+                    if matches!(&object.kind, VisualObjectKind::Connector { connector } if removed.contains(&connector.from.object_id) || removed.contains(&connector.to.object_id))
+                    {
+                        removed.insert(object.id);
+                    }
+                }
+                if before == removed.len() {
+                    break;
+                }
+            }
+            scene.objects.retain(|object| !removed.contains(&object.id) && !matches!(&object.kind, VisualObjectKind::Connector { connector } if removed.contains(&connector.from.object_id) || removed.contains(&connector.to.object_id)));
+            scene
+                .parent_by_child
+                .retain(|child, parent| !removed.contains(child) && !removed.contains(parent));
+        }
         VisualOperation::AddObject(draft) => {
             let id = allocate_object_id(allocator)?;
             let object = VisualObject {
@@ -2406,6 +2687,243 @@ mod tests {
             style: VisualStyle::default(),
             kind,
         }
+    }
+
+    #[test]
+    fn visual_clipboard_graph_and_subtree_delete_are_atomic_and_undoable() {
+        let mut source = VisualDiagramDocument::new();
+        let frame = source
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Container {
+                    label: "Group".into(),
+                },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let ids = source
+            .apply_transaction(&[
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                })),
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Circle,
+                })),
+            ])
+            .unwrap()
+            .created_objects;
+        source
+            .apply_transaction(&[
+                VisualOperation::SetParent {
+                    child: ids[0],
+                    parent: Some(frame),
+                },
+                VisualOperation::SetParent {
+                    child: ids[1],
+                    parent: Some(frame),
+                },
+                VisualOperation::AddObject(draft(VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: ids[0],
+                            anchor: VisualAnchor::East,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: ids[1],
+                            anchor: VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Straight,
+                        direction: VisualConnectorDirection::Forward,
+                        label: String::new(),
+                    },
+                })),
+            ])
+            .unwrap();
+        let edge = source.scene().objects.last().unwrap().id;
+        let mut partial = source.clone();
+        partial
+            .apply_transaction(&[VisualOperation::DeleteSelection(vec![ids[0]])])
+            .unwrap();
+        assert!(
+            partial
+                .scene()
+                .objects
+                .iter()
+                .any(|object| object.id == frame)
+        );
+        assert!(
+            partial
+                .scene()
+                .objects
+                .iter()
+                .any(|object| object.id == ids[1])
+        );
+        assert!(
+            !partial
+                .scene()
+                .objects
+                .iter()
+                .any(|object| object.id == edge)
+        );
+        assert_eq!(partial.scene().parent_by_child.get(&ids[1]), Some(&frame));
+        assert!(
+            super::VisualClipboardFragment::capture(source.scene(), &[edge].into_iter().collect())
+                .is_err()
+        );
+        let fragment =
+            super::VisualClipboardFragment::capture(source.scene(), &[frame].into_iter().collect())
+                .unwrap();
+        let encoded = fragment.encode().unwrap();
+        let fragment = super::VisualClipboardFragment::decode(&encoded).unwrap();
+        let mut target = VisualDiagramDocument::new();
+        let original = target.scene().clone();
+        let result = target
+            .apply_transaction(&[VisualOperation::InsertClipboard {
+                fragment,
+                offset: 24.0,
+            }])
+            .unwrap();
+        assert_eq!(result.created_objects.len(), 4);
+        assert_eq!(target.scene().parent_by_child.len(), 2);
+        let inserted = target.scene().clone();
+        assert!(target.undo().unwrap());
+        assert_eq!(target.scene(), &original);
+        assert!(target.redo().unwrap());
+        assert_eq!(target.scene(), &inserted);
+        target
+            .apply_transaction(&[VisualOperation::DeleteSelection(vec![
+                result.created_objects[0],
+                result.created_objects[1],
+            ])])
+            .unwrap();
+        assert_eq!(target.scene().objects.len(), 1);
+        assert!(target.scene().parent_by_child.is_empty());
+        assert!(target.undo().unwrap());
+        assert_eq!(target.scene(), &inserted);
+        let before = target.scene().clone();
+        assert!(
+            super::VisualClipboardFragment::decode(&"x".repeat(MAX_VISUAL_SCENE_BYTES + 1))
+                .is_err()
+        );
+        assert_eq!(target.scene(), &before);
+    }
+
+    #[test]
+    fn visual_clipboard_dependencies_offsets_and_capacity_are_atomic() {
+        let mut source = VisualDiagramDocument::new();
+        let layer = source
+            .apply_transaction(&[VisualOperation::AddLayer {
+                name: "Foreground".into(),
+                to_index: 1,
+            }])
+            .unwrap()
+            .created_layers[0];
+        let preset = source
+            .apply_transaction(&[VisualOperation::AddPreset(VisualPresetDraft {
+                name: "Marker".into(),
+                components: vec![VisualPrimitiveComponent {
+                    shape: VisualPrimitiveShape::Diamond,
+                    transform: VisualTransform::default(),
+                    style: VisualStyle::default(),
+                }],
+            })])
+            .unwrap()
+            .created_presets[0];
+        let asset = one_pixel_asset([10, 20, 30, 255]);
+        let ids = source
+            .apply_transaction(&[
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: layer,
+                    transform: VisualTransform::default(),
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::PresetInstance { preset_id: preset },
+                }),
+                VisualOperation::AddImageReference {
+                    asset: asset.clone(),
+                    layer_id: layer,
+                    transform: VisualTransform::default(),
+                    style: VisualStyle::default(),
+                },
+            ])
+            .unwrap()
+            .created_objects;
+        let fragment =
+            super::VisualClipboardFragment::capture(source.scene(), &ids.iter().copied().collect())
+                .unwrap();
+        let mut target = VisualDiagramDocument::new();
+        let first = target
+            .apply_transaction(&[VisualOperation::InsertClipboard {
+                fragment: fragment.clone(),
+                offset: 24.0,
+            }])
+            .unwrap();
+        let second = target
+            .apply_transaction(&[VisualOperation::InsertClipboard {
+                fragment: fragment.clone(),
+                offset: 48.0,
+            }])
+            .unwrap();
+        assert_eq!(first.created_objects.len(), 2);
+        assert_eq!(second.created_objects.len(), 2);
+        assert_ne!(first.created_objects, second.created_objects);
+        assert_eq!(target.scene().assets, vec![asset]);
+        let first_objects: Vec<_> = first
+            .created_objects
+            .iter()
+            .map(|id| {
+                target
+                    .scene()
+                    .objects
+                    .iter()
+                    .find(|object| object.id == *id)
+                    .unwrap()
+            })
+            .collect();
+        let second_objects: Vec<_> = second
+            .created_objects
+            .iter()
+            .map(|id| {
+                target
+                    .scene()
+                    .objects
+                    .iter()
+                    .find(|object| object.id == *id)
+                    .unwrap()
+            })
+            .collect();
+        assert!(matches!(
+            first_objects[0].kind,
+            VisualObjectKind::PresetInstance { .. }
+        ));
+        assert!(matches!(
+            first_objects[1].kind,
+            VisualObjectKind::ImageReference { .. }
+        ));
+        assert_eq!(
+            second_objects[0].transform.x - first_objects[0].transform.x,
+            24.0
+        );
+        assert_ne!(first_objects[0].layer_id, second_objects[0].layer_id);
+        assert_ne!(first.created_presets, second.created_presets);
+        let fill = (target.scene().layers.len()..super::MAX_VISUAL_LAYERS)
+            .map(|index| VisualOperation::AddLayer {
+                name: format!("Layer {index}"),
+                to_index: index,
+            })
+            .collect::<Vec<_>>();
+        target.apply_transaction(&fill).unwrap();
+        let before = target.scene().clone();
+        let revision = target.revision();
+        assert!(
+            target
+                .apply_transaction(&[VisualOperation::InsertClipboard {
+                    fragment,
+                    offset: 72.0
+                }])
+                .is_err()
+        );
+        assert_eq!(target.scene(), &before);
+        assert_eq!(target.revision(), revision);
+        assert!(super::VisualClipboardFragment::decode("{\"version\":999}").is_err());
     }
 
     #[test]

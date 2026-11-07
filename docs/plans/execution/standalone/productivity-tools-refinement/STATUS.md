@@ -32,7 +32,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | M3-C | Safe multi-source ZIP creation domain | complete |
 | M3-D | ZIP creation UI and accepted chooser effects | complete |
 | M4-A | Visual navigation, fonts, marquee and viewer sizing | complete |
-| M4-B | Structural clipboard and keyboard ownership | pending |
+| M4-B | Structural clipboard and keyboard ownership | complete |
 | M4-C | Owned persistent inline labels | pending |
 | M4-D | Persistent editable connector bends | pending |
 | M4-E | Four additional editable templates | pending |
@@ -306,3 +306,38 @@ M4-A exact common command prefix: `cargo nextest run -p multi_launcher --cargo-p
 - Final fit/manual selector: `test(gui::diagram_studio::tests::visual_viewer_fit_tracks_resize_until_manual_zoom) | test(gui::diagram_studio::tests::diagram_studio_visual_canvas_viewer_navigation_keeps_editor_camera_independent) | test(gui::diagram_studio::tests::studio_usability_diagram_viewer_generic_resize_and_camera_share_one_render_result)`.
 
 Final no-behavior cleanup removed isolated wrapping/blank and added the existing GUI too-many-arguments lint pattern to the scoped minimap orchestration helper. No jobs remain; only diagram_studio.rs plus parent ledger changed. git diff --check passes; no broad test/build. Existing visual_canvas.rs mapping abstraction sufficed unchanged.
+
+
+M4-A checkpoint4a50a6c576127d236f4241eb8f6b17831b58511e committed; its one normal push succeeded. Tree clean before sole-writer M4-B assignment. Existing prepared handoff remains authoritative; labels/manual routes remain later dependent packets.
+
+## M8 final tooling / documentation handoff
+
+Read-only planner found no dedicated Clippy preset. One final package-scoped pass: `cargo clippy --locked --offline -p multi_launcher --lib --bin multi_launcher --test recycle_plugin --profile fast-dev --no-deps --message-format=json` (include recycle target if changed by M7B). No workspace/all-targets/release/-Dwarnings. Capture JSON compiler-message package/lint/primary location and classify task-introduced or materially changed versus existing touched/untouched first-party versus dependency/vendor by baseline source comparison; identical historical emission is not asserted. Fix task-caused findings without blanket suppression/unrelated cleanup. Existing owned-process compile-stage machinery supports bounded ownership if needed; no wrapper self-tests required.
+
+User-facing docs: calculation_pad/README.md + executable examples; docs/DIAGRAM_STUDIO.md for authoring/viewer/templates; docs/DIAGRAM_EXPORT.md for outputs/draw.io limits; README Silent Screen Recorder + recording plugin metadata; ZIP and Explorer plugin/dialog help (README currently no dedicated section); actual plugin metadata and help_window for Command Help. Update changed behavior/platform limits only in M8, not historical-plan prose as a user-help substitute. Planner performed no writes/builds/lint.
+
+### M4-B implementation in progress
+
+VisualClipboardFragment reuses a bounded versioned VisualScene and ordinary validation. Capture validates scene/selection before dependency cloning; decode checks input bytes before serde. Model InsertClipboard remaps objects/endpoints/layers/presets/membership and reuses identical content-addressed assets within atomic apply_transaction; DeleteSelection expands descendants/cascades without duplicate removal. GUI PendingMutation::VisualClipboard carries document/revision/selection and reaches ClipboardBackend only after accepted owner completion. Native payload priority and matching event/key consumption added.
+
+Parent clarified a review assumption: validate_scene forbids connector frame membership, so a connector inside a surviving frame is NOT a valid reproduced defect. Preserve that invariant; supported child deletion within a surviving frame and ordinary connector cascades get regression coverage. No invalid-membership fixture requested. Parent requested directly scoped missing tests for cross-document layers/presets/assets, repeated fresh paste/offset/order, capacity/invalid atomicity, canvas shortcuts/history and text/menu/viewer/stale/discard refusal, in addition to initial graph/copy/paste/failed-cut tests. First compile running, no verification completion yet. Initial Python cp1252 script failure wrote nothing and was corrected explicitly to UTF-8; no blocker.
+
+M4-B first command used an unavailable Nextest runner profile via --profile fast-dev, so no tests ran; corrected --cargo-profile fast-dev compiled. Initial run963ea677-616a-424b-a920-955be0efc502 executed1/3 selected, that model test failed and remaining2 were not run under actual fail-fast. Paste had offset connector transforms, violating canonical default-transform validation. Model correction offsets positioned objects only; connectors follow remapped endpoints. Future manual interior points are M4D, not represented as connector transform. Added/affected bounded coverage and next --no-fail-fast scoped run pending. Ordinary compilation/test feedback, no user blocker.
+
+### M4-B result
+
+Version1 typed bounded VisualClipboardFragment captures the selected graph/subtrees/internal connectors and required layers/presets/assets, preserving order while excluding the document title/external parent. Source validation precedes clones; input byte limits precede serde. InsertClipboard allocates/remaps IDs/endpoints/membership/dependencies atomically in the existing document transaction; repeated paste uses fresh target IDs and visible offsets, assets reuse matching hashes, connector transforms remain canonical. Unused synthetic-title layer is not inserted. DeleteSelection handles descendants/cascades once and preserves title; undo/redo remains one transaction.
+
+GUI PendingMutation owns accepted clipboard/input effects with current document/revision/selection and existing retained owner fences. Native Copy/Cut/Paste has payload priority and consumes matching key fallback once; fallible existing ClipboardBackend write precedes cut deletion. Canvas Select All/Delete/Backspace/history routes require actual writable canvas focus and reject text/menu/viewer/gesture/transition/stale/discard input. Selection includes all pasted objects. No OS clipboard work occurs during rendering.
+
+Combined no-fail-fast runabe3daf2-7f89-4d2f-9b2d-66ef28ceeffe passed4/6: both model cases, egui event consumption and initial negatives passed; positive copy/Delete did not fire. Corrected viewport-owned test focus via actual pointer clicks; first follow-up e37d90ee-9a22-443f-8450-584343d549df passed2/4 (affected model dependency/capacity after unused-layer fix and strengthened real text/menu/viewer/stale/discard negative), positive shortcuts still failed. Existing host installs accepted deferred canvas focus after child body; tests now wait its normal settling frame and assert actual child canvas focus, preserving production guards. Final GUI runbb2e2a00-3310-4e6d-822e-19007f71a68d passed3/3. All six scoped cases now have passing evidence. Native clipboard/keys remain M8.
+
+Coverage includes cross-document layers/presets/assets, repeated fresh IDs/order/offsets, capacity/invalid refusal with unchanged scene/revision, group and supported surviving-frame child deletion plus connector cascade, history, egui clipboard-event/key dedup and delivered payload priority, fresh pasted object count/selection, failed-write no-cut, actual rendered text edit/menu and owner/stale/discard/viewer refusals. Parent inspected model/GUI boundaries and scope. Source formatting restricted to owned hunks; no broad builds/suites. Exact command receipts follow.
+M4-B actual command prefix: `cargo nextest run --cargo-profile fast-dev --lib -j 1` (these runs omitted package selector; filters selected only the named application cases, no unfiltered workspace suite). Later packets return to explicit `-p multi_launcher`.
+
+- Initial963ea selector (fail-fast): `test(visual_clipboard_graph_and_subtree_delete_are_atomic_and_undoable) | test(visual_clipboard_events_deduplicate_and_failed_cut_preserves_scene) | test(visual_clipboard_native_paste_consumes_matching_fallback)`.
+- Combinedabe3 selector (`--no-fail-fast`): `test(visual_clipboard_graph_and_subtree_delete_are_atomic_and_undoable) | test(visual_clipboard_dependencies_offsets_and_capacity_are_atomic) | test(visual_clipboard_events_deduplicate_and_failed_cut_preserves_scene) | test(visual_clipboard_native_paste_consumes_matching_fallback) | test(visual_canvas_clipboard_selection_delete_and_history_shortcuts) | test(visual_clipboard_rejects_unfocused_discarded_and_stale_effects)`.
+- Affectede37 selector (`--no-fail-fast`): `test(visual_clipboard_dependencies_offsets_and_capacity_are_atomic) | test(visual_clipboard_events_deduplicate_and_failed_cut_preserves_scene) | test(visual_canvas_clipboard_selection_delete_and_history_shortcuts) | test(visual_clipboard_rejects_unfocused_discarded_and_stale_effects)`.
+- Finalbb2 selector (`--no-fail-fast`): `test(visual_clipboard_events_deduplicate_and_failed_cut_preserves_scene) | test(visual_canvas_clipboard_selection_delete_and_history_shortcuts) | test(visual_clipboard_rejects_unfocused_discarded_and_stale_effects)`.
+
+All egui events are simulated, not native Windows evidence. Source cleanup after tests is formatting only, git diff --check clean, no Cargo/native job remains. Only visual.rs/mod.rs/diagram_studio.rs and parent STATUS changed. Shared ROOT click helper restored; child focus receipt belongs only to new canvas focus helper.

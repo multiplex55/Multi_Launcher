@@ -795,7 +795,22 @@ struct VisualGesture {
     did_move: bool,
 }
 
+enum VisualClipboardAction {
+    Copy,
+    Cut,
+    Paste(Option<String>),
+    OversizedPaste,
+    SelectAll,
+    Delete,
+}
+
 enum PendingMutation {
+    VisualClipboard {
+        action: VisualClipboardAction,
+        selection: BTreeSet<VisualObjectId>,
+        expected_document: RenderDocumentIdentity,
+        expected_revision: u64,
+    },
     ReplaceSource(String),
     ReplaceSourceWithCursor {
         source: String,
@@ -1204,6 +1219,8 @@ pub(crate) struct DiagramStudioDialog {
     visual_membership_target: Option<VisualObjectId>,
     visual_selection: Option<VisualObjectId>,
     visual_selected_objects: BTreeSet<VisualObjectId>,
+    visual_clipboard: Arc<dyn crate::clipboard_modify::clipboard::ClipboardBackend>,
+    visual_last_paste: Option<(u64, u32)>,
     visual_selected_preset: Option<crate::diagram::VisualPresetId>,
     visual_property_draft: Option<VisualPropertyDraft>,
     visual_gesture: Option<VisualGesture>,
@@ -1412,6 +1429,8 @@ impl DiagramStudioDialog {
             visual_membership_target: None,
             visual_selection: None,
             visual_selected_objects: BTreeSet::new(),
+            visual_clipboard: Arc::new(crate::clipboard_modify::clipboard::ArboardClipboardBackend),
+            visual_last_paste: None,
             visual_selected_preset: None,
             visual_property_draft: None,
             visual_gesture: None,
@@ -3236,6 +3255,7 @@ impl DiagramStudioDialog {
             matches!(
                 mutation,
                 PendingMutation::ReplaceVisualLabel { .. }
+                    | PendingMutation::VisualClipboard { .. }
                     | PendingMutation::VisualTransaction { .. }
                     | PendingMutation::VisualAssetImport { .. }
                     | PendingMutation::VisualLayoutFailure { .. }
@@ -6143,8 +6163,110 @@ impl DiagramStudioDialog {
         }
     }
 
+    fn apply_visual_clipboard(
+        &mut self,
+        action: VisualClipboardAction,
+        selection: &BTreeSet<VisualObjectId>,
+    ) -> Result<(), String> {
+        use std::hash::{Hash, Hasher};
+        match action {
+            VisualClipboardAction::OversizedPaste => {
+                return Err("Clipboard fragment is too large.".into());
+            }
+            VisualClipboardAction::SelectAll => {
+                let scene = self.documents.visual_scene().ok_or("No visual document")?;
+                self.visual_selected_objects = scene
+                    .objects
+                    .iter()
+                    .filter(|object| object.id != crate::diagram::TITLE_OBJECT_ID)
+                    .map(|object| object.id)
+                    .collect();
+                self.visual_selection = self.visual_selected_objects.last().copied();
+            }
+            VisualClipboardAction::Copy | VisualClipboardAction::Cut => {
+                let cut = matches!(action, VisualClipboardAction::Cut);
+                let scene = self.documents.visual_scene().ok_or("No visual document")?;
+                let text = crate::diagram::VisualClipboardFragment::capture(scene, selection)
+                    .and_then(|fragment| fragment.encode())
+                    .map_err(|error| error.to_string())?;
+                self.visual_clipboard
+                    .write_text(&text)
+                    .map_err(|error| error.to_string())?;
+                self.visual_last_paste = None;
+                if cut {
+                    self.documents
+                        .apply_visual_transaction(&[VisualOperation::DeleteSelection(
+                            selection.iter().copied().collect(),
+                        )])
+                        .map_err(|error| error.to_string())?;
+                    self.revalidate_visual_selection();
+                }
+            }
+            VisualClipboardAction::Delete => {
+                self.documents
+                    .apply_visual_transaction(&[VisualOperation::DeleteSelection(
+                        selection.iter().copied().collect(),
+                    )])
+                    .map_err(|error| error.to_string())?;
+                self.revalidate_visual_selection();
+            }
+            VisualClipboardAction::Paste(payload) => {
+                let text = match payload {
+                    Some(text) => text,
+                    None => self
+                        .visual_clipboard
+                        .read_text()
+                        .map_err(|error| error.to_string())?,
+                };
+                let fragment = crate::diagram::VisualClipboardFragment::decode(&text)
+                    .map_err(|error| error.to_string())?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                text.hash(&mut hasher);
+                let hash = hasher.finish();
+                let count = self
+                    .visual_last_paste
+                    .filter(|(last, _)| *last == hash)
+                    .map_or(1, |(_, count)| count.saturating_add(1));
+                let outcome = self
+                    .documents
+                    .apply_visual_transaction(&[VisualOperation::InsertClipboard {
+                        fragment,
+                        offset: f64::from(count) * 24.0,
+                    }])
+                    .map_err(|error| error.to_string())?;
+                self.visual_last_paste = Some((hash, count));
+                self.visual_selected_objects = outcome.created_objects.into_iter().collect();
+                self.visual_selection = self.visual_selected_objects.last().copied();
+            }
+        }
+        Ok(())
+    }
+
     fn apply_pending(&mut self, pending: PendingMutation) -> bool {
         match pending {
+            PendingMutation::VisualClipboard {
+                action,
+                selection,
+                expected_document,
+                expected_revision,
+            } => {
+                if !self.visual_intent_is_current(&expected_document, expected_revision)
+                    || self.visual_selected_objects != selection
+                {
+                    return self.reject_stale_visual_intent();
+                }
+                let result = self.apply_visual_clipboard(action, &selection);
+                match result {
+                    Ok(()) => {
+                        self.message = None;
+                        true
+                    }
+                    Err(error) => {
+                        self.message = Some(StudioNotice::error(error));
+                        false
+                    }
+                }
+            }
             PendingMutation::ReplaceSourceWithCursor {
                 source,
                 expected_document,
@@ -6372,6 +6494,7 @@ impl DiagramStudioDialog {
                 .replace_source(source)
                 .map(|changed| (changed, None)),
             PendingMutation::ReplaceVisualLabel { .. }
+            | PendingMutation::VisualClipboard { .. }
             | PendingMutation::VisualTransaction { .. }
             | PendingMutation::VisualAssetImport { .. }
             | PendingMutation::VisualLayoutFailure { .. }
@@ -7920,6 +8043,7 @@ impl DiagramStudioDialog {
         let mut stage_history: Option<bool> = None;
         let mut clear_visual_draft = false;
         let mut canvas_interaction_authorized = false;
+        let mut clipboard_action = None;
         let _visual_scroll = egui::ScrollArea::vertical()
             .id_salt("diagram-studio-visual-document-scroll")
             .show(ui, |ui| {
@@ -8352,6 +8476,16 @@ impl DiagramStudioDialog {
                 let canvas_editing_allowed = canvas_interaction_authorized
                     && pointer_press_authorized
                     && gesture.is_none();
+                if canvas_editing_allowed
+                    && ui.memory(|memory| memory.focused()) == Some(canvas_response.id)
+                    && self.active_menu_scope.is_none()
+                {
+                    let (action, history) = visual_canvas_keyboard_action(ui);
+                    clipboard_action = action;
+                    if stage_history.is_none() {
+                        stage_history = history;
+                    }
+                }
                 if !visual_canvas_editing_allowed || !widget_focus_allows_canvas {
                     gesture = None;
                     self.visual_canvas_press_authorized = None;
@@ -9957,7 +10091,14 @@ impl DiagramStudioDialog {
             }
         }
         if pending.is_none() && document_intent.is_none() {
-            if let Some((operations, select_after)) = staged_operations {
+            if let Some(action) = clipboard_action {
+                *pending = Some(PendingMutation::VisualClipboard {
+                    action,
+                    selection: selection_state.objects.clone(),
+                    expected_document: visual_identity,
+                    expected_revision: visual_revision,
+                });
+            } else if let Some((operations, select_after)) = staged_operations {
                 *pending = Some(PendingMutation::VisualTransaction {
                     operations,
                     expected_document: visual_identity,
@@ -9991,6 +10132,74 @@ impl DiagramStudioDialog {
         effects.visual_asset_picker_requested = visual_asset_picker_requested;
         effects
     }
+}
+
+fn visual_canvas_keyboard_action(ui: &egui::Ui) -> (Option<VisualClipboardAction>, Option<bool>) {
+    ui.ctx().input_mut(|input| {
+        // Prefer the native clipboard event and remove the matching key fallback.
+        let native = input.events.iter().find_map(|event| match event {
+            egui::Event::Copy => Some((egui::Key::C, VisualClipboardAction::Copy)),
+            egui::Event::Cut => Some((egui::Key::X, VisualClipboardAction::Cut)),
+            egui::Event::Paste(text) => Some((
+                egui::Key::V,
+                if text.len() > crate::diagram::MAX_VISUAL_SCENE_BYTES {
+                    VisualClipboardAction::OversizedPaste
+                } else {
+                    VisualClipboardAction::Paste(Some(text.clone()))
+                },
+            )),
+            _ => None,
+        });
+        if let Some((key, action)) = native {
+            input.events.retain(|event| !match event {
+                egui::Event::Copy => key == egui::Key::C,
+                egui::Event::Cut => key == egui::Key::X,
+                egui::Event::Paste(_) => key == egui::Key::V,
+                egui::Event::Key {
+                    key: event_key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => *event_key == key && modifiers.command,
+                _ => false,
+            });
+            return (Some(action), None);
+        }
+        let found = input.events.iter().find_map(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event else {
+                return None;
+            };
+            if modifiers.command {
+                let result = match key {
+                    egui::Key::C => (Some(VisualClipboardAction::Copy), None),
+                    egui::Key::X => (Some(VisualClipboardAction::Cut), None),
+                    egui::Key::V => (Some(VisualClipboardAction::Paste(None)), None),
+                    egui::Key::A => (Some(VisualClipboardAction::SelectAll), None),
+                    egui::Key::Z => (None, Some(modifiers.shift)),
+                    egui::Key::Y => (None, Some(true)),
+                    _ => return None,
+                };
+                Some((*key, result))
+            } else if matches!(key, egui::Key::Delete | egui::Key::Backspace) {
+                Some((*key, (Some(VisualClipboardAction::Delete), None)))
+            } else {
+                None
+            }
+        });
+        if let Some((key, result)) = found {
+            input.events.retain(|event| {
+                !matches!(event, egui::Event::Key { key: event_key, pressed: true, .. } if *event_key == key)
+            });
+            result
+        } else {
+            (None, None)
+        }
+    })
 }
 
 fn paint_visual_projection(
@@ -14007,6 +14216,176 @@ mod tests {
         dialog.reset_document_presentation();
         dialog.open();
         dialog
+    }
+
+    fn focus_visual_canvas(dialog: &mut DiagramStudioDialog, ctx: &egui::Context) {
+        frame(dialog, ctx);
+        let point = dialog.test_visual_canvas_rect.unwrap().left_top() + egui::vec2(20.0, 20.0);
+        for pressed in [true, false] {
+            frame_with_child_events(
+                dialog,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        frame(dialog, ctx);
+        assert_eq!(super::super::render::immediate_viewport_test_focused_id(), Some((viewport_id(), dialog.test_visual_canvas_id)));
+    }
+
+    #[test]
+    fn visual_clipboard_events_deduplicate_and_failed_cut_preserves_scene() {
+        use crate::clipboard_modify::clipboard::{
+            ClipboardError,
+            fake::{FakeClipboardBackend, Op},
+        };
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let backend = Arc::new(FakeClipboardBackend::default());
+        dialog.visual_clipboard = backend.clone();
+        let ctx = egui::Context::default();
+        focus_visual_canvas(&mut dialog, &ctx);
+        dialog.visual_selected_objects = ids.iter().copied().collect();
+        dialog.visual_selection = ids.first().copied();
+        let key = egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        frame_with_child_events(&mut dialog, &ctx, vec![key, egui::Event::Copy]);
+        assert_eq!(backend.writes().len(), 1);
+        let copied = backend.writes()[0].clone();
+        let paste_backend = Arc::new(FakeClipboardBackend::with_text("not a fragment"));
+        dialog.visual_clipboard = paste_backend.clone();
+        let key = egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        frame_with_child_events(&mut dialog, &ctx, vec![key, egui::Event::Paste(copied)]);
+        assert_eq!(dialog.visual_selected_objects.len(), ids.len());
+        assert_eq!(
+            dialog.documents.visual_scene().unwrap().objects.len(),
+            1 + ids.len() * 2
+        );
+        assert!(
+            dialog
+                .visual_selected_objects
+                .iter()
+                .all(|id| !ids.contains(id))
+        );
+        let after_paste = dialog.documents.visual_scene().unwrap().clone();
+        paste_backend.push(Op::Write(Err(ClipboardError::Busy("busy".into()))));
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Cut]);
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &after_paste);
+        assert!(dialog.message.is_some());
+    }
+
+    #[test]
+    fn visual_clipboard_native_paste_consumes_matching_fallback() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::Key {
+                    key: egui::Key::V,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                },
+                egui::Event::Paste("delivered payload".into()),
+                egui::Event::Text("unrelated".into()),
+            ],
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let (action, history) = super::visual_canvas_keyboard_action(ui);
+            assert!(matches!(action, Some(super::VisualClipboardAction::Paste(Some(ref text))) if text == "delivered payload"));
+            assert!(history.is_none());
+            assert_eq!(ui.input(|input| input.events.len()), 1);
+            assert!(matches!(&ui.input(|input| input.events.clone())[0], egui::Event::Text(_)));
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn visual_canvas_clipboard_selection_delete_and_history_shortcuts() {
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let ctx = egui::Context::default();
+        focus_visual_canvas(&mut dialog, &ctx);
+        send_child_key(&mut dialog, &ctx, egui::Key::A, egui::Modifiers::COMMAND);
+        assert_eq!(dialog.visual_selected_objects.len(), ids.len());
+        send_child_key(&mut dialog, &ctx, egui::Key::Delete, egui::Modifiers::NONE);
+        assert_eq!(dialog.documents.visual_scene().unwrap().objects.len(), 1);
+        send_child_key(&mut dialog, &ctx, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(dialog.documents.visual_scene().unwrap().objects.len(), 4);
+        send_child_key(&mut dialog, &ctx, egui::Key::Y, egui::Modifiers::COMMAND);
+        assert_eq!(dialog.documents.visual_scene().unwrap().objects.len(), 1);
+    }
+
+    #[test]
+    fn visual_clipboard_rejects_unfocused_discarded_and_stale_effects() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+        let mut dialog = initialized_visual_dialog();
+        let ids = add_visual_layout_objects(&mut dialog);
+        let backend = Arc::new(FakeClipboardBackend::default());
+        dialog.visual_clipboard = backend.clone();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_label");
+        assert!(dialog.test_action_has_focus("visual_label"));
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Text(" edited".into())]);
+        assert!(dialog.documents.visual_label().unwrap().contains(" edited"));
+        let before = dialog.documents.visual_scene().unwrap().clone();
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Copy]);
+        assert!(backend.writes().is_empty());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        click_action(&mut dialog, &ctx, "menu_visual_templates");
+        frame(&mut dialog, &ctx);
+        assert!(dialog.active_menu_scope.is_some());
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::Cut]);
+        assert!(backend.writes().is_empty());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        click_action(&mut dialog, &ctx, "menu_visual_templates");
+        focus_visual_canvas(&mut dialog, &ctx);
+        dialog.visual_selected_objects = ids.iter().copied().collect();
+        dialog.visual_selection = ids.first().copied();
+        frame_with_events_and_root_discard(&mut dialog, &ctx, vec![egui::Event::Cut]);
+        assert!(backend.writes().is_empty());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        dialog.viewer_open = true;
+        frame(&mut dialog, &ctx);
+        click_viewer_canvas(&mut dialog, &ctx);
+        assert!(dialog.test_viewer_canvas_has_focus());
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::Cut]);
+        assert!(backend.writes().is_empty());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        let stale = dialog.render_document.clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        dialog.render_document = RenderDocumentIdentity::fresh();
+        dialog.test_pending_mutation = Some(PendingMutation::VisualClipboard {
+            action: super::VisualClipboardAction::Cut,
+            selection: dialog.visual_selected_objects.clone(),
+            expected_document: stale,
+            expected_revision: revision,
+        });
+        frame(&mut dialog, &ctx);
+        assert!(backend.writes().is_empty());
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
     }
 
     fn save_test_diagram(path: &Path, source: &str) -> Vec<u8> {

@@ -58,7 +58,7 @@ pub use visual::{
     MAX_VISUAL_LAYERS, MAX_VISUAL_NAME_BYTES, MAX_VISUAL_OBJECTS, MAX_VISUAL_PRESET_COMPONENTS,
     MAX_VISUAL_PRESETS, MAX_VISUAL_SCENE_BYTES, MAX_VISUAL_TEXT_BYTES,
     MAX_VISUAL_TRANSACTION_OPERATIONS, MIN_VISUAL_DIMENSION, TITLE_OBJECT_ID, VisualAnchor,
-    VisualAsset, VisualAssetFormat, VisualAssetId, VisualColor, VisualConnector,
+    VisualAsset, VisualAssetFormat, VisualAssetId, VisualClipboardFragment, VisualColor, VisualConnector,
     VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument,
     VisualDocumentError, VisualLayer, VisualLayerId, VisualLineStyle, VisualObject,
     VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualPreset,
