@@ -1004,3 +1004,50 @@ Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; origi
 | r04-m4-d-symmetric-list.log | 55A6510362CA20821C91B777B0E22E088172A0EE829243C581A46FA4811A49E2 |
 | r04-m4-d-symmetric-run.log | A2B4917B27B95FBA479AABEA4F18AD45C6769BCFB47FA8F3BDF81CC6A9C4944D |
 | r04-m4-d-independent-xml-check.json | 56796B438472F3902482CD979F67C7D3625388AF28D746CE2872D0C088CC0E0E |
+
+
+## R04 final category disposition — Diagram completion
+
+M4-D source checkpoint a797430bae48e9c40a66d81e59ec3bac9d0e9889 is committed and pushed; upstream equals HEAD and the checkout is clean before this reporting update. R04 M0-A 6dc92c904b7cd6cc0f966131561b299e4bfdb295 has exact direct parent R03 final reporting tip 00e199e00df7513153ceb00a42e8cb5cb1f5b9e0. Accepted source checkpoints are M4-A 47bee821f16f33473aa0a0da4d113c9a2b27f64e, M4-B 06d61ae88fb312720a500509c2e4bf7c39f06623, M4-C d3f8bf3a9ca4a66be9e9428b3dc2c11801df04f8 and M4-D above. Every normal push succeeded. The range has no merge commits or history rewrites. The actual final reporting SHA is read after this documentation commit, recorded separately, and becomes the sole R05 parent.
+
+This disposition supersedes the inherited C03 frozen rows without erasing their failure history. Original IDs are individually enumerated below using the original E.4 owner mapping; grouped rows there do not establish more detailed per-number labels than the source Goal supplies.
+
+| Original ID | Final local disposition / evidence owner | Remaining full native proof |
+| --- | --- | --- |
+| 27 | Implemented and locally verified: M8-A/B retained dual authority/model/style/layers; M4-A hierarchy; M4-D frozen v1/v2/v3 compatibility | N6/N7 user pending |
+| 28 | Implemented and locally verified: M8-A/B retained dual authority/model/style/layers; M4-A hierarchy; M4-D frozen v1/v2/v3 compatibility | N6/N7 user pending |
+| 29 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 30 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 31 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 32 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 33 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 34 | Implemented and locally verified: M8-A/B retained dual authority/model/style/layers; M4-A hierarchy; M4-D frozen v1/v2/v3 compatibility | N6/N7 user pending |
+| 35 | Implemented and locally verified: M8-A/B retained dual authority/model/style/layers; M4-A hierarchy; M4-D frozen v1/v2/v3 compatibility | N6/N7 user pending |
+| 36 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 37 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 38 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+| 39 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 40 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 41 | Implemented and locally verified: M9-A/B retained manipulation/connectors/assets/navigation; M4-A persistent groups, containers/swimlanes and descendant transforms | N6/N7 user pending |
+| 42 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+| 43 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+| 44 | Implemented and locally verified: M11-A/B and M4-D supported grouped draw.io profile, explicit refusals/reports and separate-copy workflow | N6/N7 user pending |
+| 45 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+| 46 | Implemented and locally verified: M10-A/B retained assistance/conversion/library; M4-B five starters and M4-C actual current rich image controls/publication | N6/N7 user pending |
+
+| Original milestone | Final recovery disposition |
+| --- | --- |
+| M8-A | Retained explicit Mermaid/Visual authority and versioned persistence; M4-D actually executes frozen invalid v1 and deterministic v2 migration and v3 legacy-wire checks. No eager source rewrite. |
+| M8-B | Retained primitives/styles/layers/shared projection; M4-A adds validated hierarchy/frame geometry while retaining bounded native model. |
+| M9-A | Retained ordinary transforms/snapping/guides/minimap; M4-A actual visible grouped drag now passes strict canvas mapping after real Fit, with descendant closure and coherent undo. Full native pointer/DPI remains pending. |
+| M9-B | Retained connectors/assets/presets; M4-A completes persistent group/container/swimlane editing and shared projection/export. |
+| M10-A | Retained Mermaid assistance, explicit supported Visual copy and recents/duplicate; M4-B adds five editable Visual starter categories with real menu and dirty decisions. No promise of rich-to-Mermaid conversion. |
+| M10-B | M4-C completes reachable scale/background controls, current SVG/PNG encoding, retained cancellation/staging and atomic no-clobber publication. Viewer stays read-only with independent camera. |
+| M11-A | M4-D implements faithful bounded uncompressed grouped interchange; layers, supported nested unrotated frames, rotated leaves and anchored connectors round-trip. Unsupported content is explicitly refused before publication. |
+| M11-B | Current Diagram Studio/export references and portable fixture updated; all 20 selected Diagram IDs accounted for here. Local workflow/owner tests and review complete; full N6/N7 and external reader deferred to final packet. |
+
+M4-A/B/C/D have respectively 22, 12, 25 and 24 distinct passing affected-case inventories within their recorded receipts. These overlap and must not be summed as unique category tests. Original failures, diagnostic runs, focused corrections and compile-only attempts remain separately recorded above. The latest production lib/main-bin check passes with six pre-existing Note Panel/Table warnings and existing dependency warnings; final M4-D changes after that check are cfg(test)/docs only. All scoped source, lifecycle, geometry, wire-profile, test-oracle and final accuracy reviews are clear. This reporting-only checkpoint requires diff/review, not another Cargo run. R06 will perform the required cumulative affected-case verification and scoped Clippy once.
+
+No implementation blocker remains within the documented draw.io subset. Compressed/multi-page/active/external content, relative ports/offsets/waypoints, unsupported styles/assets/presets, rotated parents with descendants, cross-layer membership and unrepresentable tree/paint stacking are explicit refusals rather than lossless claims. The portable fixture passes the app's import/export/reimport and independent XML syntax/reference checks; no independent draw.io reader was invoked. Full native N6/N7, external-reader rendering and complete monitor/DPI/picker/timing checks remain IMPLEMENTED_USER_VALIDATION_PENDING. R01/R02 Diagram shared-host evidence carries forward; no intermediate user check is requested.
+
+Next: read this commit's actual pushed HEAD, create the fresh R05 category branch directly from it, commit/verify/push R05/M0-A before any source edits, then implement M5-A from the existing read-only handoff. M5-B list editor/typed launcher/progress/cancel and M5-C utility/recorder checks follow sequentially. R06 then closes the cumulative matrix and supplies the single N1–N12 packet. Do not repeat Dashboard fixtures, accepted R01–R04 milestones or previous native reprobes. Goal remains active.
