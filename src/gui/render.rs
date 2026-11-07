@@ -2138,7 +2138,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self.clipboard_modify_host.root_layer(),
             Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
             Panel::ZipExtractorDialog => NavigationDialogKind::ZipExtractor.layer_id(),
-            Panel::RegexTesterDialog => NavigationDialogKind::RegexTester.layer_id(),
+            Panel::RegexTesterDialog => self.regex_tester_dialog.root_layer(),
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
             Panel::DateTimeStudioDialog => middle(egui::Id::new("date-time-studio-window")),
             Panel::MarkdownStudioDialog => self.markdown_studio_dialog.host_layer_if_root(),
@@ -4321,6 +4321,7 @@ impl LauncherApp {
         self.poll_crop_screenshot(ctx);
         self.poll_screen_draw_region_picker(ctx);
         self.xml_toolkit_dialog.poll_host_background(ctx);
+        self.regex_tester_dialog.poll_host_background(ctx);
         self.clipboard_dialog.observe_clipboard_version();
         self.poll_batch_rename_runtime(ctx);
         self.poll_search_replace_runtime(ctx);
@@ -4800,13 +4801,14 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 27] {
+    fn viewport_bootstrap_state(&self) -> [bool; 28] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
             self.radial_placement_viewport.needs_viewport_bootstrap(),
             self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
             self.xml_toolkit_dialog.needs_viewport_bootstrap(),
+            self.regex_tester_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4842,7 +4844,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 27],
+        previously_pending: [bool; 28],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -4879,7 +4881,7 @@ impl LauncherApp {
         }
     }
 
-    fn show_regex_tester(&mut self, ctx: &egui::Context, root_visible: bool) {
+    fn show_regex_tester(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
         use crate::gui::jump_mode::ui::NavigationDialogKind;
 
         let instance = self
@@ -4904,38 +4906,34 @@ impl LauncherApp {
             ),
             _ => None,
         };
-        let application_input_allowed = self.native_ui_application_input_allowed(ctx);
-        let root_native_owner_current = root_visible
-            && instance.is_some()
-            && self.native_ui_host_input_allowed(ctx, root_visible)
-            && crate::gui::jump_mode::ui::visible_top_middle_layer(ctx)
-                == NavigationDialogKind::RegexTester.layer_id();
+        let application_input_allowed = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible();
+        let root_native_owner_current = self.regex_tester_root_input_owner_current(ctx, root_visible);
+        let jump_mode_enabled = self.jump_mode_enabled()
+            && !self.mouse_gestures_dialog.recorder_canvas_active();
+        let pinned = self.pinned_panels.contains(&super::Panel::RegexTesterDialog);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_regex_observation() {
-            let observation = self.regex_tester_dialog.show_with_jump_mode_observation(
-                ctx,
-                root_scope.as_ref(),
-                instance,
-                application_input_allowed,
-                root_native_owner_current,
-                self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+            let observation = self.regex_tester_dialog.show_hosted_with_observation(
+                ctx, root_scope.as_ref(), instance, application_input_allowed,
+                root_native_owner_current, jump_mode_enabled, root_visible, first, pinned,
             );
             self.qa_framebuffer_after_regex_show(
-                ctx,
-                root_visible,
-                self.regex_tester_dialog.open,
-                observation,
+                ctx, root_visible, self.regex_tester_dialog.open, observation,
             );
             return;
         }
-        self.regex_tester_dialog.show_with_jump_mode(
-            ctx,
-            root_scope.as_ref(),
-            instance,
-            application_input_allowed,
-            root_native_owner_current,
-            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active(),
+        self.regex_tester_dialog.show_hosted(
+            ctx, root_scope.as_ref(), instance, application_input_allowed,
+            root_native_owner_current, jump_mode_enabled, root_visible, first, pinned,
         );
+    }
+
+    fn regex_tester_root_input_owner_current(&self, ctx: &egui::Context, root_visible: bool) -> bool {
+        self.native_ui_host_input_allowed(ctx, root_visible)
+            && self.regex_tester_dialog.root_layer().is_some_and(|layer| {
+                crate::gui::jump_mode::ui::visible_top_middle_layer(ctx) == Some(layer)
+            })
     }
 
     fn show_calculation_pad(
@@ -8780,7 +8778,7 @@ impl LauncherApp {
             // An Immediate Regex Tester owns its own viewport and remains
             // usable while the launcher is hidden. Its ROOT scope and ROOT
             // native-owner eligibility stay disabled in this branch.
-            self.show_regex_tester(&ctx, false);
+            self.show_regex_tester(&ctx, first_ui_pass, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -9712,6 +9710,7 @@ impl LauncherApp {
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
@@ -9800,6 +9799,7 @@ impl LauncherApp {
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.regex_tester_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
@@ -10686,6 +10686,7 @@ impl LauncherApp {
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
             self.show_xml_toolkit(&ctx, first_ui_pass, false);
+            self.show_regex_tester(&ctx, first_ui_pass, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11124,7 +11125,7 @@ impl LauncherApp {
                 .retain(|panel| *panel != super::Panel::ZipExtractorDialog);
         }
         self.hash_generator_dialog.show(&ctx);
-        self.show_regex_tester(&ctx, frame_logic.should_be_visible);
+        self.show_regex_tester(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_xml_toolkit(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_table_utility(
             &ctx,
@@ -11899,6 +11900,14 @@ impl LauncherApp {
         }
         self.complete_mouse_settings_hosts(ctx);
         self.complete_file_search_host(ctx);
+        let (regex_closed, regex_docked) = self.regex_tester_dialog.on_ui_frame_complete(ctx);
+        if regex_closed {
+            self.panel_states.regex_tester_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::RegexTesterDialog);
+        }
+        if regex_docked {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
         let (xml_closed, xml_docked) = self.xml_toolkit_dialog.on_ui_frame_complete(ctx);
         if xml_closed {
             self.panel_states.xml_toolkit_dialog = false;
@@ -12466,6 +12475,7 @@ impl eframe::App for LauncherApp {
             || self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open)
             || self.json_utility_host.needs_root_ui_when_hidden(self.json_utility_dialog.open)
             || self.xml_toolkit_dialog.needs_root_ui_when_hidden()
+            || self.regex_tester_dialog.needs_root_ui_when_hidden()
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -12516,7 +12526,6 @@ impl eframe::App for LauncherApp {
         self.complete_markdown_diagram_handoff(_ctx);
         self.complete_quick_notes_dialog(_ctx);
         self.complete_mkmacro_dialog(_ctx);
-        self.regex_tester_dialog.on_ui_frame_complete(_ctx);
         let effects = self.complete_retained_tool_dialogs(_ctx);
         self.dispatch_root_dialog_effects(_ctx, effects);
         self.complete_recording_dialog(_ctx);
@@ -12739,7 +12748,6 @@ impl LauncherApp {
         self.complete_markdown_diagram_handoff(ctx);
         self.complete_quick_notes_dialog(ctx);
         self.complete_mkmacro_dialog(ctx);
-        self.regex_tester_dialog.on_ui_frame_complete(ctx);
         let effects = self.complete_retained_tool_dialogs(ctx);
         self.dispatch_root_dialog_effects(ctx, effects);
         self.complete_recording_dialog(ctx);
@@ -19336,6 +19344,118 @@ mod tests {
         drop(workspace);
     }
 
+
+
+    #[test]
+    fn regex_tester_host_moves_retain_revision_and_copy_only_after_accepted_child_input() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_actual_query_frame(&ctx, &mut app);
+        let clipboard = Arc::new(crate::clipboard_modify::clipboard::fake::FakeClipboardBackend::default());
+        app.regex_tester_dialog =
+            crate::gui::regex_tester_dialog::RegexTesterDialogState::with_clipboard(clipboard.clone());
+        app.regex_tester_dialog.session.draft.test_text = "one fish two fish".into();
+        app.regex_tester_dialog.test_select_clipboard_section();
+        app.focus_panel(super::super::Panel::RegexTesterDialog);
+        let viewport = egui::ViewportId::from_hash_of("regex_tester_viewport");
+        let child = |app: &mut LauncherApp, events, discard_root| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard_root)
+                    .0
+                    .drop_without_applying_deltas();
+            });
+        };
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        let host_button = |app: &LauncherApp| {
+            let (rect, clip, enabled) = app.regex_tester_dialog.test_host_button().unwrap();
+            assert!(enabled && clip.contains_rect(rect));
+            rect
+        };
+        let before = app.regex_tester_dialog.session.revision();
+        for _ in 0..4 {
+            child(&mut app, Vec::new(), false);
+        }
+        let dock = host_button(&app);
+        for pressed in [true, false] {
+            child(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.regex_tester_dialog.root_layer().is_some());
+        assert_eq!(app.regex_tester_dialog.session.revision(), before);
+
+        app.set_jump_mode_enabled(true);
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let pattern = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "Regular expression")
+            .expect("the docked pattern editor is registered")
+            .clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(pattern, pressed));
+        }
+        let pattern = r"\b\w+ fish";
+        root(&mut app, vec![egui::Event::Text(pattern.into())]);
+        let edited = app.regex_tester_dialog.session.revision();
+        assert_eq!(edited, before + 1);
+        assert_eq!(app.regex_tester_dialog.session.draft.pattern, pattern);
+
+        let pop_out = host_button(&app);
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(pop_out, pressed));
+        }
+        assert!(app.regex_tester_dialog.root_layer().is_none());
+        for _ in 0..3 {
+            child(&mut app, Vec::new(), false);
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.regex_tester_dialog.needs_root_ui_when_hidden());
+        assert_eq!(app.regex_tester_dialog.session.revision(), edited);
+        assert_eq!(app.regex_tester_dialog.session.draft.test_text, "one fish two fish");
+
+        let copy_button = |app: &LauncherApp| {
+            app.regex_tester_dialog.test_native_jump_targets().iter()
+                .find(|target| target.metadata().label() == "Copy pattern")
+                .expect("the detached clipboard action is registered")
+                .clipped_rect()
+        };
+        for discard_child in [false, true] {
+            for _ in 0..3 {
+                child(&mut app, Vec::new(), false);
+            }
+            let copy = copy_button(&app);
+            child(&mut app, tool_dialog_pointer_events(copy, true), false);
+            if discard_child {
+                super::IMMEDIATE_VIEWPORT_TEST_DISCARD.with(|request| request.set(Some(viewport)));
+            }
+            child(&mut app, tool_dialog_pointer_events(copy, false), !discard_child);
+            assert!(clipboard.writes().is_empty());
+        }
+        child(&mut app, Vec::new(), false);
+        let copy = copy_button(&app);
+        for pressed in [true, false] {
+            child(&mut app, tool_dialog_pointer_events(copy, pressed), false);
+        }
+        assert_eq!(clipboard.writes(), [pattern]);
+
+        let dock = host_button(&app);
+        for pressed in [true, false] {
+            child(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert!(app.regex_tester_dialog.root_layer().is_some());
+        assert_eq!(app.regex_tester_dialog.session.revision(), edited);
+        assert_eq!(app.regex_tester_dialog.session.draft.pattern, pattern);
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.regex_tester_dialog.open);
+    }
 
     #[cfg(windows)]
     #[test]

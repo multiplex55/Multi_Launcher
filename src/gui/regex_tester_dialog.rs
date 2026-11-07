@@ -1,3 +1,6 @@
+use super::utility_host::{
+    HostIdentity, UtilityHostState, UtilityPresentation, ViewportPassProvenance,
+};
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
 use crate::gui::jump_mode::ui::{FocusDirective, register_and_apply_target};
 use crate::gui::jump_mode::ui::{
@@ -15,7 +18,9 @@ use crate::gui::utility_dialog_size::{
     UtilityDialogSizeWindowExt as _, apply_native_utility_size_restore,
     close_native_utility_size_window,
 };
-use crate::regex_tester::{EvaluationResult, MatchCompleteness, RegexSession, RegexSyntaxNodeRef};
+use crate::regex_tester::{
+    EvaluationResult, MatchCompleteness, RegexDraft, RegexSession, RegexSyntaxNodeRef,
+};
 use crate::settings::UtilityToolKey;
 use eframe::egui;
 use eframe::egui::emath::GuiRounding as _;
@@ -345,10 +350,68 @@ enum VisualizationWorkspaceReveal {
     Pattern,
 }
 
+enum RegexHostedAction {
+    Clipboard(clipboard::ClipboardAction, Option<(u64, Option<usize>)>),
+    CopySelected(inspection::CopyTarget, (u64, Option<usize>)),
+    Reference(reference::ReferenceAction),
+    History(history::HistoryAction),
+    Preset(presets::PresetAction),
+    SelectMatch(usize),
+    Navigate(bool),
+}
+#[derive(Default)]
+struct RegexHostedEffects {
+    mark_changed: bool,
+    cases: test_cases::DeferredCaseEffects,
+    substitution: substitution::DeferredSubstitutionEffects,
+    actions: Vec<RegexHostedAction>,
+}
+
+struct RegexHostDraft {
+    draft: RegexDraft,
+    pattern_selection: Option<visualization::SourceSelection>,
+    visualization: visualization::VisualizationState,
+    workspace_reveal: Option<VisualizationWorkspaceReveal>,
+    information_open: bool,
+    information_section: InformationSection,
+    test_cases_expanded: bool,
+    selected_capture: usize,
+    scroll_to_selected: bool,
+    focus_pattern: bool,
+    copy_feedback: Option<Result<&'static str, String>>,
+    presets: Option<presets::PresetEditorCheckpoint>,
+    reference_query: String,
+    reference_category: Option<crate::regex_tester::ReferenceCategory>,
+    examples_query: String,
+}
+
+struct RegexHostFrame {
+    root: ViewportPassProvenance,
+    owner: Option<ViewportPassProvenance>,
+    host: HostIdentity,
+    epoch: u64,
+    first: bool,
+    pinned: bool,
+    native_info: Option<egui::ViewportInfo>,
+    draft: Option<RegexHostDraft>,
+    request: Option<UtilityPresentation>,
+    close: bool,
+    copies: Vec<String>,
+}
+
 /// Session-owned inputs survive closing the utility; persistence is explicit.
 pub struct RegexTesterDialogState {
     pub open: bool,
     pub session: RegexSession,
+    hosted_effects: Option<RegexHostedEffects>,
+    pending_host_effects: Option<RegexHostedEffects>,
+    host: UtilityHostState,
+    host_frame: Option<RegexHostFrame>,
+    host_epoch: u64,
+    pending_host_request: Option<UtilityPresentation>,
+    native_close_pending: bool,
+    #[cfg(test)]
+    host_button: Option<(egui::Rect, egui::Rect, bool)>,
     focus_pattern: bool,
     focus_viewport: bool,
     information_open: bool,
@@ -559,6 +622,15 @@ impl RegexTesterDialogState {
         Self {
             open: false,
             session: RegexSession::default(),
+            hosted_effects: None,
+            pending_host_effects: None,
+            host: UtilityHostState::popped_out(),
+            host_frame: None,
+            host_epoch: 0,
+            pending_host_request: None,
+            native_close_pending: false,
+            #[cfg(test)]
+            host_button: None,
             focus_pattern: false,
             focus_viewport: false,
             information_open: true,
@@ -612,6 +684,8 @@ impl RegexTesterDialogState {
         self.session.ensure_initial_evaluation(Instant::now());
         self.focus_viewport = true;
         if !self.open {
+            self.host = UtilityHostState::popped_out();
+            self.host_epoch = self.host_epoch.wrapping_add(1);
             self.focus_pattern = true;
             if self.information_open
                 && self.information_section == InformationSection::Visualization
@@ -646,9 +720,351 @@ impl RegexTesterDialogState {
     }
 
     pub(crate) fn root_navigation_instance(&self, current: Option<u64>) -> Option<u64> {
-        current.filter(|instance| {
-            self.observed_viewport != Some((*instance, RegexViewportPresentation::Immediate))
-        })
+        self.root_layer().and(current)
+    }
+
+    pub(crate) fn root_layer(&self) -> Option<egui::LayerId> {
+        (self.open
+            && (self.host.presentation() == UtilityPresentation::Docked
+                || self.observed_viewport.is_some_and(|(_, presentation)| {
+                    presentation == RegexViewportPresentation::Embedded
+                })))
+        .then(Self::root_host_layer)
+    }
+
+    fn root_host_layer() -> egui::LayerId {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("regex_tester_embedded_window"),
+        )
+    }
+
+    pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
+        self.open
+            && self.host.presentation() == UtilityPresentation::Popout
+            && self.observed_viewport.is_none()
+    }
+
+    pub(crate) fn needs_root_ui_when_hidden(&self) -> bool {
+        self.open && self.host.presentation() == UtilityPresentation::Popout
+    }
+
+    fn native_geometry_identity(&self) -> super::utility_window_geometry::NativeViewportIdentity {
+        super::utility_window_geometry::NativeViewportIdentity {
+            key: UtilityToolKey::parse("regex-tester").expect("stable regex utility key"),
+            viewport_id: viewport_id(),
+            owner_generation: self.host_epoch,
+            host_generation: self.host.identity().generation,
+        }
+    }
+
+    fn retire_native_host(&mut self, ctx: &egui::Context) {
+        if self
+            .observed_viewport
+            .is_some_and(|(_, presentation)| presentation == RegexViewportPresentation::Immediate)
+        {
+            super::utility_dialog_size::close_native_utility_geometry_viewport(
+                ctx,
+                self.native_geometry_identity(),
+            );
+            ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
+        }
+        self.observed_viewport = None;
+        self.native_jump_mode.cancel_all();
+        self.native_jump_frame = None;
+        self.native_close_pending = false;
+    }
+
+    pub(crate) fn end_session_with_host(&mut self, ctx: &egui::Context) {
+        if let Some(draft) = self.host_frame.take().and_then(|frame| frame.draft) {
+            self.restore_host_draft(draft);
+        }
+        self.pending_host_effects = None;
+        self.pending_host_request = None;
+        self.retire_native_host(ctx);
+        self.retire_deferred_visualization_effects();
+        self.host.retire_to_docked();
+        self.focus_viewport = false;
+        self.open = false;
+    }
+
+    pub(crate) fn poll_host_background(&mut self, ctx: &egui::Context) {
+        if !self.open {
+            return;
+        }
+        let now = Instant::now();
+        self.session.ensure_initial_evaluation(now);
+        let evaluated = self.session.tick(now);
+        if evaluated {
+            self.record_history();
+            self.scroll_to_selected = false;
+        }
+        if self.session.tick_test_cases(now) || evaluated {
+            ctx.request_repaint_of(viewport_id());
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        if let Some(delay) = self.session.pending_delay(now) {
+            ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_button(&self) -> Option<(egui::Rect, egui::Rect, bool)> {
+        self.host_button
+    }
+
+    fn restore_host_draft(&mut self, draft: RegexHostDraft) {
+        self.session.draft = draft.draft;
+        self.pattern_selection = draft.pattern_selection;
+        self.visualization = draft.visualization;
+        self.visualization_workspace_reveal = draft.workspace_reveal;
+        self.information_open = draft.information_open;
+        self.information_section = draft.information_section;
+        self.test_cases_expanded = draft.test_cases_expanded;
+        self.selected_capture = draft.selected_capture;
+        self.scroll_to_selected = draft.scroll_to_selected;
+        self.focus_pattern = draft.focus_pattern;
+        self.copy_feedback = draft.copy_feedback;
+        if let Some((presets, checkpoint)) = self.presets.as_mut().zip(draft.presets) {
+            presets.restore_editor(checkpoint);
+        }
+        self.reference.query = draft.reference_query;
+        self.reference.category = draft.reference_category;
+        self.examples.query = draft.examples_query;
+    }
+
+    fn checkpoint_host_draft(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| !input.events.is_empty()) {
+            return;
+        }
+        if let Some(frame) = &mut self.host_frame
+            && frame.first
+            && ctx.current_pass_index() == 0
+        {
+            frame.draft = Some(RegexHostDraft {
+                draft: self.session.draft.clone(),
+                pattern_selection: self.pattern_selection.clone(),
+                visualization: self.visualization.clone(),
+                workspace_reveal: self.visualization_workspace_reveal,
+                information_open: self.information_open,
+                information_section: self.information_section,
+                test_cases_expanded: self.test_cases_expanded,
+                selected_capture: self.selected_capture,
+                scroll_to_selected: self.scroll_to_selected,
+                focus_pattern: self.focus_pattern,
+                copy_feedback: self.copy_feedback.clone(),
+                presets: self
+                    .presets
+                    .as_ref()
+                    .map(presets::PresetState::checkpoint_editor),
+                reference_query: self.reference.query.clone(),
+                reference_category: self.reference.category,
+                examples_query: self.examples.query.clone(),
+            });
+        }
+    }
+
+    fn prepare_host_callback(&mut self, ctx: &egui::Context, native: bool) -> bool {
+        let first = self.host_frame.as_ref().is_none_or(|frame| frame.first)
+            && ctx.current_pass_index() == 0;
+        if let Some(frame) = &mut self.host_frame {
+            if first {
+                frame.owner = Some(ViewportPassProvenance::current(ctx, ctx.viewport_id()));
+                frame.native_info = native.then(|| ctx.input(|input| input.viewport().clone()));
+            } else if let Some(draft) = frame.draft.take() {
+                self.restore_host_draft(draft);
+            }
+        }
+        first
+    }
+
+    fn finish_host_callback(
+        &mut self,
+        ctx: &egui::Context,
+        output_start: Option<usize>,
+        close: bool,
+    ) {
+        if let Some(frame) = &mut self.host_frame {
+            frame.close |= close && !frame.pinned;
+            if let Some(start) = output_start {
+                ctx.output_mut(|output| {
+                    for command in output.commands.split_off(start) {
+                        match command {
+                            egui::OutputCommand::CopyText(text) => frame.copies.push(text),
+                            other => output.commands.push(other),
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    fn preset_confirmation_open(&self) -> bool {
+        self.information_section == InformationSection::Presets
+            && self
+                .presets
+                .as_ref()
+                .is_some_and(presets::PresetState::has_pending_delete_confirmation)
+    }
+
+    fn show_host_control(&mut self, ui: &mut egui::Ui, allow_input: bool) {
+        let allow_input = allow_input && !self.preset_confirmation_open();
+        if let Some(frame) = &mut self.host_frame {
+            let (response, request) = super::utility_host::presentation_button(
+                ui,
+                frame.host.host,
+                allow_input && !ui.is_sizing_pass(),
+            );
+            #[cfg(test)]
+            {
+                self.host_button = Some((response.rect, ui.clip_rect(), response.enabled()));
+            }
+            if response.clicked() && allow_input && !ui.ctx().will_discard() {
+                frame.request = Some(request);
+            }
+        }
+    }
+
+    pub(crate) fn show_hosted(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&JumpModeScope>,
+        instance: Option<u64>,
+        application_input_allowed: bool,
+        root_native_owner_current: bool,
+        jump_mode_enabled: bool,
+        root_visible: bool,
+        first: bool,
+        pinned: bool,
+    ) {
+        self.show_hosted_impl(
+            ctx,
+            root_scope,
+            instance,
+            application_input_allowed,
+            root_native_owner_current,
+            jump_mode_enabled,
+            root_visible,
+            first,
+            pinned,
+            #[cfg(feature = "qa-framebuffer-capture")]
+            None,
+        );
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn show_hosted_with_observation(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&JumpModeScope>,
+        instance: Option<u64>,
+        application_input_allowed: bool,
+        root_native_owner_current: bool,
+        jump_mode_enabled: bool,
+        root_visible: bool,
+        first: bool,
+        pinned: bool,
+    ) -> Option<RegexViewportObservation> {
+        let mut observation = None;
+        self.show_hosted_impl(
+            ctx,
+            root_scope,
+            instance,
+            application_input_allowed,
+            root_native_owner_current,
+            jump_mode_enabled,
+            root_visible,
+            first,
+            pinned,
+            Some(&mut observation),
+        );
+        Self::complete_viewport_observation(ctx, &mut observation);
+        observation
+    }
+
+    fn show_hosted_impl(
+        &mut self,
+        ctx: &egui::Context,
+        root_scope: Option<&JumpModeScope>,
+        instance: Option<u64>,
+        application_input_allowed: bool,
+        root_native_owner_current: bool,
+        jump_mode_enabled: bool,
+        root_visible: bool,
+        first: bool,
+        pinned: bool,
+        #[cfg(feature = "qa-framebuffer-capture")] observation: Option<
+            &mut Option<RegexViewportObservation>,
+        >,
+    ) {
+        if let Some(draft) = self.host_frame.take().and_then(|frame| frame.draft) {
+            self.restore_host_draft(draft);
+        }
+        self.pending_host_effects = None;
+        if !self.open {
+            if self.observed_viewport.is_some()
+                || self.deferred_constructor.is_some()
+                || self.deferred_syntax_focus.is_some()
+            {
+                self.end_session_with_host(ctx);
+            }
+            return;
+        }
+        if pinned {
+            self.native_close_pending = false;
+        }
+        if !root_visible && self.host.presentation() == UtilityPresentation::Docked {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.host_button = None;
+        }
+        self.host_frame = Some(RegexHostFrame {
+            root: ViewportPassProvenance::current(ctx, egui::ViewportId::ROOT),
+            owner: None,
+            host: self.host.identity(),
+            epoch: self.host_epoch,
+            first,
+            pinned,
+            native_info: None,
+            draft: None,
+            request: None,
+            close: false,
+            copies: Vec::new(),
+        });
+        self.hosted_effects = Some(RegexHostedEffects::default());
+        let replay_scope = (!first)
+            .then(|| root_scope.map(JumpModeScope::registration_only))
+            .flatten();
+        let root_scope = replay_scope.as_ref().or(root_scope);
+        if self.host.presentation() == UtilityPresentation::Popout {
+            self.show_with_jump_mode_impl(
+                ctx,
+                root_scope,
+                instance,
+                application_input_allowed,
+                root_native_owner_current,
+                jump_mode_enabled,
+                #[cfg(feature = "qa-framebuffer-capture")]
+                observation,
+            );
+        } else {
+            let process_actions = self.prepare_host_callback(ctx, false);
+            let output_start = ctx.output(|output| output.commands.len());
+            let mut body_rendered = false;
+            let close = self.show_embedded_viewport(
+                ctx,
+                ctx,
+                root_scope,
+                application_input_allowed,
+                root_native_owner_current,
+                process_actions,
+                &mut body_rendered,
+            );
+            self.finish_host_callback(ctx, Some(output_start), close);
+        }
+        self.pending_host_effects = self.hosted_effects.take();
     }
 
     pub(crate) fn show_with_jump_mode(
@@ -701,6 +1117,15 @@ impl RegexTesterDialogState {
             jump_mode_enabled,
             Some(&mut observation),
         );
+        Self::complete_viewport_observation(ctx, &mut observation);
+        observation
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn complete_viewport_observation(
+        ctx: &egui::Context,
+        observation: &mut Option<RegexViewportObservation>,
+    ) {
         if let Some(observation) = observation.as_mut() {
             observation.root_discarded |= ctx.will_discard();
             if observation.is_immediate_target() {
@@ -711,7 +1136,6 @@ impl RegexTesterDialogState {
             }
             observation.renderer_returned_at_unix_ms = Some(regex_unix_millis());
         }
-        observation
     }
 
     fn show_with_jump_mode_impl(
@@ -741,8 +1165,12 @@ impl RegexTesterDialogState {
                 reserve_windows_system_menu_alt_space(&mut input.events);
                 reserve_windows_system_menu_alt_space(&mut input.raw.events);
             });
-            let process_case_actions = child.current_pass_index() == 0;
             let independent = class == egui::ViewportClass::Immediate;
+            let process_case_actions = self.prepare_host_callback(child.ctx(), independent);
+            let output_start = self
+                .hosted_effects
+                .is_some()
+                .then(|| child.ctx().output(|output| output.commands.len()));
             let presentation = if independent {
                 RegexViewportPresentation::Immediate
             } else {
@@ -758,10 +1186,12 @@ impl RegexTesterDialogState {
                 self.native_jump_mode.cancel_all();
                 self.native_jump_frame = None;
             }
-            if independent && self.focus_viewport {
-                child.send_viewport_cmd(egui::ViewportCommand::Focus);
+            if self.hosted_effects.is_none() {
+                if independent && self.focus_viewport {
+                    child.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                self.focus_viewport = false;
             }
-            self.focus_viewport = false;
             let mut body_rendered = false;
             if independent {
                 let close = self.show_native_viewport(
@@ -774,112 +1204,29 @@ impl RegexTesterDialogState {
                     ctx,
                     &mut body_rendered,
                 );
-                if close {
+                if self.hosted_effects.is_some() {
+                    self.finish_host_callback(child.ctx(), output_start, close);
+                } else if close {
                     self.open = false;
                     child.send_viewport_cmd(egui::ViewportCommand::Close);
                     self.native_jump_mode.cancel_all();
                     self.native_jump_frame = None;
                 }
             } else {
-                self.begin_staged_visualization_effects();
-                let close = process_case_actions
-                    && root_native_owner_current
-                    && child.input_mut(|input| {
-                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                            || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-                    });
-                if close {
-                    if process_case_actions
-                        && root_native_owner_current
-                        && !child.will_discard()
-                        && !ctx.will_discard()
-                    {
-                        // A previously accepted constructor belongs to this
-                        // matching viewport callback even if the close key is
-                        // pressed before an idle frame arrives.
-                        self.apply_deferred_constructor(child, child.viewport_id());
-                    }
+                let close = self.show_embedded_viewport(
+                    child.ctx(),
+                    ctx,
+                    root_scope,
+                    application_input_allowed,
+                    root_native_owner_current,
+                    process_case_actions,
+                    &mut body_rendered,
+                );
+                if self.hosted_effects.is_some() {
+                    self.finish_host_callback(child.ctx(), output_start, close);
+                } else if close {
                     self.open = false;
-                    self.discard_staged_visualization_effects();
                     self.retire_deferred_visualization_effects();
-                    #[cfg(feature = "qa-framebuffer-capture")]
-                    if let Some(slot) = observation_slot.as_deref_mut() {
-                        *slot = Some(self.viewport_observation(
-                            child.ctx(),
-                            ctx,
-                            class,
-                            application_input_allowed,
-                            false,
-                        ));
-                    }
-                    return;
-                }
-                // Standalone egui contexts embed viewports. Keep that fallback
-                // within its parent rather than changing root-window geometry.
-                let size = child.input(|input| input.content_rect().size());
-                let available = (size - egui::vec2(24.0, 48.0)).max(egui::vec2(1.0, 1.0));
-                let mut open = self.open;
-                egui::Window::new("Regex Tester")
-                    .id(egui::Id::new("regex_tester_embedded_window"))
-                    .collapsible(false)
-                    .resizable(true)
-                    .default_size(available.min(egui::vec2(960.0, 680.0)))
-                    .min_size(available.min(egui::vec2(360.0, 240.0)))
-                    .max_size(available)
-                    .show_utility(
-                        child,
-                        "regex-tester",
-                        egui::Id::new("regex_tester_embedded_window"),
-                        Some(&mut open),
-                        crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
-                            crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
-                                available.min(egui::vec2(960.0, 680.0)),
-                            ),
-                            egui::Vec2::ZERO,
-                            [None, None],
-                        )
-                        .with_minimum(available.min(egui::vec2(360.0, 240.0)))
-                        .with_maximum(available),
-                        |ui| {
-                            ui.add_enabled_ui(root_native_owner_current, |ui| {
-                                body_rendered = ui.is_visible() && !ui.is_sizing_pass();
-                                if body_rendered
-                                    && process_case_actions
-                                    && root_native_owner_current
-                                {
-                                    self.apply_deferred_constructor(
-                                        ui.ctx(),
-                                        ui.ctx().viewport_id(),
-                                    );
-                                    self.prepare_deferred_syntax_focus(ui.ctx().viewport_id());
-                                }
-                                self.body_in_viewport_scoped(
-                                    ui,
-                                    false,
-                                    process_case_actions
-                                        && application_input_allowed
-                                        && root_native_owner_current,
-                                    root_scope,
-                                    root_native_owner_current,
-                                )
-                            })
-                        },
-                    );
-                self.open = open;
-                if body_rendered
-                    && process_case_actions
-                    && application_input_allowed
-                    && root_native_owner_current
-                    && !child.will_discard()
-                {
-                    self.stage_visualization_root_effects(
-                        child.ctx(),
-                        child.ctx(),
-                        child.ctx().viewport_id(),
-                        false,
-                    );
-                } else {
-                    self.discard_staged_visualization_effects();
                 }
             }
             if !self.open {
@@ -899,6 +1246,105 @@ impl RegexTesterDialogState {
                 ));
             }
         });
+    }
+
+    fn show_embedded_viewport(
+        &mut self,
+        child: &egui::Context,
+        ctx: &egui::Context,
+        root_scope: Option<&JumpModeScope>,
+        application_input_allowed: bool,
+        root_native_owner_current: bool,
+        process_case_actions: bool,
+        body_rendered: &mut bool,
+    ) -> bool {
+        self.begin_staged_visualization_effects();
+        if process_case_actions && self.hosted_effects.is_some() {
+            self.apply_owner_constructor(child, child.viewport_id());
+        }
+        let close = process_case_actions
+            && root_native_owner_current
+            && !egui::Popup::is_any_open(child)
+            && child.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+            });
+        if close {
+            if process_case_actions
+                && root_native_owner_current
+                && !child.will_discard()
+                && !ctx.will_discard()
+            {
+                // A previously accepted constructor belongs to this
+                // matching viewport callback even if the close key is
+                // pressed before an idle frame arrives.
+                self.apply_owner_constructor(child, child.viewport_id());
+            }
+            self.discard_staged_visualization_effects();
+            return true;
+        }
+        // Standalone egui contexts embed viewports. Keep that fallback
+        // within its parent rather than changing root-window geometry.
+        let size = child.input(|input| input.content_rect().size());
+        let available = (size - egui::vec2(24.0, 48.0)).max(egui::vec2(1.0, 1.0));
+        let mut open = self.open;
+        egui::Window::new("Regex Tester")
+            .id(egui::Id::new("regex_tester_embedded_window"))
+            .collapsible(false)
+            .resizable(true)
+            .default_size(available.min(egui::vec2(960.0, 680.0)))
+            .min_size(available.min(egui::vec2(360.0, 240.0)))
+            .max_size(available)
+            .show_utility(
+                child,
+                "regex-tester",
+                egui::Id::new("regex_tester_embedded_window"),
+                Some(&mut open),
+                crate::gui::utility_dialog_size::UtilityWindowSizeRecipe::new(
+                    crate::gui::utility_dialog_size::UtilityWindowSizeDefault::outer(
+                        available.min(egui::vec2(960.0, 680.0)),
+                    ),
+                    egui::Vec2::ZERO,
+                    [None, None],
+                )
+                .with_minimum(available.min(egui::vec2(360.0, 240.0)))
+                .with_maximum(available),
+                |ui| {
+                    ui.add_enabled_ui(root_native_owner_current, |ui| {
+                        *body_rendered = ui.is_visible() && !ui.is_sizing_pass();
+                        if *body_rendered && process_case_actions && root_native_owner_current {
+                            self.apply_owner_constructor(ui.ctx(), ui.ctx().viewport_id());
+                            self.prepare_deferred_syntax_focus(ui.ctx().viewport_id());
+                            self.checkpoint_host_draft(ui.ctx());
+                        }
+                        self.show_host_control(
+                            ui,
+                            process_case_actions && root_native_owner_current,
+                        );
+                        self.body_in_viewport_scoped(
+                            ui,
+                            false,
+                            process_case_actions
+                                && application_input_allowed
+                                && root_native_owner_current,
+                            root_scope,
+                            root_native_owner_current,
+                        )
+                    })
+                },
+            );
+        if *body_rendered
+            && process_case_actions
+            && application_input_allowed
+            && root_native_owner_current
+            && !child.will_discard()
+            && !ctx.will_discard()
+        {
+            self.stage_visualization_root_effects(child, child, child.viewport_id(), false);
+        } else {
+            self.discard_staged_visualization_effects();
+        }
+        !open
     }
 
     #[cfg(feature = "qa-framebuffer-capture")]
@@ -1036,7 +1482,7 @@ impl RegexTesterDialogState {
         self.native_jump_mode.handle_viewport_input(
             &ctx,
             jump_owner_current,
-            ctx.current_pass_index() == 0,
+            process_actions,
             viewport,
         );
         let native_owner_current = application_input_allowed
@@ -1045,35 +1491,55 @@ impl RegexTesterDialogState {
             && ctx.memory(|memory| memory.top_modal_layer().is_none())
             && super::jump_mode::ui::visible_top_middle_layer(&ctx).is_none();
         let popup_open = egui::Popup::is_any_open(&ctx);
-        let close = ctx.input_mut(|input| {
-            (process_actions
-                && native_owner_current
-                && !popup_open
-                && (input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                    || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)))
-                || (process_actions && input.viewport().close_requested())
-        });
-        if process_actions && native_owner_current && child.is_visible() && !child.is_sizing_pass()
+        let keyboard_close = process_actions
+            && native_owner_current
+            && !popup_open
+            && ctx.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+            });
+        let os_close = ctx.input(|input| input.viewport().close_requested());
+        let close = if let Some(frame) = &self.host_frame {
+            if os_close {
+                child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.native_close_pending = !frame.pinned;
+            }
+            !frame.pinned && (keyboard_close || self.native_close_pending)
+        } else {
+            keyboard_close || (process_actions && os_close)
+        };
+        if process_actions && self.hosted_effects.is_some() {
+            self.apply_owner_constructor(&ctx, viewport);
+        }
+        if process_actions
+            && (native_owner_current || close)
+            && child.is_visible()
+            && !child.is_sizing_pass()
         {
-            self.apply_deferred_constructor(&ctx, viewport);
+            self.apply_owner_constructor(&ctx, viewport);
             if !close {
                 self.prepare_deferred_syntax_focus(viewport);
+                self.checkpoint_host_draft(&ctx);
             }
         }
         if close {
-            self.retire_deferred_visualization_effects();
+            if self.hosted_effects.is_none() {
+                self.retire_deferred_visualization_effects();
+            }
             self.native_jump_mode.cancel_all();
             self.native_jump_frame = None;
             return true;
         }
-        apply_native_utility_size_restore(
-            child,
-            class,
-            UtilityToolKey::parse("regex-tester").unwrap(),
-            egui::vec2(960.0, 680.0),
-            Some(egui::vec2(360.0, 240.0)),
-            None,
-        );
+        if self.hosted_effects.is_none() {
+            apply_native_utility_size_restore(
+                child,
+                class,
+                UtilityToolKey::parse("regex-tester").unwrap(),
+                egui::vec2(960.0, 680.0),
+                Some(egui::vec2(360.0, 240.0)),
+                None,
+            );
+        }
         self.native_jump_mode.begin_ui_pass();
         let scope = binding.filter(|_| jump_owner_current).and_then(|binding| {
             let NavigationOwner::Dialog { instance, .. } = binding.owner else {
@@ -1087,14 +1553,19 @@ impl RegexTesterDialogState {
             )
         });
 
+        let replay_scope = (!process_actions)
+            .then(|| scope.as_ref().map(JumpModeScope::registration_only))
+            .flatten();
+        let scope = replay_scope.as_ref().or(scope.as_ref());
         egui::CentralPanel::default().show(child, |ui| {
             ui.add_enabled_ui(native_owner_current, |ui| {
                 *body_rendered = ui.is_visible() && !ui.is_sizing_pass();
+                self.show_host_control(ui, process_actions && native_owner_current && !popup_open);
                 self.body_in_viewport_scoped(
                     ui,
                     true,
                     process_actions && ctx.current_pass_index() == 0 && native_owner_current,
-                    scope.as_ref(),
+                    scope,
                     native_owner_current,
                 )
             });
@@ -1196,7 +1667,143 @@ impl RegexTesterDialogState {
     /// Commit only syntax interactions from the root frame/pass that actually
     /// survived all egui discard requests. Focus is queued for the next matching
     /// child callback, where its viewport-scoped TextEdit state can be updated.
-    pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) {
+    pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> (bool, bool) {
+        let Some(mut frame) = self.host_frame.take() else {
+            self.complete_visualization_frame(ctx);
+            return (false, false);
+        };
+        let effects = self.pending_host_effects.take();
+        let current =
+            self.open && frame.host == self.host.identity() && frame.epoch == self.host_epoch;
+        if !current
+            || !frame.first
+            || !frame.root.was_retained(ctx)
+            || !frame.owner.is_some_and(|owner| owner.was_retained(ctx))
+        {
+            if current && let Some(draft) = frame.draft.take() {
+                self.restore_host_draft(draft);
+            }
+            self.pending_visualization_root_effects = None;
+            return (false, false);
+        }
+        let native = frame.native_info.is_some();
+        let owner = frame.owner.expect("retained regex owner").viewport_id;
+        if frame.close || (native && self.native_close_pending && !frame.pinned) {
+            self.end_session_with_host(ctx);
+            return (true, false);
+        }
+        if let Some(info) = frame.native_info.as_ref() {
+            super::utility_dialog_size::apply_native_utility_geometry_restore(
+                ctx,
+                egui::ViewportClass::Immediate,
+                true,
+                "Regex Tester",
+                self.native_geometry_identity(),
+                info,
+                egui::vec2(960.0, 680.0),
+                Some(egui::vec2(360.0, 240.0)),
+                None,
+            );
+        }
+        if self.focus_viewport {
+            if native {
+                ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
+            } else {
+                ctx.move_to_top(Self::root_host_layer());
+            }
+            self.focus_viewport = false;
+        }
+        if let Some(effects) = effects {
+            self.apply_hosted_effects(ctx, owner, effects, frame.copies);
+        }
+        self.complete_visualization_frame(ctx);
+        if let Some(request) = frame.request {
+            self.pending_host_request = Some(request);
+        }
+        let mut reveal = false;
+        // An accepted syntax constructor uses the old viewport's TextEdit state
+        // to record its Undo edit. Finish that callback before moving the editor.
+        if self.deferred_constructor.is_none()
+            && let Some(request) = self.pending_host_request.take()
+            && request != frame.host.host
+        {
+            self.retire_native_host(ctx);
+            self.host.transition(request);
+            self.focus_viewport = true;
+            reveal = request == UtilityPresentation::Docked;
+            if let Some((target, _)) = &mut self.deferred_syntax_focus {
+                *target = if reveal {
+                    egui::ViewportId::ROOT
+                } else {
+                    viewport_id()
+                };
+            }
+            if reveal {
+                ctx.move_to_top(Self::root_host_layer());
+            }
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+        (false, reveal)
+    }
+
+    fn apply_hosted_effects(
+        &mut self,
+        ctx: &egui::Context,
+        owner: egui::ViewportId,
+        effects: RegexHostedEffects,
+        copies: Vec<String>,
+    ) {
+        if effects.mark_changed {
+            self.session.mark_changed(Instant::now());
+        }
+        effects.substitution.apply(&mut self.session);
+        effects.cases.apply(
+            &mut self.session,
+            self.clipboard.as_ref(),
+            &mut self.copy_feedback,
+        );
+        for action in effects.actions {
+            match action {
+                RegexHostedAction::Clipboard(action, selected) => {
+                    if selected.is_none_or(|identity| identity == self.selected_match_identity()) {
+                        self.clipboard_action(action);
+                    }
+                }
+                RegexHostedAction::CopySelected(target, selected) => {
+                    if selected == self.selected_match_identity() {
+                        self.copy_selected(target);
+                    }
+                }
+                RegexHostedAction::Reference(action) => self.reference_action(action),
+                RegexHostedAction::History(action) => self.history_action(action),
+                RegexHostedAction::Preset(action) => self.preset_action(action),
+                RegexHostedAction::SelectMatch(index) => {
+                    self.session.select_match(index);
+                    self.scroll_to_selected |= self.session.selected_index().is_some();
+                }
+                RegexHostedAction::Navigate(forward) => {
+                    let changed = self.navigate_match(forward);
+                    self.scroll_to_selected |= changed;
+                }
+            }
+        }
+        for text in copies {
+            self.copy_feedback = Some(
+                self.clipboard
+                    .write_text(&text)
+                    .map(|_| "Copied selection")
+                    .map_err(|error| error.to_string()),
+            );
+        }
+        if self.scroll_to_selected {
+            ctx.request_repaint_of(owner);
+        }
+        if let Some(delay) = self.session.pending_delay(Instant::now()) {
+            ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
+        }
+    }
+
+    fn complete_visualization_frame(&mut self, ctx: &egui::Context) {
         let Some(effects) = self.pending_visualization_root_effects.take() else {
             return;
         };
@@ -1244,6 +1851,13 @@ impl RegexTesterDialogState {
             ctx.request_repaint_of(effects.viewport_id);
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
+    }
+
+    fn apply_owner_constructor(&mut self, ctx: &egui::Context, viewport: egui::ViewportId) {
+        // The constructor was already accepted by the previous owner pass.
+        let current_effects = self.hosted_effects.take();
+        self.apply_deferred_constructor(ctx, viewport);
+        self.hosted_effects = current_effects;
     }
 
     fn apply_deferred_constructor(&mut self, ctx: &egui::Context, viewport_id: egui::ViewportId) {
@@ -1331,11 +1945,7 @@ impl RegexTesterDialogState {
         scope: Option<&JumpModeScope>,
         native_owner_current: bool,
     ) -> CoreLayout {
-        let preset_confirmation_open = self.information_section == InformationSection::Presets
-            && self
-                .presets
-                .as_ref()
-                .is_some_and(presets::PresetState::has_pending_delete_confirmation);
+        let preset_confirmation_open = self.preset_confirmation_open();
         let mut form_targets = JumpTargets::new(scope);
         let action_scope = scope.map(|scope| {
             scope.child_namespace(format!(
@@ -1351,19 +1961,16 @@ impl RegexTesterDialogState {
         }
         if process_case_actions
             && native_owner_current
+            && !preset_confirmation_open
             && let Some(forward) = keyboard::navigation(ui.ctx(), ui.layer_id(), independent)
+            && self.navigate_match(forward)
         {
-            let changed = if forward {
-                self.session.next_match()
-            } else {
-                self.session.previous_match()
-            };
-            if changed {
-                self.request_match_scroll(ui);
-            }
+            self.request_match_scroll(ui);
         }
         let now = Instant::now();
-        self.session.ensure_initial_evaluation(now);
+        if self.hosted_effects.is_none() {
+            self.session.ensure_initial_evaluation(now);
+        }
         let bounds = ui.available_rect_before_wrap();
         let had_error = self.validation_error().is_some();
         let header_height = pattern_header_height(ui);
@@ -1458,7 +2065,7 @@ impl RegexTesterDialogState {
         bounded_area(ui, layout.editor, "regex_tester_editor_area", |ui| {
             self.text_area(ui, form_targets, action_targets, process_case_actions)
         });
-        if self.session.tick(now) {
+        if self.hosted_effects.is_none() && self.session.tick(now) {
             self.record_history();
             self.scroll_to_selected = false;
             ui.ctx().request_repaint();
@@ -1468,7 +2075,7 @@ impl RegexTesterDialogState {
             .visualization()
             .and_then(|result| result.tree());
         self.visualization.accept_tree(accepted_tree);
-        if self.session.tick_test_cases(now) {
+        if self.hosted_effects.is_none() && self.session.tick_test_cases(now) {
             ui.ctx().request_repaint();
         }
         if let Some(validation) = layout.validation {
@@ -2062,7 +2669,11 @@ impl RegexTesterDialogState {
         self.scroll_to_selected = false;
         self.visualization.clear_pending_source_focus();
         self.copy_feedback = None;
-        self.session.mark_changed(Instant::now());
+        if let Some(effects) = &mut self.hosted_effects {
+            effects.mark_changed = true;
+        } else {
+            self.session.mark_changed(Instant::now());
+        }
     }
 
     fn apply_constructor_request(
@@ -2375,7 +2986,18 @@ impl RegexTesterDialogState {
             return;
         }
         if section == InformationSection::Substitution {
-            if substitution::show_scoped(ui, &mut self.session, targets, process_case_actions) {
+            let changed = if let Some(effects) = &mut self.hosted_effects {
+                substitution::show_scoped_deferred(
+                    ui,
+                    &mut self.session,
+                    targets,
+                    process_case_actions,
+                    &mut effects.substitution,
+                )
+            } else {
+                substitution::show_scoped(ui, &mut self.session, targets, process_case_actions)
+            };
+            if changed {
                 self.copy_feedback = None;
             }
             return;
@@ -2388,16 +3010,31 @@ impl RegexTesterDialogState {
             return;
         }
         if section == InformationSection::TestCases {
-            test_cases::show_scoped(
-                ui,
-                &mut self.session,
-                &mut self.test_cases_expanded,
-                self.clipboard.as_ref(),
-                &mut self.copy_feedback,
-                process_case_actions,
-                form_targets,
-                targets,
-            );
+            if let Some(effects) = &mut self.hosted_effects {
+                test_cases::show_scoped_deferred(
+                    ui,
+                    &mut self.session,
+                    &mut self.test_cases_expanded,
+                    self.clipboard.as_ref(),
+                    &mut self.copy_feedback,
+                    process_case_actions,
+                    form_targets,
+                    targets,
+                    &mut effects.cases,
+                );
+            } else {
+                test_cases::show_scoped(
+                    ui,
+                    &mut self.session,
+                    &mut self.test_cases_expanded,
+                    self.clipboard.as_ref(),
+                    &mut self.copy_feedback,
+                    process_case_actions,
+                    form_targets,
+                    targets,
+                );
+            }
+
             return;
         }
 
@@ -2451,8 +3088,12 @@ impl RegexTesterDialogState {
                 }
             });
         if let Some(index) = selected {
-            self.session.select_match(index);
-            self.request_match_scroll(ui);
+            if let Some(effects) = &mut self.hosted_effects {
+                effects.actions.push(RegexHostedAction::SelectMatch(index));
+            } else {
+                self.session.select_match(index);
+                self.request_match_scroll(ui);
+            }
         }
     }
 
@@ -2492,7 +3133,18 @@ impl RegexTesterDialogState {
         }
     }
 
+    fn selected_match_identity(&self) -> (u64, Option<usize>) {
+        (self.session.revision(), self.session.selected_index())
+    }
+
     fn copy_selected(&mut self, target: inspection::CopyTarget) {
+        let selected = self.selected_match_identity();
+        if let Some(effects) = &mut self.hosted_effects {
+            effects
+                .actions
+                .push(RegexHostedAction::CopySelected(target, selected));
+            return;
+        }
         let text = self
             .session
             .selected_index()
@@ -2511,8 +3163,32 @@ impl RegexTesterDialogState {
         });
     }
 
+    fn navigate_match(&mut self, forward: bool) -> bool {
+        if let Some(effects) = &mut self.hosted_effects {
+            effects.actions.push(RegexHostedAction::Navigate(forward));
+            false
+        } else if forward {
+            self.session.next_match()
+        } else {
+            self.session.previous_match()
+        }
+    }
+
     fn clipboard_action(&mut self, action: clipboard::ClipboardAction) {
         use clipboard::ClipboardAction as Action;
+        if self.hosted_effects.is_some() {
+            let selected = matches!(
+                action,
+                Action::CopyMatch | Action::CopyCapture(_) | Action::CopyMatchInformation
+            )
+            .then(|| self.selected_match_identity());
+            if let Some(effects) = &mut self.hosted_effects {
+                effects
+                    .actions
+                    .push(RegexHostedAction::Clipboard(action, selected));
+            }
+            return;
+        }
         match action {
             Action::ImportText => match self.clipboard.read_text() {
                 Ok(text) => {
@@ -2579,6 +3255,10 @@ impl RegexTesterDialogState {
     }
 
     fn reference_action(&mut self, action: reference::ReferenceAction) {
+        if let Some(effects) = &mut self.hosted_effects {
+            effects.actions.push(RegexHostedAction::Reference(action));
+            return;
+        }
         match action {
             reference::ReferenceAction::Append(entry) => {
                 self.session.draft.pattern.push_str(entry.syntax);
@@ -2608,6 +3288,10 @@ impl RegexTesterDialogState {
     }
 
     fn history_action(&mut self, action: history::HistoryAction) {
+        if let Some(effects) = &mut self.hosted_effects {
+            effects.actions.push(RegexHostedAction::History(action));
+            return;
+        }
         let Some(history) = &mut self.history else {
             return;
         };
@@ -2629,6 +3313,10 @@ impl RegexTesterDialogState {
     }
 
     fn preset_action(&mut self, action: presets::PresetAction) {
+        if let Some(effects) = &mut self.hosted_effects {
+            effects.actions.push(RegexHostedAction::Preset(action));
+            return;
+        }
         if self
             .presets
             .as_mut()
@@ -2745,14 +3433,14 @@ impl RegexTesterDialogState {
                 .add_enabled(enabled, egui::Button::new("Previous"))
                 .on_hover_text("Previous match (Shift+F3)");
             targets.button(ui, &previous, "previous-match", "Previous match");
-            if committing && previous.clicked() && self.session.previous_match() {
+            if committing && previous.clicked() && self.navigate_match(false) {
                 self.request_match_scroll(ui);
             }
             let next = ui
                 .add_enabled(enabled, egui::Button::new("Next"))
                 .on_hover_text("Next match (F3)");
             targets.button(ui, &next, "next-match", "Next match");
-            if committing && next.clicked() && self.session.next_match() {
+            if committing && next.clicked() && self.navigate_match(true) {
                 self.request_match_scroll(ui);
             }
             ui.add(
@@ -5652,6 +6340,132 @@ mod tests {
         assert!(dialog.open);
         assert_eq!(dialog.session.draft.pattern, "(?:a)+");
         assert!(dialog.deferred_constructor.is_none());
+    }
+
+    #[test]
+    fn hosted_preset_save_omits_buffers_after_discarded_include_clicks() {
+        install_regex_immediate_viewport_renderer();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let dir = tempfile::tempdir().unwrap();
+        let preset_path = dir.path().join("presets.json");
+        let mut dialog = RegexTesterDialogState::with_storage_paths(
+            dir.path().join("history.json"),
+            &preset_path,
+        );
+        dialog.session.draft.pattern = "fish".into();
+        dialog.session.draft.test_text = "private test text".into();
+        dialog.session.draft.replacement = "private replacement".into();
+        dialog.information_section = InformationSection::Presets;
+        dialog.open();
+
+        let render = |dialog: &mut RegexTesterDialogState, events| {
+            REGEX_VIEWPORT_EVENTS.with(|pending| *pending.borrow_mut() = events);
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(960.0, 680.0),
+                    )),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    dialog.show_hosted(
+                        ui.ctx(),
+                        None,
+                        Some(1),
+                        true,
+                        false,
+                        true,
+                        true,
+                        ui.ctx().current_pass_index() == 0,
+                        false,
+                    );
+                },
+            )
+            .drop_without_applying_deltas();
+            dialog.on_ui_frame_complete(&ctx);
+        };
+        let click = |dialog: &mut RegexTesterDialogState, label, discard| {
+            let point = regex_native_target(dialog, label, None)
+                .clipped_rect()
+                .center();
+            for pressed in [true, false] {
+                if !pressed && discard {
+                    REGEX_VIEWPORT_DISCARD_AFTER_CALLBACK.with(|request| request.set(true));
+                }
+                render(
+                    dialog,
+                    vec![
+                        egui::Event::PointerMoved(point),
+                        egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        };
+        for _ in 0..4 {
+            render(&mut dialog, Vec::new());
+        }
+        click(&mut dialog, "Preset name", false);
+        render(&mut dialog, vec![egui::Event::Text("Pattern only".into())]);
+        click(&mut dialog, "Include sample text", true);
+        render(&mut dialog, Vec::new());
+        click(&mut dialog, "Include replacement", true);
+        render(&mut dialog, Vec::new());
+        click(&mut dialog, "Save preset", false);
+        let store = crate::regex_tester::PresetStore::open(&preset_path);
+        let [entry] = store.entries() else {
+            panic!("the accepted Save creates one preset");
+        };
+        assert_eq!(entry.name, "Pattern only");
+        assert_eq!(entry.pattern, "fish");
+        assert!(entry.sample_text.is_none());
+        assert!(entry.replacement.is_none());
+    }
+
+    #[test]
+    fn hosted_match_copy_requires_the_selection_seen_before_navigation() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(clipboard.clone());
+        dialog.session.draft.pattern = r"\w+".into();
+        dialog.session.draft.test_text = "one two".into();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+
+        dialog.hosted_effects = Some(RegexHostedEffects::default());
+        assert!(!dialog.navigate_match(true));
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyMatch);
+        let effects = dialog.hosted_effects.take().unwrap();
+        dialog.apply_hosted_effects(
+            &egui::Context::default(),
+            viewport_id(),
+            effects,
+            Vec::new(),
+        );
+        assert_eq!(dialog.session.selected_index(), Some(1));
+        assert!(dialog.scroll_to_selected);
+        assert!(clipboard.writes.lock().unwrap().is_empty());
+
+        dialog.hosted_effects = Some(RegexHostedEffects::default());
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyMatch);
+        let effects = dialog.hosted_effects.take().unwrap();
+        dialog.apply_hosted_effects(
+            &egui::Context::default(),
+            viewport_id(),
+            effects,
+            Vec::new(),
+        );
+        assert_eq!(*clipboard.writes.lock().unwrap(), ["two"]);
     }
 
     #[test]

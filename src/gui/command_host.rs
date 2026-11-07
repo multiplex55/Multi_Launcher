@@ -252,7 +252,6 @@ impl DialogCommandHost for LauncherApp {
         self.focus_panel(super::Panel::QrDialog);
     }
     fn open_regex_tester_dialog(&mut self) {
-        self.regex_tester_dialog.open();
         self.focus_panel(super::Panel::RegexTesterDialog);
     }
     fn open_calculation_pad_dialog(&mut self) {

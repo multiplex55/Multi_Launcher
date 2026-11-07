@@ -16,11 +16,47 @@ pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
     show_scoped(ui, session, &mut JumpTargets::new(None), true)
 }
 
+#[derive(Default)]
+pub(super) struct DeferredSubstitutionEffects {
+    enabled: Option<bool>,
+    replacement_changed: bool,
+}
+impl DeferredSubstitutionEffects {
+    pub(super) fn apply(self, session: &mut RegexSession) {
+        if let Some(enabled) = self.enabled {
+            session.set_substitution_enabled(enabled, Instant::now());
+        }
+        if self.replacement_changed {
+            session.mark_replacement_changed(Instant::now());
+        }
+    }
+}
+
 pub(super) fn show_scoped(
     ui: &mut egui::Ui,
     session: &mut RegexSession,
     targets: &mut JumpTargets<'_>,
     committing: bool,
+) -> bool {
+    show_scoped_inner(ui, session, targets, committing, None)
+}
+
+pub(super) fn show_scoped_deferred(
+    ui: &mut egui::Ui,
+    session: &mut RegexSession,
+    targets: &mut JumpTargets<'_>,
+    committing: bool,
+    deferred: &mut DeferredSubstitutionEffects,
+) -> bool {
+    show_scoped_inner(ui, session, targets, committing, Some(deferred))
+}
+
+fn show_scoped_inner(
+    ui: &mut egui::Ui,
+    session: &mut RegexSession,
+    targets: &mut JumpTargets<'_>,
+    committing: bool,
+    mut deferred: Option<&mut DeferredSubstitutionEffects>,
 ) -> bool {
     let mut changed = false;
     egui::ScrollArea::vertical()
@@ -39,7 +75,11 @@ pub(super) fn show_scoped(
                 "Enable substitution preview",
             );
             if response.changed() && committing {
-                session.set_substitution_enabled(enabled, Instant::now());
+                if let Some(effects) = deferred.as_mut() {
+                    effects.enabled = Some(enabled);
+                } else {
+                    session.set_substitution_enabled(enabled, Instant::now());
+                }
                 changed = true;
             }
             ui.label("Replacement");
@@ -81,7 +121,11 @@ pub(super) fn show_scoped(
                 targets.button(ui, &clear, "substitution/clear", "Clear replacement");
                 if clear.clicked() && committing {
                     session.draft.replacement.clear();
-                    session.mark_replacement_changed(Instant::now());
+                    if let Some(effects) = deferred.as_mut() {
+                        effects.replacement_changed = true;
+                    } else {
+                        session.mark_replacement_changed(Instant::now());
+                    }
                     changed = true;
                 }
             } else {
@@ -102,7 +146,11 @@ pub(super) fn show_scoped(
                     "Replacement text",
                 );
                 if response.changed() && committing {
-                    session.mark_replacement_changed(Instant::now());
+                    if let Some(effects) = deferred.as_mut() {
+                        effects.replacement_changed = true;
+                    } else {
+                        session.mark_replacement_changed(Instant::now());
+                    }
                     changed = true;
                 }
             }
@@ -164,4 +212,19 @@ pub(super) fn show_scoped(
             }
         });
     changed
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    #[test]
+    fn substitution_mode_changes_only_when_applied() {
+        let mut session = crate::regex_tester::RegexSession::default();
+        let effects = super::DeferredSubstitutionEffects {
+            enabled: Some(true),
+            replacement_changed: false,
+        };
+        assert!(!session.substitution_enabled());
+        effects.apply(&mut session);
+        assert!(session.substitution_enabled());
+    }
 }

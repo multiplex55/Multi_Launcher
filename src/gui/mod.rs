@@ -4887,6 +4887,10 @@ impl LauncherApp {
                 self.xml_toolkit_dialog.root_layer().is_some()
                     || self.xml_toolkit_dialog.needs_viewport_bootstrap()
             },
+            Panel::RegexTesterDialog => {
+                self.regex_tester_dialog.root_layer().is_some()
+                    || self.regex_tester_dialog.needs_viewport_bootstrap()
+            },
             Panel::SnippetDialog => self.snippet_window_host.root_layer().is_some(),
             Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer().is_some(),
             Panel::SnippetPromptDialog => self.snippet_prompt_has_root_presentation(),
@@ -5007,7 +5011,7 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog | Panel::XmlToolkitDialog | Panel::RegexTesterDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5287,7 +5291,7 @@ impl LauncherApp {
                 self.panel_states.qr_dialog = false;
             }
             Panel::RegexTesterDialog => {
-                self.regex_tester_dialog.open = false;
+                self.regex_tester_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.regex_tester_dialog = false;
             }
             Panel::CalculationPadDialog => {
@@ -5605,7 +5609,7 @@ impl LauncherApp {
                 self.panel_states.qr_dialog = false;
             }
             Panel::RegexTesterDialog => {
-                self.regex_tester_dialog.open = false;
+                self.regex_tester_dialog.end_session_with_host(&self.egui_ctx);
                 self.panel_states.regex_tester_dialog = false;
             }
             Panel::CalculationPadDialog => {
@@ -5923,6 +5927,8 @@ impl LauncherApp {
             self.clipboard_modify_host.request_focus();
         } else if panel == Panel::XmlToolkitDialog {
             self.xml_toolkit_dialog.open();
+        } else if panel == Panel::RegexTesterDialog {
+            self.regex_tester_dialog.open();
         } else if panel == Panel::JsonUtilityDialog {
             if !self.json_utility_dialog.open {
                 self.json_utility_dialog.reopen_existing();
