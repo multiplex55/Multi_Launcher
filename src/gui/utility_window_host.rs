@@ -11,6 +11,9 @@ use super::jump_mode::ui::{
 use super::jump_mode::{SurfaceId, TargetGeneration};
 use super::search_replace_dialog::{SearchReplaceHostActions, SearchReplaceInteractionCheckpoint};
 use super::snippet_dialog::{SnippetHostActions, SnippetHostEffects, SnippetInteractionCheckpoint};
+use super::clipboard_modify_dialog::{
+    ClipboardModifyHostActions, ClipboardModifyInteractionCheckpoint,
+};
 use super::utility_dialog_size::{
     apply_native_utility_geometry_restore, close_native_utility_geometry_viewport,
 };
@@ -19,7 +22,7 @@ use super::utility_host::{
 };
 use super::utility_window_geometry::NativeViewportIdentity;
 use super::{
-    BatchRenameDialogState, BatchRenameUiCommand, ClipboardDialog, SearchReplaceDialogState,
+    BatchRenameDialogState, BatchRenameUiCommand, ClipboardDialog, ClipboardModifyDialogState, SearchReplaceDialogState,
     SearchReplaceUiCommand, SnippetDialog,
 };
 use crate::file_operations::RenameRuntimeSnapshot;
@@ -92,6 +95,28 @@ pub(super) trait HostedUtilityDialog: Sized {
 pub(super) type BatchRenameWindowHost = UtilityWindowHost<BatchRenameDialogState>;
 pub(super) type SearchReplaceWindowHost = UtilityWindowHost<SearchReplaceDialogState>;
 pub(super) type ClipboardHistoryWindowHost = UtilityWindowHost<ClipboardDialog>;
+pub(super) type ClipboardModifyWindowHost = UtilityWindowHost<ClipboardModifyDialogState>;
+
+#[cfg(test)]
+pub(super) type ClipboardModifyTestService = std::sync::Arc<
+    crate::clipboard_modify::clipboard::ClipboardService<
+        crate::clipboard_modify::clipboard::fake::FakeClipboardBackend,
+    >,
+>;
+
+pub(super) struct ClipboardModifyHostRuntime {
+    pub legacy_window_size: egui::Vec2,
+    pub catalog: std::sync::Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
+    pub store: crate::clipboard_modify::store::ClipboardModifierStore,
+    pub pinned: bool,
+    #[cfg(test)]
+    pub test_service: Option<ClipboardModifyTestService>,
+}
+
+pub(super) enum ClipboardModifyHostCommand {
+    Closed,
+    Apply(ClipboardModifyHostActions),
+}
 
 pub(super) enum ClipboardHostCommand {
     Closed,
@@ -230,6 +255,15 @@ impl<D: HostedUtilityDialog> UtilityWindowHost<D> {
         } else {
             self.state.embedded_root_layer()
         }
+    }
+
+    pub(super) fn owner_viewport(&self) -> egui::ViewportId {
+        if self.root_layer().is_none()
+            && let Some(session) = self.native_session
+        {
+            return Self::viewport(session);
+        }
+        egui::ViewportId::ROOT
     }
 
     pub(super) fn needs_root_ui_when_hidden(&self, open: bool) -> bool {
@@ -1370,6 +1404,113 @@ impl HostedUtilityDialog for SnippetDialog {
             vec![SnippetHostCommand::Closed]
         } else if actions.effects.needs_completion() {
             vec![SnippetHostCommand::Apply(actions.effects)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
+}
+
+impl HostedUtilityDialog for ClipboardModifyDialogState {
+    const KIND: NavigationDialogKind = NavigationDialogKind::ClipboardModify;
+    const KEY: &'static str = "clipboard-modify";
+    const TITLE: &'static str = "Clipboard Modify";
+    const SIZE: egui::Vec2 = egui::vec2(900.0, 640.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(520.0, 360.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    type Runtime = ClipboardModifyHostRuntime;
+    type Actions = ClipboardModifyHostActions;
+    type Checkpoint = ClipboardModifyInteractionCheckpoint;
+    type Command = ClipboardModifyHostCommand;
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+
+    fn session(&self) -> u64 {
+        self.host_session_epoch()
+    }
+
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        false
+    }
+
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+
+    fn popup_layer(&self, ctx: &egui::Context, parent: egui::LayerId) -> Option<egui::LayerId> {
+        self.owned_popup_layer(ctx, parent)
+    }
+
+    fn confirmation_binding(
+        &self, _: egui::ViewportId, _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+
+    fn confirmation_scope(
+        &self, _: &JumpModeUi, _: NavigationOwner, _: NavigationViewportBinding, _: SurfaceId,
+    ) -> Option<JumpModeScope> {
+        None
+    }
+
+    fn capture(&self) -> Self::Checkpoint {
+        ClipboardModifyInteractionCheckpoint::capture(self)
+    }
+
+    fn restore(&mut self, checkpoint: Self::Checkpoint) {
+        checkpoint.restore(self);
+    }
+
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        _: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        _: NavigationOwner,
+        parent_input: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        runtime: &Self::Runtime,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        #[cfg(test)]
+        if let Some(service) = &runtime.test_service {
+            return self.render_host(
+                ctx, runtime.legacy_window_size, service, runtime.catalog.clone(),
+                Some(&runtime.store), parent_input, first, runtime.pinned, child_ui, presentation,
+            );
+        }
+        self.render_host(
+            ctx, runtime.legacy_window_size, &crate::clipboard_modify::runtime::clipboard_service(),
+            runtime.catalog.clone(), Some(&runtime.store), parent_input, first, runtime.pinned,
+            child_ui, presentation,
+        )
+    }
+
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+
+    fn closed_command() -> Self::Command {
+        ClipboardModifyHostCommand::Closed
+    }
+
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, ClipboardModifyHostCommand::Closed)
+    }
+
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![ClipboardModifyHostCommand::Closed]
+        } else if actions.needs_completion() {
+            vec![ClipboardModifyHostCommand::Apply(actions)]
         } else {
             Vec::new()
         }

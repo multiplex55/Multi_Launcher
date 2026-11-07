@@ -1294,6 +1294,9 @@ pub struct LauncherApp {
     clipboard_history_host: utility_window_host::ClipboardHistoryWindowHost,
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
+    clipboard_modify_host: utility_window_host::ClipboardModifyWindowHost,
+    #[cfg(test)]
+    clipboard_modify_test_service: Option<utility_window_host::ClipboardModifyTestService>,
     pub json_utility_dialog: JsonUtilityDialogState,
     pub(crate) zip_extractor_dialog: ZipExtractorDialog,
     #[cfg(windows)]
@@ -2173,10 +2176,28 @@ impl LauncherApp {
     }
 
     pub fn open_clipboard_modify_dialog(&mut self) {
+        self.open_clipboard_modify_section(ClipboardModifyDialogSection::Modify);
+    }
+
+    pub(crate) fn open_clipboard_modify_section(&mut self, section: ClipboardModifyDialogSection) {
+        self.load_clipboard_modify_section(section);
+        self.focus_panel(Panel::ClipboardModifyDialog);
+    }
+
+    fn load_clipboard_modify_section(&mut self, section: ClipboardModifyDialogSection) {
+        #[cfg(test)]
+        if let Some(service) = &self.clipboard_modify_test_service {
+            self.clipboard_modify_dialog.open_section(section, service);
+            return;
+        }
         self.clipboard_modify_dialog.open_section(
-            ClipboardModifyDialogSection::Modify,
+            section,
             &crate::clipboard_modify::runtime::clipboard_service(),
         );
+    }
+
+    pub(crate) fn clipboard_modify_has_root_presentation(&self) -> bool {
+        self.clipboard_modify_host.root_layer().is_some()
     }
 
     pub fn open_clipboard_modify_config_file(&mut self) {
@@ -3944,6 +3965,9 @@ impl LauncherApp {
             clipboard_history_host: Default::default(),
             clipboard_modify_runtime,
             clipboard_modify_dialog: ClipboardModifyDialogState::default(),
+            clipboard_modify_host: utility_window_host::ClipboardModifyWindowHost::default(),
+            #[cfg(test)]
+            clipboard_modify_test_service: None,
             json_utility_dialog: JsonUtilityDialogState::default(),
             zip_extractor_dialog: ZipExtractorDialog::default(),
             #[cfg(windows)]
@@ -4843,6 +4867,7 @@ impl LauncherApp {
             Panel::Settings => self.settings_window_host.root_layer().is_some(),
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
+            Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
             Panel::SnippetDialog => self.snippet_window_host.root_layer().is_some(),
             Panel::SnippetPromptDialog => self.snippet_prompt_has_root_presentation(),
             Panel::BatchRenameDialog => self.batch_rename_host.root_layer().is_some(),
@@ -4934,12 +4959,23 @@ impl LauncherApp {
         self.panel_stack.retain(|panel| *panel != Panel::ClipboardDialog);
     }
 
+    fn close_clipboard_modify_session(&mut self) {
+        self.clipboard_modify_host.retire(&self.egui_ctx);
+        if self.clipboard_modify_dialog.open {
+            self.clipboard_modify_dialog.open = false;
+            self.clipboard_modify_dialog.cleanup_after_close();
+        }
+        self.panel_states.clipboard_modify_dialog = false;
+        self.panel_stack
+            .retain(|panel| *panel != Panel::ClipboardModifyDialog);
+    }
+
     fn close_front_dialog_from_root_input(&mut self) -> bool {
         if !self.pin_list_open
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::SnippetDialog) || (*panel == Panel::SnippetPromptDialog && self.hosted_snippet_preview_active()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog) || (*panel == Panel::SnippetPromptDialog && self.hosted_snippet_preview_active()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
@@ -5206,9 +5242,7 @@ impl LauncherApp {
                 self.close_clipboard_history_session();
             }
             Panel::ClipboardModifyDialog => {
-                self.clipboard_modify_dialog.open = false;
-                self.clipboard_modify_dialog.cleanup_after_close();
-                self.panel_states.clipboard_modify_dialog = false;
+                self.close_clipboard_modify_session();
             }
             Panel::QrDialog => {
                 self.qr_dialog.close();
@@ -5520,9 +5554,7 @@ impl LauncherApp {
                 self.close_clipboard_history_session();
             }
             Panel::ClipboardModifyDialog => {
-                self.clipboard_modify_dialog.open = false;
-                self.clipboard_modify_dialog.cleanup_after_close();
-                self.panel_states.clipboard_modify_dialog = false;
+                self.close_clipboard_modify_session();
             }
             Panel::QrDialog => {
                 self.qr_dialog.close();
@@ -5736,9 +5768,11 @@ impl LauncherApp {
             Panel::TodoDialog => self.todo_dialog.ensure_open(),
             Panel::TodoViewDialog => self.todo_view_dialog.ensure_open(),
             Panel::ClipboardDialog => self.clipboard_dialog.ensure_open(),
-            Panel::ClipboardModifyDialog => self
-                .clipboard_modify_dialog
-                .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
+            Panel::ClipboardModifyDialog => {
+                if !self.clipboard_modify_dialog.open {
+                    self.load_clipboard_modify_section(ClipboardModifyDialogSection::Modify);
+                }
+            }
             Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
             Panel::ZipExtractorDialog => {
                 #[cfg(windows)]
@@ -5829,6 +5863,9 @@ impl LauncherApp {
         } else if panel == Panel::ClipboardDialog {
             self.clipboard_dialog.ensure_open();
             self.clipboard_history_host.request_focus();
+        } else if panel == Panel::ClipboardModifyDialog {
+            self.ensure_open(panel);
+            self.clipboard_modify_host.request_focus();
         } else if panel == Panel::BatchRenameDialog {
             self.batch_rename_dialog.open();
             self.batch_rename_host.request_focus();

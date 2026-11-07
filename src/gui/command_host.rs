@@ -1016,10 +1016,7 @@ impl ClipboardModifyCommandHost for LauncherApp {
             }
             ClipboardModifySectionPayload::Help => super::ClipboardModifyDialogSection::Help,
         };
-        self.clipboard_modify_dialog.open_section(
-            section,
-            &crate::clipboard_modify::runtime::clipboard_service(),
-        );
+        self.open_clipboard_modify_section(section);
     }
 
     fn undo_clipboard_modify(&mut self) -> Result<(), String> {

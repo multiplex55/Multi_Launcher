@@ -170,6 +170,27 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         confirmed: bool,
         label: &str,
     ) -> Result<UndoRecord, ClipboardError> {
+        self.commit_dialog_with_review(baseline, output, confirmed, None, label)
+    }
+
+    pub(crate) fn commit_reviewed_dialog(
+        &self,
+        baseline: &str,
+        output: &str,
+        expected: &ClipboardSummary,
+        label: &str,
+    ) -> Result<UndoRecord, ClipboardError> {
+        self.commit_dialog_with_review(baseline, output, true, Some(expected), label)
+    }
+
+    fn commit_dialog_with_review(
+        &self,
+        baseline: &str,
+        output: &str,
+        confirmed: bool,
+        expected: Option<&ClipboardSummary>,
+        label: &str,
+    ) -> Result<UndoRecord, ClipboardError> {
         let _g = self.commit.lock().unwrap();
         let mut current = self.read_retry()?;
         if current.as_bytes() != baseline.as_bytes() && !confirmed {
@@ -180,6 +201,12 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         }
         if confirmed {
             current = self.read_retry()?;
+        }
+        if expected.is_some_and(|expected| *expected != ClipboardSummary::new(&current)) {
+            return Err(ClipboardError::ConfirmationRequired(ClipboardConflict {
+                baseline: ClipboardSummary::new(baseline),
+                current: ClipboardSummary::new(&current),
+            }));
         }
         self.write_retry(output)?;
         let rec = UndoRecord {

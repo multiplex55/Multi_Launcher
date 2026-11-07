@@ -55,10 +55,11 @@ pub(crate) enum NavigationDialogKind {
     DuplicateFinder,
     Activity,
     ZipExtractor,
+    ClipboardModify,
 }
 
 impl NavigationDialogKind {
-    pub(crate) const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::FileSearch,
         Self::Snippets,
         Self::ClipboardHistory,
@@ -78,6 +79,7 @@ impl NavigationDialogKind {
         Self::DuplicateFinder,
         Self::Activity,
         Self::ZipExtractor,
+        Self::ClipboardModify,
     ];
 
     const fn index(self) -> usize {
@@ -101,6 +103,7 @@ impl NavigationDialogKind {
             Self::DuplicateFinder => 16,
             Self::Activity => 17,
             Self::ZipExtractor => 18,
+            Self::ClipboardModify => 19,
         }
     }
 
@@ -125,6 +128,7 @@ impl NavigationDialogKind {
             Self::DuplicateFinder => "duplicate-finder",
             Self::Activity => "activity",
             Self::ZipExtractor => "zip-extractor",
+            Self::ClipboardModify => "clipboard-modify",
         }
     }
 
@@ -136,6 +140,7 @@ impl NavigationDialogKind {
             Self::FileSearch => egui::Id::new(Some("File Search")),
             Self::Snippets => egui::Id::new(Some("Snippets")),
             Self::ClipboardHistory => egui::Id::new(Some("Clipboard History")),
+            Self::ClipboardModify => egui::Id::new("clipboard_modify_dialog_window"),
             Self::JsonUtility => egui::Id::new("json_utility_dialog"),
             Self::RegexTester => egui::Id::new("regex_tester_embedded_window"),
             Self::XmlToolkit => egui::Id::new("xml_toolkit_embedded_window"),
@@ -434,6 +439,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::BatchRename
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
+                    | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::Snippets
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
@@ -469,6 +475,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::BatchRename
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
+                    | NavigationDialogKind::ClipboardModify
                     | NavigationDialogKind::Snippets),
                 ..
             } => {
@@ -4246,6 +4253,11 @@ mod tests {
                     }
                     NavigationDialogKind::ClipboardHistory => {
                         egui::Window::new("Clipboard History").show(ctx, |_| {});
+                    }
+                    NavigationDialogKind::ClipboardModify => {
+                        egui::Window::new("Clipboard Modify")
+                            .id(egui::Id::new("clipboard_modify_dialog_window"))
+                            .show(ctx, |_| {});
                     }
                     NavigationDialogKind::JsonUtility => {
                         egui::Window::new("JSON Utility")

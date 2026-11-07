@@ -1351,7 +1351,7 @@ impl SettingsEditor {
             SettingsHostAction::ClipboardModify(command) => match command {
                 ClipboardModifySettingsCommand::OpenDialog => {
                     app.open_clipboard_modify_dialog();
-                    return true;
+                    return app.clipboard_modify_has_root_presentation();
                 }
                 ClipboardModifySettingsCommand::OpenConfigFile => {
                     app.open_clipboard_modify_config_file()
