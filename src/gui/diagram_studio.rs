@@ -24,13 +24,14 @@ use crate::diagram::{
     VisualConnectorEndpoint, VisualConnectorRoute, VisualDistribution, VisualLineStyle,
     VisualObject, VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation,
     VisualPresetDraft, VisualPrimitiveShape, VisualProjectedKind, VisualProjectionError,
-    VisualScene, VisualSceneProjection, VisualShadow, VisualStyle, VisualTransform,
-    VisualTransformMode, build_scene, color_with_opacity, duplicate_saved_document,
-    export_drawio_scene, generic_preview_family, import_drawio_xml, is_generic_preview_candidate,
-    mermaid_visual_copy, preview_visual_transforms, project_visual_scene, publish_drawio_export,
-    publish_visual_document_copy, read_drawio_xml_source, visual_canvas_align_selection,
-    visual_canvas_distribute_selection, visual_canvas_hit_test, visual_canvas_marquee_selection,
-    visual_canvas_minimap_layout, visual_canvas_selection_bounds, visual_canvas_selection_handles,
+    VisualScene, VisualSceneProjection, VisualShadow, VisualStyle, VisualSwimlaneOrientation,
+    VisualTransform, VisualTransformMode, build_scene, color_with_opacity,
+    duplicate_saved_document, export_drawio_scene, generic_preview_family, import_drawio_xml,
+    is_generic_preview_candidate, mermaid_visual_copy, preview_visual_transforms,
+    project_visual_scene, publish_drawio_export, publish_visual_document_copy,
+    read_drawio_xml_source, visual_canvas_align_selection, visual_canvas_distribute_selection,
+    visual_canvas_hit_test, visual_canvas_marquee_selection, visual_canvas_minimap_layout,
+    visual_canvas_selection_bounds, visual_canvas_selection_handles,
     visual_canvas_snap_translation_delta,
 };
 use eframe::egui;
@@ -1018,6 +1019,7 @@ pub(crate) struct DiagramStudioDialog {
     selected_nodes: BTreeSet<NodeId>,
     property_draft: Option<PropertyDraft>,
     visual_create_shape: VisualPrimitiveShape,
+    visual_membership_target: Option<VisualObjectId>,
     visual_selection: Option<VisualObjectId>,
     visual_selected_objects: BTreeSet<VisualObjectId>,
     visual_selected_preset: Option<crate::diagram::VisualPresetId>,
@@ -1038,6 +1040,8 @@ pub(crate) struct DiagramStudioDialog {
     test_canvas_id: Option<egui::Id>,
     #[cfg(test)]
     test_action_rects: Vec<(String, egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_visual_group_enabled: bool,
     #[cfg(test)]
     test_action_focus_ids: Vec<(String, egui::Id)>,
     #[cfg(test)]
@@ -1207,6 +1211,7 @@ impl DiagramStudioDialog {
             selected_nodes: BTreeSet::new(),
             property_draft: None,
             visual_create_shape: VisualPrimitiveShape::Rectangle,
+            visual_membership_target: None,
             visual_selection: None,
             visual_selected_objects: BTreeSet::new(),
             visual_selected_preset: None,
@@ -1227,6 +1232,8 @@ impl DiagramStudioDialog {
             test_canvas_id: None,
             #[cfg(test)]
             test_action_rects: Vec::new(),
+            #[cfg(test)]
+            test_visual_group_enabled: false,
             #[cfg(test)]
             test_action_focus_ids: Vec::new(),
             #[cfg(test)]
@@ -5134,6 +5141,13 @@ impl DiagramStudioDialog {
         }
         if previous_primary != self.visual_selection {
             self.visual_property_draft = None;
+            self.visual_membership_target = None;
+        }
+        if self.visual_membership_target.is_some_and(|target| {
+            self.visual_selection
+                .is_none_or(|child| !visual_frame_can_parent(scene, child, target))
+        }) {
+            self.visual_membership_target = None;
         }
         let revision = self.documents.visual_revision();
         if self.visual_property_draft.as_ref().is_some_and(|draft| {
@@ -5172,6 +5186,7 @@ impl DiagramStudioDialog {
         }
         if self.visual_selection != selection.primary {
             self.visual_property_draft = None;
+            self.visual_membership_target = None;
         }
         self.visual_selection = selection.primary;
         self.visual_selected_objects = selection.objects;
@@ -5682,6 +5697,7 @@ impl DiagramStudioDialog {
             self.visual_selected_objects.clear();
         }
         self.visual_selected_preset = None;
+        self.visual_membership_target = None;
         self.visual_property_draft = None;
         self.visual_gesture = None;
         self.visual_canvas_press_authorized = None;
@@ -7568,14 +7584,27 @@ impl DiagramStudioDialog {
                         extend_selection,
                         true,
                     );
-                    let mode = canvas_gesture_mode(hit, &next_selection, projected, base_painted_prefix, extend_selection);
-                    if let Some(mode) = mode {
-                        let selected_ids = next_selection.objects.clone();
+                    let mode = canvas_gesture_mode(
+                        scene,
+                        hit,
+                        &next_selection,
+                        projected,
+                        base_painted_prefix,
+                        extend_selection,
+                    );
+                    if let Some(mode) = mode
+                        && let Some(resolved) = crate::diagram::visual_canvas_resolve_membership(
+                            scene,
+                            &next_selection.objects,
+                        )
+                    {
+                        let transformable_ids =
+                            resolved.expanded.into_iter().collect::<BTreeSet<_>>();
                         let initial_objects = scene
                             .objects
                             .iter()
                             .filter(|object| {
-                                selected_ids.contains(&object.id)
+                                transformable_ids.contains(&object.id)
                                     && !matches!(
                                         &object.kind,
                                         VisualObjectKind::Connector { .. }
@@ -7690,13 +7719,16 @@ impl DiagramStudioDialog {
                                         x: current_world.x - active.pointer_start_world.x,
                                         y: current_world.y - active.pointer_start_world.y,
                                     };
-                                    if let Some(snapped) = visual_canvas_snap_translation_delta(
-                                        projected,
-                                        &active.initial_selection.objects,
-                                        base_painted_prefix,
-                                        raw_delta,
-                                        active.mapping.zoom,
-                                    ) {
+                                    if let Some(scene) = scene_snapshot.as_deref()
+                                        && let Some(snapped) = visual_canvas_snap_translation_delta(
+                                            scene,
+                                            projected,
+                                            &active.initial_selection.objects,
+                                            base_painted_prefix,
+                                            raw_delta,
+                                            active.mapping.zoom,
+                                        )
+                                    {
                                         current_world = ScenePoint {
                                             x: active.pointer_start_world.x + snapped.delta.x,
                                             y: active.pointer_start_world.y + snapped.delta.y,
@@ -7910,22 +7942,28 @@ impl DiagramStudioDialog {
                     ));
                 }
 
-                let transformable_selection_count = base_projection.map_or(0, |projection| {
-                    projection
-                        .items
-                        .iter()
-                        .take(base_painted_prefix)
-                        .filter(|item| {
-                            selection_state.objects.contains(&item.object_id)
-                                && item.kind != VisualProjectedKind::Connector
-                        })
-                        .map(|item| item.object_id)
-                        .collect::<BTreeSet<_>>()
-                        .len()
+                let resolved_layout_selection = scene_snapshot.as_deref().and_then(|scene| {
+                    crate::diagram::visual_canvas_resolve_membership(
+                        scene,
+                        &selection_state.objects,
+                    )
                 });
-                let layout_owner_available = scene_snapshot.is_some()
-                    && base_projection.is_some()
-                    && transformable_selection_count <= MAX_VISUAL_TRANSACTION_OPERATIONS;
+                let transformable_selection_count = resolved_layout_selection
+                    .as_ref()
+                    .map_or(0, |selection| selection.roots.len());
+                let layout_owner_available = scene_snapshot
+                    .as_deref()
+                    .zip(base_projection)
+                    .is_some_and(|(scene, projection)| {
+                        resolved_layout_selection.is_some()
+                            && visual_canvas_selection_bounds(
+                                scene,
+                                projection,
+                                &selection_state.objects,
+                                base_painted_prefix,
+                            )
+                            .is_some()
+                    });
                 let layout_actions_allowed = visual_canvas_editing_allowed
                     && document_intent.is_none()
                     && self.visual_gesture.is_none()
@@ -8106,6 +8144,117 @@ impl DiagramStudioDialog {
                                 style: VisualStyle::default(),
                                 kind: VisualObjectKind::Text {
                                     text: "New text".into(),
+                                },
+                            })],
+                            None,
+                        ));
+                    }
+                    let add_container = ui.add_enabled(
+                        structural_edits_allowed,
+                        egui::Button::new("Add container"),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "visual_add_container".into(),
+                        add_container.rect,
+                        ui.clip_rect(),
+                    ));
+                    if add_container.clicked() && document_intent.is_none() {
+                        staged_operations = Some((
+                            vec![VisualOperation::AddObject(VisualObjectDraft {
+                                layer_id: DEFAULT_LAYER_ID,
+                                transform: next_visual_frame_transform(
+                                    scene_snapshot.as_deref(),
+                                ),
+                                style: visual_frame_style(),
+                                kind: VisualObjectKind::Container {
+                                    label: "Container".into(),
+                                },
+                            })],
+                            None,
+                        ));
+                    }
+                    let group_roots = scene_snapshot.as_deref()
+                        .map_or_else(Vec::new, |scene| visual_group_roots(scene, &self.visual_selected_objects));
+                    let group = ui.add_enabled(
+                        structural_edits_allowed && !group_roots.is_empty(),
+                        egui::Button::new("Group selection"),
+                    );
+                    #[cfg(test)]
+                    {
+                        self.test_visual_group_enabled = group.enabled();
+                        self.test_action_rects.push(("visual_group_selection".into(), group.rect, ui.clip_rect()));
+                    }
+                    if group.clicked() && document_intent.is_none() {
+                        if let (Some(scene), Some(projection)) = (scene_snapshot.as_deref(), base_projection) {
+                            let group_selection = group_roots.iter().copied().collect();
+                            if let Some(bounds) = visual_canvas_selection_bounds(scene, projection, &group_selection, visual_painted_item_prefix(projection)) {
+                                staged_operations = Some((vec![VisualOperation::Group {
+                                    frame: VisualObjectDraft {
+                                        layer_id: DEFAULT_LAYER_ID,
+                                        transform: VisualTransform { x: bounds.center().x, y: bounds.center().y, width: (bounds.max.x - bounds.min.x + 40.0).max(40.0), height: (bounds.max.y - bounds.min.y + 64.0).max(64.0), rotation_degrees: 0.0 },
+                                        style: visual_frame_style(),
+                                        kind: VisualObjectKind::Container { label: "Group".into() },
+                                    },
+                                    members: group_roots,
+                                }], None));
+                            }
+                        }
+                    }
+                    let ungroup_id = scene_snapshot.as_ref().and_then(|scene| self.visual_selection.and_then(|id| scene.objects.iter().find(|object| object.id == id && matches!(object.kind, VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. })).map(|object| object.id)));
+                    let ungroup = ui.add_enabled(structural_edits_allowed && ungroup_id.is_some(), egui::Button::new("Ungroup"));
+                    #[cfg(test)]
+                    self.test_action_rects.push(("visual_ungroup".into(), ungroup.rect, ui.clip_rect()));
+                    if ungroup.clicked() && document_intent.is_none() {
+                        if let Some(id) = ungroup_id { staged_operations = Some((vec![VisualOperation::Ungroup(id)], None)); }
+                    }
+                    let add_horizontal_swimlane = ui.add_enabled(
+                        structural_edits_allowed,
+                        egui::Button::new("Add horizontal lane"),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "visual_add_horizontal_swimlane".into(),
+                        add_horizontal_swimlane.rect,
+                        ui.clip_rect(),
+                    ));
+                    if add_horizontal_swimlane.clicked() && document_intent.is_none() {
+                        staged_operations = Some((
+                            vec![VisualOperation::AddObject(VisualObjectDraft {
+                                layer_id: DEFAULT_LAYER_ID,
+                                transform: next_visual_frame_transform(
+                                    scene_snapshot.as_deref(),
+                                ),
+                                style: visual_frame_style(),
+                                kind: VisualObjectKind::Swimlane {
+                                    orientation: VisualSwimlaneOrientation::Horizontal,
+                                    label: "Horizontal lane".into(),
+                                },
+                            })],
+                            None,
+                        ));
+                    }
+                    let add_vertical_swimlane = ui.add_enabled(
+                        structural_edits_allowed,
+                        egui::Button::new("Add vertical lane"),
+                    );
+                    #[cfg(test)]
+                    self.test_action_rects.push((
+                        "visual_add_vertical_swimlane".into(),
+                        add_vertical_swimlane.rect,
+                        ui.clip_rect(),
+                    ));
+                    if add_vertical_swimlane.clicked() && document_intent.is_none() {
+                        staged_operations = Some((
+                            vec![VisualOperation::AddObject(VisualObjectDraft {
+                                layer_id: DEFAULT_LAYER_ID,
+                                transform: next_visual_frame_transform(
+                                    scene_snapshot.as_deref(),
+                                ),
+                                style: visual_frame_style(),
+                                kind: VisualObjectKind::Swimlane {
+                                    orientation: VisualSwimlaneOrientation::Vertical,
+                                    label: "Vertical lane".into(),
                                 },
                             })],
                             None,
@@ -8352,15 +8501,137 @@ impl DiagramStudioDialog {
                     egui::CollapsingHeader::new("Object properties")
                         .default_open(true)
                         .show(ui, |ui| {
+                        let selected_is_connector = matches!(
+                            &object.kind,
+                            VisualObjectKind::Connector { .. }
+                        );
+                        if selected_id != crate::diagram::TITLE_OBJECT_ID
+                            && !selected_is_connector
+                        {
+                            let current_parent = scene.parent_by_child.get(&selected_id).copied();
+                            let mut parent_target = self.visual_membership_target;
+                            ui.add_enabled_ui(!visual_draft_active, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(current_parent.map_or_else(
+                                        || "Frame: none".to_owned(),
+                                        |id| format!("Frame: #{}", id.get()),
+                                    ));
+                                    let _parent_combo = egui::ComboBox::from_id_salt((
+                                        "diagram-visual-membership-parent",
+                                        selected_id,
+                                    ))
+                                    .selected_text(parent_target
+                                        .and_then(|id| {
+                                            scene.objects.iter().find(|candidate| candidate.id == id)
+                                        })
+                                        .map_or_else(|| "Choose frame".to_owned(), visual_object_label))
+                                    .show_ui(ui, |ui| {
+                                        for candidate in scene.objects.iter().filter(|candidate| {
+                                            matches!(
+                                                &candidate.kind,
+                                                VisualObjectKind::Container { .. }
+                                                    | VisualObjectKind::Swimlane { .. }
+                                            ) && visual_frame_can_parent(scene, selected_id, candidate.id)
+                                        }) {
+                                            let _response = ui.selectable_value(
+                                                &mut parent_target,
+                                                Some(candidate.id),
+                                                visual_object_label(candidate),
+                                            );
+                                            #[cfg(test)]
+                                            self.test_action_rects.push((
+                                                format!("visual_parent_option_{}", candidate.id.get()),
+                                                _response.rect,
+                                                ui.clip_rect(),
+                                            ));
+                                        }
+                                    });
+                                    #[cfg(test)]
+                                    self.test_action_rects.push((
+                                        "visual_membership_parent".into(),
+                                        _parent_combo.response.rect,
+                                        ui.clip_rect(),
+                                    ));
+                                    let assign = ui.add_enabled(
+                                        visual_edits_allowed
+                                            && pending.is_none()
+                                            && parent_target.is_some_and(|parent| {
+                                                Some(parent) != current_parent
+                                            }),
+                                        egui::Button::new("Assign / reparent"),
+                                    );
+                                    #[cfg(test)]
+                                    self.test_action_rects.push((
+                                        "visual_assign_parent".into(),
+                                        assign.rect,
+                                        ui.clip_rect(),
+                                    ));
+                                    if assign.clicked()
+                                        && pending.is_none()
+                                        && document_intent.is_none()
+                                        && let Some(parent) = parent_target
+                                    {
+                                        staged_operations = Some((
+                                            vec![VisualOperation::SetParent {
+                                                child: selected_id,
+                                                parent: Some(parent),
+                                            }],
+                                            None,
+                                        ));
+                                    }
+                                    let detach = ui.add_enabled(
+                                        visual_edits_allowed
+                                            && pending.is_none()
+                                            && current_parent.is_some(),
+                                        egui::Button::new("Detach from frame"),
+                                    );
+                                    #[cfg(test)]
+                                    self.test_action_rects.push((
+                                        "visual_detach_parent".into(),
+                                        detach.rect,
+                                        ui.clip_rect(),
+                                    ));
+                                    if detach.clicked()
+                                        && pending.is_none()
+                                        && document_intent.is_none()
+                                    {
+                                        staged_operations = Some((
+                                            vec![VisualOperation::SetParent {
+                                                child: selected_id,
+                                                parent: None,
+                                            }],
+                                            None,
+                                        ));
+                                    }
+                                });
+                            });
+                            self.visual_membership_target = parent_target;
+                        }
+                        let populated_frame = matches!(
+                            &object.kind,
+                            VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. }
+                        ) && scene
+                            .parent_by_child
+                            .values()
+                            .any(|parent| *parent == selected_id);
+                        if matches!(
+                            &object.kind,
+                            VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. }
+                        ) {
+                            ui.weak("Removing a frame promotes direct members without moving them; connectors attached to the frame are removed.");
+                        }
                         if !matches!(&object.kind, VisualObjectKind::Connector { .. }) {
-                            ui.horizontal_wrapped(|ui| {
+                            ui.add_enabled_ui(!populated_frame, |ui| ui.horizontal_wrapped(|ui| {
                                 ui.label("Position / size");
                                 ui.add(egui::DragValue::new(&mut object.transform.x).prefix("x ").speed(1.0));
                                 ui.add(egui::DragValue::new(&mut object.transform.y).prefix("y ").speed(1.0));
                                 ui.add(egui::DragValue::new(&mut object.transform.width).prefix("w ").speed(1.0));
                                 ui.add(egui::DragValue::new(&mut object.transform.height).prefix("h ").speed(1.0));
                                 ui.add(egui::DragValue::new(&mut object.transform.rotation_degrees).prefix("° ").speed(1.0));
-                            });
+                            }));
+                            if populated_frame {
+                                ui.weak("Use the canvas group handles to transform this frame with its members.");
+                            }
                         }
                         match &mut object.kind {
                             VisualObjectKind::Text { text } => {
@@ -8373,6 +8644,93 @@ impl DiagramStudioDialog {
                                 });
                                 ui.label("Text");
                                 ui.add(egui::TextEdit::multiline(text).desired_rows(2));
+                            }
+                            VisualObjectKind::Container { label } => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Header fill");
+                                    edit_visual_color(ui, &mut object.style.fill);
+                                    ui.label("Border / text");
+                                    edit_visual_color(ui, &mut object.style.border);
+                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
+                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
+                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Label font ").speed(0.5));
+                                });
+                                let label_id = ui.make_persistent_id((
+                                    "diagram-visual-frame-label",
+                                    self.render_document.clone(),
+                                    selected_id,
+                                ));
+                                clear_text_edit_undoer(ui.ctx(), label_id);
+                                let _label_edit = ui.add(
+                                    egui::TextEdit::singleline(label).id(label_id),
+                                );
+                                #[cfg(test)]
+                                self.test_action_rects.push((
+                                    "visual_frame_label".into(),
+                                    _label_edit.rect,
+                                    ui.clip_rect(),
+                                ));
+                            }
+                            VisualObjectKind::Swimlane { orientation, label } => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Header fill");
+                                    edit_visual_color(ui, &mut object.style.fill);
+                                    ui.label("Border / text");
+                                    edit_visual_color(ui, &mut object.style.border);
+                                    ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
+                                    ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
+                                    ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Label font ").speed(0.5));
+                                    let _orientation_combo = egui::ComboBox::from_id_salt("diagram-visual-swimlane-orientation")
+                                        .selected_text(match orientation {
+                                            VisualSwimlaneOrientation::Horizontal => "Horizontal",
+                                            VisualSwimlaneOrientation::Vertical => "Vertical",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            let _horizontal = ui.selectable_value(
+                                                orientation,
+                                                VisualSwimlaneOrientation::Horizontal,
+                                                "Horizontal",
+                                            );
+                                            #[cfg(test)]
+                                            self.test_action_rects.push((
+                                                "visual_swimlane_horizontal".into(),
+                                                _horizontal.rect,
+                                                ui.clip_rect(),
+                                            ));
+                                            let _vertical = ui.selectable_value(
+                                                orientation,
+                                                VisualSwimlaneOrientation::Vertical,
+                                                "Vertical",
+                                            );
+                                            #[cfg(test)]
+                                            self.test_action_rects.push((
+                                                "visual_swimlane_vertical".into(),
+                                                _vertical.rect,
+                                                ui.clip_rect(),
+                                            ));
+                                        });
+                                    #[cfg(test)]
+                                    self.test_action_rects.push((
+                                        "visual_swimlane_orientation".into(),
+                                        _orientation_combo.response.rect,
+                                        ui.clip_rect(),
+                                    ));
+                                });
+                                let label_id = ui.make_persistent_id((
+                                    "diagram-visual-frame-label",
+                                    self.render_document.clone(),
+                                    selected_id,
+                                ));
+                                clear_text_edit_undoer(ui.ctx(), label_id);
+                                let _label_edit = ui.add(
+                                    egui::TextEdit::singleline(label).id(label_id),
+                                );
+                                #[cfg(test)]
+                                self.test_action_rects.push((
+                                    "visual_frame_label".into(),
+                                    _label_edit.rect,
+                                    ui.clip_rect(),
+                                ));
                             }
                             VisualObjectKind::Primitive { .. } => {
                                 ui.horizontal_wrapped(|ui| {
@@ -8655,7 +9013,11 @@ impl DiagramStudioDialog {
                             #[cfg(test)]
                             self.test_action_rects.push(("visual_apply_properties".into(), apply.rect, ui.clip_rect()));
                             if apply.clicked() && pending.is_none() && document_intent.is_none() {
-                                staged_operations = Some((vec![VisualOperation::ReplaceObject(object.clone())], Some(selected_id)));
+                                if let Some(operations) = crate::diagram::visual_canvas_property_transform_operations(scene, object) {
+                                    staged_operations = Some((operations, Some(selected_id)));
+                                } else {
+                                    self.message = Some(StudioNotice::error("Frame resize must be uniform and stay within geometry limits."));
+                                }
                             }
                             let cancel = ui.add_enabled(visual_edits_allowed, egui::Button::new("Cancel property edit"));
                             #[cfg(test)]
@@ -8810,6 +9172,7 @@ fn paint_visual_projection(
         let is_text = item.kind == VisualProjectedKind::Text;
         let is_connector = item.kind == VisualProjectedKind::Connector;
         let is_image = item.kind == VisualProjectedKind::Image;
+        let is_frame = item.header.is_some();
         let outline = item
             .outline
             .iter()
@@ -8830,8 +9193,18 @@ fn paint_visual_projection(
                 .map(|point| *point + offset)
                 .collect::<Vec<_>>();
             if !is_text {
+                let fill = item
+                    .header
+                    .as_ref()
+                    .map(|header| {
+                        header
+                            .iter()
+                            .map(|point| mapping.point(*point) + offset)
+                            .collect()
+                    })
+                    .unwrap_or_else(|| shadow_outline.clone());
                 painter.add(egui::Shape::convex_polygon(
-                    shadow_outline.clone(),
+                    fill,
                     shadow_color,
                     egui::Stroke::NONE,
                 ));
@@ -8844,6 +9217,20 @@ fn paint_visual_projection(
                     true,
                     egui::Stroke::new(shadow_width, shadow_color),
                 );
+                if is_frame {
+                    for path in &item.details {
+                        let points = path
+                            .iter()
+                            .map(|point| mapping.point(*point) + offset)
+                            .collect::<Vec<_>>();
+                        paint_solid_path(
+                            painter,
+                            &points,
+                            false,
+                            egui::Stroke::new(shadow_width, shadow_color),
+                        );
+                    }
+                }
             }
         }
 
@@ -8954,8 +9341,13 @@ fn paint_visual_projection(
                 &mapping,
             );
         } else if !is_text {
+            let fill = item
+                .header
+                .as_ref()
+                .map(|header| header.iter().map(|point| mapping.point(*point)).collect())
+                .unwrap_or_else(|| outline.clone());
             painter.add(egui::Shape::convex_polygon(
-                outline.clone(),
+                fill,
                 visual_color(item.style.fill, item.style.opacity),
                 egui::Stroke::NONE,
             ));
@@ -9037,6 +9429,7 @@ fn visual_item_paint_work(item: &crate::diagram::ProjectedVisualItem) -> usize {
     let path_points = item
         .outline
         .len()
+        .saturating_add(item.header.as_ref().map_or(0, Vec::len))
         .saturating_add(item.details.iter().map(Vec::len).sum::<usize>())
         .saturating_add(item.open_paths.iter().map(Vec::len).sum::<usize>());
     let text_work = item.text.as_ref().map_or(0, |text| {
@@ -9270,22 +9663,30 @@ fn reduce_canvas_selection(
 }
 
 fn canvas_gesture_mode(
+    scene: &VisualScene,
     hit: CanvasHit,
     selection: &VisualSelectionState,
     projection: &VisualSceneProjection,
     painted_item_prefix: usize,
     extend: bool,
 ) -> Option<VisualGestureMode> {
-    let transformable_selection = projection
-        .items
-        .iter()
-        .take(painted_item_prefix)
-        .filter(|item| {
-            selection.objects.contains(&item.object_id)
-                && item.kind != VisualProjectedKind::Connector
-        })
-        .map(|item| item.object_id)
-        .collect::<BTreeSet<_>>();
+    let transformable_selection =
+        crate::diagram::visual_canvas_resolve_membership(scene, &selection.objects)?
+            .expanded
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+    if !transformable_selection.is_empty()
+        && matches!(hit, CanvasHit::Handle(_) | CanvasHit::Object(_))
+        && visual_canvas_selection_bounds(
+            scene,
+            projection,
+            &selection.objects,
+            painted_item_prefix,
+        )
+        .is_none()
+    {
+        return None;
+    }
     match hit {
         CanvasHit::Handle(CanvasHandleKind::ResizeCorner {
             object_id,
@@ -9310,6 +9711,7 @@ fn canvas_gesture_mode(
             if transformable_selection.len() > 1 =>
         {
             let pivot = visual_canvas_selection_bounds(
+                scene,
                 projection,
                 &selection.objects,
                 painted_item_prefix,
@@ -9323,6 +9725,7 @@ fn canvas_gesture_mode(
             if transformable_selection.len() > 1 =>
         {
             let pivot = visual_canvas_selection_bounds(
+                scene,
                 projection,
                 &selection.objects,
                 painted_item_prefix,
@@ -9666,8 +10069,74 @@ fn visual_object_label(object: &VisualObject) -> String {
         VisualObjectKind::PresetInstance { .. } => "Preset instance",
         VisualObjectKind::ImageReference { .. } => "Image reference",
         VisualObjectKind::Connector { .. } => "Connector",
+        VisualObjectKind::Container { label } => {
+            return format!(
+                "Container — {} #{}",
+                label.chars().take(24).collect::<String>(),
+                object.id.get()
+            );
+        }
+        VisualObjectKind::Swimlane { orientation, label } => {
+            let orientation = match orientation {
+                VisualSwimlaneOrientation::Horizontal => "Horizontal lane",
+                VisualSwimlaneOrientation::Vertical => "Vertical lane",
+            };
+            return format!(
+                "{orientation} — {} #{}",
+                label.chars().take(24).collect::<String>(),
+                object.id.get()
+            );
+        }
     };
     format!("{label} #{}", object.id.get())
+}
+
+fn visual_group_roots(
+    scene: &VisualScene,
+    selection: &BTreeSet<VisualObjectId>,
+) -> Vec<VisualObjectId> {
+    crate::diagram::visual_canvas_resolve_membership(scene, selection).map_or_else(
+        Vec::new,
+        |membership| {
+            membership
+                .roots
+                .into_iter()
+                .filter(|id| *id != crate::diagram::TITLE_OBJECT_ID)
+                .collect()
+        },
+    )
+}
+
+fn visual_frame_can_parent(
+    scene: &VisualScene,
+    child: VisualObjectId,
+    parent: VisualObjectId,
+) -> bool {
+    if child == parent {
+        return false;
+    }
+    if !scene.objects.iter().any(|object| {
+        object.id == parent
+            && matches!(
+                &object.kind,
+                VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. }
+            )
+    }) {
+        return false;
+    }
+    let mut current = Some(parent);
+    let mut depth = 0usize;
+    while let Some(id) = current {
+        if id == child {
+            return false;
+        }
+        depth += 1;
+        if depth > crate::diagram::MAX_VISUAL_CONTAINMENT_DEPTH {
+            return false;
+        }
+        current = scene.parent_by_child.get(&id).copied();
+    }
+    true
 }
 
 fn visual_connector_endpoint_editor(
@@ -9801,6 +10270,20 @@ fn next_visual_object_transform(scene: Option<&VisualScene>) -> VisualTransform 
         width: 150.0,
         height: 82.0,
         rotation_degrees: 0.0,
+    }
+}
+
+fn next_visual_frame_transform(scene: Option<&VisualScene>) -> VisualTransform {
+    let mut transform = next_visual_object_transform(scene);
+    transform.width = 320.0;
+    transform.height = 220.0;
+    transform
+}
+
+fn visual_frame_style() -> VisualStyle {
+    VisualStyle {
+        fill: VisualColor::rgba(84, 130, 176, 48),
+        ..VisualStyle::default()
     }
 }
 
@@ -12859,6 +13342,652 @@ mod tests {
     }
 
     #[test]
+    fn diagram_studio_visual_container_controls_membership_and_group_drag_once() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+
+        click_action(&mut dialog, &ctx, "visual_add_container");
+        click_action(&mut dialog, &ctx, "visual_add_container");
+        let frame_ids = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .filter_map(|object| {
+                matches!(&object.kind, VisualObjectKind::Container { .. }).then_some(object.id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(frame_ids.len(), 2, "the frame control creates containers");
+        let frame_id = frame_ids[0];
+        let other_frame_id = frame_ids[1];
+        click_action(&mut dialog, &ctx, "visual_add_shape");
+        let child_id = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find_map(|object| {
+                matches!(&object.kind, VisualObjectKind::Primitive { .. }).then_some(object.id)
+            })
+            .expect("the shape control creates a member candidate");
+
+        let mut child = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == child_id)
+            .unwrap()
+            .clone();
+        let frame_object = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == frame_id)
+            .unwrap();
+        let mut other_frame = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == other_frame_id)
+            .unwrap()
+            .clone();
+        other_frame.transform.x = 400.0;
+        other_frame.transform.y = 0.0;
+        child.transform.x = frame_object.transform.x;
+        child.transform.y = frame_object.transform.y;
+        child.transform.width = 80.0;
+        child.transform.height = 50.0;
+        dialog
+            .documents
+            .apply_visual_transaction(&[
+                VisualOperation::ReplaceObject(child),
+                VisualOperation::ReplaceObject(other_frame),
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 120.0,
+                        y: 0.0,
+                        width: 70.0,
+                        height: 50.0,
+                        ..VisualTransform::default()
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Ellipse,
+                    },
+                }),
+            ])
+            .unwrap();
+        dialog.revalidate_visual_selection();
+        let external_id = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find_map(|object| {
+                matches!(
+                    &object.kind,
+                    VisualObjectKind::Primitive {
+                        shape: VisualPrimitiveShape::Ellipse
+                    }
+                )
+                .then_some(object.id)
+            })
+            .unwrap();
+        let connector_id = dialog
+            .documents
+            .apply_visual_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: child_id,
+                            anchor: VisualAnchor::East,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: external_id,
+                            anchor: VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Straight,
+                        direction: VisualConnectorDirection::None,
+                        label: String::new(),
+                    },
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+
+        let mixed = [crate::diagram::TITLE_OBJECT_ID, child_id, connector_id].into_iter().collect();
+        assert_eq!(visual_group_roots(dialog.documents.visual_scene().unwrap(), &mixed), vec![child_id]);
+        let ineligible = [crate::diagram::TITLE_OBJECT_ID, connector_id].into_iter().collect();
+        assert!(visual_group_roots(dialog.documents.visual_scene().unwrap(), &ineligible).is_empty());
+
+        click_action(&mut dialog, &ctx, "visual_object_selection");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!("visual_object_option_{}", child_id.get()),
+        );
+        click_action(&mut dialog, &ctx, "visual_membership_parent");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!("visual_parent_option_{}", frame_id.get()),
+        );
+        click_action(&mut dialog, &ctx, "visual_assign_parent");
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .parent_by_child
+                .get(&child_id),
+            Some(&frame_id)
+        );
+        // Verify the working parent controls can reparent and detach as well as
+        // make the final membership used by the group gesture below.
+        click_action(&mut dialog, &ctx, "visual_membership_parent");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!("visual_parent_option_{}", other_frame_id.get()),
+        );
+        click_action(&mut dialog, &ctx, "visual_assign_parent");
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .parent_by_child
+                .get(&child_id),
+            Some(&other_frame_id),
+            "Assign / reparent uses the accepted visual transaction"
+        );
+        click_action(&mut dialog, &ctx, "visual_detach_parent");
+        assert!(
+            !dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .parent_by_child
+                .contains_key(&child_id)
+        );
+        click_action(&mut dialog, &ctx, "visual_membership_parent");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!("visual_parent_option_{}", frame_id.get()),
+        );
+        click_action(&mut dialog, &ctx, "visual_assign_parent");
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .parent_by_child
+                .get(&child_id),
+            Some(&frame_id)
+        );
+
+        click_action(&mut dialog, &ctx, "visual_object_selection");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!("visual_object_option_{}", frame_id.get()),
+        );
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        let transform_for = |dialog: &DiagramStudioDialog, id| {
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .objects
+                .iter()
+                .find(|object| object.id == id)
+                .unwrap()
+                .transform
+        };
+        let frame_before = transform_for(&dialog, frame_id);
+        let child_before = transform_for(&dialog, child_id);
+        let scene_before_gesture = dialog.documents.visual_scene().unwrap().clone();
+        let path_for = |scene: &VisualScene| {
+            project_visual_scene(scene)
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|item| item.object_id == connector_id)
+                .unwrap()
+                .open_paths
+        };
+        let route_before = path_for(&scene_before_gesture);
+        click_action(&mut dialog, &ctx, "visual_fit");
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        let frame_header = visual_canvas_world_point(
+            &dialog,
+            ScenePoint {
+                x: frame_before.x,
+                y: frame_before.y - frame_before.height / 2.0 + 12.0,
+            },
+        );
+        let fit_scene = dialog.documents.visual_scene().unwrap();
+        let fit_projection = project_visual_scene(fit_scene).unwrap();
+        let fit_mapping = pure_canvas_mapping(
+            dialog.test_visual_canvas_rect.unwrap().shrink(12.0),
+            dialog.camera,
+        );
+        let fit_point = scene_point_from_screen(frame_header);
+        assert!(
+            fit_mapping.contains_screen_point(fit_point),
+            "frame header outside fitted clip: mapping={fit_mapping:?}, point={fit_point:?}"
+        );
+        assert!(
+            visual_painted_item_prefix(&fit_projection)
+                > fit_projection
+                    .items
+                    .iter()
+                    .position(|item| item.object_id == frame_id)
+                    .unwrap()
+        );
+        assert_eq!(
+            visual_canvas_hit_test(
+                &fit_projection,
+                visual_painted_item_prefix(&fit_projection),
+                &[],
+                fit_mapping,
+                fit_point,
+                9.0
+            ),
+            CanvasHit::Object(frame_id)
+        );
+        let button = |pos, pressed, modifiers| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        for pressed in [true, false] {
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(frame_header),
+                    button(frame_header, pressed, egui::Modifiers::NONE),
+                ],
+            );
+        }
+        assert_eq!(dialog.visual_selection, Some(frame_id));
+        for _ in 0..2 {
+            frame(&mut dialog, &ctx);
+        }
+        let child_center = visual_canvas_world_point(
+            &dialog,
+            ScenePoint {
+                x: child_before.x - child_before.width / 4.0,
+                y: child_before.y + child_before.height / 4.0,
+            },
+        );
+        let scene = dialog.documents.visual_scene().unwrap();
+        let projection = project_visual_scene(scene).unwrap();
+        let canvas = dialog.test_visual_canvas_rect.unwrap();
+        let mapping = pure_canvas_mapping(canvas.shrink(12.0), dialog.camera);
+        let child_screen_point = scene_point_from_screen(child_center);
+        assert!(
+            mapping.contains_screen_point(child_screen_point),
+            "child outside current clip: mapping={mapping:?}, camera={:?}, canvas={canvas:?}, child_transform={child_before:?}, child_screen={child_screen_point:?}, hit_layer={:?}",
+            dialog.camera,
+            ctx.layer_id_at(child_center)
+        );
+        let child_world_point = mapping.screen_to_world(child_screen_point);
+        let projected_child = projection
+            .items
+            .iter()
+            .find(|item| item.object_id == child_id)
+            .unwrap();
+        assert!(projected_child.bounds.contains_point(child_world_point));
+        assert!(
+            visual_painted_item_prefix(&projection)
+                > projection
+                    .items
+                    .iter()
+                    .position(|item| item.object_id == child_id)
+                    .unwrap()
+        );
+        let handles = visual_canvas_selection_handles(
+            scene,
+            &projection,
+            &dialog.visual_selected_objects,
+            visual_painted_item_prefix(&projection),
+            mapping,
+        );
+        assert_eq!(
+            visual_canvas_hit_test(
+                &projection,
+                visual_painted_item_prefix(&projection),
+                &handles,
+                mapping,
+                child_screen_point,
+                9.0,
+            ),
+            CanvasHit::Object(child_id),
+            "the modifier click point resolves to the visible child outline"
+        );
+        for pressed in [true, false] {
+            let modifiers = egui::Modifiers::SHIFT;
+            frame_with_child_events(
+                &mut dialog,
+                &ctx,
+                vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(child_center),
+                    button(child_center, pressed, modifiers),
+                ],
+            );
+        }
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            dialog.visual_selected_objects,
+            [frame_id, child_id].into_iter().collect()
+        );
+        assert_eq!(dialog.visual_selection, Some(child_id));
+        let revision = dialog.documents.visual_revision().unwrap();
+        let start = visual_canvas_world_point(
+            &dialog,
+            ScenePoint {
+                x: frame_before.x,
+                y: frame_before.y - frame_before.height / 2.0 + 12.0,
+            },
+        );
+        let end = start + egui::vec2(32.0, 18.0);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                button(start, true, egui::Modifiers::NONE),
+            ],
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let active = dialog
+            .visual_gesture
+            .as_ref()
+            .expect("the selected frame owns a group gesture");
+        let preview_path = active
+            .preview_projection
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.object_id == connector_id)
+            .unwrap()
+            .open_paths
+            .clone();
+        assert_ne!(
+            preview_path, route_before,
+            "the linked path follows the previewed child"
+        );
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        assert_eq!(
+            path_for(dialog.documents.visual_scene().unwrap()),
+            route_before,
+            "preview routing does not mutate the committed document"
+        );
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(end),
+                button(end, false, egui::Modifiers::NONE),
+            ],
+        );
+        frame(&mut dialog, &ctx);
+
+        let frame_after = transform_for(&dialog, frame_id);
+        let child_after = transform_for(&dialog, child_id);
+        let frame_delta = ScenePoint {
+            x: frame_after.x - frame_before.x,
+            y: frame_after.y - frame_before.y,
+        };
+        let child_delta = ScenePoint {
+            x: child_after.x - child_before.x,
+            y: child_after.y - child_before.y,
+        };
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        assert_eq!(
+            path_for(dialog.documents.visual_scene().unwrap()),
+            preview_path,
+            "the accepted connector route matches the preview"
+        );
+        assert_eq!(dialog.visual_selected_objects.len(), 2);
+        assert_eq!(dialog.visual_selection, Some(child_id));
+        assert!(frame_delta.x.abs() > 1.0 || frame_delta.y.abs() > 1.0);
+        assert!((frame_delta.x - child_delta.x).abs() < 1e-9);
+        assert!((frame_delta.y - child_delta.y).abs() < 1e-9);
+
+        click_action(&mut dialog, &ctx, "visual_undo");
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .parent_by_child
+                .get(&child_id),
+            Some(&frame_id)
+        );
+        assert_eq!(transform_for(&dialog, frame_id), frame_before);
+        assert_eq!(transform_for(&dialog, child_id), child_before);
+        assert_eq!(
+            path_for(dialog.documents.visual_scene().unwrap()),
+            route_before
+        );
+        assert_eq!(dialog.visual_selected_objects.len(), 2);
+        assert_eq!(dialog.visual_selection, Some(child_id));
+
+        let before_discarded_release = dialog.documents.visual_scene().unwrap().clone();
+        let discarded_revision = dialog.documents.visual_revision().unwrap();
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                button(start, true, egui::Modifiers::NONE),
+            ],
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        assert_ne!(
+            dialog
+                .visual_gesture
+                .as_ref()
+                .unwrap()
+                .preview_projection
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .find(|item| item.object_id == connector_id)
+                .unwrap()
+                .open_paths,
+            route_before
+        );
+        dialog.test_request_child_discard();
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(end),
+                button(end, false, egui::Modifiers::NONE),
+            ],
+        );
+        assert_eq!(dialog.documents.visual_revision(), Some(discarded_revision));
+        assert_eq!(
+            dialog.documents.visual_scene().unwrap(),
+            &before_discarded_release
+        );
+        assert!(dialog.visual_gesture.is_none());
+    }
+
+    #[test]
+    fn diagram_studio_visual_group_and_ungroup_controls_are_atomic_and_retained() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_add_shape");
+        let child = dialog.visual_selection.unwrap();
+        click_action(&mut dialog, &ctx, "visual_object_selection");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!(
+                "visual_object_option_{}",
+                crate::diagram::TITLE_OBJECT_ID.get()
+            ),
+        );
+        frame(&mut dialog, &ctx);
+        assert!(
+            !dialog.test_visual_group_enabled,
+            "the title alone cannot be grouped"
+        );
+        click_action(&mut dialog, &ctx, "visual_object_selection");
+        click_action(
+            &mut dialog,
+            &ctx,
+            &format!("visual_object_option_{}", child.get()),
+        );
+        frame(&mut dialog, &ctx);
+        assert!(dialog.test_visual_group_enabled);
+        let before = dialog.documents.visual_scene().unwrap().clone();
+        let revision = dialog.documents.visual_revision().unwrap();
+        click_action_with_child_discard(&mut dialog, &ctx, "visual_group_selection");
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        click_action_with_root_discard(&mut dialog, &ctx, "visual_group_selection");
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision));
+        click_action(&mut dialog, &ctx, "visual_group_selection");
+        let frame_id = dialog.visual_selection.unwrap();
+        assert_ne!(frame_id, child);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        assert_eq!(
+            dialog
+                .documents
+                .visual_scene()
+                .unwrap()
+                .parent_by_child
+                .get(&child),
+            Some(&frame_id)
+        );
+        let grouped = dialog.documents.visual_scene().unwrap().clone();
+        click_action_with_child_discard(&mut dialog, &ctx, "visual_ungroup");
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &grouped);
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 1));
+        click_action(&mut dialog, &ctx, "visual_ungroup");
+        assert_eq!(dialog.documents.visual_revision(), Some(revision + 2));
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before);
+        click_action(&mut dialog, &ctx, "visual_undo");
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &grouped);
+    }
+
+    #[test]
+    fn diagram_studio_visual_container_controls_create_and_edit_swimlane() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        click_action(&mut dialog, &ctx, "visual_add_horizontal_swimlane");
+        let lane_id = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find_map(|object| {
+                matches!(
+                    &object.kind,
+                    VisualObjectKind::Swimlane {
+                        orientation: VisualSwimlaneOrientation::Horizontal,
+                        ..
+                    }
+                )
+                .then_some(object.id)
+            })
+            .expect("the lane control creates a horizontal swimlane");
+
+        click_action(&mut dialog, &ctx, "visual_frame_label");
+        send_child_key(&mut dialog, &ctx, egui::Key::A, egui::Modifiers::COMMAND);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::Text("Renamed lane".into())],
+        );
+        assert!(dialog.visual_property_draft.as_ref().is_some_and(|draft| {
+            matches!(
+                &draft.object.kind,
+                VisualObjectKind::Swimlane {
+                    orientation: VisualSwimlaneOrientation::Horizontal,
+                    label,
+                } if label == "Renamed lane"
+            )
+        }));
+        click_action(&mut dialog, &ctx, "visual_swimlane_orientation");
+        click_action(&mut dialog, &ctx, "visual_swimlane_vertical");
+        assert!(dialog.visual_property_draft.as_ref().is_some_and(|draft| {
+            matches!(
+                &draft.object.kind,
+                VisualObjectKind::Swimlane {
+                    orientation: VisualSwimlaneOrientation::Vertical,
+                    label,
+                } if label == "Renamed lane"
+            )
+        }));
+        let before_discard = dialog.documents.visual_scene().unwrap().clone();
+        let before_revision = dialog.documents.visual_revision();
+        click_action_with_child_discard(&mut dialog, &ctx, "visual_apply_properties");
+        assert_eq!(dialog.documents.visual_scene().unwrap(), &before_discard);
+        assert_eq!(dialog.documents.visual_revision(), before_revision);
+        click_action(&mut dialog, &ctx, "visual_apply_properties");
+
+        let lane = dialog
+            .documents
+            .visual_scene()
+            .unwrap()
+            .objects
+            .iter()
+            .find(|object| object.id == lane_id)
+            .unwrap();
+        assert!(matches!(
+            &lane.kind,
+            VisualObjectKind::Swimlane {
+                orientation: VisualSwimlaneOrientation::Vertical,
+                label,
+            } if label == "Renamed lane"
+        ));
+    }
+
+    #[test]
     fn diagram_studio_visual_layout_snap_preview_matches_release_and_cancel_clears_guides() {
         let mut dialog = initialized_visual_dialog();
         let (selected_id, target_id) = add_visual_snap_objects(&mut dialog);
@@ -12990,6 +14119,7 @@ mod tests {
             .iter()
             .map(|id| {
                 visual_canvas_selection_bounds(
+                    dialog.documents.visual_scene().unwrap(),
                     &aligned_projection,
                     &[*id].into_iter().collect(),
                     aligned_projection.items.len(),
@@ -13030,6 +14160,7 @@ mod tests {
             .iter()
             .map(|id| {
                 visual_canvas_selection_bounds(
+                    dialog.documents.visual_scene().unwrap(),
                     &distributed_projection,
                     &[*id].into_iter().collect(),
                     distributed_projection.items.len(),

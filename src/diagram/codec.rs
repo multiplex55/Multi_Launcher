@@ -563,6 +563,101 @@ mod tests {
     };
     use crate::diagram::{GraphOperation, NodeId, PreviewState, VisualDiagramDocument};
 
+    #[test]
+    fn diagram_codec_rejects_duplicate_membership_child_keys_in_current_and_history() {
+        use crate::diagram::{
+            DEFAULT_LAYER_ID, VisualObjectDraft, VisualObjectKind, VisualOperation,
+            VisualPrimitiveShape, VisualStyle, VisualTransform,
+        };
+        let mut document = VisualDiagramDocument::new();
+        let draft = |kind| VisualObjectDraft {
+            layer_id: DEFAULT_LAYER_ID,
+            transform: VisualTransform::default(),
+            style: VisualStyle::default(),
+            kind,
+        };
+        let frame = document
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Container {
+                    label: "Frame".into(),
+                },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let child = document
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        document
+            .apply_transaction(&[VisualOperation::SetParent {
+                child,
+                parent: Some(frame),
+            }])
+            .unwrap();
+        document.replace_label("changed").unwrap();
+        let bytes = encode_document(DiagramFileDocumentRef::Visual(&document)).unwrap();
+        assert!(decode_document(&bytes).is_ok());
+        let encoded = String::from_utf8(bytes).unwrap();
+        let original = format!(
+            "\"parent_by_child\":{{\"{}\":{}}}",
+            child.get(),
+            frame.get()
+        );
+        let duplicate = format!(
+            "\"parent_by_child\":{{\"{}\":{},\"{}\":{}}}",
+            child.get(),
+            frame.get(),
+            child.get(),
+            frame.get()
+        );
+        let offsets = encoded
+            .match_indices(&original)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert!(
+            offsets.len() >= 2,
+            "expected membership in current scene and history"
+        );
+        for offset in [offsets[0], *offsets.last().unwrap()] {
+            let mut malformed = encoded.clone();
+            malformed.replace_range(offset..offset + original.len(), &duplicate);
+            let error = match decode_document(malformed.as_bytes()) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("duplicate membership was accepted"),
+            };
+            assert!(
+                error.contains("duplicate visual membership child"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagram_codec_visual_container_v3_without_membership_field_keeps_legacy_scene_wire() {
+        let visual = VisualDiagramDocument::new();
+        let bytes = encode_document(DiagramFileDocumentRef::Visual(&visual)).unwrap();
+        let mut wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(wire["current"].get("parent_by_child").is_none());
+        wire["current"]
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_by_child");
+
+        let decoded = decode_document(&serde_json::to_vec(&wire).unwrap()).unwrap();
+        let DiagramFileDocument::Visual(decoded) = decoded else {
+            panic!("visual payload decoded as Mermaid");
+        };
+        assert!(decoded.scene().parent_by_child.is_empty());
+        assert_eq!(
+            encode_document(DiagramFileDocumentRef::Visual(&decoded)).unwrap(),
+            bytes
+        );
+    }
+
     fn session_with_history() -> DiagramSession {
         let mut session = DiagramSession::new();
         session

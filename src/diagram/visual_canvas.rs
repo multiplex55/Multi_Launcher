@@ -2,9 +2,9 @@
 
 use super::scene::{ScenePoint, SceneRect};
 use super::visual::{
-    MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_DIMENSION, MAX_VISUAL_TRANSACTION_OPERATIONS,
-    MIN_VISUAL_DIMENSION, VisualObject, VisualObjectId, VisualOperation, VisualScene,
-    VisualTransform,
+    MAX_VISUAL_CONTAINMENT_DEPTH, MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_DIMENSION,
+    MAX_VISUAL_TRANSACTION_OPERATIONS, MIN_VISUAL_DIMENSION, VisualObject, VisualObjectId,
+    VisualObjectKind, VisualOperation, VisualScene, VisualTransform,
 };
 use super::visual_scene::{VisualProjectedKind, VisualSceneProjection};
 use std::collections::{BTreeMap, BTreeSet};
@@ -112,6 +112,84 @@ pub struct SnappedTranslation {
     pub guides: Vec<CanvasGuide>,
 }
 
+/// Stable scene-order expansion of selected frame roots and their descendants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedVisualMembership {
+    pub roots: Vec<VisualObjectId>,
+    pub members_by_root: Vec<(VisualObjectId, Vec<VisualObjectId>)>,
+    pub expanded: Vec<VisualObjectId>,
+}
+
+pub fn resolve_visual_membership(
+    scene: &VisualScene,
+    selection: &BTreeSet<VisualObjectId>,
+) -> Option<ResolvedVisualMembership> {
+    let scene_order = scene
+        .objects
+        .iter()
+        .enumerate()
+        .map(|(index, object)| (object.id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut roots = Vec::new();
+    for id in selection {
+        let object = scene.objects.iter().find(|object| object.id == *id)?;
+        if matches!(&object.kind, VisualObjectKind::Connector { .. }) {
+            continue;
+        }
+        let mut ancestor = scene.parent_by_child.get(id).copied();
+        let mut is_covered = false;
+        let mut depth = 0;
+        while let Some(parent) = ancestor {
+            depth += 1;
+            if depth > MAX_VISUAL_CONTAINMENT_DEPTH {
+                return None;
+            }
+            if selection.contains(&parent) {
+                is_covered = true;
+                break;
+            }
+            ancestor = scene.parent_by_child.get(&parent).copied();
+        }
+        if !is_covered {
+            roots.push(*id);
+        }
+    }
+    roots.sort_by_key(|id| scene_order.get(id).copied().unwrap_or(usize::MAX));
+
+    let mut children_by_parent = BTreeMap::<VisualObjectId, Vec<VisualObjectId>>::new();
+    for (child, parent) in &scene.parent_by_child {
+        children_by_parent.entry(*parent).or_default().push(*child);
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_by_key(|id| scene_order.get(id).copied().unwrap_or(usize::MAX));
+    }
+
+    let mut members_by_root = Vec::with_capacity(roots.len());
+    let mut expanded = Vec::new();
+    for root in &roots {
+        let mut members = Vec::new();
+        let mut pending = vec![*root];
+        while let Some(id) = pending.pop() {
+            members.push(id);
+            if expanded.len().saturating_add(members.len()) > MAX_VISUAL_TRANSACTION_OPERATIONS {
+                return None;
+            }
+            if let Some(children) = children_by_parent.get(&id) {
+                pending.extend(children.iter().rev().copied());
+            }
+        }
+        members.sort_by_key(|id| scene_order.get(id).copied().unwrap_or(usize::MAX));
+        expanded.extend(members.iter().copied());
+        members_by_root.push((*root, members));
+    }
+    expanded.sort_by_key(|id| scene_order.get(id).copied().unwrap_or(usize::MAX));
+    Some(ResolvedVisualMembership {
+        roots,
+        members_by_root,
+        expanded,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisualAlign {
     Left,
@@ -157,6 +235,7 @@ impl CanvasMinimap {
 /// Nearby guides are measured against the raw pointer movement; otherwise the
 /// group's minimum edge snaps to the shared ten-world-unit grid.
 pub fn snap_translation_delta(
+    scene: &VisualScene,
     projection: &VisualSceneProjection,
     selected: &BTreeSet<VisualObjectId>,
     painted_item_prefix: usize,
@@ -171,17 +250,14 @@ pub fn snap_translation_delta(
     {
         return None;
     }
-    let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
-    let transformable_selection = selected
-        .iter()
-        .filter(|id| bounds_by_object.contains_key(id))
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let resolved = resolve_visual_membership(scene, selected)?;
+    let transformable_selection = resolved.expanded.into_iter().collect::<BTreeSet<_>>();
     if transformable_selection.is_empty()
-        || transformable_selection.len() > MAX_VISUAL_TRANSACTION_OPERATIONS
+        || !owners_fully_painted(projection, &transformable_selection, painted_item_prefix)
     {
         return None;
     }
+    let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
     if raw_delta.x == 0.0 && raw_delta.y == 0.0 {
         return Some(SnappedTranslation {
             delta: ScenePoint::default(),
@@ -316,18 +392,19 @@ pub fn align_selection(
     alignment: VisualAlign,
 ) -> Option<Vec<VisualOperation>> {
     let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
-    let selected_ids = selection
-        .iter()
-        .filter(|id| bounds_by_object.contains_key(id))
-        .copied()
-        .collect::<Vec<_>>();
-    if selected_ids.len() < 2 || selected_ids.len() > MAX_VISUAL_TRANSACTION_OPERATIONS {
+    let resolved = resolve_visual_membership(scene, selection)?;
+    let expanded = resolved.expanded.iter().copied().collect::<BTreeSet<_>>();
+    if resolved.roots.len() < 2 || !owners_fully_painted(projection, &expanded, painted_item_prefix)
+    {
         return None;
     }
-    let selected_bounds = selected_outline_bounds(selection, &bounds_by_object)?;
-    let mut operations = Vec::with_capacity(selected_ids.len());
-    for id in selected_ids {
-        let bounds = *bounds_by_object.get(&id)?;
+    let groups = membership_group_bounds(&resolved, &bounds_by_object)?;
+    let selected_bounds = groups
+        .iter()
+        .map(|(_, _, bounds)| *bounds)
+        .reduce(union_rect)?;
+    let mut operations = Vec::with_capacity(expanded.len());
+    for (_, members, bounds) in groups {
         let (dx, dy) = match alignment {
             VisualAlign::Left => (selected_bounds.min.x - bounds.min.x, 0.0),
             VisualAlign::HorizontalCenter => (selected_bounds.center().x - bounds.center().x, 0.0),
@@ -339,13 +416,7 @@ pub fn align_selection(
         if dx == 0.0 && dy == 0.0 {
             continue;
         }
-        let mut object = scene.objects.iter().find(|object| object.id == id)?.clone();
-        object.transform.x += dx;
-        object.transform.y += dy;
-        if !valid_transform(object.transform) {
-            return None;
-        }
-        operations.push(VisualOperation::ReplaceObject(object));
+        append_group_translation(scene, &members, dx, dy, &mut operations)?;
     }
     Some(operations)
 }
@@ -361,11 +432,14 @@ pub fn distribute_selection(
     distribution: VisualDistribution,
 ) -> Option<Vec<VisualOperation>> {
     let bounds_by_object = visible_outline_bounds(projection, painted_item_prefix);
-    let mut objects = selection
-        .iter()
-        .filter_map(|id| bounds_by_object.get(id).map(|bounds| (*id, *bounds)))
-        .collect::<Vec<_>>();
-    if objects.len() < 3 || objects.len() > MAX_VISUAL_TRANSACTION_OPERATIONS {
+    let resolved = resolve_visual_membership(scene, selection)?;
+    let expanded = resolved.expanded.iter().copied().collect::<BTreeSet<_>>();
+    if resolved.roots.len() < 3 || !owners_fully_painted(projection, &expanded, painted_item_prefix)
+    {
+        return None;
+    }
+    let mut objects = membership_group_bounds(&resolved, &bounds_by_object)?;
+    if expanded.len() > MAX_VISUAL_TRANSACTION_OPERATIONS {
         return None;
     }
     let horizontal = distribution == VisualDistribution::Horizontal;
@@ -383,43 +457,47 @@ pub fn distribute_selection(
             bounds.max.y
         }
     };
-    objects.sort_by(|(left_id, left), (right_id, right)| {
+    objects.sort_by(|(left_id, _, left), (right_id, _, right)| {
         leading_edge(left)
             .total_cmp(&leading_edge(right))
             .then_with(|| left_id.cmp(right_id))
     });
-    let first = *objects.first()?;
-    let last = *objects
+    let first = objects.first()?.clone();
+    let last = objects
         .iter()
-        .max_by(|(left_id, left), (right_id, right)| {
+        .max_by(|(left_id, _, left), (right_id, _, right)| {
             trailing_edge(left)
                 .total_cmp(&trailing_edge(right))
                 .then_with(|| right_id.cmp(left_id))
-        })?;
+        })?
+        .clone();
     if first.0 == last.0 {
         return Some(Vec::new());
     }
+    let first_id = first.0;
+    let last_id = last.0;
+    let outer_min = leading_edge(&first.2);
+    let outer_max = trailing_edge(&last.2);
+    let first_trailing = trailing_edge(&first.2);
     let mut ordered = Vec::with_capacity(objects.len());
     ordered.push(first);
     ordered.extend(
         objects
             .into_iter()
-            .filter(|(id, _)| *id != first.0 && *id != last.0),
+            .filter(|(id, _, _)| *id != first_id && *id != last_id),
     );
     ordered.push(last);
-    let outer_min = leading_edge(&first.1);
-    let outer_max = trailing_edge(&last.1);
     let total_object_extent = ordered
         .iter()
-        .map(|(_, bounds)| trailing_edge(bounds) - leading_edge(bounds))
+        .map(|(_, _, bounds)| trailing_edge(bounds) - leading_edge(bounds))
         .sum::<f64>();
     let gap = (outer_max - outer_min - total_object_extent) / (ordered.len() - 1) as f64;
     if !gap.is_finite() {
         return None;
     }
-    let mut cursor = trailing_edge(&first.1);
-    let mut operations = Vec::with_capacity(ordered.len().saturating_sub(2));
-    for (id, bounds) in ordered.iter().skip(1).take(ordered.len() - 2) {
+    let mut cursor = first_trailing;
+    let mut operations = Vec::with_capacity(expanded.len());
+    for (_, members, bounds) in ordered.iter().skip(1).take(ordered.len() - 2) {
         let leading = leading_edge(bounds);
         let trailing = trailing_edge(bounds);
         let target_min = cursor + gap;
@@ -428,20 +506,13 @@ pub fn distribute_selection(
         if delta == 0.0 {
             continue;
         }
-        let mut object = scene
-            .objects
-            .iter()
-            .find(|object| object.id == *id)?
-            .clone();
-        if horizontal {
-            object.transform.x += delta;
-        } else {
-            object.transform.y += delta;
-        }
-        if !valid_transform(object.transform) {
-            return None;
-        }
-        operations.push(VisualOperation::ReplaceObject(object));
+        append_group_translation(
+            scene,
+            members,
+            if horizontal { delta } else { 0.0 },
+            if horizontal { 0.0 } else { delta },
+            &mut operations,
+        )?;
     }
     Some(operations)
 }
@@ -557,6 +628,54 @@ fn selected_outline_bounds(
         .reduce(union_rect)
 }
 
+fn membership_group_bounds(
+    resolved: &ResolvedVisualMembership,
+    bounds_by_object: &BTreeMap<VisualObjectId, SceneRect>,
+) -> Option<Vec<(VisualObjectId, Vec<VisualObjectId>, SceneRect)>> {
+    resolved
+        .members_by_root
+        .iter()
+        .map(|(root, members)| {
+            let bounds = members
+                .iter()
+                .map(|id| bounds_by_object.get(id).copied())
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .reduce(union_rect)?;
+            Some((*root, members.clone(), bounds))
+        })
+        .collect()
+}
+
+fn append_group_translation(
+    scene: &VisualScene,
+    members: &[VisualObjectId],
+    dx: f64,
+    dy: f64,
+    operations: &mut Vec<VisualOperation>,
+) -> Option<()> {
+    if dx == 0.0 && dy == 0.0 {
+        return Some(());
+    }
+    if operations.len().saturating_add(members.len()) > MAX_VISUAL_TRANSACTION_OPERATIONS {
+        return None;
+    }
+    for id in members {
+        let mut object = scene
+            .objects
+            .iter()
+            .find(|object| object.id == *id)?
+            .clone();
+        object.transform.x += dx;
+        object.transform.y += dy;
+        if !valid_transform(object.transform) {
+            return None;
+        }
+        operations.push(VisualOperation::ReplaceObject(object));
+    }
+    Some(())
+}
+
 fn visible_outline_bounds(
     projection: &VisualSceneProjection,
     painted_item_prefix: usize,
@@ -591,6 +710,25 @@ fn visible_outline_bounds(
     bounds
 }
 
+fn owners_fully_painted(
+    projection: &VisualSceneProjection,
+    owners: &BTreeSet<VisualObjectId>,
+    painted_item_prefix: usize,
+) -> bool {
+    owners.iter().all(|owner| {
+        let mut found = false;
+        for (index, item) in projection.items.iter().enumerate() {
+            if item.object_id == *owner {
+                found = true;
+                if index >= painted_item_prefix {
+                    return false;
+                }
+            }
+        }
+        found
+    })
+}
+
 fn valid_rect(rect: SceneRect) -> bool {
     rect.min.x.is_finite()
         && rect.min.y.is_finite()
@@ -607,27 +745,12 @@ pub fn selection_handles(
     painted_item_prefix: usize,
     mapping: CanvasMapping,
 ) -> Vec<CanvasHandle> {
-    let shape_selection = selection
-        .iter()
-        .filter(|id| {
-            projection
-                .items
-                .iter()
-                .any(|item| item.object_id == **id && item.kind != VisualProjectedKind::Connector)
-        })
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let Some(resolved) = resolve_visual_membership(scene, selection) else {
+        return Vec::new();
+    };
+    let shape_selection = resolved.expanded.into_iter().collect::<BTreeSet<_>>();
     if shape_selection.is_empty()
-        || shape_selection.iter().any(|id| {
-            let mut projected_items = projection
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| item.object_id == *id)
-                .peekable();
-            projected_items.peek().is_none()
-                || projected_items.any(|(index, _)| index >= painted_item_prefix)
-        })
+        || !owners_fully_painted(projection, &shape_selection, painted_item_prefix)
     {
         return Vec::new();
     }
@@ -667,7 +790,7 @@ pub fn selection_handles(
         return handles;
     }
 
-    let Some(bounds) = selection_bounds(projection, &shape_selection, painted_item_prefix) else {
+    let Some(bounds) = selection_bounds(scene, projection, selection, painted_item_prefix) else {
         return Vec::new();
     };
     group_handles(bounds, gap)
@@ -748,6 +871,24 @@ pub fn hit_test(
                     })
                 });
             }
+            if is_frame_kind(item.kind) {
+                if item
+                    .header
+                    .as_ref()
+                    .is_some_and(|header| point_in_polygon(world_point, header))
+                {
+                    return true;
+                }
+                let radius = handle_radius_screen_points
+                    + (item.style.border_width * mapping.zoom / 2.0).max(0.0);
+                if item
+                    .text_bounds
+                    .is_some_and(|bounds| bounds.contains_point(world_point))
+                {
+                    return true;
+                }
+                return frame_paths_near_screen_point(item, mapping, screen_point, radius);
+            }
             if !item.bounds.contains_point(world_point) {
                 return false;
             }
@@ -771,6 +912,18 @@ pub fn marquee_selection(
                     path.windows(2)
                         .any(|segment| segment_intersects_rect(segment[0], segment[1], marquee))
                 })
+        } else if is_frame_kind(item.kind) {
+            item.header
+                .as_ref()
+                .is_some_and(|header| path_intersects_rect(header, true, marquee))
+                || item
+                    .text_bounds
+                    .is_some_and(|bounds| rects_intersect(bounds, marquee))
+                || path_intersects_rect(&item.outline, true, marquee)
+                || item
+                    .details
+                    .iter()
+                    .any(|path| path_intersects_rect(path, false, marquee))
         } else {
             rects_intersect(item.bounds, marquee)
         };
@@ -781,20 +934,114 @@ pub fn marquee_selection(
     selected
 }
 
+fn is_frame_kind(kind: VisualProjectedKind) -> bool {
+    matches!(
+        kind,
+        VisualProjectedKind::Container
+            | VisualProjectedKind::SwimlaneHorizontal
+            | VisualProjectedKind::SwimlaneVertical
+    )
+}
+
+fn frame_paths_near_screen_point(
+    item: &super::visual_scene::ProjectedVisualItem,
+    mapping: CanvasMapping,
+    screen_point: ScenePoint,
+    radius: f64,
+) -> bool {
+    let threshold = radius * radius;
+    let near_path = |path: &[ScenePoint], closed: bool| {
+        if path.len() < 2 {
+            return false;
+        }
+        let segments = path.len() - 1 + usize::from(closed && path.len() > 2);
+        (0..segments).any(|index| {
+            let start = mapping.world_to_screen(path[index]);
+            let end = mapping.world_to_screen(path[(index + 1) % path.len()]);
+            squared_distance_to_segment(start, end, screen_point) <= threshold
+        })
+    };
+    near_path(&item.outline, true) || item.details.iter().any(|path| near_path(path, false))
+}
+
+fn path_intersects_rect(path: &[ScenePoint], closed: bool, rect: SceneRect) -> bool {
+    if path.iter().any(|point| rect.contains_point(*point)) {
+        return true;
+    }
+    if path.len() < 2 {
+        return false;
+    }
+    let segments = path.len() - 1 + usize::from(closed && path.len() > 2);
+    (0..segments)
+        .any(|index| segment_intersects_rect(path[index], path[(index + 1) % path.len()], rect))
+}
+
 pub fn selection_bounds(
+    scene: &VisualScene,
     projection: &VisualSceneProjection,
     selection: &BTreeSet<VisualObjectId>,
     painted_item_prefix: usize,
 ) -> Option<SceneRect> {
-    projection
-        .items
-        .iter()
-        .take(painted_item_prefix)
-        .filter(|item| {
-            selection.contains(&item.object_id) && item.kind != VisualProjectedKind::Connector
-        })
-        .map(|item| item.bounds)
-        .reduce(union_rect)
+    let resolved = resolve_visual_membership(scene, selection)?;
+    let expanded = resolved.expanded.into_iter().collect::<BTreeSet<_>>();
+    if expanded.is_empty() || !owners_fully_painted(projection, &expanded, painted_item_prefix) {
+        return None;
+    }
+    selected_outline_bounds(
+        &expanded,
+        &visible_outline_bounds(projection, painted_item_prefix),
+    )
+}
+
+/// Apply one frame's property transform to its complete world-space hierarchy.
+pub fn property_transform_operations(
+    scene: &VisualScene,
+    edited: &VisualObject,
+) -> Option<Vec<VisualOperation>> {
+    let original = scene.objects.iter().find(|object| object.id == edited.id)?;
+    let selection = [edited.id].into_iter().collect();
+    let resolved = resolve_visual_membership(scene, &selection)?;
+    if resolved.expanded.len() <= 1 {
+        return Some(vec![VisualOperation::ReplaceObject(edited.clone())]);
+    }
+    let before = original.transform;
+    let after = edited.transform;
+    let sx = after.width / before.width;
+    let sy = after.height / before.height;
+    if !sx.is_finite() || sx <= 0.0 || (sx - sy).abs() > 1e-9 {
+        return None;
+    }
+    let angle = (after.rotation_degrees - before.rotation_degrees).to_radians();
+    let mut operations = Vec::with_capacity(resolved.expanded.len());
+    for id in resolved.expanded {
+        if id == edited.id {
+            if !valid_transform(after) {
+                return None;
+            }
+            operations.push(VisualOperation::ReplaceObject(edited.clone()));
+            continue;
+        }
+        let mut child = scene.objects.iter().find(|object| object.id == id)?.clone();
+        let relative = rotate(
+            ScenePoint {
+                x: (child.transform.x - before.x) * sx,
+                y: (child.transform.y - before.y) * sx,
+            },
+            angle,
+        );
+        child.transform.x = after.x + relative.x;
+        child.transform.y = after.y + relative.y;
+        child.transform.width *= sx;
+        child.transform.height *= sx;
+        child.transform.rotation_degrees = normalize_degrees(
+            child.transform.rotation_degrees + after.rotation_degrees - before.rotation_degrees,
+        );
+        if !valid_transform(child.transform) {
+            return None;
+        }
+        operations.push(VisualOperation::ReplaceObject(child));
+    }
+    Some(operations)
 }
 
 pub fn preview_transforms(
@@ -1101,7 +1348,8 @@ mod tests {
         CanvasAnchor, CanvasGuideAxis, CanvasHandle, CanvasHandleKind, CanvasHit, CanvasMapping,
         VisualAlign, VisualDistribution, VisualTransformMode, align_selection,
         distribute_selection, hit_test, marquee_selection, minimap_layout, preview_transforms,
-        selection_bounds, selection_handles, snap_translation_delta, visible_outline_bounds,
+        resolve_visual_membership, selection_bounds, selection_handles, snap_translation_delta,
+        visible_outline_bounds,
     };
     use crate::diagram::{
         DEFAULT_LAYER_ID, MAX_VISUAL_COORDINATE_ABS, MAX_VISUAL_TRANSACTION_OPERATIONS, ScenePoint,
@@ -1109,7 +1357,7 @@ mod tests {
         VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument, VisualObject,
         VisualObjectDraft, VisualObjectKind, VisualOperation, VisualPresetDraft,
         VisualPrimitiveComponent, VisualPrimitiveShape, VisualSceneProjection, VisualShadow,
-        VisualStyle, VisualTransform, project_visual_scene,
+        VisualStyle, VisualSwimlaneOrientation, VisualTransform, project_visual_scene,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1320,6 +1568,146 @@ mod tests {
                 mapping,
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn visual_container_header_and_border_are_pickable_but_frame_interior_is_transparent() {
+        let mut document = VisualDiagramDocument::new();
+        let mut title = document.scene().objects[0].clone();
+        title.transform.x = 1_000.0;
+        title.transform.y = 1_000.0;
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::ReplaceObject(title),
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 200.0,
+                        height: 120.0,
+                        rotation_degrees: 30.0,
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Container {
+                        label: "Group".into(),
+                    },
+                }),
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: 80.0,
+                        y: 0.0,
+                        width: 120.0,
+                        height: 180.0,
+                        rotation_degrees: -20.0,
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Swimlane {
+                        orientation: VisualSwimlaneOrientation::Vertical,
+                        label: "Column".into(),
+                    },
+                }),
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: 0.0,
+                        y: 20.0,
+                        width: 20.0,
+                        height: 20.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Rectangle,
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        document
+            .apply_transaction(&[VisualOperation::SetParent {
+                child: ids[2],
+                parent: Some(ids[0]),
+            }])
+            .unwrap();
+        let projection = project_visual_scene(document.scene()).unwrap();
+        let mapping = map();
+        let local_to_world = |transform: VisualTransform, local: ScenePoint| {
+            let (sin, cos) = transform.rotation_degrees.to_radians().sin_cos();
+            ScenePoint {
+                x: transform.x + local.x * cos - local.y * sin,
+                y: transform.y + local.x * sin + local.y * cos,
+            }
+        };
+        let container_transform = document.scene().objects[1].transform;
+        let header_world = local_to_world(container_transform, ScenePoint { x: -80.0, y: -36.0 });
+        assert_eq!(
+            hit_test(
+                &projection,
+                projection.items.len(),
+                &[],
+                mapping,
+                mapping.world_to_screen(header_world),
+                5.0,
+            ),
+            CanvasHit::Object(ids[0])
+        );
+        let border_world = local_to_world(container_transform, ScenePoint { x: -100.0, y: 0.0 });
+        assert_eq!(
+            hit_test(
+                &projection,
+                projection.items.len(),
+                &[],
+                mapping,
+                mapping.world_to_screen(border_world),
+                5.0,
+            ),
+            CanvasHit::Object(ids[0])
+        );
+        let body_world = local_to_world(container_transform, ScenePoint { x: -50.0, y: 20.0 });
+        assert_eq!(
+            hit_test(
+                &projection,
+                projection.items.len(),
+                &[],
+                mapping,
+                mapping.world_to_screen(body_world),
+                5.0,
+            ),
+            CanvasHit::Empty
+        );
+        assert_eq!(
+            hit_test(
+                &projection,
+                projection.items.len(),
+                &[],
+                mapping,
+                mapping.world_to_screen(ScenePoint { x: 0.0, y: 20.0 }),
+                5.0,
+            ),
+            CanvasHit::Object(ids[2])
+        );
+        assert!(
+            marquee_selection(
+                &projection,
+                projection.items.len(),
+                SceneRect {
+                    min: ScenePoint { x: -70.0, y: 10.0 },
+                    max: ScenePoint { x: -55.0, y: 25.0 },
+                }
+            )
+            .is_empty()
+        );
+        let vertical_transform = document.scene().objects[2].transform;
+        let vertical_header = local_to_world(vertical_transform, ScenePoint { x: -50.0, y: 0.0 });
+        assert_eq!(
+            hit_test(
+                &projection,
+                projection.items.len(),
+                &[],
+                mapping,
+                mapping.world_to_screen(vertical_header),
+                5.0,
+            ),
+            CanvasHit::Object(ids[1])
         );
     }
 
@@ -1691,7 +2079,13 @@ mod tests {
             .created_objects[0];
         let projection = project_visual_scene(document.scene()).unwrap();
         let selection = [first, second].into_iter().collect::<BTreeSet<_>>();
-        let bounds = selection_bounds(&projection, &selection, projection.items.len()).unwrap();
+        let bounds = selection_bounds(
+            document.scene(),
+            &projection,
+            &selection,
+            projection.items.len(),
+        )
+        .unwrap();
         assert!(bounds.min.x < -49.0 && bounds.max.x > 49.0);
         let handles = selection_handles(
             document.scene(),
@@ -1703,6 +2097,390 @@ mod tests {
         assert_eq!(handles.len(), 2);
         assert_eq!(handles[0].kind, CanvasHandleKind::RotateSelection);
         assert_eq!(handles[1].kind, CanvasHandleKind::ResizeSelection);
+    }
+
+    #[test]
+    fn visual_container_membership_resolves_nested_selection_once_in_scene_order_and_caps_work() {
+        let mut document = VisualDiagramDocument::new();
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: -80.0,
+                        width: 220.0,
+                        height: 160.0,
+                        ..VisualTransform::default()
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Container {
+                        label: "Outer".into(),
+                    },
+                }),
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: -80.0,
+                        width: 140.0,
+                        height: 100.0,
+                        ..VisualTransform::default()
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Swimlane {
+                        orientation: VisualSwimlaneOrientation::Horizontal,
+                        label: "Inner".into(),
+                    },
+                }),
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: -80.0,
+                        y: 24.0,
+                        width: 30.0,
+                        height: 20.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Rectangle,
+                )),
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: 0.0,
+                        y: 24.0,
+                        width: 30.0,
+                        height: 20.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Ellipse,
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        document
+            .apply_transaction(&[
+                VisualOperation::SetParent {
+                    child: ids[1],
+                    parent: Some(ids[0]),
+                },
+                VisualOperation::SetParent {
+                    child: ids[2],
+                    parent: Some(ids[1]),
+                },
+                VisualOperation::SetParent {
+                    child: ids[3],
+                    parent: Some(ids[0]),
+                },
+            ])
+            .unwrap();
+        let connector = document
+            .apply_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: ids[2],
+                            anchor: VisualAnchor::East,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: ids[3],
+                            anchor: VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Straight,
+                        direction: VisualConnectorDirection::None,
+                        label: String::new(),
+                    },
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+
+        let selection = [ids[0], ids[1], ids[2], connector]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let resolved = resolve_visual_membership(document.scene(), &selection).unwrap();
+        assert_eq!(resolved.roots, vec![ids[0]]);
+        assert_eq!(resolved.expanded, ids[..4]);
+        assert_eq!(resolved.members_by_root[0].1, ids[..4]);
+        let mut grouped = document.clone();
+        let group = grouped
+            .apply_transaction(&[VisualOperation::Group {
+                frame: VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform::default(),
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Container {
+                        label: "Group".into(),
+                    },
+                },
+                members: resolved.roots.clone(),
+            }])
+            .unwrap()
+            .created_objects[0];
+        assert_eq!(grouped.scene().parent_by_child.get(&ids[0]), Some(&group));
+        assert!(!grouped.scene().parent_by_child.contains_key(&connector));
+        assert_eq!(
+            grouped
+                .scene()
+                .objects
+                .iter()
+                .find(|object| object.id == connector),
+            document
+                .scene()
+                .objects
+                .iter()
+                .find(|object| object.id == connector)
+        );
+
+        let projection = project_visual_scene(document.scene()).unwrap();
+        let selected_frame = [ids[0]].into_iter().collect::<BTreeSet<_>>();
+        let handles = selection_handles(
+            document.scene(),
+            &projection,
+            &selected_frame,
+            projection.items.len(),
+            map(),
+        );
+        assert_eq!(handles.len(), 2, "a populated frame uses group handles");
+        let bounds = selection_bounds(
+            document.scene(),
+            &projection,
+            &selected_frame,
+            projection.items.len(),
+        )
+        .unwrap();
+        assert!(bounds.min.x <= -190.0 && bounds.max.x >= 30.0);
+        let objects = resolved
+            .expanded
+            .iter()
+            .map(|id| {
+                document
+                    .scene()
+                    .objects
+                    .iter()
+                    .find(|object| object.id == *id)
+                    .unwrap()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let rotated = preview_transforms(
+            &objects,
+            VisualTransformMode::RotateSelection {
+                pivot: ScenePoint::default(),
+            },
+            ScenePoint { x: 100.0, y: 0.0 },
+            ScenePoint { x: 0.0, y: 100.0 },
+        )
+        .unwrap();
+        let resized = preview_transforms(
+            &objects,
+            VisualTransformMode::ResizeSelection {
+                pivot: ScenePoint::default(),
+            },
+            ScenePoint { x: 100.0, y: 0.0 },
+            ScenePoint { x: 150.0, y: 0.0 },
+        )
+        .unwrap();
+        assert_eq!(rotated.len(), ids.len());
+        assert_eq!(resized.len(), ids.len());
+        for ((original, rotated), resized) in objects.iter().zip(&rotated).zip(&resized) {
+            assert!((rotated.transform.x + original.transform.y).abs() < 1e-9);
+            assert!((rotated.transform.y - original.transform.x).abs() < 1e-9);
+            assert!((resized.transform.width - original.transform.width * 1.5).abs() < 1e-9);
+        }
+
+        let mut oversized = VisualDiagramDocument::new();
+        let oversized_frame = oversized
+            .apply_transaction(&[VisualOperation::AddObject(VisualObjectDraft {
+                layer_id: DEFAULT_LAYER_ID,
+                transform: VisualTransform::default(),
+                style: VisualStyle::default(),
+                kind: VisualObjectKind::Container {
+                    label: "Too large".into(),
+                },
+            })])
+            .unwrap()
+            .created_objects[0];
+        let child_operations = (0..MAX_VISUAL_TRANSACTION_OPERATIONS)
+            .map(|_| {
+                VisualOperation::AddObject(object(
+                    VisualTransform::default(),
+                    VisualPrimitiveShape::Rectangle,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let children = oversized
+            .apply_transaction(&child_operations)
+            .unwrap()
+            .created_objects;
+        let memberships = children
+            .iter()
+            .map(|child| VisualOperation::SetParent {
+                child: *child,
+                parent: Some(oversized_frame),
+            })
+            .collect::<Vec<_>>();
+        oversized.apply_transaction(&memberships).unwrap();
+        assert!(
+            resolve_visual_membership(oversized.scene(), &[oversized_frame].into_iter().collect(),)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn visual_frame_property_transform_moves_rotates_and_uniformly_scales_descendants_once() {
+        let mut document = VisualDiagramDocument::new();
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: -20.0,
+                        y: 10.0,
+                        width: 100.0,
+                        height: 80.0,
+                        rotation_degrees: 0.0,
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Container {
+                        label: "Frame".into(),
+                    },
+                }),
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: 0.0,
+                        y: 10.0,
+                        width: 20.0,
+                        height: 10.0,
+                        rotation_degrees: 0.0,
+                    },
+                    VisualPrimitiveShape::Rectangle,
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        document
+            .apply_transaction(&[VisualOperation::SetParent {
+                child: ids[1],
+                parent: Some(ids[0]),
+            }])
+            .unwrap();
+        let before = document.scene().clone();
+        let mut frame = before
+            .objects
+            .iter()
+            .find(|object| object.id == ids[0])
+            .unwrap()
+            .clone();
+        frame.transform.x += 10.0;
+        frame.transform.width *= 2.0;
+        frame.transform.height *= 2.0;
+        frame.transform.rotation_degrees = 90.0;
+        let operations = super::property_transform_operations(&before, &frame).unwrap();
+        assert_eq!(operations.len(), 2);
+        document.apply_transaction(&operations).unwrap();
+        let child = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == ids[1])
+            .unwrap();
+        assert!((child.transform.x + 10.0).abs() < 1e-9);
+        assert!((child.transform.y - 50.0).abs() < 1e-9);
+        assert_eq!(
+            (
+                child.transform.width,
+                child.transform.height,
+                child.transform.rotation_degrees
+            ),
+            (40.0, 20.0, 90.0)
+        );
+        document.undo().unwrap();
+        assert_eq!(document.scene(), &before);
+        frame.transform.height = 90.0;
+        assert!(super::property_transform_operations(&before, &frame).is_none());
+    }
+
+    #[test]
+    fn visual_container_align_translates_members_as_one_accepted_layout_transaction() {
+        let mut document = VisualDiagramDocument::new();
+        let mut title = document.scene().objects[0].clone();
+        title.transform.x = 1_000.0;
+        title.transform.y = 1_000.0;
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::ReplaceObject(title),
+                VisualOperation::AddObject(VisualObjectDraft {
+                    layer_id: DEFAULT_LAYER_ID,
+                    transform: VisualTransform {
+                        x: -100.0,
+                        width: 100.0,
+                        height: 80.0,
+                        ..VisualTransform::default()
+                    },
+                    style: VisualStyle::default(),
+                    kind: VisualObjectKind::Container {
+                        label: "Group".into(),
+                    },
+                }),
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: -100.0,
+                        y: 20.0,
+                        width: 20.0,
+                        height: 20.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Rectangle,
+                )),
+                VisualOperation::AddObject(object(
+                    VisualTransform {
+                        x: 100.0,
+                        width: 20.0,
+                        height: 20.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualPrimitiveShape::Ellipse,
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        document
+            .apply_transaction(&[VisualOperation::SetParent {
+                child: ids[1],
+                parent: Some(ids[0]),
+            }])
+            .unwrap();
+        let projection = project_visual_scene(document.scene()).unwrap();
+        let selection = [ids[0], ids[2]].into_iter().collect::<BTreeSet<_>>();
+        let operations = align_selection(
+            document.scene(),
+            &projection,
+            &selection,
+            projection.items.len(),
+            VisualAlign::Right,
+        )
+        .unwrap();
+        assert_eq!(operations.len(), 2);
+        let revision = document.revision();
+        let undo_depth = document.undo_depth();
+        document.apply_transaction(&operations).unwrap();
+        assert_eq!(document.revision(), revision + 1);
+        assert_eq!(document.undo_depth(), undo_depth + 1);
+        let frame = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == ids[0])
+            .unwrap();
+        let child = document
+            .scene()
+            .objects
+            .iter()
+            .find(|object| object.id == ids[1])
+            .unwrap();
+        assert!((frame.transform.x - 60.0).abs() < 1e-9);
+        assert!((child.transform.x - 60.0).abs() < 1e-9);
+        assert!((child.transform.x - frame.transform.x).abs() < 1e-9);
     }
 
     #[test]
@@ -1778,6 +2556,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         let grid = snap_translation_delta(
+            document.scene(),
             &projection,
             &selected,
             projection.items.len(),
@@ -1789,6 +2568,7 @@ mod tests {
         assert!(grid.guides.is_empty());
 
         let guided = snap_translation_delta(
+            document.scene(),
             &projection,
             &selected,
             projection.items.len(),
@@ -1823,6 +2603,7 @@ mod tests {
         );
 
         let too_far_at_zoom = snap_translation_delta(
+            document.scene(),
             &projection,
             &selected,
             projection.items.len(),
@@ -1854,6 +2635,7 @@ mod tests {
                 .any(|item| { item.object_id == other_id || item.object_id == tied_candidate })
         );
         let bounded = snap_translation_delta(
+            document.scene(),
             &projection,
             &selected,
             before_unpainted_candidate,
@@ -1864,6 +2646,7 @@ mod tests {
         assert_eq!(bounded.delta, ScenePoint { x: 35.0, y: 0.0 });
         assert!(bounded.guides.is_empty());
         let returned_to_origin = snap_translation_delta(
+            document.scene(),
             &projection,
             &selected,
             projection.items.len(),
@@ -1955,6 +2738,7 @@ mod tests {
         let projection = project_visual_scene(document.scene()).unwrap();
         let selected = [selected_id].into_iter().collect::<BTreeSet<_>>();
         let snapped = snap_translation_delta(
+            document.scene(),
             &projection,
             &selected,
             projection.items.len(),

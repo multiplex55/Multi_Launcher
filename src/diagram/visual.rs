@@ -1,9 +1,9 @@
 //! Bounded editable visual document data and its content history.
 
-use serde::de::{self, Visitor};
+use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
@@ -14,6 +14,8 @@ pub const MAX_VISUAL_PRESET_COMPONENTS: usize = 64;
 pub const MAX_VISUAL_NAME_BYTES: usize = 128;
 pub const MAX_VISUAL_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_VISUAL_CONNECTOR_LABEL_BYTES: usize = 4 * 1024;
+pub const MAX_VISUAL_FRAME_LABEL_BYTES: usize = 1024;
+pub const MAX_VISUAL_CONTAINMENT_DEPTH: usize = 32;
 pub const MAX_VISUAL_DOCUMENT_TITLE_BYTES: usize = 4 * 1024;
 pub const MAX_VISUAL_HISTORY_ENTRIES: usize = 64;
 pub const MAX_VISUAL_HISTORY_BYTES: usize = 4 * 1024 * 1024;
@@ -270,6 +272,22 @@ pub enum VisualObjectKind {
     Connector {
         connector: VisualConnector,
     },
+    Container {
+        #[serde(deserialize_with = "deserialize_visual_frame_label")]
+        label: String,
+    },
+    Swimlane {
+        orientation: VisualSwimlaneOrientation,
+        #[serde(deserialize_with = "deserialize_visual_frame_label")]
+        label: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualSwimlaneOrientation {
+    Horizontal,
+    Vertical,
 }
 
 /// Compass-side anchor in the referenced object's local orientation.
@@ -378,6 +396,12 @@ pub struct VisualScene {
         deserialize_with = "deserialize_bounded_assets"
     )]
     pub assets: Vec<VisualAsset>,
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_bounded_membership"
+    )]
+    pub parent_by_child: BTreeMap<VisualObjectId, VisualObjectId>,
 }
 
 impl VisualScene {
@@ -396,6 +420,7 @@ impl VisualScene {
             }],
             presets: Vec::new(),
             assets: Vec::new(),
+            parent_by_child: BTreeMap::new(),
         }
     }
 
@@ -600,6 +625,15 @@ pub enum VisualOperation {
         style: VisualStyle,
     },
     RemoveObject(VisualObjectId),
+    SetParent {
+        child: VisualObjectId,
+        parent: Option<VisualObjectId>,
+    },
+    Group {
+        frame: VisualObjectDraft,
+        members: Vec<VisualObjectId>,
+    },
+    Ungroup(VisualObjectId),
     ReplaceObject(VisualObject),
     MoveObject {
         id: VisualObjectId,
@@ -650,6 +684,14 @@ pub enum VisualDocumentError {
     UnknownConnectorEndpoint(VisualObjectId),
     ConnectorEndpointIsConnector(VisualObjectId),
     InvalidConnectorGeometry,
+    MembershipChildNotFound(VisualObjectId),
+    MembershipParentNotFound(VisualObjectId),
+    MembershipParentMustBeFrame(VisualObjectId),
+    MembershipChildNotAllowed(VisualObjectId),
+    MembershipCycle,
+    MembershipTooDeep { max_depth: usize },
+    TooManyMemberships { max_memberships: usize },
+    FrameLabelInvalid,
     InvalidId,
     InvalidGeometry,
     InvalidStyle,
@@ -742,6 +784,36 @@ impl fmt::Display for VisualDocumentError {
             Self::InvalidConnectorGeometry => formatter.write_str(
                 "connector transform is not editable; use its attached endpoint objects",
             ),
+            Self::MembershipChildNotFound(id) => {
+                write!(formatter, "visual frame member {} was not found", id.get())
+            }
+            Self::MembershipParentNotFound(id) => {
+                write!(formatter, "visual parent frame {} was not found", id.get())
+            }
+            Self::MembershipParentMustBeFrame(id) => write!(
+                formatter,
+                "visual parent object {} is not a frame",
+                id.get()
+            ),
+            Self::MembershipChildNotAllowed(id) => write!(
+                formatter,
+                "visual object {} cannot be assigned to a frame",
+                id.get()
+            ),
+            Self::MembershipCycle => {
+                formatter.write_str("visual frame membership cannot contain a cycle")
+            }
+            Self::MembershipTooDeep { max_depth } => write!(
+                formatter,
+                "visual frame membership exceeds the {max_depth}-level nesting limit"
+            ),
+            Self::TooManyMemberships { max_memberships } => write!(
+                formatter,
+                "visual document exceeds the {max_memberships}-membership limit"
+            ),
+            Self::FrameLabelInvalid => {
+                formatter.write_str("visual frame label contains unsupported control characters")
+            }
             Self::InvalidId => formatter.write_str("visual document contains an invalid stable ID"),
             Self::InvalidGeometry => formatter.write_str(
                 "visual object geometry is nonfinite, degenerate, or outside its bounds",
@@ -1191,6 +1263,19 @@ fn apply_visual_operation(
                 .position(|object| object.id == *id)
                 .ok_or(VisualDocumentError::UnknownObject(*id))?;
             scene.objects.remove(index);
+            let surviving_parent = scene.parent_by_child.remove(id);
+            let children = scene
+                .parent_by_child
+                .iter()
+                .filter_map(|(child, parent)| (*parent == *id).then_some(*child))
+                .collect::<Vec<_>>();
+            for child in children {
+                if let Some(parent) = surviving_parent {
+                    scene.parent_by_child.insert(child, parent);
+                } else {
+                    scene.parent_by_child.remove(&child);
+                }
+            }
             scene.objects.retain(|object| {
                 !matches!(
                     &object.kind,
@@ -1198,6 +1283,137 @@ fn apply_visual_operation(
                         if connector.from.object_id == *id || connector.to.object_id == *id
                 )
             });
+        }
+        VisualOperation::SetParent { child, parent } => {
+            let object = scene
+                .objects
+                .iter()
+                .find(|object| object.id == *child)
+                .ok_or(VisualDocumentError::MembershipChildNotFound(*child))?;
+            if *child == TITLE_OBJECT_ID
+                || matches!(object.kind, VisualObjectKind::Connector { .. })
+            {
+                return Err(VisualDocumentError::MembershipChildNotAllowed(*child));
+            }
+            if let Some(parent) = parent {
+                scene.parent_by_child.insert(*child, *parent);
+            } else {
+                scene.parent_by_child.remove(child);
+            }
+        }
+        VisualOperation::Group { frame, members } => {
+            if !matches!(
+                frame.kind,
+                VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. }
+            ) || members.is_empty()
+            {
+                return Err(VisualDocumentError::InvalidState(
+                    "group requires a frame and at least one member".into(),
+                ));
+            }
+            if members.len() > MAX_VISUAL_TRANSACTION_OPERATIONS {
+                return Err(VisualDocumentError::TooManyOperations {
+                    max_operations: MAX_VISUAL_TRANSACTION_OPERATIONS,
+                });
+            }
+            let selected = members
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            if selected.len() != members.len() {
+                return Err(VisualDocumentError::InvalidState(
+                    "group members must be unique".into(),
+                ));
+            }
+            for id in members {
+                let object = scene
+                    .objects
+                    .iter()
+                    .find(|object| object.id == *id)
+                    .ok_or(VisualDocumentError::MembershipChildNotFound(*id))?;
+                if *id == TITLE_OBJECT_ID
+                    || matches!(object.kind, VisualObjectKind::Connector { .. })
+                {
+                    return Err(VisualDocumentError::MembershipChildNotAllowed(*id));
+                }
+            }
+            let mut roots = Vec::new();
+            for object in &scene.objects {
+                if !selected.contains(&object.id) {
+                    continue;
+                }
+                let mut parent = scene.parent_by_child.get(&object.id).copied();
+                let mut visited = std::collections::HashSet::new();
+                let mut covered = false;
+                while let Some(id) = parent {
+                    if !visited.insert(id) {
+                        return Err(VisualDocumentError::MembershipCycle);
+                    }
+                    if visited.len() > MAX_VISUAL_CONTAINMENT_DEPTH {
+                        return Err(VisualDocumentError::MembershipTooDeep {
+                            max_depth: MAX_VISUAL_CONTAINMENT_DEPTH,
+                        });
+                    }
+                    if selected.contains(&id) {
+                        covered = true;
+                        break;
+                    }
+                    parent = scene.parent_by_child.get(&id).copied();
+                }
+                if !covered {
+                    roots.push(object.id);
+                }
+            }
+            let shared_parent = roots
+                .first()
+                .and_then(|id| scene.parent_by_child.get(id))
+                .copied()
+                .filter(|parent| {
+                    roots
+                        .iter()
+                        .all(|id| scene.parent_by_child.get(id) == Some(parent))
+                });
+            let id = allocate_object_id(allocator)?;
+            let object = VisualObject {
+                id,
+                layer_id: frame.layer_id,
+                transform: frame.transform,
+                style: frame.style.clone(),
+                kind: frame.kind.clone(),
+            };
+            validate_object(&object)?;
+            let index = scene
+                .objects
+                .iter()
+                .position(|object| roots.contains(&object.id))
+                .unwrap_or(scene.objects.len());
+            scene.objects.insert(index, object);
+            if let Some(parent) = shared_parent {
+                scene.parent_by_child.insert(id, parent);
+            }
+            for child in roots {
+                scene.parent_by_child.insert(child, id);
+            }
+            outcome.created_objects.push(id);
+        }
+        VisualOperation::Ungroup(id) => {
+            let frame = scene
+                .objects
+                .iter()
+                .find(|object| object.id == *id)
+                .ok_or(VisualDocumentError::UnknownObject(*id))?;
+            if !matches!(
+                frame.kind,
+                VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. }
+            ) {
+                return Err(VisualDocumentError::MembershipParentMustBeFrame(*id));
+            }
+            apply_visual_operation(
+                scene,
+                allocator,
+                &VisualOperation::RemoveObject(*id),
+                outcome,
+            )?;
         }
         VisualOperation::ReplaceObject(replacement) => {
             let index = scene
@@ -1655,6 +1871,47 @@ fn validate_scene(
         }
     }
 
+    if scene.parent_by_child.len() > MAX_VISUAL_OBJECTS {
+        return Err(VisualDocumentError::TooManyMemberships {
+            max_memberships: MAX_VISUAL_OBJECTS,
+        });
+    }
+    for (child, parent) in &scene.parent_by_child {
+        if !object_ids.contains(child) {
+            return Err(VisualDocumentError::MembershipChildNotFound(*child));
+        }
+        if *child == TITLE_OBJECT_ID || connector_ids.contains(child) {
+            return Err(VisualDocumentError::MembershipChildNotAllowed(*child));
+        }
+        let parent_object = scene
+            .objects
+            .iter()
+            .find(|object| object.id == *parent)
+            .ok_or(VisualDocumentError::MembershipParentNotFound(*parent))?;
+        if !matches!(
+            parent_object.kind,
+            VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. }
+        ) {
+            return Err(VisualDocumentError::MembershipParentMustBeFrame(*parent));
+        }
+        let mut visited = std::collections::HashSet::new();
+        let mut cursor = *child;
+        visited.insert(cursor);
+        let mut depth = 0;
+        while let Some(next) = scene.parent_by_child.get(&cursor) {
+            depth += 1;
+            if !visited.insert(*next) {
+                return Err(VisualDocumentError::MembershipCycle);
+            }
+            if depth > MAX_VISUAL_CONTAINMENT_DEPTH {
+                return Err(VisualDocumentError::MembershipTooDeep {
+                    max_depth: MAX_VISUAL_CONTAINMENT_DEPTH,
+                });
+            }
+            cursor = *next;
+        }
+    }
+
     match scene
         .objects
         .iter()
@@ -1790,6 +2047,21 @@ fn validate_object(object: &VisualObject) -> Result<(), VisualDocumentError> {
                 });
             }
         }
+        VisualObjectKind::Container { label } | VisualObjectKind::Swimlane { label, .. } => {
+            validate_frame_label(label)?
+        }
+    }
+    Ok(())
+}
+
+fn validate_frame_label(label: &str) -> Result<(), VisualDocumentError> {
+    if label.len() > MAX_VISUAL_FRAME_LABEL_BYTES {
+        return Err(VisualDocumentError::TextTooLarge {
+            max_bytes: MAX_VISUAL_FRAME_LABEL_BYTES,
+        });
+    }
+    if label.chars().any(char::is_control) {
+        return Err(VisualDocumentError::FrameLabelInvalid);
     }
     Ok(())
 }
@@ -1927,6 +2199,45 @@ where
     D: Deserializer<'de>,
 {
     deserialize_bounded_string::<D, MAX_VISUAL_CONNECTOR_LABEL_BYTES>(deserializer)
+}
+
+fn deserialize_visual_frame_label<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let label = deserialize_bounded_string::<D, MAX_VISUAL_FRAME_LABEL_BYTES>(deserializer)?;
+    validate_frame_label(&label).map_err(de::Error::custom)?;
+    Ok(label)
+}
+
+fn deserialize_bounded_membership<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<VisualObjectId, VisualObjectId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct MembershipVisitor;
+    impl<'de> Visitor<'de> for MembershipVisitor {
+        type Value = BTreeMap<VisualObjectId, VisualObjectId>;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "a bounded unique child-to-frame mapping")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+            let mut parents = BTreeMap::new();
+            while let Some(child) = access.next_key::<VisualObjectId>()? {
+                if parents.len() >= MAX_VISUAL_OBJECTS {
+                    return Err(de::Error::custom("too many visual memberships"));
+                }
+                if parents.contains_key(&child) {
+                    return Err(de::Error::custom("duplicate visual membership child"));
+                }
+                let parent = access.next_value::<VisualObjectId>()?;
+                parents.insert(child, parent);
+            }
+            Ok(parents)
+        }
+    }
+    deserializer.deserialize_map(MembershipVisitor)
 }
 
 fn deserialize_bounded_vec<'de, D, T, const MAX_ITEMS: usize>(
@@ -2071,7 +2382,7 @@ mod tests {
         VisualHistoryEntry, VisualLayer, VisualLayerId, VisualLineStyle, VisualObject,
         VisualObjectDraft, VisualObjectId, VisualObjectKind, VisualOperation, VisualPresetDraft,
         VisualPrimitiveComponent, VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle,
-        VisualTransform,
+        VisualSwimlaneOrientation, VisualTransform,
     };
     use crate::diagram::codec::{
         DiagramFileDocument, DiagramFileDocumentRef, decode_document, encode_document,
@@ -2086,8 +2397,99 @@ mod tests {
         }
     }
 
+    #[test]
+    fn visual_group_rejects_intermediate_membership_cycle_atomically() {
+        let mut document = VisualDiagramDocument::new();
+        let a = document
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let b = document
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Container { label: "B".into() },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let c = document
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualObjectKind::Container { label: "C".into() },
+            ))])
+            .unwrap()
+            .created_objects[0];
+        let scene = document.scene().clone();
+        let allocator = document.allocator();
+        let revision = document.revision();
+        let undo = document.undo_depth();
+        let result = document.apply_transaction(&[
+            VisualOperation::SetParent {
+                child: a,
+                parent: Some(b),
+            },
+            VisualOperation::SetParent {
+                child: b,
+                parent: Some(c),
+            },
+            VisualOperation::SetParent {
+                child: c,
+                parent: Some(b),
+            },
+            VisualOperation::Group {
+                frame: draft(VisualObjectKind::Container {
+                    label: "Group".into(),
+                }),
+                members: vec![a],
+            },
+        ]);
+        assert!(matches!(result, Err(VisualDocumentError::MembershipCycle)));
+        assert_eq!(document.scene(), &scene);
+        assert_eq!(document.allocator(), allocator);
+        assert_eq!(document.revision(), revision);
+        assert_eq!(document.undo_depth(), undo);
+    }
+
     fn text_draft(text: impl Into<String>) -> VisualObjectDraft {
         draft(VisualObjectKind::Text { text: text.into() })
+    }
+
+    fn container_draft(label: impl Into<String>, x: f64) -> VisualObjectDraft {
+        VisualObjectDraft {
+            layer_id: DEFAULT_LAYER_ID,
+            transform: VisualTransform {
+                x,
+                width: 320.0,
+                height: 220.0,
+                ..VisualTransform::default()
+            },
+            style: VisualStyle::default(),
+            kind: VisualObjectKind::Container {
+                label: label.into(),
+            },
+        }
+    }
+
+    fn swimlane_draft(
+        label: impl Into<String>,
+        orientation: VisualSwimlaneOrientation,
+        x: f64,
+    ) -> VisualObjectDraft {
+        VisualObjectDraft {
+            layer_id: DEFAULT_LAYER_ID,
+            transform: VisualTransform {
+                x,
+                width: 320.0,
+                height: 220.0,
+                ..VisualTransform::default()
+            },
+            style: VisualStyle::default(),
+            kind: VisualObjectKind::Swimlane {
+                orientation,
+                label: label.into(),
+            },
+        }
     }
 
     fn connector_draft(from: VisualObjectId, to: VisualObjectId) -> VisualObjectDraft {
@@ -2106,6 +2508,251 @@ mod tests {
                 label: "depends on".into(),
             },
         })
+    }
+
+    #[test]
+    fn visual_container_membership_supports_nested_reparent_and_detach_history() {
+        let mut document = VisualDiagramDocument::new();
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(container_draft("Outer", -200.0)),
+                VisualOperation::AddObject(swimlane_draft(
+                    "Vertical lane",
+                    VisualSwimlaneOrientation::Vertical,
+                    200.0,
+                )),
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Diamond,
+                })),
+            ])
+            .unwrap()
+            .created_objects;
+        let [outer, lane, child] = ids.as_slice() else {
+            panic!("three visual objects were created");
+        };
+
+        let before_membership = document.revision();
+        let outcome = document
+            .apply_transaction(&[
+                VisualOperation::SetParent {
+                    child: *lane,
+                    parent: Some(*outer),
+                },
+                VisualOperation::SetParent {
+                    child: *child,
+                    parent: Some(*lane),
+                },
+            ])
+            .unwrap();
+        assert!(outcome.changed);
+        assert_eq!(document.revision(), before_membership + 1);
+        assert_eq!(document.scene().parent_by_child.get(lane), Some(outer));
+        assert_eq!(document.scene().parent_by_child.get(child), Some(lane));
+
+        let revision = document.revision();
+        let history_depth = document.undo_depth();
+        assert!(
+            !document
+                .apply_transaction(&[VisualOperation::SetParent {
+                    child: *child,
+                    parent: Some(*lane),
+                }])
+                .unwrap()
+                .changed
+        );
+        assert_eq!(document.revision(), revision);
+        assert_eq!(document.undo_depth(), history_depth);
+
+        assert!(document.undo().unwrap());
+        assert!(document.scene().parent_by_child.is_empty());
+        assert!(document.redo().unwrap());
+        assert_eq!(document.scene().parent_by_child.get(child), Some(lane));
+        document
+            .apply_transaction(&[VisualOperation::SetParent {
+                child: *child,
+                parent: Some(*outer),
+            }])
+            .unwrap();
+        assert_eq!(document.scene().parent_by_child.get(child), Some(outer));
+        document
+            .apply_transaction(&[VisualOperation::SetParent {
+                child: *child,
+                parent: None,
+            }])
+            .unwrap();
+        assert!(!document.scene().parent_by_child.contains_key(child));
+    }
+
+    #[test]
+    fn visual_container_invalid_membership_is_atomic_and_rejects_cycles_and_reserved_objects() {
+        let mut document = VisualDiagramDocument::new();
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(container_draft("First", -200.0)),
+                VisualOperation::AddObject(container_draft("Second", 200.0)),
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                })),
+            ])
+            .unwrap()
+            .created_objects;
+        let [first, second, child] = ids.as_slice() else {
+            panic!("three visual objects were created");
+        };
+        let unchanged = document.clone();
+
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::SetParent {
+                child: *child,
+                parent: Some(*child),
+            }]),
+            Err(VisualDocumentError::MembershipParentMustBeFrame(_))
+        ));
+        assert_eq!(document, unchanged);
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::AddObject(container_draft(
+                "bad\u{0007}label",
+                -300.0,
+            ))]),
+            Err(VisualDocumentError::FrameLabelInvalid)
+        ));
+        assert_eq!(document, unchanged);
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::SetParent {
+                child: TITLE_OBJECT_ID,
+                parent: Some(*first),
+            }]),
+            Err(VisualDocumentError::MembershipChildNotAllowed(_))
+        ));
+        assert_eq!(document, unchanged);
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::SetParent {
+                child: *child,
+                parent: Some(VisualObjectId(u64::MAX)),
+            }]),
+            Err(VisualDocumentError::MembershipParentNotFound(_))
+        ));
+        assert_eq!(document, unchanged);
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::SetParent {
+                child: VisualObjectId(u64::MAX),
+                parent: None,
+            }]),
+            Err(VisualDocumentError::MembershipChildNotFound(_))
+        ));
+        assert_eq!(document, unchanged);
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::SetParent {
+                child: TITLE_OBJECT_ID,
+                parent: None,
+            }]),
+            Err(VisualDocumentError::MembershipChildNotAllowed(_))
+        ));
+        assert_eq!(document, unchanged);
+        assert!(matches!(
+            document.apply_transaction(&[
+                VisualOperation::SetParent {
+                    child: *first,
+                    parent: Some(*second),
+                },
+                VisualOperation::SetParent {
+                    child: *second,
+                    parent: Some(*first),
+                },
+            ]),
+            Err(VisualDocumentError::MembershipCycle)
+        ));
+        assert_eq!(document, unchanged);
+
+        let connector_id = document
+            .apply_transaction(&[VisualOperation::AddObject(connector_draft(*child, *first))])
+            .unwrap()
+            .created_objects[0];
+        let before_connector_membership = document.clone();
+        assert!(matches!(
+            document.apply_transaction(&[VisualOperation::SetParent {
+                child: connector_id,
+                parent: Some(*first),
+            }]),
+            Err(VisualDocumentError::MembershipChildNotAllowed(_))
+        ));
+        assert_eq!(document, before_connector_membership);
+    }
+
+    #[test]
+    fn visual_container_delete_promotes_members_and_cascades_frame_connectors_atomically() {
+        let mut document = VisualDiagramDocument::new();
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(container_draft("Outer", -250.0)),
+                VisualOperation::AddObject(swimlane_draft(
+                    "Inner",
+                    VisualSwimlaneOrientation::Horizontal,
+                    0.0,
+                )),
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Circle,
+                })),
+                VisualOperation::AddObject(draft(VisualObjectKind::Primitive {
+                    shape: VisualPrimitiveShape::Rectangle,
+                })),
+            ])
+            .unwrap()
+            .created_objects;
+        let [outer, inner, member, other] = ids.as_slice() else {
+            panic!("four visual objects were created");
+        };
+        let connector_ids = document
+            .apply_transaction(&[
+                VisualOperation::AddObject(connector_draft(*inner, *other)),
+                VisualOperation::AddObject(connector_draft(*member, *other)),
+            ])
+            .unwrap()
+            .created_objects;
+        document
+            .apply_transaction(&[
+                VisualOperation::SetParent {
+                    child: *inner,
+                    parent: Some(*outer),
+                },
+                VisualOperation::SetParent {
+                    child: *member,
+                    parent: Some(*inner),
+                },
+            ])
+            .unwrap();
+
+        let before_delete = document.clone();
+        document
+            .apply_transaction(&[VisualOperation::RemoveObject(*inner)])
+            .unwrap();
+        assert_eq!(document.scene().parent_by_child.get(member), Some(outer));
+        assert!(!document.scene().parent_by_child.contains_key(inner));
+        assert!(
+            document
+                .scene()
+                .objects
+                .iter()
+                .all(|object| object.id != connector_ids[0])
+        );
+        assert!(
+            document
+                .scene()
+                .objects
+                .iter()
+                .any(|object| object.id == connector_ids[1])
+        );
+        assert!(document.undo().unwrap());
+        assert_eq!(document.scene(), before_delete.scene());
+
+        document
+            .apply_transaction(&[VisualOperation::RemoveObject(*outer)])
+            .unwrap();
+        assert!(!document.scene().parent_by_child.contains_key(inner));
+        assert_eq!(document.scene().parent_by_child.get(member), Some(inner));
+        assert!(document.undo().unwrap());
+        assert_eq!(document.scene().parent_by_child.get(inner), Some(outer));
+        assert_eq!(document.scene().parent_by_child.get(member), Some(inner));
     }
 
     fn scene_with_object(id: u64) -> VisualScene {

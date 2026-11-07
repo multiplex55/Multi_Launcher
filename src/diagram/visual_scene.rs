@@ -5,7 +5,8 @@ use super::visual::{
     VisualAnchor, VisualAsset, VisualColor, VisualConnector, VisualConnectorDirection,
     VisualConnectorEndpoint, VisualConnectorRoute, VisualDiagramDocument, VisualDocumentError,
     VisualLayerId, VisualObject, VisualObjectId, VisualObjectKind, VisualPrimitiveComponent,
-    VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle, VisualTransform,
+    VisualPrimitiveShape, VisualScene, VisualShadow, VisualStyle, VisualSwimlaneOrientation,
+    VisualTransform,
 };
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
@@ -42,6 +43,9 @@ pub enum VisualProjectedKind {
     PresetPrimitive(VisualPrimitiveShape),
     Image,
     MissingImagePlaceholder,
+    Container,
+    SwimlaneHorizontal,
+    SwimlaneVertical,
     Connector,
 }
 
@@ -56,6 +60,8 @@ pub struct ProjectedVisualItem {
     pub style: VisualStyle,
     /// Closed, rotated outline path in document coordinates.
     pub outline: Vec<ScenePoint>,
+    /// Transformed swimlane/container header area, shared by paint and interaction.
+    pub header: Option<Vec<ScenePoint>>,
     /// Additional closed paths such as a cylinder's top cap or missing-image X.
     pub details: Vec<Vec<ScenePoint>>,
     /// Open route and arrowhead paths, used only by connectors.
@@ -168,6 +174,31 @@ pub fn project_visual_scene(
                     Some(text),
                     false,
                 )?],
+                VisualObjectKind::Container { label } => vec![build_frame_item(
+                    object.id,
+                    layer.id,
+                    VisualProjectedKind::Container,
+                    object.transform,
+                    object.style.clone(),
+                    label,
+                    false,
+                )?],
+                VisualObjectKind::Swimlane { orientation, label } => vec![build_frame_item(
+                    object.id,
+                    layer.id,
+                    match orientation {
+                        VisualSwimlaneOrientation::Horizontal => {
+                            VisualProjectedKind::SwimlaneHorizontal
+                        }
+                        VisualSwimlaneOrientation::Vertical => {
+                            VisualProjectedKind::SwimlaneVertical
+                        }
+                    },
+                    object.transform,
+                    object.style.clone(),
+                    label,
+                    *orientation == VisualSwimlaneOrientation::Vertical,
+                )?],
                 VisualObjectKind::ImageReference { asset_id } => {
                     if let Some(asset) = scene.assets.iter().find(|asset| asset.id() == asset_id) {
                         let mut item = build_item(
@@ -248,6 +279,7 @@ pub fn project_visual_scene(
     }
 
     let owner_bounds = projected_owner_bounds(&items_by_object);
+    let obstacle_bounds = projected_obstacle_bounds(&items_by_object);
     let parallel_lanes = connector_parallel_lanes(&connectors);
     let object_rotations = scene
         .objects
@@ -288,8 +320,14 @@ pub fn project_visual_scene(
         .ok_or_else(|| {
             VisualProjectionError::InvalidScene("connector target outline is unavailable".into())
         })?;
-        let (route, route_fallback) =
-            route_connector(connector, from, to, &owner_bounds, &mut route_budget);
+        let (route, route_fallback) = route_connector(
+            connector,
+            from,
+            to,
+            &owner_bounds,
+            &obstacle_bounds,
+            &mut route_budget,
+        );
         if route_fallback {
             connector_route_fallbacks = connector_route_fallbacks.saturating_add(1);
         }
@@ -325,6 +363,7 @@ pub fn project_visual_scene(
             transform: object.transform,
             style: object.style.clone(),
             outline: Vec::new(),
+            header: None,
             details: Vec::new(),
             open_paths,
             text,
@@ -426,6 +465,56 @@ struct ConnectorEgress {
     lane_point: ScenePoint,
 }
 
+#[derive(Clone, Copy)]
+struct ConnectorObstacleView<'a> {
+    base: &'a BTreeMap<VisualObjectId, SceneRect>,
+    endpoint_frames: [Option<(VisualObjectId, SceneRect)>; 2],
+}
+
+impl<'a> ConnectorObstacleView<'a> {
+    fn new(
+        base: &'a BTreeMap<VisualObjectId, SceneRect>,
+        owner_bounds: &BTreeMap<VisualObjectId, SceneRect>,
+        connector: &VisualConnector,
+    ) -> Self {
+        let endpoint_frame = |id| {
+            if base.contains_key(&id) {
+                None
+            } else {
+                owner_bounds.get(&id).copied().map(|bounds| (id, bounds))
+            }
+        };
+        let from = endpoint_frame(connector.from.object_id);
+        let to = (connector.to.object_id != connector.from.object_id)
+            .then(|| endpoint_frame(connector.to.object_id))
+            .flatten();
+        Self {
+            base,
+            endpoint_frames: [from, to],
+        }
+    }
+
+    fn len(self) -> usize {
+        self.base.len() + self.endpoint_frames.iter().flatten().count()
+    }
+
+    fn contains_key(self, id: &VisualObjectId) -> bool {
+        self.base.contains_key(id)
+            || self
+                .endpoint_frames
+                .iter()
+                .flatten()
+                .any(|(endpoint_id, _)| endpoint_id == id)
+    }
+
+    fn iter(self) -> impl Iterator<Item = (VisualObjectId, SceneRect)> + 'a {
+        self.base
+            .iter()
+            .map(|(id, bounds)| (*id, *bounds))
+            .chain(self.endpoint_frames.into_iter().flatten())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RouteQueueEntry {
     cost: f64,
@@ -460,11 +549,49 @@ fn projected_owner_bounds(
     items_by_object
         .iter()
         .filter_map(|(id, items)| {
-            items
+            let bounds = items
                 .iter()
-                .map(|item| item.bounds)
-                .reduce(union)
-                .map(|bounds| (*id, bounds))
+                .map(|item| {
+                    if matches!(
+                        item.kind,
+                        VisualProjectedKind::Container
+                            | VisualProjectedKind::SwimlaneHorizontal
+                            | VisualProjectedKind::SwimlaneVertical
+                    ) {
+                        bounds_for_points(&item.outline).unwrap_or(item.bounds)
+                    } else {
+                        item.bounds
+                    }
+                })
+                .reduce(union);
+            bounds.map(|bounds| (*id, bounds))
+        })
+        .collect()
+}
+
+fn projected_obstacle_bounds(
+    items_by_object: &BTreeMap<VisualObjectId, Vec<ProjectedVisualItem>>,
+) -> BTreeMap<VisualObjectId, SceneRect> {
+    items_by_object
+        .iter()
+        .filter_map(|(id, items)| {
+            let is_frame = items.iter().any(|item| {
+                matches!(
+                    item.kind,
+                    VisualProjectedKind::Container
+                        | VisualProjectedKind::SwimlaneHorizontal
+                        | VisualProjectedKind::SwimlaneVertical
+                )
+            });
+            if is_frame {
+                None
+            } else {
+                items
+                    .iter()
+                    .map(|item| item.bounds)
+                    .reduce(union)
+                    .map(|bounds| (*id, bounds))
+            }
         })
         .collect()
 }
@@ -581,25 +708,51 @@ fn route_connector(
     from: ConnectorAnchorPoint,
     to: ConnectorAnchorPoint,
     owner_bounds: &BTreeMap<VisualObjectId, SceneRect>,
+    obstacle_bounds: &BTreeMap<VisualObjectId, SceneRect>,
     remaining_work: &mut usize,
 ) -> (Vec<ScenePoint>, bool) {
+    let route_obstacles = ConnectorObstacleView::new(obstacle_bounds, owner_bounds, connector);
     if connector.from.object_id == connector.to.object_id {
         return match connector.route {
-            VisualConnectorRoute::Curved => {
-                route_curved_self_loop(connector, from, to, owner_bounds, remaining_work)
-            }
+            VisualConnectorRoute::Curved => route_curved_self_loop(
+                connector,
+                from,
+                to,
+                owner_bounds,
+                route_obstacles,
+                remaining_work,
+            ),
             VisualConnectorRoute::Straight => {
-                let (path, _) = route_elbow(connector, from, to, owner_bounds, remaining_work);
+                let (path, _) = route_elbow(
+                    connector,
+                    from,
+                    to,
+                    owner_bounds,
+                    route_obstacles,
+                    remaining_work,
+                );
                 (path, true)
             }
-            VisualConnectorRoute::Elbow => {
-                route_elbow(connector, from, to, owner_bounds, remaining_work)
-            }
+            VisualConnectorRoute::Elbow => route_elbow(
+                connector,
+                from,
+                to,
+                owner_bounds,
+                route_obstacles,
+                remaining_work,
+            ),
         };
     }
     match connector.route {
         VisualConnectorRoute::Straight if distance(from.point, to.point) <= f64::EPSILON => {
-            let (path, _) = route_elbow(connector, from, to, owner_bounds, remaining_work);
+            let (path, _) = route_elbow(
+                connector,
+                from,
+                to,
+                owner_bounds,
+                route_obstacles,
+                remaining_work,
+            );
             (path, true)
         }
         VisualConnectorRoute::Straight => (
@@ -639,9 +792,14 @@ fn route_connector(
             ),
             false,
         ),
-        VisualConnectorRoute::Elbow => {
-            route_elbow(connector, from, to, owner_bounds, remaining_work)
-        }
+        VisualConnectorRoute::Elbow => route_elbow(
+            connector,
+            from,
+            to,
+            owner_bounds,
+            route_obstacles,
+            remaining_work,
+        ),
     }
 }
 
@@ -650,6 +808,7 @@ fn route_elbow(
     mut from: ConnectorAnchorPoint,
     mut to: ConnectorAnchorPoint,
     owner_bounds: &BTreeMap<VisualObjectId, SceneRect>,
+    obstacle_bounds: ConnectorObstacleView<'_>,
     remaining_work: &mut usize,
 ) -> (Vec<ScenePoint>, bool) {
     let Some(from_bounds) = owner_bounds.get(&connector.from.object_id) else {
@@ -673,25 +832,25 @@ fn route_elbow(
         from.point,
         from_egress.normal_point,
         connector.from.object_id,
-        owner_bounds,
+        obstacle_bounds,
         remaining_work,
     ) && route_egress_is_clear(
         from_egress.normal_point,
         from_egress.lane_point,
         connector.from.object_id,
-        owner_bounds,
+        obstacle_bounds,
         remaining_work,
     ) && route_egress_is_clear(
         to.point,
         to_egress.normal_point,
         connector.to.object_id,
-        owner_bounds,
+        obstacle_bounds,
         remaining_work,
     ) && route_egress_is_clear(
         to_egress.normal_point,
         to_egress.lane_point,
         connector.to.object_id,
-        owner_bounds,
+        obstacle_bounds,
         remaining_work,
     );
     let route = stubs_clear
@@ -699,7 +858,7 @@ fn route_elbow(
             route_orthogonal(
                 from_egress.lane_point,
                 to_egress.lane_point,
-                owner_bounds,
+                obstacle_bounds,
                 remaining_work,
             )
         })
@@ -727,25 +886,33 @@ fn route_curved_self_loop(
     from: ConnectorAnchorPoint,
     to: ConnectorAnchorPoint,
     owner_bounds: &BTreeMap<VisualObjectId, SceneRect>,
+    obstacle_bounds: ConnectorObstacleView<'_>,
     remaining_work: &mut usize,
 ) -> (Vec<ScenePoint>, bool) {
     let path = connector_self_loop(from, to);
     if curved_self_loop_is_clear(
         connector.from.object_id,
         &path,
-        owner_bounds,
+        obstacle_bounds,
         remaining_work,
     ) {
         return (path, false);
     }
-    let (fallback, _) = route_elbow(connector, from, to, owner_bounds, remaining_work);
+    let (fallback, _) = route_elbow(
+        connector,
+        from,
+        to,
+        owner_bounds,
+        obstacle_bounds,
+        remaining_work,
+    );
     (fallback, true)
 }
 
 fn curved_self_loop_is_clear(
     owner_id: VisualObjectId,
     path: &[ScenePoint],
-    owner_bounds: &BTreeMap<VisualObjectId, SceneRect>,
+    owner_bounds: ConnectorObstacleView<'_>,
     remaining_work: &mut usize,
 ) -> bool {
     let required = path
@@ -759,13 +926,13 @@ fn curved_self_loop_is_clear(
     *remaining_work -= required;
     let last_segment = path.len().saturating_sub(2);
     !owner_bounds.iter().any(|(id, bounds)| {
-        let obstacle = if *id == owner_id {
-            expand(*bounds, 0.1)
+        let obstacle = if id == owner_id {
+            expand(bounds, 0.1)
         } else {
-            expand(*bounds, CONNECTOR_CLEARANCE + 0.1)
+            expand(bounds, CONNECTOR_CLEARANCE + 0.1)
         };
         path.windows(2).enumerate().any(|(index, segment)| {
-            (*id != owner_id || (index != 0 && index != last_segment))
+            (id != owner_id || (index != 0 && index != last_segment))
                 && segment_crosses_rect(segment[0], segment[1], obstacle)
         })
     })
@@ -775,7 +942,7 @@ fn route_egress_is_clear(
     start: ScenePoint,
     end: ScenePoint,
     owner_id: VisualObjectId,
-    owner_bounds: &BTreeMap<VisualObjectId, SceneRect>,
+    owner_bounds: ConnectorObstacleView<'_>,
     remaining_work: &mut usize,
 ) -> bool {
     let obstacle_count =
@@ -793,9 +960,9 @@ fn route_egress_is_clear(
     *remaining_work -= obstacle_count;
     !owner_bounds
         .iter()
-        .filter(|(id, _)| **id != owner_id)
+        .filter(|(id, _)| *id != owner_id)
         .any(|(_, bounds)| {
-            segment_crosses_rect(start, end, expand(*bounds, CONNECTOR_CLEARANCE + 0.1))
+            segment_crosses_rect(start, end, expand(bounds, CONNECTOR_CLEARANCE + 0.1))
         })
 }
 
@@ -886,7 +1053,7 @@ fn connector_self_loop(from: ConnectorAnchorPoint, to: ConnectorAnchorPoint) -> 
 fn route_orthogonal(
     start: ScenePoint,
     end: ScenePoint,
-    owner_bounds: &BTreeMap<VisualObjectId, SceneRect>,
+    owner_bounds: ConnectorObstacleView<'_>,
     remaining_work: &mut usize,
 ) -> Option<Vec<ScenePoint>> {
     if owner_bounds.len() > *remaining_work {
@@ -896,7 +1063,7 @@ fn route_orthogonal(
     *remaining_work -= owner_bounds.len();
     let all_obstacles = owner_bounds
         .iter()
-        .map(|(id, bounds)| (*id, expand(*bounds, CONNECTOR_CLEARANCE + 0.1)))
+        .map(|(id, bounds)| (id, expand(bounds, CONNECTOR_CLEARANCE + 0.1)))
         .collect::<Vec<_>>();
     let mut relevant = all_obstacles
         .iter()
@@ -1367,6 +1534,121 @@ fn build_item(
     )
 }
 
+fn build_frame_item(
+    object_id: VisualObjectId,
+    layer_id: VisualLayerId,
+    kind: VisualProjectedKind,
+    transform: VisualTransform,
+    style: VisualStyle,
+    label: &str,
+    vertical_header: bool,
+) -> Result<ProjectedVisualItem, VisualProjectionError> {
+    let mut item = build_item(
+        object_id,
+        None,
+        layer_id,
+        kind,
+        transform,
+        style.clone(),
+        None,
+        false,
+    )?;
+    let header_extent = if vertical_header {
+        (transform.width * 0.22).min(28.0)
+    } else {
+        (transform.height * 0.28).min(28.0)
+    };
+    let header = if vertical_header {
+        vec![
+            point(-transform.width / 2.0, -transform.height / 2.0),
+            point(
+                -transform.width / 2.0 + header_extent,
+                -transform.height / 2.0,
+            ),
+            point(
+                -transform.width / 2.0 + header_extent,
+                transform.height / 2.0,
+            ),
+            point(-transform.width / 2.0, transform.height / 2.0),
+        ]
+    } else {
+        vec![
+            point(-transform.width / 2.0, -transform.height / 2.0),
+            point(transform.width / 2.0, -transform.height / 2.0),
+            point(
+                transform.width / 2.0,
+                -transform.height / 2.0 + header_extent,
+            ),
+            point(
+                -transform.width / 2.0,
+                -transform.height / 2.0 + header_extent,
+            ),
+        ]
+    }
+    .into_iter()
+    .map(|point| rotate_translate(point, transform))
+    .collect::<Vec<_>>();
+    let divider = if vertical_header {
+        let x = -transform.width / 2.0 + header_extent;
+        vec![
+            rotate_translate(point(x, -transform.height / 2.0), transform),
+            rotate_translate(point(x, transform.height / 2.0), transform),
+        ]
+    } else {
+        let y = -transform.height / 2.0 + header_extent;
+        vec![
+            rotate_translate(point(-transform.width / 2.0, y), transform),
+            rotate_translate(point(transform.width / 2.0, y), transform),
+        ]
+    };
+    item.bounds = union(
+        item.bounds,
+        expand(
+            bounds_for_points(&divider).ok_or_else(|| {
+                VisualProjectionError::InvalidScene("frame header is empty".into())
+            })?,
+            style.border_width / 2.0,
+        ),
+    );
+    item.details.push(divider);
+    item.header = Some(header);
+
+    let text_transform = if vertical_header {
+        let local_center = point(-transform.width / 2.0 + header_extent / 2.0, 0.0);
+        VisualTransform {
+            x: rotate_translate(local_center, transform).x,
+            y: rotate_translate(local_center, transform).y,
+            width: (transform.height - 12.0).max(1.0),
+            height: (header_extent - 4.0).max(1.0),
+            rotation_degrees: transform.rotation_degrees - 90.0,
+        }
+    } else {
+        let local_center = point(0.0, -transform.height / 2.0 + header_extent / 2.0);
+        let center = rotate_translate(local_center, transform);
+        VisualTransform {
+            x: center.x,
+            y: center.y,
+            width: (transform.width - 12.0).max(1.0),
+            height: (header_extent - 4.0).max(1.0),
+            rotation_degrees: transform.rotation_degrees,
+        }
+    };
+    let (prepared, truncated) = prepare_text(label, text_transform, style.font_size);
+    let text_bounds = rotated_rect_bounds(
+        point(text_transform.x, text_transform.y),
+        prepared.reserved_width,
+        prepared.height,
+        text_transform.rotation_degrees,
+    );
+    item.bounds = union(item.bounds, text_bounds);
+    item.text = Some(prepared);
+    item.text_transform = Some(text_transform);
+    item.text_bounds = Some(text_bounds);
+    item.text_rotation_degrees = text_transform.rotation_degrees;
+    item.text_truncated = truncated;
+    Ok(item)
+}
+
 fn build_preset_item(
     object_id: VisualObjectId,
     component_index: Option<usize>,
@@ -1451,6 +1733,7 @@ fn build_item_with_paths(
         transform,
         style,
         outline,
+        header: None,
         details,
         open_paths: Vec::new(),
         text: prepared_text,
@@ -1473,6 +1756,9 @@ fn kind_shape(kind: VisualProjectedKind) -> VisualPrimitiveShape {
         VisualProjectedKind::Text
         | VisualProjectedKind::Image
         | VisualProjectedKind::MissingImagePlaceholder
+        | VisualProjectedKind::Container
+        | VisualProjectedKind::SwimlaneHorizontal
+        | VisualProjectedKind::SwimlaneVertical
         | VisualProjectedKind::Connector => VisualPrimitiveShape::Rectangle,
     }
 }
@@ -1985,12 +2271,159 @@ mod tests {
         segment_crosses_rect,
     };
     use crate::diagram::{
-        DEFAULT_LAYER_ID, VisualAnchor, VisualAssetId, VisualColor, VisualConnector,
-        VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute,
+        DEFAULT_LAYER_ID, ScenePoint, SceneRect, VisualAnchor, VisualAssetId, VisualColor,
+        VisualConnector, VisualConnectorDirection, VisualConnectorEndpoint, VisualConnectorRoute,
         VisualDiagramDocument, VisualObjectDraft, VisualObjectId, VisualObjectKind,
         VisualOperation, VisualPresetDraft, VisualPrimitiveComponent, VisualPrimitiveShape,
-        VisualShadow, VisualStyle, VisualTransform,
+        VisualShadow, VisualStyle, VisualSwimlaneOrientation, VisualTransform,
     };
+
+    #[test]
+    fn visual_container_projection_builds_rotated_headers_and_ignores_unrelated_frames_for_routes()
+    {
+        let mut document = VisualDiagramDocument::new();
+        let mut title = document.scene().objects[0].clone();
+        title.transform.x = 2_000.0;
+        title.transform.y = 2_000.0;
+        let ids = document
+            .apply_transaction(&[
+                VisualOperation::ReplaceObject(title),
+                VisualOperation::AddObject(draft(
+                    VisualTransform {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 120.0,
+                        height: 80.0,
+                        rotation_degrees: 25.0,
+                    },
+                    VisualStyle::default(),
+                    VisualObjectKind::Container {
+                        label: "Team".into(),
+                    },
+                )),
+                VisualOperation::AddObject(draft(
+                    VisualTransform {
+                        x: 0.0,
+                        y: 180.0,
+                        width: 120.0,
+                        height: 180.0,
+                        rotation_degrees: -15.0,
+                    },
+                    VisualStyle::default(),
+                    VisualObjectKind::Swimlane {
+                        orientation: VisualSwimlaneOrientation::Vertical,
+                        label: "Column".into(),
+                    },
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        let projection = project_visual_scene(document.scene()).unwrap();
+        for (id, expected_kind) in [
+            (ids[0], VisualProjectedKind::Container),
+            (ids[1], VisualProjectedKind::SwimlaneVertical),
+        ] {
+            let item = projection
+                .items
+                .iter()
+                .find(|item| item.object_id == id)
+                .unwrap();
+            assert_eq!(item.kind, expected_kind);
+            assert_eq!(item.header.as_ref().unwrap().len(), 4);
+            assert!(!item.details.is_empty());
+            assert!(item.text_bounds.is_some());
+            assert!(
+                item.outline
+                    .iter()
+                    .all(|point| point.x.is_finite() && point.y.is_finite())
+            );
+        }
+
+        let mut routing = VisualDiagramDocument::new();
+        let mut title = routing.scene().objects[0].clone();
+        title.transform.x = 2_000.0;
+        title.transform.y = 2_000.0;
+        let endpoints = routing
+            .apply_transaction(&[
+                VisualOperation::ReplaceObject(title),
+                VisualOperation::AddObject(draft(
+                    VisualTransform {
+                        x: -180.0,
+                        width: 60.0,
+                        height: 40.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualStyle::default(),
+                    VisualObjectKind::Container {
+                        label: "Source frame".into(),
+                    },
+                )),
+                VisualOperation::AddObject(draft(
+                    VisualTransform {
+                        x: 180.0,
+                        width: 60.0,
+                        height: 40.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualStyle::default(),
+                    VisualObjectKind::Swimlane {
+                        orientation: VisualSwimlaneOrientation::Horizontal,
+                        label: "Target frame".into(),
+                    },
+                )),
+                VisualOperation::AddObject(draft(
+                    VisualTransform {
+                        width: 100.0,
+                        height: 100.0,
+                        ..VisualTransform::default()
+                    },
+                    VisualStyle::default(),
+                    VisualObjectKind::Container {
+                        label: "Transparent route area".into(),
+                    },
+                )),
+            ])
+            .unwrap()
+            .created_objects;
+        assert_eq!(endpoints.len(), 3);
+        routing
+            .apply_transaction(&[VisualOperation::AddObject(draft(
+                VisualTransform::default(),
+                VisualStyle::default(),
+                VisualObjectKind::Connector {
+                    connector: VisualConnector {
+                        from: VisualConnectorEndpoint {
+                            object_id: endpoints[0],
+                            anchor: VisualAnchor::East,
+                        },
+                        to: VisualConnectorEndpoint {
+                            object_id: endpoints[1],
+                            anchor: VisualAnchor::West,
+                        },
+                        route: VisualConnectorRoute::Elbow,
+                        direction: VisualConnectorDirection::None,
+                        label: String::new(),
+                    },
+                },
+            ))])
+            .unwrap();
+        let projection = project_visual_scene(routing.scene()).unwrap();
+        let connector = projection
+            .items
+            .iter()
+            .find(|item| item.kind == VisualProjectedKind::Connector)
+            .unwrap();
+        assert!(!connector.route_fallback);
+        let unrelated_frame = SceneRect {
+            min: ScenePoint { x: -50.0, y: -50.0 },
+            max: ScenePoint { x: 50.0, y: 50.0 },
+        };
+        assert!(
+            connector.open_paths[0]
+                .windows(2)
+                .any(|segment| segment_crosses_rect(segment[0], segment[1], unrelated_frame))
+        );
+    }
 
     fn draft(
         transform: VisualTransform,

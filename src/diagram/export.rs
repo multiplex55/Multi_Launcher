@@ -14,7 +14,7 @@ use super::visual::{
     VisualLineStyle, VisualPrimitiveShape, VisualShadow,
 };
 use super::visual_scene::{
-    MAX_VISUAL_PROJECTED_ITEMS, MAX_VISUAL_PROJECTION_COORDINATE_ABS,
+    MAX_VISUAL_OUTLINE_POINTS, MAX_VISUAL_PROJECTED_ITEMS, MAX_VISUAL_PROJECTION_COORDINATE_ABS,
     MAX_VISUAL_TEXT_LINES_PER_SCENE, ProjectedStrokePrimitive, ProjectedVisualItem,
     VisualProjectedKind, VisualSceneProjection, color_with_opacity,
 };
@@ -748,9 +748,19 @@ fn validate_visual_export_item(item: &ProjectedVisualItem) -> Result<(), Diagram
             "visual projection contains invalid geometry or style values".into(),
         ));
     }
+    if item
+        .header
+        .as_ref()
+        .is_some_and(|header| header.len() > MAX_VISUAL_OUTLINE_POINTS)
+    {
+        return Err(DiagramExportError::Encode(
+            "visual frame header exceeds its point limit".into(),
+        ));
+    }
     let points = item
         .outline
         .iter()
+        .chain(item.header.iter().flatten())
         .chain(item.details.iter().flatten())
         .chain(item.open_paths.iter().flatten());
     if points.into_iter().any(|point| !valid_export_point(*point)) {
@@ -896,16 +906,43 @@ fn push_item_shadow(
         let opacity = item.style.opacity;
         write_visual_filled_path(
             &mut fragment,
-            &item.outline,
+            item.header.as_deref().unwrap_or(&item.outline),
             true,
             shadow.color,
             opacity,
-            Some((shadow.color, opacity, shadow.blur * 2.0)),
+            if item.header.is_some() {
+                None
+            } else {
+                Some((shadow.color, opacity, shadow.blur * 2.0))
+            },
             ScenePoint {
                 x: shadow.offset_x,
                 y: shadow.offset_y,
             },
         )?;
+        if item.header.is_some() && shadow.blur > 0.0 {
+            for (path, closed) in std::iter::once((&item.outline, true))
+                .chain(item.details.iter().map(|path| (path, false)))
+            {
+                let points = path
+                    .iter()
+                    .map(|point| ScenePoint {
+                        x: point.x + shadow.offset_x,
+                        y: point.y + shadow.offset_y,
+                    })
+                    .collect::<Vec<_>>();
+                write_visual_stroke_path(
+                    &mut fragment,
+                    &points,
+                    closed,
+                    shadow.color,
+                    opacity,
+                    shadow.blur * 2.0,
+                    VisualLineStyle::Solid,
+                    None,
+                )?;
+            }
+        }
     }
     if let Some(text) = &item.text {
         write_visual_text(
@@ -947,7 +984,7 @@ fn push_item_fragment(
     if draw_fill {
         write_visual_filled_path(
             &mut fragment,
-            &item.outline,
+            item.header.as_deref().unwrap_or(&item.outline),
             true,
             item.style.fill,
             item.style.opacity,
@@ -4235,6 +4272,74 @@ mod tests {
     }
 
     #[test]
+    fn visual_frame_export_uses_shared_header_and_transparent_interior_with_shadow() {
+        let mut document = VisualDiagramDocument::new();
+        document.replace_label("").unwrap();
+        let mut style = visual_style(
+            VisualColor::rgba(35, 120, 200, 255),
+            VisualColor::rgba(0, 0, 0, 255),
+            1.0,
+        );
+        style.border_width = 2.0;
+        style.shadow = Some(VisualShadow {
+            offset_x: 8.0,
+            offset_y: 8.0,
+            blur: 2.0,
+            color: VisualColor::rgba(20, 20, 20, 160),
+        });
+        let id = add_visual_object(
+            &mut document,
+            VisualTransform {
+                x: 300.0,
+                y: 0.0,
+                width: 180.0,
+                height: 100.0,
+                rotation_degrees: 0.0,
+            },
+            style,
+            VisualObjectKind::Container {
+                label: String::new(),
+            },
+        );
+        let (snapshot, projection) = visual_export_snapshot(&document);
+        let item = projection
+            .items
+            .iter()
+            .find(|item| item.object_id == id)
+            .unwrap();
+        let header = item
+            .header
+            .as_ref()
+            .expect("frame projects its header geometry");
+        let svg = snapshot
+            .encode_svg(DiagramVisualExportOptions::default())
+            .unwrap();
+        let svg_text = std::str::from_utf8(svg.bytes()).unwrap();
+        assert!(svg_text.contains(&super::visual_path_data(header, true).unwrap()));
+        assert!(svg_text.contains(&super::visual_path_data(&item.outline, true).unwrap()));
+        let png = snapshot
+            .encode_png(DiagramVisualExportOptions::default())
+            .unwrap();
+        assert!(visual_export_pixel(&png, &projection, ScenePoint { x: 300.0, y: -40.0 })[3] > 0);
+        assert_eq!(
+            visual_export_pixel(&png, &projection, ScenePoint { x: 300.0, y: 10.0 })[3],
+            0
+        );
+        assert!(
+            visual_export_pixel(&png, &projection, ScenePoint { x: 398.0, y: 10.0 })[3] > 0,
+            "shifted frame-border shadow is exported"
+        );
+        let mut malformed = item.clone();
+        malformed.header.as_mut().unwrap()[0].x = f64::NAN;
+        assert!(super::validate_visual_export_item(&malformed).is_err());
+        malformed.header = Some(vec![
+            ScenePoint::default();
+            super::MAX_VISUAL_OUTLINE_POINTS + 1
+        ]);
+        assert!(super::validate_visual_export_item(&malformed).is_err());
+    }
+
+    #[test]
     fn visual_scene_export_vector_svg_and_png_preserve_rotated_outlines_text_and_alpha() {
         let mut document = VisualDiagramDocument::new();
         document.replace_label("").unwrap();
@@ -4454,6 +4559,7 @@ mod tests {
                 ScenePoint { x: 50.0, y: 40.0 },
                 ScenePoint { x: -50.0, y: 40.0 },
             ],
+            header: None,
             details: Vec::new(),
             open_paths: Vec::new(),
             text: None,

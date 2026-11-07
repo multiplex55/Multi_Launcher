@@ -550,6 +550,7 @@ pub fn import_drawio_xml(bytes: &[u8]) -> Result<DrawioImportResult, DrawioWireE
         objects: Vec::new(),
         presets: Vec::new(),
         assets: Vec::new(),
+        parent_by_child: Default::default(),
     };
     let mut next_object_id = 2u64;
     let mut source_object_ids = HashMap::<String, VisualObjectId>::new();
@@ -1480,6 +1481,9 @@ pub(crate) fn export_drawio_scene(
         bytes: Vec::new(),
         report: DrawioReport::default(),
     };
+    if !scene.parent_by_child.is_empty() {
+        result.report.add(None, "frame-membership-not-exported");
+    }
     let exportable_vertices = scene
         .objects
         .iter()
@@ -1547,6 +1551,11 @@ pub(crate) fn export_drawio_scene(
                     "image-reference-not-exported",
                 );
             }
+            VisualObjectKind::Container { .. } | VisualObjectKind::Swimlane { .. } => {
+                result
+                    .report
+                    .add(Some(&object_wire_id(object.id)), "frame-not-exported");
+            }
         }
     }
     if !scene.presets.is_empty() {
@@ -1569,6 +1578,8 @@ fn is_exportable_vertex(object: &VisualObject) -> bool {
         VisualObjectKind::Text { .. } => true,
         VisualObjectKind::PresetInstance { .. }
         | VisualObjectKind::ImageReference { .. }
+        | VisualObjectKind::Container { .. }
+        | VisualObjectKind::Swimlane { .. }
         | VisualObjectKind::Connector { .. } => false,
     }
 }
@@ -2449,6 +2460,23 @@ mod tests {
             ),
             Err(other) => panic!("unexpected export result: {other:?}"),
         }
+
+        let mut grouped_scene = VisualScene::new("Wire title");
+        let mut frame = primitive(2, VisualPrimitiveShape::Rectangle);
+        frame.kind = VisualObjectKind::Container {
+            label: "Frame".into(),
+        };
+        grouped_scene.objects.push(frame);
+        grouped_scene
+            .objects
+            .push(primitive(3, VisualPrimitiveShape::Rectangle));
+        grouped_scene
+            .parent_by_child
+            .insert(VisualObjectId::from_raw(3), VisualObjectId::from_raw(2));
+        let grouped = VisualDiagramDocument::from_fresh_scene(grouped_scene).unwrap();
+        assert!(
+            matches!(export_drawio_xml(&grouped), Err(DrawioWireError::UnsupportedContent(report)) if report.issues.iter().any(|issue| issue.property == "frame-membership-not-exported"))
+        );
 
         for delimiter in [";", "="] {
             let mut unsafe_font = primitive(2, VisualPrimitiveShape::Rectangle);
