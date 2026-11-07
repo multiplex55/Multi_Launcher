@@ -319,6 +319,15 @@ impl eframe::App for ImageCompareFixtureApp {
         self.write_observation(&ctx);
     }
 
+    fn on_ui_frame_complete(&mut self, ctx: &egui::Context) {
+        let completion = self.dialog.on_hosted_frame_complete(ctx);
+        for text in completion.copies {
+            if let Err(error) = crate::actions::clipboard::set_text(&text) {
+                self.last_error = Some(format!("Clipboard copy failed: {error}"));
+            }
+        }
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.dialog.shutdown();
     }

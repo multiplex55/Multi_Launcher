@@ -22,6 +22,7 @@ enum DialogCopyOwner {
     CalculationPad,
     Converter,
     DateTimeStudio,
+    ImageCompare,
     FolderSize,
     FileLock,
 }
@@ -2159,7 +2160,7 @@ impl LauncherApp {
             Panel::Plugins => middle(egui::Id::new("Plugin Settings")),
             Panel::MultiManagerDialog => middle(egui::Id::new("MultiManager")),
             Panel::MultiManagerSettingsDialog => middle(egui::Id::new("MultiManager Settings")),
-            Panel::ImageCompareDialog => NavigationDialogKind::ImageCompare.layer_id(),
+            Panel::ImageCompareDialog => self.image_compare_dialog.root_layer(),
             Panel::DuplicateFinderDialog => NavigationDialogKind::DuplicateFinder.layer_id(),
             Panel::FolderSizeDialog => middle(egui::Id::new(Some("Folder Size"))),
             Panel::FileLockDialog => middle(egui::Id::new(Some("File Lock Inspector"))),
@@ -4321,6 +4322,7 @@ impl LauncherApp {
         self.xml_toolkit_dialog.poll_host_background(ctx);
         self.regex_tester_dialog.poll_host_background(ctx);
         self.table_utility_dialog.poll_host_background(ctx);
+        self.image_compare_dialog.poll_host_background(ctx);
         self.clipboard_dialog.observe_clipboard_version();
         self.poll_batch_rename_runtime(ctx);
         self.poll_search_replace_runtime(ctx);
@@ -4800,7 +4802,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 31] {
+    fn viewport_bootstrap_state(&self) -> [bool; 32] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4811,6 +4813,7 @@ impl LauncherApp {
             self.timer_dialog.needs_root_ui_when_hidden(),
             self.calendar_hosts_need_hidden_root_ui(),
             self.date_time_studio_dialog.needs_root_ui_when_hidden(),
+            self.image_compare_dialog.needs_viewport_bootstrap(),
             self.diagram_studio_dialog.needs_root_ui_when_hidden(),
             self.calculation_pad_dialog.needs_root_ui_when_hidden(),
             self.pin_windows_need_bootstrap(),
@@ -4846,7 +4849,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 31],
+        previously_pending: [bool; 32],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -7004,21 +7007,19 @@ impl LauncherApp {
         root_visible: bool,
         first_ui_pass: bool,
         owner_transition_pending: bool,
+        jump_escape_preempted: bool,
     ) {
         use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner};
 
         let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
-        let instance = match owner {
-            NavigationOwner::Dialog {
-                kind: NavigationDialogKind::ImageCompare,
-                instance,
-            } => Some(instance),
-            _ => None,
-        };
-        let native_owner_current = !owner_transition_pending
-            && self.image_compare_native_ui_owner_current(ctx, root_visible);
+        let instance = self
+            .jump_mode_ui
+            .dialog_instance(NavigationDialogKind::ImageCompare);
+        let native_owner_current = self.image_compare_native_ui_owner_current(ctx, root_visible);
         let scope = instance
-            .filter(|_| native_owner_current && self.jump_mode_enabled())
+            .filter(|_| {
+                native_owner_current && !owner_transition_pending && self.jump_mode_enabled()
+            })
             .and_then(|instance| {
                 self.jump_mode_ui.scope_for_navigation_owner(
                     crate::gui::jump_mode::SurfaceId::dialog("image-compare", instance),
@@ -7029,14 +7030,26 @@ impl LauncherApp {
                     false,
                 )
             });
-        self.image_compare_dialog.show_with_jump_mode(
+        let jump_enabled =
+            self.jump_mode_enabled() && !self.mouse_gestures_dialog.recorder_canvas_active();
+        self.image_compare_dialog.show_hosted(
             ctx,
             scope.as_ref(),
             instance,
             owner,
-            self.native_ui_application_input_allowed(ctx),
+            self.native_ui_application_input_allowed(ctx)
+                && !self.ocr_surface_visible()
+                && !self.confirm_modal.is_open()
+                && !self.action_sheet.is_open()
+                && !self.pin_list_open,
             native_owner_current,
+            &self.jump_mode_ui,
+            jump_enabled,
+            root_visible,
             first_ui_pass,
+            self.pinned_panels
+                .contains(&super::Panel::ImageCompareDialog),
+            !jump_escape_preempted,
         );
     }
 
@@ -8034,14 +8047,16 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
         self.image_compare_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
-            && NavigationDialogKind::ImageCompare
-                .layer_id()
-                .is_some_and(|layer| visible_top_middle_layer(ctx) == Some(layer))
+            && self.image_compare_dialog.root_layer().is_some_and(|layer| {
+                visible_top_middle_layer(ctx) == Some(layer)
+                    && focused_response_layer(ctx)
+                        .is_none_or(|focus| focus == layer || focus.order == egui::Order::Background)
+            })
     }
 
     fn duplicate_finder_native_ui_owner_current(
@@ -8438,6 +8453,8 @@ impl LauncherApp {
                         self.xml_toolkit_dialog.root_navigation_instance(current)
                     } else if kind == NavigationDialogKind::TableUtility {
                         self.table_utility_dialog.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::ImageCompare {
+                        self.image_compare_dialog.root_layer().and(current)
                     } else if kind == NavigationDialogKind::DashboardEditor {
                         self.dashboard_editor.host_layer_if_root().and(current)
                     } else if kind == NavigationDialogKind::FileSearch {
@@ -9115,6 +9132,7 @@ impl LauncherApp {
             self.show_timer_host(&ctx, first_ui_pass, false);
             self.show_calendar_hosts(&ctx, first_ui_pass, false, false);
             self.show_date_time_studio_host(&ctx, first_ui_pass, false, false);
+            self.show_image_compare(&ctx, false, first_ui_pass, false, false);
             self.show_diagram_studio(&ctx, first_ui_pass, false);
             self.show_calculation_pad(&ctx, first_ui_pass, false);
             self.show_markdown_studio(&ctx, first_ui_pass, false);
@@ -9973,6 +9991,7 @@ impl LauncherApp {
                     && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.date_time_studio_root_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.image_compare_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
@@ -10066,6 +10085,7 @@ impl LauncherApp {
                     && !self.timer_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.calendar_root_input_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.date_time_studio_root_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.image_compare_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.table_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && self.xml_toolkit_root_input_owner(&ctx, frame_logic.should_be_visible)
                         == NavigationOwner::Blocked
@@ -10958,6 +10978,7 @@ impl LauncherApp {
             self.show_timer_host(&ctx, first_ui_pass, false);
             self.show_calendar_hosts(&ctx, first_ui_pass, false, false);
             self.show_date_time_studio_host(&ctx, first_ui_pass, false, false);
+            self.show_image_compare(&ctx, false, first_ui_pass, false, false);
             self.show_ocr_surface(&ctx);
             self.revalidate_show_query_focus_after_dialogs(
                 &ctx,
@@ -11370,6 +11391,7 @@ impl LauncherApp {
             frame_logic.should_be_visible,
             first_ui_pass,
             owner_transition_pending,
+            jump_session_escape_preempted,
         );
         self.show_duplicate_finder(
             &ctx,
@@ -12381,6 +12403,20 @@ impl LauncherApp {
                 }
             }
         }
+        let comparison = self.image_compare_dialog.on_hosted_frame_complete(ctx);
+        for text in comparison.copies {
+            effects.push(RootDialogEffect::CopyText {
+                owner: DialogCopyOwner::ImageCompare,
+                text,
+            });
+        }
+        if comparison.show_root {
+            effects.push(RootDialogEffect::ShowRoot);
+        }
+        if comparison.closed {
+            self.panel_states.image_compare_dialog = false;
+            self.panel_stack.retain(|panel| *panel != super::Panel::ImageCompareDialog);
+        }
         let studio = self.date_time_studio_dialog.on_hosted_frame_complete(ctx);
         if studio.show_root {
             effects.push(RootDialogEffect::ShowRoot);
@@ -12615,6 +12651,11 @@ impl LauncherApp {
                         DialogCopyOwner::DateTimeStudio => {
                             self.date_time_studio_dialog.copy_completed(result)
                         }
+                        DialogCopyOwner::ImageCompare => {
+                            if let Err(error) = result {
+                                self.report_error_message("image_compare.copy", error);
+                            }
+                        }
                         DialogCopyOwner::FolderSize => {
                             self.folder_size_dialog.copy_completed(result)
                         }
@@ -12742,6 +12783,7 @@ impl eframe::App for LauncherApp {
             || self.timer_dialog.needs_root_ui_when_hidden()
             || self.calendar_hosts_need_hidden_root_ui()
             || self.date_time_studio_dialog.needs_root_ui_when_hidden()
+            || self.image_compare_dialog.needs_root_ui_when_hidden()
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -17942,7 +17984,7 @@ mod tests {
         assert!(app.visible_flag.load(Ordering::Relaxed));
     }
 
-    fn studio_host_frame(
+    fn run_host_viewport_frame(
         ctx: &egui::Context,
         app: &mut LauncherApp,
         viewport: egui::ViewportId,
@@ -17991,7 +18033,7 @@ mod tests {
     ) -> egui::Rect {
         let mut previous = None;
         for _ in 0..128 {
-            studio_host_frame(ctx, app, viewport, Vec::new(), false, false);
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
             let (id, rect, clip) = app
                 .date_time_studio_dialog
                 .test_focusable_control(name)
@@ -18013,7 +18055,7 @@ mod tests {
                     key_press(egui::Key::Tab, egui::Modifiers::NONE),
                     key_release(egui::Key::Tab, egui::Modifiers::NONE),
                 ] {
-                    studio_host_frame(ctx, app, viewport, vec![event], false, false);
+                    run_host_viewport_frame(ctx, app, viewport, vec![event], false, false);
                 }
             }
         }
@@ -18028,7 +18070,7 @@ mod tests {
     ) {
         let rect = reveal_studio_host_control(ctx, app, viewport, name);
         for pressed in [true, false] {
-            studio_host_frame(
+            run_host_viewport_frame(
                 ctx,
                 app,
                 viewport,
@@ -18063,7 +18105,7 @@ mod tests {
 
         click_studio_host_control(&ctx, &mut app, root, "mode_AddSubtract");
         click_studio_host_control(&ctx, &mut app, root, "offset_anchor");
-        studio_host_frame(
+        run_host_viewport_frame(
             &ctx,
             &mut app,
             root,
@@ -18081,7 +18123,7 @@ mod tests {
         app.date_time_studio_dialog
             .test_set_schedule_preview("2026-11-02", "09:00", "UTC");
         click_studio_host_control(&ctx, &mut app, root, "schedule_count");
-        studio_host_frame(
+        run_host_viewport_frame(
             &ctx,
             &mut app,
             root,
@@ -18102,7 +18144,7 @@ mod tests {
             app.date_time_studio_dialog.presentation(),
             UtilityPresentation::Popout
         );
-        studio_host_frame(
+        run_host_viewport_frame(
             &ctx,
             &mut app,
             root,
@@ -18112,7 +18154,7 @@ mod tests {
         );
         assert!(!app.visible_flag.load(Ordering::Relaxed));
         for _ in 0..4 {
-            studio_host_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
         }
         let (primary, _, _) = app
             .date_time_studio_dialog
@@ -18129,7 +18171,7 @@ mod tests {
         let query = app.query.clone();
         click_studio_host_control(&ctx, &mut app, native, "schedule_cadence");
         assert!(app.date_time_studio_dialog.test_owner_popup_open());
-        studio_host_frame(
+        run_host_viewport_frame(
             &ctx,
             &mut app,
             native,
@@ -18155,9 +18197,9 @@ mod tests {
             ("2026-11-07 10:15", Some(reference))
         );
         for _ in 0..4 {
-            studio_host_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
         }
-        studio_host_frame(
+        run_host_viewport_frame(
             &ctx,
             &mut app,
             root,
@@ -18197,7 +18239,7 @@ mod tests {
         let root = egui::ViewportId::ROOT;
         let native = super::super::DateTimeStudioDialog::viewport();
         click_studio_host_control(&ctx, &mut app, root, "host-presentation");
-        studio_host_frame(
+        run_host_viewport_frame(
             &ctx,
             &mut app,
             root,
@@ -18210,7 +18252,7 @@ mod tests {
         for control in ["schedule_copy", "schedule_prepare_calendar"] {
             for discard_child in [false, true] {
                 let rect = reveal_studio_host_control(&ctx, &mut app, native, control);
-                studio_host_frame(
+                run_host_viewport_frame(
                     &ctx,
                     &mut app,
                     native,
@@ -18218,7 +18260,7 @@ mod tests {
                     false,
                     false,
                 );
-                studio_host_frame(
+                run_host_viewport_frame(
                     &ctx,
                     &mut app,
                     native,
@@ -18263,14 +18305,14 @@ mod tests {
         }
         let original = app.calendar_event_editor.test_start_date().to_owned();
         for _ in 0..3 {
-            studio_host_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
         }
         assert!(
             app.date_time_studio_dialog
                 .test_focusable_control("schedule_prepare_calendar")
                 .is_none()
         );
-        studio_host_frame(
+        run_host_viewport_frame(
             &ctx,
             &mut app,
             native,
@@ -18280,6 +18322,482 @@ mod tests {
         );
         assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
         assert_eq!(app.calendar_event_editor.test_start_date(), original);
+    }
+
+    fn image_compare_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &'static str,
+    ) -> egui::Rect {
+        let mut previous = None;
+        for _ in 0..8 {
+            run_host_viewport_frame(ctx, app, viewport, Vec::new(), false, false);
+            if let Some((_, rect, true)) = app.image_compare_dialog.response_for_test(name)
+                && rect.is_positive()
+            {
+                if previous == Some(rect) {
+                    return rect;
+                }
+                previous = Some(rect);
+            } else {
+                previous = None;
+            }
+        }
+        panic!("Image Compare control {name} must be enabled with a visible interaction rectangle");
+    }
+
+    fn click_image_compare_host_control(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        viewport: egui::ViewportId,
+        name: &'static str,
+    ) {
+        let rect = image_compare_host_control(ctx, app, viewport, name);
+        for pressed in [true, false] {
+            run_host_viewport_frame(
+                ctx,
+                app,
+                viewport,
+                tool_dialog_pointer_events(rect, pressed),
+                false,
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn imgdiff_host_moves_retain_inflight_pair_worker_and_camera_with_root_hidden() {
+        use super::super::utility_host::UtilityPresentation;
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_image_compare_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::ImageCompareDialogState::viewport();
+        let path = workspace.root().join("host-image-a.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 40, 80, 255]))
+            .save(&path)
+            .unwrap();
+        app.image_compare_dialog
+            .queue_file_pick_for_test(Some(path));
+        app.image_compare_dialog
+            .queue_clipboard_image_for_test(8, 8, [40, 10, 80, 255].repeat(64));
+        let hold = app.image_compare_dialog.hold_next_presentation_for_test();
+        click_image_compare_host_control(&ctx, &mut app, root, "open-a");
+        click_image_compare_host_control(&ctx, &mut app, root, "paste-b");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !hold.entered() {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "presentation job reached its test hold"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        click_image_compare_host_control(&ctx, &mut app, root, "view/wipe-b-end");
+        click_image_compare_host_control(&ctx, &mut app, root, "view/zoom");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_release(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        let canvas = image_compare_host_control(&ctx, &mut app, root, "canvas");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            tool_dialog_pointer_events(canvas, true),
+            false,
+            false,
+        );
+        let dragged = canvas.center() + egui::vec2(25.0, 17.0);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::PointerMoved(dragged)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![egui::Event::PointerButton {
+                pos: dragged,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+            false,
+        );
+        let before = app.image_compare_dialog.test_host_snapshot();
+        assert_eq!(before.3, 1.0);
+        assert!(before.4 > 1.0);
+        assert_ne!(before.5, egui::Vec2::ZERO);
+        let ids = app.image_compare_dialog.test_input_ids();
+        assert!(ids.iter().all(Option::is_some));
+        let pending = app.image_compare_dialog.test_presentation_keys();
+        assert!(pending.0.is_some() && pending.1.is_none());
+        assert!(
+            app.jump_mode_ui
+                .retained_registry()
+                .targets()
+                .iter()
+                .any(|target| target.eligible() && target.metadata().label() == "Pop Out")
+        );
+        click_image_compare_host_control(&ctx, &mut app, root, "host-presentation");
+        assert_eq!(
+            app.image_compare_dialog.presentation(),
+            UtilityPresentation::Popout
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+        }
+        assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+        assert_eq!(app.image_compare_dialog.test_input_ids(), ids);
+        assert_eq!(app.image_compare_dialog.test_presentation_keys(), pending);
+        hold.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let pair = app.image_compare_dialog.test_presentation_keys();
+            if pair.0.is_some() && pair.0 == pair.1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native owner collected the held result"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+        let query = app.query.clone();
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![
+                key_press(egui::Key::Space, egui::Modifiers::SHIFT),
+                egui::Event::Text(" ".into()),
+            ],
+            false,
+            false,
+        );
+        assert!(
+            app.image_compare_dialog
+                .test_host_jump()
+                .active_session()
+                .is_some()
+        );
+        assert!(
+            app.image_compare_dialog
+                .test_host_jump()
+                .active_session()
+                .unwrap()
+                .hint_map()
+                .assignments()
+                .iter()
+                .any(|assignment| assignment.target().label() == "Dock")
+        );
+        assert!(app.jump_mode_ui.active_session().is_none());
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_release(egui::Key::Space, egui::Modifiers::SHIFT)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(
+            app.image_compare_dialog
+                .test_host_jump()
+                .active_session()
+                .is_none()
+        );
+        assert!(app.image_compare_dialog.open);
+        assert_eq!(app.query, query);
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        click_image_compare_host_control(&ctx, &mut app, native, "host-presentation");
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(
+            app.image_compare_dialog.presentation(),
+            UtilityPresentation::Docked
+        );
+        assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+        assert!(!app.close_front_dialog_from_root_input());
+        for _ in 0..3 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.image_compare_dialog.open);
+    }
+
+    #[test]
+    fn imgdiff_detached_source_actions_and_close_reject_discarded_root_and_child_passes() {
+        use crate::commands::DialogCommandHost;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_image_compare_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::ImageCompareDialogState::viewport();
+        let path = workspace.root().join("accepted-image-a.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 40, 80, 255]))
+            .save(&path)
+            .unwrap();
+        app.image_compare_dialog
+            .queue_file_pick_for_test(Some(path));
+        app.image_compare_dialog
+            .queue_clipboard_image_for_test(8, 8, [40, 10, 80, 255].repeat(64));
+        click_image_compare_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        for (name, side) in [("open-a", 0), ("paste-b", 1)] {
+            for discard_child in [false, true] {
+                let rect = image_compare_host_control(&ctx, &mut app, native, name);
+                let before = app.image_compare_dialog.test_host_snapshot();
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, true),
+                    false,
+                    false,
+                );
+                run_host_viewport_frame(
+                    &ctx,
+                    &mut app,
+                    native,
+                    tool_dialog_pointer_events(rect, false),
+                    !discard_child,
+                    discard_child,
+                );
+                let after = app.image_compare_dialog.test_host_snapshot();
+                assert_eq!(after.0, before.0);
+                assert_eq!(after.1, before.1);
+                assert_eq!((after.6, after.7), (before.6, before.7));
+                assert!(app.image_compare_dialog.test_input_ids()[side].is_none());
+            }
+            click_image_compare_host_control(&ctx, &mut app, native, name);
+            assert_eq!(app.image_compare_dialog.test_host_snapshot().1[side], 1);
+        }
+        let snapshot = app.image_compare_dialog.test_host_snapshot();
+        assert_eq!((snapshot.6, snapshot.7), (0, 0));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let pair = app.image_compare_dialog.test_presentation_keys();
+            if pair.0.is_some() && pair.0 == pair.1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "accepted pair was presented"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for discard_child in [false, true] {
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                !discard_child,
+                discard_child,
+            );
+            assert!(app.image_compare_dialog.open);
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![key_release(egui::Key::Escape, egui::Modifiers::NONE)],
+                false,
+                false,
+            );
+            assert!(app.image_compare_dialog.open);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.image_compare_dialog.open);
+        let retired = app.image_compare_dialog.smoke_retirement_observation();
+        assert_eq!(retired["session_closed"], true);
+        assert!(retired["retired_uploads"].as_u64().unwrap() > 0);
+        for _ in 0..4 {
+            run_host_viewport_frame(&ctx, &mut app, root, Vec::new(), false, false);
+        }
+        assert!(
+            app.image_compare_dialog.smoke_retirement_observation()["retired_uploads"]
+                .as_u64()
+                .unwrap()
+                > 0,
+            "logical egui frames cannot acknowledge actual GPU paints"
+        );
+    }
+
+    #[test]
+    fn imgdiff_numeric_copy_waits_for_root_and_native_owner_retention() {
+        use crate::commands::DialogCommandHost;
+        struct CopyGuard(Option<egui::ViewportId>);
+        impl Drop for CopyGuard {
+            fn drop(&mut self) {
+                super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY.with(|target| target.set(self.0));
+            }
+        }
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(false);
+        prepare_tool_dialog_root(&ctx, &mut app);
+        DialogCommandHost::open_image_compare_dialog(&mut app);
+        let root = egui::ViewportId::ROOT;
+        let native = super::super::ImageCompareDialogState::viewport();
+        click_image_compare_host_control(&ctx, &mut app, root, "host-presentation");
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            root,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            false,
+            false,
+        );
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+        let _copy_guard = CopyGuard(
+            super::IMMEDIATE_VIEWPORT_TEST_NO_PLATFORM_COPY
+                .with(|target| target.replace(Some(native))),
+        );
+        let mut found_editor = false;
+        for _ in 0..64 {
+            run_host_viewport_frame(&ctx, &mut app, native, Vec::new(), false, false);
+            let (id, rect, enabled) = app
+                .image_compare_dialog
+                .response_for_test("view/zoom")
+                .unwrap();
+            if enabled
+                && rect.is_positive()
+                && app.image_compare_dialog.test_focused_control() == Some(id)
+                && egui::TextEdit::load_state(&ctx, id).is_some()
+            {
+                found_editor = true;
+                break;
+            }
+            for event in [
+                key_press(egui::Key::Tab, egui::Modifiers::NONE),
+                key_release(egui::Key::Tab, egui::Modifiers::NONE),
+            ] {
+                run_host_viewport_frame(&ctx, &mut app, native, vec![event], false, false);
+            }
+        }
+        assert!(
+            found_editor,
+            "Tab reached the real numeric TextEdit inside the Zoom slider"
+        );
+        let before = app.image_compare_dialog.test_host_snapshot();
+        let _ = LauncherApp::take_test_root_dialog_effects(&ctx);
+        for discard_child in [false, true] {
+            for event in [
+                key_press(egui::Key::A, egui::Modifiers::COMMAND),
+                key_release(egui::Key::A, egui::Modifiers::COMMAND),
+            ] {
+                run_host_viewport_frame(&ctx, &mut app, native, vec![event], false, false);
+            }
+            run_host_viewport_frame(
+                &ctx,
+                &mut app,
+                native,
+                vec![egui::Event::Copy],
+                !discard_child,
+                discard_child,
+            );
+            assert!(LauncherApp::take_test_root_dialog_effects(&ctx).is_empty());
+            assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
+        }
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![key_press(egui::Key::A, egui::Modifiers::COMMAND)],
+            false,
+            false,
+        );
+        run_host_viewport_frame(
+            &ctx,
+            &mut app,
+            native,
+            vec![egui::Event::Copy],
+            false,
+            false,
+        );
+        let effects = LauncherApp::take_test_root_dialog_effects(&ctx);
+        assert!(matches!(effects.as_slice(), [RootDialogEffect::CopyText {
+            owner: DialogCopyOwner::ImageCompare, text,
+        }] if text.trim().parse::<f32>().ok() == Some(before.4)));
+        assert_eq!(app.image_compare_dialog.test_host_snapshot(), before);
     }
 
     #[test]
