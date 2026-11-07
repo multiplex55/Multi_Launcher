@@ -1324,7 +1324,7 @@ Parent independently rehashed every recorded evidence file and the executable, c
 
 ### Coverage and compatibility audit
 
-Parent read the complete bounded audit and mechanically verified all 50 requested IDs, 38 exact original milestone keys/titles, 37 exact ordinary host names/order and 12 full native flows. All 80 concrete representative FQName references resolve into the required 835 inventory. Independent review checked ownership/normal routes and evidence attribution; no generic-host test substitutes for individual surface wiring. Numeric labels retain the original E.4 groups without invented per-number micro-titles. The tables below supersede historical partial status only where locally proved; all full native flows remain user-pending. The source compatibility/support limits remain explicit. M6-B/M6-C and original M17-B are not complete yet.
+Parent read the complete bounded audit and mechanically verified all 50 requested IDs, 38 exact original milestone keys/titles, 37 exact ordinary host names/order and 12 full native flows. All 80 concrete representative FQName references resolve into the required 835 inventory. Independent review checked ownership/normal routes and evidence attribution; no generic-host test substitutes for individual surface wiring. Numeric labels retain the original E.4 groups without invented per-number micro-titles. The tables below supersede historical partial status only where locally proved; all full native flows remain user-pending. The source compatibility/support limits remain explicit. At this historical M6-A checkpoint, M6-B/M6-C and original M17-B were still pending; the final M6-C disposition below supersedes that delivery status.
 
 ### Accepted closure keys
 
@@ -1399,7 +1399,7 @@ All rows are `LOCAL`; the referenced current cases have passing M6-A evidence ac
 
 ### All original milestones — exactly 38 rows
 
-Scopes retain the exact canonical original titles. `LOCAL` is accepted source/local evidence; M17-A verification is locally complete, while M17-B delivery and M6-B/M6-C remain pending.
+Scopes retain the exact canonical original titles. `LOCAL` is accepted source/local evidence. The final M6-C disposition below completes implementation delivery; native acceptance remains pending.
 
 | Original milestone | Original scope | Current owner / normal route and accepted recovery closure | Concrete evidence / disposition |
 | --- | --- | --- | --- |
@@ -1440,7 +1440,7 @@ Scopes retain the exact canonical original titles. `LOCAL` is accepted source/lo
 | M16-A | Recorder controls and command integration | Existing typed Open/Stop/optional chord, R02 host and M5-C | LOCAL; H37, S1 |
 | M16-B | Recording interoperability and cleanup acceptance | Exact capture/publication/worker owners + fake live pin/interlocks | LOCAL; H37/S2; full N12 pending |
 | M17-A | Scoped cumulative verification and final review | Current R06/M6-A worker/parent | LOCAL COMPLETE; exact835 inventory, initial829+6 corrected, scoped Clippy/build and audited coverage above |
-| M17-B | Final delivery, status and next-tip handoff | Existing R06/M6-B/M6-C parent ownership | PENDING; no packet/final-goal-complete claim in this draft |
+| M17-B | Final delivery, status and next-tip handoff | R06/M6-B/M6-C parent ownership | IMPLEMENTATION HANDOFF COMPLETE; single packet reviewed, final docs committed/pushed and actual tip recorded externally; N1–N12 user-pending |
 
 ### Exact ordinary host rows — 37
 
@@ -1621,3 +1621,34 @@ M6-B is complete. The single [Windows 11 acceptance packet](MANUAL_WINDOWS_11_AC
 Independent read-only review checked current routes, labels, settings schema, profile isolation and helper disposal. Corrections incorporated the separate gesture editor and auto-save semantics, Paste Sequence Run/preflight/Next and second run, Diagram align/layer actions, and actual live-pin opener. Static inspection confirms all twelve gates and 43 initially NOT_RUN gate/subcheck fields; no PASS/FAIL is preselected. JSON parses, the grouped draw.io fixture exists, and git diff --check passes. No Cargo, application, helper, native capture or Explorer action was run for this documentation milestone.
 
 The packet binds the executable to accepted code checkpoint 08c91e819ef8f488fdc83da33f0e052230a6a34d and preserves the original dirty-build provenance. No later documentation SHA is claimed to be embedded. Full native N1–N12 and independent external draw.io rendering remain user-pending. An applicable Windows 11 Explorer capability refusal is FAIL/capability-gap feedback, not a successful five-tab proof. M6-C final reporting/receipt is next; the implementation is not waiting for user execution of this packet.
+
+## R06/M6-C — Final implementation handoff
+
+**Disposition: IMPLEMENTATION_COMPLETE_USER_VALIDATION_PENDING.** This is implementation delivery, not a claim that complete native acceptance passed. R01–R06 implementation milestones and original M17-A/M17-B delivery are complete. No known missing/unsafe implementation or unresolved failing affected test remains in the accepted scope. The conditional Windows 11 Explorer provider and bounded draw.io profile retain their documented capability limits. Full N1–N12, external draw.io rendering and optional monitor/DPI checks remain unobserved user checks, covered by the single [manual packet](MANUAL_WINDOWS_11_ACCEPTANCE.md).
+
+### Category and branch receipt
+
+| Category | Existing linear branch | Final reporting checkpoint |
+| --- | --- | --- |
+| R01 — shared hosts | fix/productivity-host-core-recovery | b8c3f259cbd55d483fb1346b262026ed42d5d820 |
+| R02 — individual host migrations | feat/productivity-host-migrations | 7912a9f591c301d7a161a0675eea650d07d9148e |
+| R03 — independent Inspector/comparisons | feat/productivity-programmer-inspector | 00e199e00df7513153ceb00a42e8cb5cb1f5b9e0 |
+| R04 — Diagram hierarchy/starters/export/interchange | feat/productivity-diagram-completion | 102eaf9fbe291530acf0901f641bf6f822fcbc0f |
+| R05 — guarded Explorer lists/utility cooperation | feat/productivity-explorer-utility-completion | 1a47fb3f91e69a50b1c80f26d0e2735a906aaf00 |
+| R06 — acceptance and delivery | test/productivity-native-acceptance-closeout | Code 08c91e819ef8f488fdc83da33f0e052230a6a34d; packet 6182b6403e420a745ac648da2a1e1056c38545f6; final reporting SHA read after this commit into ignored r06-m6-c-final-receipt.json |
+
+All category checkpoints above are normally pushed. Each M0-A is the direct child of the preceding exact reporting tip, starting at 1852f264dae69056f79bc0c3b593c70331fa620f. Fresh parent verification after the packet commit checked six direct M0 parents, baseline-only document paths, base ancestry, zero new-range merges, unchanged R01–R05 tips, all upstreams equal, one checkout/worktree and exact Goal/Kickstart blobs from 05153ac1. No default branch/PR/merge action was performed. The final post-report verifier writes a fresh receipt rather than overwriting prior evidence or editing a report to include its own SHA.
+
+### Verification and proof boundaries
+
+- Required cumulative inventory: 835 current tests (831 lib, four bin), reconciled from the accepted baseline and recovery inventories. Initial run passed 829 with six failures; focused corrections passed those six and three additionally affected callers. All 835 required cases have passing evidence, with 838 distinct current passing cases across runs. This is not a single uninterrupted all-green 835 run. Exact selectors, lists, commands, failures and corrections remain in M6-A above.
+- Production lib/bin build succeeded using locked/offline fast-dev; actual executable size 143,680,000 bytes and SHA-256 E393FD9F07B58758105C429DAE9467AC41A914226A1D288631A756901F6F8BC8. It was not launched during closeout. Fresh comparison checks all 1,225 tracked build inputs against the original manifest and confirms only documentation changed after accepted code 08c91e81. Original dirty-build provenance remains intact.
+- Scoped first-party Clippy succeeded with 120 classified advisory findings, including recovery-introduced/materially changed constructs; these are not all described as pre-existing. Details and scope decisions remain in M6-A. No lint suppression, vendor or Nextest configuration workaround was used.
+- The 50 original IDs, 38 exact milestone titles and 37 individual ordinary hosts remain individually accounted above; no generic host pass replaces individual wiring evidence. Earlier narrow native accounting/held-file/capture/media proofs remain distinct from current scripted/fake tests and from complete N1–N12 flows. No new native full gate was run or marked PASS.
+- M6-B source/route/profile review cleared its final packet and all 43 NOT_RUN gate/subcheck fields. M6-C independent review cleared the final requirement/branch/evidence disposition, confirmed the exact matrix counts and found no blocking issue. Documentation-only closeout uses static checks and content equivalence; no redundant Cargo run or native application launch is needed.
+
+Fresh M6-B audit evidence (ignored target directory): r06-parent-ancestry-m6-b.json SHA-256 4FE836985F28F312BA1942A64E869E19F53D76326DF0F574E73452B17712145A; r06-parent-code-build-equivalence-m6-b.json SHA-256 BC120321F3BEABC3711AA52D7B5D0A01F19DB08DD189E7B62892FD0B6B9A231F. Final post-commit ancestry/content receipts and r06-m6-c-final-receipt.json capture the actual final HEAD, upstream, clean status and receipt hashes without changing committed history.
+
+### Next safe action
+
+Run the manual packet once when convenient, using its verified executable and uniquely isolated profile. Return only gate/subcheck IDs, expected/observed behavior, OS/build and redacted diagnostics. Unperformed checks stay NOT_RUN; any applicable failure becomes a focused follow-up against the final branch. Do not repeat the completed Dashboard three-fixture checkpoint, recovered documents, R01–R06 implementation, cumulative baseline or native probes merely to resume from this report. Agent model configuration was reread and preserved; no agent configuration edits are included. No additional milestones, queued implementation or automatic merge are part of this handoff.
