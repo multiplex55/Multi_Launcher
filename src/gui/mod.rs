@@ -1302,6 +1302,9 @@ pub struct LauncherApp {
     #[cfg(test)]
     clipboard_modify_test_service: Option<utility_window_host::ClipboardModifyTestService>,
     pub json_utility_dialog: JsonUtilityDialogState,
+    json_utility_host: utility_window_host::JsonUtilityWindowHost,
+    #[cfg(test)]
+    json_utility_test_clipboard: Option<Arc<crate::clipboard_modify::clipboard::fake::FakeClipboardBackend>>,
     pub(crate) zip_extractor_dialog: ZipExtractorDialog,
     #[cfg(windows)]
     pub(crate) archive_session: crate::archive::ArchiveSession,
@@ -3977,6 +3980,9 @@ impl LauncherApp {
             #[cfg(test)]
             clipboard_modify_test_service: None,
             json_utility_dialog: JsonUtilityDialogState::default(),
+            json_utility_host: utility_window_host::JsonUtilityWindowHost::default(),
+            #[cfg(test)]
+            json_utility_test_clipboard: None,
             zip_extractor_dialog: ZipExtractorDialog::default(),
             #[cfg(windows)]
             archive_session,
@@ -4876,6 +4882,7 @@ impl LauncherApp {
             Panel::FileSearchDialog => self.file_search_host.root_layer().is_some(),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer().is_some(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_has_root_presentation(),
+            Panel::JsonUtilityDialog => self.json_utility_host.root_layer().is_some(),
             Panel::SnippetDialog => self.snippet_window_host.root_layer().is_some(),
             Panel::PasteSequenceDialog => self.paste_sequence_host.root_layer().is_some(),
             Panel::SnippetPromptDialog => self.snippet_prompt_has_root_presentation(),
@@ -4996,12 +5003,19 @@ impl LauncherApp {
             && !self.ocr_surface_visible()
             && self.panel_stack.iter().rev()
                 .find(|panel| self.panel_has_root_presentation(**panel))
-                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
+                .is_some_and(|panel| matches!(panel, Panel::BatchRenameDialog | Panel::SearchReplaceDialog | Panel::ClipboardDialog | Panel::ClipboardModifyDialog | Panel::SnippetDialog | Panel::PasteSequenceDialog | Panel::JsonUtilityDialog) || (*panel == Panel::SnippetPromptDialog && self.snippet_prompt_has_host_companion()))
         {
             // These tools stage keyboard close in their exact owner pass.
             return false;
         }
         self.close_front_dialog()
+    }
+
+    fn close_json_utility_session(&mut self) {
+        self.json_utility_host.retire(&self.egui_ctx);
+        self.json_utility_dialog.close();
+        self.panel_states.json_utility_dialog = false;
+        self.panel_stack.retain(|panel| *panel != Panel::JsonUtilityDialog);
     }
 
     /// Close the top-most open dialog if any is visible.
@@ -5321,8 +5335,7 @@ impl LauncherApp {
             }
             Panel::RecordingDialog => self.close_recording_setup(),
             Panel::JsonUtilityDialog => {
-                self.json_utility_dialog.close();
-                self.panel_states.json_utility_dialog = false;
+                self.close_json_utility_session();
             }
             Panel::ZipExtractorDialog => {
                 self.close_zip_extractor_dialog();
@@ -5637,8 +5650,7 @@ impl LauncherApp {
             }
             Panel::RecordingDialog => self.close_recording_setup(),
             Panel::JsonUtilityDialog => {
-                self.json_utility_dialog.close();
-                self.panel_states.json_utility_dialog = false;
+                self.close_json_utility_session();
             }
             Panel::ZipExtractorDialog => {
                 self.close_zip_extractor_dialog();
@@ -5901,6 +5913,11 @@ impl LauncherApp {
         } else if panel == Panel::ClipboardModifyDialog {
             self.ensure_open(panel);
             self.clipboard_modify_host.request_focus();
+        } else if panel == Panel::JsonUtilityDialog {
+            if !self.json_utility_dialog.open {
+                self.json_utility_dialog.reopen_existing();
+            }
+            self.json_utility_host.request_focus();
         } else if panel == Panel::BatchRenameDialog {
             self.batch_rename_dialog.open();
             self.batch_rename_host.request_focus();

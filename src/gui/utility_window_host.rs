@@ -9,6 +9,9 @@ use super::jump_mode::ui::{
     batch_rename_confirmation_layer_id,
 };
 use super::jump_mode::{SurfaceId, TargetGeneration};
+use super::json_utility_dialog::{
+    JsonUtilityHostActions, JsonUtilityInteractionCheckpoint,
+};
 use super::paste_sequence_dialog::{
     PasteSequenceDialog, PasteSequenceHostActions, PasteSequenceHostRuntime,
     PasteSequenceInteractionCheckpoint,
@@ -26,7 +29,7 @@ use super::utility_host::{
 };
 use super::utility_window_geometry::NativeViewportIdentity;
 use super::{
-    BatchRenameDialogState, BatchRenameUiCommand, ClipboardDialog, ClipboardModifyDialogState, SearchReplaceDialogState,
+    BatchRenameDialogState, BatchRenameUiCommand, ClipboardDialog, ClipboardModifyDialogState, JsonUtilityDialogState, SearchReplaceDialogState,
     SearchReplaceUiCommand, SnippetDialog,
 };
 use crate::file_operations::RenameRuntimeSnapshot;
@@ -113,6 +116,12 @@ pub(super) type SearchReplaceWindowHost = UtilityWindowHost<SearchReplaceDialogS
 pub(super) type ClipboardHistoryWindowHost = UtilityWindowHost<ClipboardDialog>;
 pub(super) type ClipboardModifyWindowHost = UtilityWindowHost<ClipboardModifyDialogState>;
 pub(super) type PasteSequenceWindowHost = UtilityWindowHost<PasteSequenceDialog>;
+pub(super) type JsonUtilityWindowHost = UtilityWindowHost<JsonUtilityDialogState>;
+
+pub(super) enum JsonUtilityHostCommand {
+    Closed,
+    Apply(JsonUtilityHostActions),
+}
 
 pub(super) struct HostedPasteSequenceRuntime {
     pub dialog: PasteSequenceHostRuntime,
@@ -1660,6 +1669,101 @@ impl HostedUtilityDialog for PasteSequenceDialog {
     fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
         if actions.needs_completion() {
             vec![PasteSequenceHostCommand::Apply(actions)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[cfg(test)]
+    fn test_button(actions: &Self::Actions) -> Option<(egui::Rect, egui::Rect, bool)> {
+        actions.host_button
+    }
+}
+
+impl HostedUtilityDialog for JsonUtilityDialogState {
+    const KIND: Option<NavigationDialogKind> = Some(NavigationDialogKind::JsonUtility);
+    const KEY: &'static str = "json-utility";
+    const TITLE: &'static str = "JSON Utility";
+    const SIZE: egui::Vec2 = egui::vec2(700.0, 480.0);
+    const MINIMUM: egui::Vec2 = egui::vec2(340.0, 220.0);
+    const SCROLL_NATIVE_WINDOW: bool = false;
+    const REGISTER_TARGETS_ON_REPLAY: bool = true;
+    type Runtime = bool;
+    type Actions = JsonUtilityHostActions;
+    type Checkpoint = JsonUtilityInteractionCheckpoint;
+    type Command = JsonUtilityHostCommand;
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+
+    fn session(&self) -> u64 {
+        self.host_session_epoch()
+    }
+
+    fn parent_targets_allowed(&self, _: &Self::Runtime) -> bool {
+        true
+    }
+
+    fn parent_input_allowed(&self) -> bool {
+        true
+    }
+
+    fn popup_layer(&self, _: &egui::Context, _: egui::LayerId) -> Option<egui::LayerId> {
+        None
+    }
+
+    fn confirmation_binding(
+        &self, _: egui::ViewportId, _: u64,
+    ) -> Option<NavigationViewportBinding> {
+        None
+    }
+
+    fn capture(&self) -> Self::Checkpoint {
+        JsonUtilityInteractionCheckpoint::capture(self)
+    }
+
+    fn restore(&mut self, checkpoint: Self::Checkpoint) {
+        checkpoint.restore(self);
+    }
+
+    fn render_host(
+        &mut self,
+        ctx: &egui::Context,
+        scopes: (Option<&JumpModeScope>, Option<&JumpModeScope>),
+        owner: NavigationOwner,
+        parent_input: bool,
+        _: NavigationOwner,
+        first: bool,
+        _: u64,
+        pinned: &bool,
+        child_ui: Option<&mut egui::Ui>,
+        presentation: UtilityPresentation,
+    ) -> Self::Actions {
+        let instance = match owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::JsonUtility, instance } => Some(instance),
+            _ => None,
+        };
+        self.render_host(ctx, scopes.0, instance, parent_input, first, *pinned, child_ui, presentation)
+    }
+
+    fn host_request(actions: &Self::Actions) -> Option<UtilityPresentation> {
+        actions.host_request
+    }
+
+    fn closed_command() -> Self::Command {
+        JsonUtilityHostCommand::Closed
+    }
+
+    fn command_closes(command: &Self::Command) -> bool {
+        matches!(command, JsonUtilityHostCommand::Closed)
+    }
+
+    fn complete_actions(&mut self, actions: Self::Actions, _: Option<usize>) -> Vec<Self::Command> {
+        if actions.close {
+            vec![JsonUtilityHostCommand::Closed]
+        } else if actions.needs_completion() {
+            vec![JsonUtilityHostCommand::Apply(actions)]
         } else {
             Vec::new()
         }

@@ -440,6 +440,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::ClipboardModify
+                    | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets
                     | NavigationDialogKind::XmlToolkit
                     | NavigationDialogKind::TableUtility
@@ -477,6 +478,7 @@ impl NavigationViewportBinding {
                     | NavigationDialogKind::SearchReplace
                     | NavigationDialogKind::ClipboardHistory
                     | NavigationDialogKind::ClipboardModify
+                    | NavigationDialogKind::JsonUtility
                     | NavigationDialogKind::Snippets),
                 ..
             } => {

@@ -2136,7 +2136,7 @@ impl LauncherApp {
             Panel::TodoViewDialog => middle(egui::Id::new(Some("View Todos"))),
             Panel::ClipboardDialog => self.clipboard_history_host.root_layer(),
             Panel::ClipboardModifyDialog => self.clipboard_modify_host.root_layer(),
-            Panel::JsonUtilityDialog => NavigationDialogKind::JsonUtility.layer_id(),
+            Panel::JsonUtilityDialog => self.json_utility_host.root_layer(),
             Panel::ZipExtractorDialog => NavigationDialogKind::ZipExtractor.layer_id(),
             Panel::RegexTesterDialog => NavigationDialogKind::RegexTester.layer_id(),
             Panel::CalculationPadDialog => self.calculation_pad_dialog.host_layer_if_root(),
@@ -4341,6 +4341,9 @@ impl LauncherApp {
         if self.paste_sequence_dialog.poll_host_background(ctx) {
             ctx.request_repaint_of(self.paste_sequence_host.owner_viewport());
         }
+        if self.json_utility_dialog.poll_host_background(ctx) {
+            ctx.request_repaint_of(self.json_utility_host.owner_viewport());
+        }
         let _ = self.multi_manager.start_pending_automatic_reconnect();
         if self
             .multi_manager
@@ -4797,7 +4800,7 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 26] {
+    fn viewport_bootstrap_state(&self) -> [bool; 27] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
@@ -4821,6 +4824,7 @@ impl LauncherApp {
             self.search_replace_needs_root_ui_when_hidden(),
             self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open),
             self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open),
+            self.json_utility_host.needs_root_ui_when_hidden(self.json_utility_dialog.open),
             self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open),
             self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open),
             self.mouse_settings_host.needs_root_ui_when_hidden(self.mouse_settings_dialog.open),
@@ -4838,7 +4842,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 26],
+        previously_pending: [bool; 27],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -5608,6 +5612,50 @@ impl LauncherApp {
                 root_jump_active: self.jump_mode_ui.active_session().is_some(),
                 close_shortcut: !pinned, allow_os_close: !pinned,
                 confirmation_owner, parent_instance, root_scopes: scopes,
+            },
+        );
+    }
+
+    fn show_json_utility_host(&mut self, ctx: &egui::Context, first: bool, root_visible: bool) {
+        use crate::gui::jump_mode::ui::{NavigationDialogKind, NavigationOwner, focused_response_layer};
+        use super::utility_window_host::HostInput;
+
+        let owner = self.resolve_jump_mode_navigation_owner(ctx, root_visible);
+        let parent_owner = self.json_utility_native_ui_owner_current(ctx, root_visible);
+        let scope = match owner {
+            NavigationOwner::Dialog { kind: NavigationDialogKind::JsonUtility, instance } if parent_owner => {
+                self.jump_mode_ui.scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("json-utility", instance),
+                    crate::gui::jump_mode::TargetGeneration(instance),
+                    "json-utility/form", ctx.viewport_id(), owner, false,
+                )
+            }
+            _ => None,
+        };
+        if !parent_owner
+            && let Some(layer) = self.json_utility_host.root_layer()
+            && focused_response_layer(ctx) == Some(layer)
+            && let Some(id) = ctx.memory(|memory| memory.focused())
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        let root_input = self.native_ui_host_input_allowed(ctx, root_visible);
+        let native_input = self.native_ui_application_input_allowed(ctx)
+            && !self.ocr_surface_visible()
+            && !self.confirm_modal.is_open()
+            && !self.action_sheet.is_open()
+            && !self.pin_list_open;
+        let jump_enabled = self.jump_mode_enabled();
+        self.json_utility_host.configure_jump(&self.jump_mode_ui, jump_enabled);
+        let pinned = self.pinned_panels.contains(&super::Panel::JsonUtilityDialog);
+        self.json_utility_host.show(
+            ctx, &mut self.json_utility_dialog, &pinned,
+            HostInput {
+                first, root_visible, root_input, native_input, root_owner: owner, parent_owner,
+                root_jump_active: self.jump_mode_ui.active_session().is_some(),
+                close_shortcut: !pinned, allow_os_close: !pinned,
+                confirmation_owner: NavigationOwner::Blocked, parent_instance: 0,
+                root_scopes: (scope.as_ref(), None),
             },
         );
     }
@@ -7582,15 +7630,18 @@ impl LauncherApp {
         ctx: &egui::Context,
         root_visible: bool,
     ) -> bool {
-        use crate::gui::jump_mode::ui::{NavigationDialogKind, visible_top_middle_layer};
+        use crate::gui::jump_mode::ui::{focused_response_layer, visible_top_middle_layer};
 
-        let Some(layer) = NavigationDialogKind::JsonUtility.layer_id() else {
+        let Some(layer) = self.json_utility_host.root_layer() else {
             return false;
         };
         self.json_utility_dialog.open
             && self.native_ui_host_input_allowed(ctx, root_visible)
             && !egui::Popup::is_any_open(ctx)
             && visible_top_middle_layer(ctx) == Some(layer)
+            && focused_response_layer(ctx).is_none_or(|focus| {
+                focus == layer || focus.order == egui::Order::Background
+            })
     }
 
     fn table_utility_native_ui_owner_current(
@@ -7882,7 +7933,7 @@ impl LauncherApp {
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
-                self.json_utility_dialog.open,
+                self.json_utility_dialog.open && self.json_utility_host.root_layer().is_some(),
             ),
             (
                 crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor,
@@ -8005,6 +8056,7 @@ impl LauncherApp {
                     NavigationDialogKind::BatchRename => self.batch_rename_host.root_layer(),
                     NavigationDialogKind::SearchReplace => self.search_replace_host.root_layer(),
                     NavigationDialogKind::ClipboardHistory => self.clipboard_history_host.root_layer(),
+                    NavigationDialogKind::JsonUtility => self.json_utility_host.root_layer(),
                     NavigationDialogKind::Snippets => self.snippet_window_host.root_layer(),
                     _ => None,
                 }),
@@ -8029,6 +8081,8 @@ impl LauncherApp {
                         self.search_replace_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::ClipboardHistory {
                         self.clipboard_history_host.root_layer().and(current)
+                    } else if kind == NavigationDialogKind::JsonUtility {
+                        self.json_utility_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::Snippets {
                         self.snippet_window_host.root_layer().and(current)
                     } else if kind == NavigationDialogKind::MouseSettings {
@@ -8717,6 +8771,7 @@ impl LauncherApp {
             self.show_search_replace_host(&ctx, first_ui_pass, false);
             self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
+            self.show_json_utility_host(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
@@ -9631,6 +9686,7 @@ impl LauncherApp {
                     && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.paste_sequence_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
@@ -9716,6 +9772,7 @@ impl LauncherApp {
                     && !self.batch_rename_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.search_replace_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self.clipboard_history_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
+                    && !self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.snippet_native_ui_owner_current(&ctx, frame_logic.should_be_visible)
                     && !self.paste_sequence_owns_root_input(&ctx, frame_logic.should_be_visible)
                     && !self
@@ -10595,6 +10652,7 @@ impl LauncherApp {
             self.show_search_replace_host(&ctx, first_ui_pass, false);
             self.show_clipboard_history_host(&ctx, first_ui_pass, false);
             self.show_clipboard_modify_host(&ctx, first_ui_pass, false);
+            self.show_json_utility_host(&ctx, first_ui_pass, false);
             self.show_snippet_editor_host(&ctx, first_ui_pass, false);
             self.show_paste_sequence_host(&ctx, first_ui_pass, false);
             self.show_mouse_settings_hosts(&ctx, first_ui_pass, false, false);
@@ -10997,48 +11055,7 @@ impl LauncherApp {
         self.todo_view_dialog = todo_view;
         self.show_clipboard_history_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         self.show_clipboard_modify_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
-        let json_utility_owner =
-            self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
-        let json_utility_native_owner =
-            self.json_utility_native_ui_owner_current(&ctx, frame_logic.should_be_visible);
-        let (json_utility_instance, json_utility_scope) = match json_utility_owner {
-            crate::gui::jump_mode::ui::NavigationOwner::Dialog {
-                kind: crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility,
-                instance,
-            } if json_utility_native_owner => {
-                let scope = self
-                    .jump_mode_enabled()
-                    .then(|| {
-                        self.jump_mode_ui.scope_for_navigation_owner(
-                            crate::gui::jump_mode::SurfaceId::dialog("json-utility", instance),
-                            crate::gui::jump_mode::TargetGeneration(instance),
-                            "json-utility/form",
-                            ctx.viewport_id(),
-                            json_utility_owner,
-                            false,
-                        )
-                    })
-                    .flatten();
-                (Some(instance), scope)
-            }
-            _ => (None, None),
-        };
-        if !json_utility_native_owner
-            && let Some(focused) = ctx.memory(|memory| memory.focused())
-            && ctx.read_response(focused).is_some_and(|response| {
-                Some(response.layer_id)
-                    == crate::gui::jump_mode::ui::NavigationDialogKind::JsonUtility.layer_id()
-            })
-        {
-            ctx.memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        self.json_utility_dialog.show_with_jump_mode(
-            &ctx,
-            json_utility_scope.as_ref(),
-            json_utility_instance,
-            json_utility_native_owner,
-            first_ui_pass,
-        );
+        self.show_json_utility_host(&ctx, first_ui_pass, frame_logic.should_be_visible);
         let zip_kind = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor;
         let zip_owner =
             self.resolve_jump_mode_navigation_owner(&ctx, frame_logic.should_be_visible);
@@ -11897,6 +11914,28 @@ impl LauncherApp {
                 effects.push(RootDialogEffect::ShowRoot);
             }
         }
+        if let Some(completion) = self.json_utility_host.complete(ctx, &mut self.json_utility_dialog) {
+            use super::utility_window_host::JsonUtilityHostCommand;
+            for command in completion.commands {
+                match command {
+                    JsonUtilityHostCommand::Closed => self.close_json_utility_session(),
+                    JsonUtilityHostCommand::Apply(actions) => {
+                        #[cfg(test)]
+                        if let Some(clipboard) = &self.json_utility_test_clipboard {
+                            self.json_utility_dialog.complete_host_actions_with_clipboard(ctx, actions, clipboard.as_ref());
+                        } else {
+                            self.json_utility_dialog.complete_host_actions(ctx, actions);
+                        }
+                        #[cfg(not(test))]
+                        self.json_utility_dialog.complete_host_actions(ctx, actions);
+                        ctx.request_repaint_of(completion.owner_viewport);
+                    }
+                }
+            }
+            if completion.show_root {
+                effects.push(RootDialogEffect::ShowRoot);
+            }
+        }
         if let Some(completion) = self.clipboard_modify_host.complete(ctx, &mut self.clipboard_modify_dialog) {
             use super::utility_window_host::ClipboardModifyHostCommand;
             for command in completion.commands {
@@ -12387,6 +12426,7 @@ impl eframe::App for LauncherApp {
             || self.search_replace_needs_root_ui_when_hidden()
             || self.clipboard_history_host.needs_root_ui_when_hidden(self.clipboard_dialog.open)
             || self.clipboard_modify_host.needs_root_ui_when_hidden(self.clipboard_modify_dialog.open)
+            || self.json_utility_host.needs_root_ui_when_hidden(self.json_utility_dialog.open)
             || self.snippet_window_host.needs_root_ui_when_hidden(self.snippet_dialog.open)
             || self.paste_sequence_host.needs_root_ui_when_hidden(self.paste_sequence_dialog.open)
             || self
@@ -37216,6 +37256,115 @@ mod tests {
         assert!(busy.contains("SequenceAlreadyActive"));
         assert!(app.paste_sequence_dialog.take_autostart_when_ready());
         let _ = app.cancel_snippet_prompt();
+    }
+
+    #[test]
+    fn json_utility_detached_search_and_copy_retain_the_same_document() {
+        use crate::clipboard_modify::clipboard::fake::FakeClipboardBackend;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.set_jump_mode_enabled(true);
+        prepare_actual_query_frame(&ctx, &mut app);
+        let clipboard = Arc::new(FakeClipboardBackend::default());
+        app.json_utility_test_clipboard = Some(clipboard.clone());
+        app.json_utility_dialog.test_open_with_source("", false);
+        let root = |app: &mut LauncherApp, events| {
+            run_tool_dialog_frame(&ctx, app, events, false).drop_without_applying_deltas();
+        };
+        for _ in 0..4 {
+            root(&mut app, Vec::new());
+        }
+        let editor = app.jump_mode_ui.retained_registry().targets().iter()
+            .find(|target| target.metadata().label() == "JSON source")
+            .expect("visible JSON source").clipped_rect();
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(editor, pressed));
+        }
+        let text = r#"{"nested":{"value":"β"},"other":"β","untouched":"λ"}"#;
+        root(&mut app, vec![egui::Event::Text(text.into())]);
+        assert_eq!(app.json_utility_dialog.test_source(), text);
+        let generation = app.json_utility_dialog.test_source_generation();
+        let session = app.json_utility_dialog.host_session_epoch();
+        let (popout, clip, enabled) = app.json_utility_host.test_button.expect("Pop Out");
+        assert!(enabled && clip.contains_rect(popout));
+        for pressed in [true, false] {
+            root(&mut app, tool_dialog_pointer_events(popout, pressed));
+        }
+        assert!(app.json_utility_host.root_layer().is_none());
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.visible_flag.load(Ordering::Relaxed));
+
+        let viewport = crate::gui::utility_window_host::JsonUtilityWindowHost::test_viewport(session);
+        let detached = |app: &mut LauncherApp, events, discard| {
+            super::with_immediate_viewport_test_events_for(viewport, events, || {
+                app.run_root_frame_for_test(&ctx, actual_query_input(false), discard)
+                    .0.drop_without_applying_deltas();
+            });
+        };
+        for _ in 0..4 {
+            detached(&mut app, Vec::new(), false);
+        }
+        assert_eq!(app.json_utility_dialog.test_source_generation(), generation);
+        let tree = app.json_utility_host.test_native_target("Tree view").expect("Tree view");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(tree, pressed), false);
+        }
+        for _ in 0..3 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let search = app.json_utility_host.test_native_target("Tree search query").expect("Tree search");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(search, pressed), false);
+        }
+        detached(&mut app, vec![egui::Event::Text("β".into())], false);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let next = loop {
+            detached(&mut app, Vec::new(), false);
+            if let Some(rect) = app.json_utility_host.test_native_target("Next search match") {
+                break rect;
+            }
+            assert!(std::time::Instant::now() < deadline, "detached search did not complete");
+            std::thread::yield_now();
+        };
+        let first_selected = app.json_utility_dialog.test_selected_node_index()
+            .expect("search selects its first match");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(next, pressed), false);
+        }
+        let selected = app.json_utility_dialog.test_selected_node_index().expect("selected search result");
+        assert_ne!(selected, first_selected, "Next selects a different match");
+        detached(&mut app, Vec::new(), false);
+        let copy = app.json_utility_host.test_native_target("Copy selected JSON pointer").expect("Copy Pointer");
+        detached(&mut app, tool_dialog_pointer_events(copy, true), false);
+        detached(&mut app, tool_dialog_pointer_events(copy, false), true);
+        assert!(clipboard.writes().is_empty());
+        for _ in 0..2 {
+            detached(&mut app, Vec::new(), false);
+        }
+        let copy = app.json_utility_host.test_native_target("Copy selected JSON pointer").expect("retained Copy Pointer");
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(copy, pressed), false);
+        }
+        assert_eq!(clipboard.writes(), ["/other"]);
+        let (dock, clip, enabled) = app.json_utility_host.test_button.expect("Dock");
+        assert!(enabled && clip.contains_rect(dock));
+        for pressed in [true, false] {
+            detached(&mut app, tool_dialog_pointer_events(dock, pressed), false);
+        }
+        assert!(app.visible_flag.load(Ordering::Relaxed));
+        assert_eq!(app.json_utility_dialog.host_session_epoch(), session);
+        assert_eq!(app.json_utility_dialog.test_source_generation(), generation);
+        assert_eq!(app.json_utility_dialog.test_selected_node_index(), Some(selected));
+        assert_eq!(app.json_utility_dialog.test_source(), text);
+        for _ in 0..3 {
+            root(&mut app, Vec::new());
+        }
+        root(&mut app, vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.json_utility_dialog.open);
+        assert_eq!(clipboard.writes(), ["/other"]);
     }
 
     #[test]
