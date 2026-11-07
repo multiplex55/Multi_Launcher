@@ -21,12 +21,44 @@ struct ZipHostFrame {
     source_revision: Option<crate::archive::ArchiveRevision>,
     destination_revision: u64,
     selection_revision: u64,
+    mode: ZipMode,
+    mode_epoch: u64,
+    creation_revision: u64,
     actions: Vec<UiAction>,
     copies: Vec<String>,
     request: Option<super::utility_host::UtilityPresentation>,
     close: bool,
     info: Option<egui::ViewportInfo>,
     native: bool,
+}
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ZipMode {
+    #[default]
+    Extract,
+    Create,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ZipPickerKind {
+    ExtractArchive,
+    ExtractDestination,
+    CreateFiles,
+    CreateFolder,
+    CreateOutput,
+}
+#[cfg(windows)]
+enum ZipPickerResult {
+    Single(Option<PathBuf>),
+    Files(Option<Vec<PathBuf>>),
+}
+#[cfg(all(windows, test))]
+enum PickerTestInvalidation {
+    Host,
+    Mode,
+    Revision,
+    Close,
 }
 #[cfg(windows)]
 #[derive(Default)]
@@ -54,7 +86,23 @@ pub(crate) struct ZipExtractorDialog {
     #[cfg(all(windows, test))]
     test_host_button: Option<(egui::Rect, egui::Rect, bool)>,
     #[cfg(all(windows, test))]
-    test_picker_paths: std::collections::VecDeque<Option<PathBuf>>,
+    test_picker_paths: std::collections::VecDeque<ZipPickerResult>,
+    #[cfg(all(windows, test))]
+    test_picker_invalidation: Option<PickerTestInvalidation>,
+    #[cfg(windows)]
+    mode: ZipMode,
+    #[cfg(windows)]
+    mode_epoch: u64,
+    #[cfg(windows)]
+    creation_snapshot: Option<crate::archive::CreationSnapshot>,
+    #[cfg(windows)]
+    creation_active: bool,
+    #[cfg(windows)]
+    creation_output: Option<PathBuf>,
+    #[cfg(windows)]
+    creation_run_output: Option<PathBuf>,
+    #[cfg(windows)]
+    member_drafts: std::collections::HashMap<crate::archive::CreationMemberId, String>,
     filter: String,
     source_path: Option<PathBuf>,
     destination_path: Option<PathBuf>,
@@ -123,6 +171,16 @@ enum SessionAction {
 enum UiAction {
     PickArchive,
     PickDestination,
+    PickCreateFiles,
+    PickCreateFolder,
+    PickCreateOutput,
+    SetMode(ZipMode),
+    SetMemberDraft(crate::archive::CreationMemberId, String),
+    ApplyMember(crate::archive::CreationMemberId),
+    RemoveMember(crate::archive::CreationMemberId),
+    ValidateCreation,
+    StartCreation,
+    CancelCreation,
     Session(SessionAction),
     SetFilter(String),
     SetDestination(String),
@@ -160,6 +218,12 @@ impl ZipExtractorDialog {
         self.last_progress_snapshot = None;
         #[cfg(windows)]
         {
+            self.mode_epoch = self.mode_epoch.wrapping_add(1);
+            self.creation_snapshot = None;
+            self.creation_active = false;
+            self.creation_output = None;
+            self.creation_run_output = None;
+            self.member_drafts.clear();
             self.confirmed_token = None;
             self.snapshot = None;
             self.catalog = None;
@@ -169,6 +233,32 @@ impl ZipExtractorDialog {
             self.report_summary = None;
             self.session_needs_polling = false;
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn update_creation_snapshot(
+        &mut self,
+        snapshot: crate::archive::CreationSnapshot,
+        active: bool,
+    ) {
+        self.creation_active = active;
+        self.creation_snapshot = Some(snapshot);
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn enter_extract_if_idle(
+        &mut self,
+        extraction_active: bool,
+        creation_active: bool,
+    ) -> Result<(), String> {
+        if creation_active || (extraction_active && self.mode != ZipMode::Extract) {
+            return Err("A ZIP operation is still running or retiring.".into());
+        }
+        if self.mode != ZipMode::Extract {
+            self.mode = ZipMode::Extract;
+            self.mode_epoch = self.mode_epoch.wrapping_add(1);
+        }
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -233,9 +323,10 @@ impl ZipExtractorDialog {
     #[cfg(windows)]
     pub(crate) fn progress_refresh_due(&self, now: Instant) -> bool {
         self.open
-            && self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.phase == crate::archive::ArchiveSessionPhase::Extracting
-            })
+            && (self.creation_active
+                || self.snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot.phase == crate::archive::ArchiveSessionPhase::Extracting
+                }))
             && self
                 .last_progress_snapshot
                 .is_none_or(|last| now.saturating_duration_since(last) >= PROGRESS_REFRESH_INTERVAL)
@@ -313,6 +404,22 @@ impl ZipExtractorDialog {
         let sort_by_name = self.sort_by_name;
         let filter = &self.filter;
         let destination_text = self.destination_text.clone();
+        let mode = self.mode;
+        let creation_snapshot = self.creation_snapshot.clone();
+        let creation_active = self.creation_active;
+        let creation_output = self.creation_output.clone();
+        let creation_run_output = self.creation_run_output.clone();
+        let member_drafts = &self.member_drafts;
+        let busy = creation_active
+            || matches!(
+                phase,
+                Some(
+                    crate::archive::ArchiveSessionPhase::Opening
+                        | crate::archive::ArchiveSessionPhase::PreparingPreview
+                        | crate::archive::ArchiveSessionPhase::Extracting
+                        | crate::archive::ArchiveSessionPhase::Closing
+                )
+            );
         let mut destination_ready = !destination_text.trim().is_empty();
         let confirmed_token = &self.confirmed_token;
         let mut open = self.open;
@@ -355,6 +462,18 @@ impl ZipExtractorDialog {
                 }
             }
             ui.add_enabled_ui(visible, |ui| {
+                    ui.horizontal(|ui| {
+                        for (label, choice) in [("Extract", ZipMode::Extract), ("Create", ZipMode::Create)] {
+                            let response = ui.add_enabled(!busy, egui::Button::selectable(mode == choice, label));
+                            register_target(jump_scope, ui, &response, format!("mode-{label}"), format!("{label} mode"), crate::gui::jump_mode::TargetKind::Action, &mut visual_order);
+                            if response.clicked() && mode != choice { actions.push(UiAction::SetMode(choice)); }
+                        }
+                    });
+                    if mode == ZipMode::Create {
+                        if let Some(message) = status_message { ui.colored_label(ui.visuals().error_fg_color, message); }
+                        draw_creation_body(ui, creation_snapshot.as_ref(), member_drafts, creation_output.as_ref(), creation_run_output.as_ref(), busy, creation_active, jump_scope, &mut visual_order, &mut actions);
+                        return;
+                    }
                     ui.label("Choose a ZIP archive, select entries, and review the destination before extraction.");
                     ui.label("Supported Stored and Deflated entries can be extracted. Existing files are never overwritten.");
 
@@ -804,6 +923,11 @@ impl ZipExtractorDialog {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.host_epoch.hash(&mut h);
         self.host.identity().generation.hash(&mut h);
+        self.mode_epoch.hash(&mut h);
+        self.creation_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.revision)
+            .hash(&mut h);
         if let Some(snapshot) = &self.snapshot {
             snapshot.source_revision.hash(&mut h);
             snapshot.destination_revision.hash(&mut h);
@@ -896,8 +1020,29 @@ impl ZipExtractorDialog {
         self.host.presentation()
     }
     #[cfg(all(windows, test))]
+    pub(crate) fn test_create_mode(&self) -> bool {
+        self.mode == ZipMode::Create
+    }
+    #[cfg(all(windows, test))]
+    pub(crate) fn test_set_create_mode(&mut self) {
+        self.mode = ZipMode::Create;
+        self.mode_epoch = self.mode_epoch.wrapping_add(1);
+    }
+    #[cfg(all(windows, test))]
+    pub(crate) fn test_creation_revision(&self) -> Option<u64> {
+        self.creation_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.revision)
+    }
+    #[cfg(all(windows, test))]
     pub(crate) fn queue_picker_for_test(&mut self, path: Option<PathBuf>) {
-        self.test_picker_paths.push_back(path);
+        self.test_picker_paths
+            .push_back(ZipPickerResult::Single(path));
+    }
+    #[cfg(all(windows, test))]
+    fn queue_picker_files_for_test(&mut self, paths: Option<Vec<PathBuf>>) {
+        self.test_picker_paths
+            .push_back(ZipPickerResult::Files(paths));
     }
     #[cfg(windows)]
     pub(super) fn show_hosted(
@@ -1150,6 +1295,12 @@ impl ZipExtractorDialog {
                     source_revision: snapshot.source_revision,
                     destination_revision: snapshot.destination_revision,
                     selection_revision: snapshot.selection_revision,
+                    mode: self.mode,
+                    mode_epoch: self.mode_epoch,
+                    creation_revision: self
+                        .creation_snapshot
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.revision),
                     actions,
                     copies,
                     request,
@@ -1161,10 +1312,11 @@ impl ZipExtractorDialog {
         }
     }
     #[cfg(windows)]
-    pub(super) fn on_hosted_frame_complete(
+    pub(super) fn on_hosted_frame_complete_with_creation(
         &mut self,
         ctx: &egui::Context,
         session: &mut crate::archive::ArchiveSession,
+        creation: &mut crate::archive::CreationSession,
     ) -> ZipHostOutcome {
         use super::utility_host::UtilityPresentation;
         let Some(frame) = self.host_pending.take() else {
@@ -1174,9 +1326,16 @@ impl ZipExtractorDialog {
         if !self.open
             || frame.epoch != self.host_epoch
             || frame.host != self.host.identity()
-            || frame.source_revision != now.source_revision
-            || frame.destination_revision != now.destination_revision
-            || frame.selection_revision != now.selection_revision
+            || frame.mode != self.mode
+            || frame.mode_epoch != self.mode_epoch
+            || match frame.mode {
+                ZipMode::Extract => {
+                    frame.source_revision != now.source_revision
+                        || frame.destination_revision != now.destination_revision
+                        || frame.selection_revision != now.selection_revision
+                }
+                ZipMode::Create => frame.creation_revision != creation.snapshot().revision,
+            }
             || !frame.root.was_retained(ctx)
             || !frame.owner.was_retained(ctx)
         {
@@ -1207,6 +1366,7 @@ impl ZipExtractorDialog {
         if frame.close || frame.actions.iter().any(|a| matches!(a, UiAction::Close)) {
             self.retire_host(ctx);
             session.close();
+            creation.close();
             self.clear_presentation();
             self.update_session_snapshot(session.snapshot(), Instant::now());
             return ZipHostOutcome {
@@ -1230,7 +1390,18 @@ impl ZipExtractorDialog {
             }
         } else {
             for action in frame.actions {
-                self.apply_host_action(action, session, ctx, frame.host, frame.epoch, frame.native);
+                if self.mode != frame.mode || self.mode_epoch != frame.mode_epoch {
+                    break;
+                }
+                self.apply_host_action(
+                    action,
+                    session,
+                    creation,
+                    ctx,
+                    frame.host,
+                    frame.epoch,
+                    frame.native,
+                );
             }
         }
         if frame.host.host == UtilityPresentation::Popout {
@@ -1254,38 +1425,89 @@ impl ZipExtractorDialog {
             },
         }
     }
+    #[cfg(all(windows, test))]
+    fn on_hosted_frame_complete(
+        &mut self,
+        ctx: &egui::Context,
+        session: &mut crate::archive::ArchiveSession,
+    ) -> ZipHostOutcome {
+        let mut creation =
+            crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
+        self.on_hosted_frame_complete_with_creation(ctx, session, &mut creation)
+    }
     #[cfg(windows)]
     fn apply_host_action(
         &mut self,
         action: UiAction,
         session: &mut crate::archive::ArchiveSession,
+        creation: &mut crate::archive::CreationSession,
         ctx: &egui::Context,
         host: super::utility_host::HostIdentity,
         epoch: u64,
         native: bool,
     ) {
-        if matches!(action, UiAction::PickArchive | UiAction::PickDestination) {
-            let choose_archive = matches!(action, UiAction::PickArchive);
+        let picker = match action {
+            UiAction::PickArchive => Some(ZipPickerKind::ExtractArchive),
+            UiAction::PickDestination => Some(ZipPickerKind::ExtractDestination),
+            UiAction::PickCreateFiles => Some(ZipPickerKind::CreateFiles),
+            UiAction::PickCreateFolder => Some(ZipPickerKind::CreateFolder),
+            UiAction::PickCreateOutput => Some(ZipPickerKind::CreateOutput),
+            _ => None,
+        };
+        if let Some(kind) = picker {
+            let required = match kind {
+                ZipPickerKind::ExtractArchive | ZipPickerKind::ExtractDestination => {
+                    ZipMode::Extract
+                }
+                _ => ZipMode::Create,
+            };
+            if self.mode != required || session.has_active_worker() || creation.has_active_worker()
+            {
+                return;
+            }
             let before = session.snapshot();
+            let revision = creation.snapshot().revision;
+            let mode_epoch = self.mode_epoch;
             let identity = native.then(|| self.native_identity(host));
             let hwnd = super::utility_dialog_size::utility_picker_hwnd(ctx, identity);
             #[cfg(test)]
-            let queued = self.test_picker_paths.pop_front();
-            #[cfg(test)]
-            let selected = if let Some(path) = queued {
-                path
+            let selected = if let Some(value) = self.test_picker_paths.pop_front() {
+                value
             } else {
-                self.host_picker(hwnd, choose_archive)
+                self.host_picker(hwnd, kind)
             };
             #[cfg(not(test))]
-            let selected = self.host_picker(hwnd, choose_archive);
+            let selected = self.host_picker(hwnd, kind);
+            #[cfg(test)]
+            if let Some(invalidation) = self.test_picker_invalidation.take() {
+                match invalidation {
+                    PickerTestInvalidation::Host => {
+                        self.host_epoch = self.host_epoch.wrapping_add(1)
+                    }
+                    PickerTestInvalidation::Mode => {
+                        self.mode_epoch = self.mode_epoch.wrapping_add(1)
+                    }
+                    PickerTestInvalidation::Revision => {
+                        if let Some(member) = creation.snapshot().members.first() {
+                            let _ = creation.edit(revision, member.id, "changed.txt".into());
+                        }
+                    }
+                    PickerTestInvalidation::Close => self.open = false,
+                }
+            }
             let after = session.snapshot();
             if !self.open
                 || self.host_epoch != epoch
                 || self.host.identity() != host
-                || before.source_revision != after.source_revision
-                || before.destination_revision != after.destination_revision
-                || before.selection_revision != after.selection_revision
+                || self.mode != required
+                || self.mode_epoch != mode_epoch
+                || creation.has_active_worker()
+                || session.has_active_worker()
+                || (required == ZipMode::Create && revision != creation.snapshot().revision)
+                || (required == ZipMode::Extract
+                    && (before.source_revision != after.source_revision
+                        || before.destination_revision != after.destination_revision
+                        || before.selection_revision != after.selection_revision))
             {
                 return;
             }
@@ -1295,31 +1517,174 @@ impl ZipExtractorDialog {
             {
                 return;
             }
-            if let Some(path) = selected {
-                if choose_archive {
-                    self.load_archive_path(path, session);
-                } else {
-                    self.select_destination_path(path, session);
+            match (kind, selected) {
+                (ZipPickerKind::ExtractArchive, ZipPickerResult::Single(Some(path))) => {
+                    self.load_archive_path(path, session)
+                }
+                (ZipPickerKind::ExtractDestination, ZipPickerResult::Single(Some(path))) => {
+                    self.select_destination_path(path, session)
+                }
+                (ZipPickerKind::CreateFiles, ZipPickerResult::Files(Some(paths)))
+                    if !paths.is_empty() =>
+                {
+                    if let Err(error) = creation.add_sources(revision, paths) {
+                        self.status_message = Some(error);
+                    }
+                }
+                (ZipPickerKind::CreateFolder, ZipPickerResult::Single(Some(path))) => {
+                    if let Err(error) = creation.add_sources(revision, vec![path]) {
+                        self.status_message = Some(error);
+                    }
+                }
+                (ZipPickerKind::CreateOutput, ZipPickerResult::Single(Some(path))) => {
+                    self.creation_output = Some(path);
+                    self.status_message = None;
+                }
+                _ => {}
+            }
+            self.update_creation_snapshot(creation.snapshot(), creation.has_active_worker());
+            ctx.request_repaint();
+            return;
+        }
+        match action {
+            UiAction::SetMode(mode) => {
+                if !session.has_active_worker()
+                    && !creation.has_active_worker()
+                    && self.mode != mode
+                {
+                    self.mode = mode;
+                    self.mode_epoch = self.mode_epoch.wrapping_add(1);
+                    self.status_message = None;
                 }
             }
-        } else {
-            self.apply_ui_action(action, session, ctx);
+            UiAction::SetMemberDraft(id, text)
+                if self.mode == ZipMode::Create
+                    && !creation.has_active_worker()
+                    && !session.has_active_worker() =>
+            {
+                if text.len() > crate::archive::ArchiveLimits::default().max_name_bytes {
+                    self.status_message =
+                        Some("The ZIP member path exceeds the allowed length.".into());
+                    return;
+                }
+                if creation
+                    .snapshot()
+                    .members
+                    .iter()
+                    .any(|member| member.id == id && member.destination == text)
+                {
+                    self.member_drafts.remove(&id);
+                } else {
+                    self.member_drafts.insert(id, text);
+                }
+            }
+            UiAction::ApplyMember(id)
+                if self.mode == ZipMode::Create && !session.has_active_worker() =>
+            {
+                if let Some(text) = self.member_drafts.get(&id).cloned() {
+                    match creation.edit(creation.snapshot().revision, id, text) {
+                        Ok(()) => {
+                            self.member_drafts.remove(&id);
+                            self.status_message = None;
+                        }
+                        Err(error) => self.status_message = Some(error),
+                    }
+                }
+            }
+            UiAction::RemoveMember(id)
+                if self.mode == ZipMode::Create && !session.has_active_worker() =>
+            {
+                match creation.remove(creation.snapshot().revision, id) {
+                    Ok(()) => {
+                        self.member_drafts.remove(&id);
+                        self.status_message = None;
+                    }
+                    Err(error) => self.status_message = Some(error),
+                }
+            }
+            UiAction::ValidateCreation
+                if self.mode == ZipMode::Create
+                    && !session.has_active_worker()
+                    && self.member_drafts.is_empty() =>
+            {
+                if let Err(error) = creation.request_validation(creation.snapshot().revision) {
+                    self.status_message = Some(error);
+                }
+            }
+            UiAction::StartCreation
+                if self.mode == ZipMode::Create
+                    && !session.has_active_worker()
+                    && self.member_drafts.is_empty() =>
+            {
+                let snapshot = creation.snapshot();
+                if snapshot.validated_revision != Some(snapshot.revision)
+                    || !snapshot.issues.is_empty()
+                {
+                    self.status_message =
+                        Some("Validate the current layout before creating a ZIP.".into());
+                } else if let Some(path) = self.creation_output.clone() {
+                    match creation.start(
+                        snapshot.revision,
+                        path.clone(),
+                        crate::archive::ArchiveLimits::default().max_actual_total_output_bytes,
+                    ) {
+                        Ok(()) => {
+                            self.creation_run_output = Some(path);
+                            self.status_message = None;
+                        }
+                        Err(error) => self.status_message = Some(error),
+                    }
+                } else {
+                    self.status_message = Some("Choose an output ZIP first.".into());
+                }
+            }
+            UiAction::CancelCreation if self.mode == ZipMode::Create => creation.cancel(),
+            UiAction::Session(_)
+            | UiAction::SetDestination(_)
+            | UiAction::SetFilter(_)
+            | UiAction::SetSortByName(_)
+            | UiAction::SetConfirmation { .. }
+                if self.mode != ZipMode::Extract || creation.has_active_worker() => {}
+            UiAction::PickArchive
+            | UiAction::PickDestination
+            | UiAction::PickCreateFiles
+            | UiAction::PickCreateFolder
+            | UiAction::PickCreateOutput
+            | UiAction::SetMemberDraft(..)
+            | UiAction::ApplyMember(..)
+            | UiAction::RemoveMember(..)
+            | UiAction::ValidateCreation
+            | UiAction::StartCreation
+            | UiAction::CancelCreation => {}
+            other => self.apply_ui_action(other, session, ctx),
         }
+        self.update_creation_snapshot(creation.snapshot(), creation.has_active_worker());
+        ctx.request_repaint();
     }
     #[cfg(windows)]
-    fn host_picker(&mut self, hwnd: Option<usize>, archive: bool) -> Option<PathBuf> {
+    fn host_picker(&mut self, hwnd: Option<usize>, kind: ZipPickerKind) -> ZipPickerResult {
         let Some(hwnd) = hwnd.and_then(|h| std::num::NonZeroIsize::new(h as isize)) else {
             self.status_message = Some(
-                "Cannot verify the ZIP picker window. Focus the extractor and try again.".into(),
+                "Cannot verify the ZIP picker window. Focus the utility and try again.".into(),
             );
-            return None;
+            return match kind {
+                ZipPickerKind::CreateFiles => ZipPickerResult::Files(None),
+                _ => ZipPickerResult::Single(None),
+            };
         };
         let picker =
             rfd::FileDialog::new().set_parent(&super::add_action_dialog::NativeDialogParent(hwnd));
-        if archive {
-            picker.add_filter("ZIP archives", &["zip"]).pick_file()
-        } else {
-            picker.pick_folder()
+        match kind {
+            ZipPickerKind::ExtractArchive => {
+                ZipPickerResult::Single(picker.add_filter("ZIP archives", &["zip"]).pick_file())
+            }
+            ZipPickerKind::ExtractDestination | ZipPickerKind::CreateFolder => {
+                ZipPickerResult::Single(picker.pick_folder())
+            }
+            ZipPickerKind::CreateFiles => ZipPickerResult::Files(picker.pick_files()),
+            ZipPickerKind::CreateOutput => {
+                ZipPickerResult::Single(picker.add_filter("ZIP archives", &["zip"]).save_file())
+            }
         }
     }
     #[cfg(windows)]
@@ -1354,6 +1719,12 @@ impl ZipExtractorDialog {
                 source_revision: snapshot.source_revision,
                 destination_revision: snapshot.destination_revision,
                 selection_revision: snapshot.selection_revision,
+                mode: self.mode,
+                mode_epoch: self.mode_epoch,
+                creation_revision: self
+                    .creation_snapshot
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.revision),
                 actions,
                 copies,
                 request,
@@ -1403,6 +1774,7 @@ impl ZipExtractorDialog {
                 self.clear_presentation();
                 self.update_session_snapshot(session.snapshot(), Instant::now());
             }
+            _ => {}
         }
         ctx.request_repaint();
     }
@@ -1803,7 +2175,7 @@ fn plan_issue_label(reason: crate::archive::PlanIssueReason) -> &'static str {
         Issue::UnsafeEntryKind(_) => "The entry type is unsupported.",
         Issue::EncryptedEntry => "Encrypted entries cannot be extracted.",
         Issue::UnsupportedFlags(_) => "The entry uses unsupported ZIP flags.",
-        Issue::UnsupportedCompression(_) => "Only Stored entries can be extracted.",
+        Issue::UnsupportedCompression(_) => "Only Stored and Deflated entries can be extracted.",
         Issue::InconsistentStoredSize => "The Stored entry has inconsistent sizes.",
         Issue::DirectoryHasPayload => "A directory entry contains unexpected data.",
         Issue::EntryDeclaredOutputTooLarge => "The entry exceeds its declared output limit.",
@@ -1819,6 +2191,274 @@ fn plan_issue_label(reason: crate::archive::PlanIssueReason) -> &'static str {
         Issue::ExistingReparsePoint => "A reparse point exists in the destination path.",
         Issue::OccupancyProbeFailed(_) => "The destination could not be checked safely.",
     }
+}
+
+#[cfg(windows)]
+fn draw_creation_body(
+    ui: &mut egui::Ui,
+    snapshot: Option<&crate::archive::CreationSnapshot>,
+    drafts: &std::collections::HashMap<crate::archive::CreationMemberId, String>,
+    output: Option<&PathBuf>,
+    run_output: Option<&PathBuf>,
+    busy: bool,
+    creation_active: bool,
+    scope: Option<&crate::gui::jump_mode::ui::JumpModeScope>,
+    order: &mut u64,
+    actions: &mut Vec<UiAction>,
+) {
+    ui.label("Add files and folders, choose their paths in the archive, then create a new ZIP.");
+    ui.horizontal_wrapped(|ui| {
+        for (label, key, action) in [
+            ("Add files…", "create-files", UiAction::PickCreateFiles),
+            ("Add folder…", "create-folder", UiAction::PickCreateFolder),
+            (
+                "Choose output ZIP…",
+                "create-output",
+                UiAction::PickCreateOutput,
+            ),
+        ] {
+            let response = ui.add_enabled(!busy, egui::Button::new(label));
+            register_target(
+                scope,
+                ui,
+                &response,
+                key,
+                label,
+                crate::gui::jump_mode::TargetKind::Action,
+                order,
+            );
+            if response.clicked() {
+                actions.push(action);
+            }
+        }
+        if let Some(path) = output {
+            let text = path.to_string_lossy();
+            ui.add_sized(
+                [ui.available_width().max(1.0), ui.spacing().interact_size.y],
+                egui::Label::new(text.as_ref()).truncate(),
+            )
+            .on_hover_text(text.as_ref());
+        }
+    });
+    let Some(snapshot) = snapshot else {
+        ui.label("Preparing creation session…");
+        return;
+    };
+    let clean =
+        snapshot.validated_revision == Some(snapshot.revision) && snapshot.issues.is_empty();
+    ui.horizontal_wrapped(|ui| {
+        let validation = if snapshot.progress.phase == crate::archive::CreationPhase::Validating {
+            "Validating…"
+        } else if snapshot.validated_revision != Some(snapshot.revision) {
+            "Layout unchecked"
+        } else if clean {
+            "Layout valid"
+        } else {
+            "Layout has conflicts"
+        };
+        ui.label(validation);
+        let response = ui.add_enabled(
+            !busy && !snapshot.members.is_empty() && drafts.is_empty(),
+            egui::Button::new("Validate layout"),
+        );
+        register_target(
+            scope,
+            ui,
+            &response,
+            "create-validate",
+            "Validate ZIP layout",
+            crate::gui::jump_mode::TargetKind::Action,
+            order,
+        );
+        if response.clicked() {
+            actions.push(UiAction::ValidateCreation);
+        }
+        let response = ui.add_enabled(
+            !busy && clean && output.is_some() && drafts.is_empty() && !snapshot.members.is_empty(),
+            egui::Button::new("Create ZIP"),
+        );
+        register_target(
+            scope,
+            ui,
+            &response,
+            "create-start",
+            "Create ZIP",
+            crate::gui::jump_mode::TargetKind::Action,
+            order,
+        );
+        if response.clicked() {
+            actions.push(UiAction::StartCreation);
+        }
+        let response = ui.add_enabled(creation_active, egui::Button::new("Cancel creation"));
+        register_target(
+            scope,
+            ui,
+            &response,
+            "create-cancel",
+            "Cancel ZIP creation",
+            crate::gui::jump_mode::TargetKind::Action,
+            order,
+        );
+        if response.clicked() {
+            actions.push(UiAction::CancelCreation);
+        }
+    });
+    match snapshot.progress.phase {
+        crate::archive::CreationPhase::Scanning
+        | crate::archive::CreationPhase::Validating
+        | crate::archive::CreationPhase::Writing => {
+            ui.label(format!(
+                "{:?}: {} entries · {} read · {} written",
+                snapshot.progress.phase,
+                snapshot.progress.completed,
+                format_bytes(snapshot.progress.input_bytes),
+                format_bytes(snapshot.progress.output_bytes)
+            ));
+        }
+        crate::archive::CreationPhase::Finished => {
+            ui.add(
+                egui::Label::new(format!(
+                    "Created {}",
+                    run_output.map_or_else(|| "ZIP".into(), |p| p.to_string_lossy().into_owned())
+                ))
+                .wrap(),
+            );
+        }
+        crate::archive::CreationPhase::Cancelled => {
+            ui.label("Creation cancelled; the draft is retained.");
+        }
+        crate::archive::CreationPhase::Failed => {
+            let message = snapshot
+                .progress
+                .message
+                .as_deref()
+                .unwrap_or("Creation could not be completed. Review the layout.");
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                if message.contains("output already exists") || message.contains("3221225525") {
+                    "That output already exists. Choose another ZIP name."
+                } else {
+                    message
+                },
+            );
+        }
+        crate::archive::CreationPhase::Idle => {}
+    }
+    let line_height = ui.spacing().interact_size.y.max(24.0);
+    let row_height = line_height * 2.0 + ui.spacing().item_spacing.y + 4.0;
+    egui::ScrollArea::vertical()
+        .id_salt("zip-create-members")
+        .show_rows(ui, row_height, snapshot.members.len(), |ui, rows| {
+            for index in rows {
+                let member = &snapshot.members[index];
+                ui.push_id(member.id, |ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(if member.kind == crate::archive::EntryKind::Directory {
+                                "Folder"
+                            } else {
+                                "File"
+                            });
+                            let source = format!(
+                                "{} · {}",
+                                member.source_path.display(),
+                                format_bytes(member.size)
+                            );
+                            ui.add_sized(
+                                [ui.available_width().max(1.0), line_height],
+                                egui::Label::new(&source).truncate(),
+                            )
+                            .on_hover_text(source);
+                        });
+                        ui.horizontal(|ui| {
+                            let mut value = drafts
+                                .get(&member.id)
+                                .cloned()
+                                .unwrap_or_else(|| member.destination.clone());
+                            let edit_width = (ui.available_width() * 0.42).clamp(100.0, 260.0);
+                            let response = ui.add_enabled(
+                                !busy,
+                                egui::TextEdit::singleline(&mut value).desired_width(edit_width),
+                            );
+                            register_target(
+                                scope,
+                                ui,
+                                &response,
+                                format!("create-path-{}", member.id.0),
+                                format!("Edit ZIP member {}", member.id.0),
+                                crate::gui::jump_mode::TargetKind::TextEntry,
+                                order,
+                            );
+                            if response.changed() {
+                                actions.push(UiAction::SetMemberDraft(member.id, value));
+                            }
+                            let apply = ui.add_enabled(
+                                !busy && drafts.contains_key(&member.id),
+                                egui::Button::new("Apply"),
+                            );
+                            register_target(
+                                scope,
+                                ui,
+                                &apply,
+                                format!("create-apply-{}", member.id.0),
+                                format!("Apply ZIP member {}", member.id.0),
+                                crate::gui::jump_mode::TargetKind::Action,
+                                order,
+                            );
+                            if apply.clicked() {
+                                actions.push(UiAction::ApplyMember(member.id));
+                            }
+                            let remove = ui.add_enabled(!busy, egui::Button::new("Remove"));
+                            register_target(
+                                scope,
+                                ui,
+                                &remove,
+                                format!("create-remove-{}", member.id.0),
+                                format!("Remove ZIP member {}", member.id.0),
+                                crate::gui::jump_mode::TargetKind::Action,
+                                order,
+                            );
+                            if remove.clicked() {
+                                actions.push(UiAction::RemoveMember(member.id));
+                            }
+                            if let Some(issue) = snapshot.issues.iter().find(|issue| {
+                                issue.member == member.id || issue.related == Some(member.id)
+                            }) {
+                                use crate::archive::CreationIssueKind as Issue;
+                                let message = match &issue.kind {
+                                    Issue::UnsafePath => "Unsafe path",
+                                    Issue::Duplicate => "Duplicate path",
+                                    Issue::FileDirectory => "File/folder conflict",
+                                    Issue::FileAncestor => "File blocks a folder",
+                                    Issue::Limit => "Validation limit",
+                                };
+                                let detail = issue.related.map_or_else(
+                                    || message.to_owned(),
+                                    |related| {
+                                        format!(
+                                            "{message} (row {})",
+                                            if issue.member == member.id {
+                                                related.0
+                                            } else {
+                                                issue.member.0
+                                            }
+                                        )
+                                    },
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&detail)
+                                            .color(ui.visuals().error_fg_color),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(detail);
+                            }
+                        });
+                    });
+                });
+            }
+        });
 }
 
 #[cfg(windows)]
@@ -1918,6 +2558,104 @@ mod tests {
         });
         let _ = dialog.on_hosted_frame_complete(ctx, session);
         output.drop_without_applying_deltas();
+    }
+
+    fn render_creation_frame(
+        ctx: &egui::Context,
+        dialog: &mut ZipExtractorDialog,
+        session: &mut crate::archive::ArchiveSession,
+        creation: &mut crate::archive::CreationSession,
+        jump: &mut crate::gui::jump_mode::ui::JumpModeUi,
+        frame: &mut u64,
+        events: Vec<egui::Event>,
+    ) {
+        jump.begin_frame();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 900.0),
+            )),
+            time: Some(1.0 + *frame as f64 / 60.0),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        *frame += 1;
+        let output = ctx.run_ui(input, |ctx| {
+            jump.begin_ui_pass();
+            let kind = crate::gui::jump_mode::ui::NavigationDialogKind::ZipExtractor;
+            let scope = jump
+                .scope_for_navigation_owner(
+                    crate::gui::jump_mode::SurfaceId::dialog("zip-extractor", 1),
+                    crate::gui::jump_mode::TargetGeneration(1),
+                    "zip-extractor",
+                    ctx.viewport_id(),
+                    crate::gui::jump_mode::ui::NavigationOwner::Dialog { kind, instance: 1 },
+                    false,
+                )
+                .unwrap();
+            dialog.show(ctx, session, true, Some(&scope));
+            jump.finish_ui_pass();
+        });
+        let _ = dialog.on_hosted_frame_complete_with_creation(ctx, session, creation);
+        output.drop_without_applying_deltas();
+    }
+
+    fn click_creation_target(
+        ctx: &egui::Context,
+        dialog: &mut ZipExtractorDialog,
+        session: &mut crate::archive::ArchiveSession,
+        creation: &mut crate::archive::CreationSession,
+        jump: &mut crate::gui::jump_mode::ui::JumpModeUi,
+        frame: &mut u64,
+        label: &str,
+    ) {
+        let target = jump
+            .pass_registry()
+            .unwrap()
+            .targets()
+            .iter()
+            .find(|target| target.metadata().label() == label)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing target {label}"));
+        assert!(
+            target.enabled() && target.eligible() && target.clipped_rect() == target.rect(),
+            "target {label} is unreachable"
+        );
+        let position = target.rect().center();
+        for pressed in [true, false] {
+            render_creation_frame(
+                ctx,
+                dialog,
+                session,
+                creation,
+                jump,
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    fn settle_creation(
+        creation: &mut crate::archive::CreationSession,
+        dialog: &mut ZipExtractorDialog,
+    ) -> crate::archive::CreationSnapshot {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !creation.poll() {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let snapshot = creation.snapshot();
+        dialog.update_creation_snapshot(snapshot.clone(), creation.has_active_worker());
+        snapshot
     }
 
     fn click_registered_target(
@@ -2044,6 +2782,343 @@ mod tests {
             bytes[index..index + b"same.bin".len()].copy_from_slice(b"same.bin");
         }
         fs::write(path, bytes).expect("install duplicate physical entry name");
+    }
+
+    #[test]
+    fn create_picker_rejects_cancelled_and_stale_owners_and_drafts() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.txt");
+        fs::write(&source, b"source").unwrap();
+        let ctx = egui::Context::default();
+        let mut session =
+            crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+        for invalidation in [
+            None,
+            Some(PickerTestInvalidation::Host),
+            Some(PickerTestInvalidation::Mode),
+            Some(PickerTestInvalidation::Revision),
+            Some(PickerTestInvalidation::Close),
+        ] {
+            let mut creation =
+                crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
+            creation.add_sources(0, vec![source.clone()]).unwrap();
+            let mut dialog = ZipExtractorDialog::default();
+            dialog.open();
+            dialog.mode = ZipMode::Create;
+            settle_creation(&mut creation, &mut dialog);
+            dialog.creation_output = Some(temp.path().join("original.zip"));
+            if invalidation.is_some() {
+                dialog.queue_picker_for_test(Some(temp.path().join("stale.zip")));
+            } else {
+                dialog.queue_picker_for_test(None);
+            }
+            dialog.test_picker_invalidation = invalidation;
+            let host = dialog.host.identity();
+            let epoch = dialog.host_epoch;
+            dialog.apply_host_action(
+                UiAction::PickCreateOutput,
+                &mut session,
+                &mut creation,
+                &ctx,
+                host,
+                epoch,
+                false,
+            );
+            assert_eq!(
+                dialog.creation_output.as_ref(),
+                Some(&temp.path().join("original.zip"))
+            );
+        }
+        let mut creation =
+            crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
+        let mut dialog = ZipExtractorDialog::default();
+        dialog.open();
+        dialog.mode = ZipMode::Create;
+        dialog.queue_picker_files_for_test(None);
+        let host = dialog.host.identity();
+        let epoch = dialog.host_epoch;
+        dialog.apply_host_action(
+            UiAction::PickCreateFiles,
+            &mut session,
+            &mut creation,
+            &ctx,
+            host,
+            epoch,
+            false,
+        );
+        assert!(creation.snapshot().members.is_empty());
+        assert!(!creation.has_active_worker());
+    }
+
+    #[test]
+    fn create_mode_accumulates_edits_validates_and_creates_new_zip() {
+        let temp = tempfile::tempdir().unwrap();
+        let a_dir = temp.path().join("a");
+        let b_dir = temp.path().join("b");
+        let folder = temp.path().join("folder");
+        fs::create_dir(&a_dir).unwrap();
+        fs::create_dir(&b_dir).unwrap();
+        fs::create_dir(&folder).unwrap();
+        fs::create_dir(folder.join("empty")).unwrap();
+        let a = a_dir.join("same.txt");
+        let b = b_dir.join("SAME.txt");
+        let remove = b_dir.join("remove.txt");
+        fs::write(&a, b"first").unwrap();
+        fs::write(&b, b"second").unwrap();
+        fs::write(&remove, b"remove").unwrap();
+        let ctx = egui::Context::default();
+        let mut dialog = ZipExtractorDialog::default();
+        dialog.open();
+        let mut session =
+            crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+        let mut creation =
+            crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
+        dialog.update_session_snapshot(session.snapshot(), Instant::now());
+        dialog.update_creation_snapshot(creation.snapshot(), false);
+        let mut jump = crate::gui::jump_mode::ui::JumpModeUi::new(true);
+        let mut frame = 0;
+        for _ in 0..3 {
+            render_creation_frame(
+                &ctx,
+                &mut dialog,
+                &mut session,
+                &mut creation,
+                &mut jump,
+                &mut frame,
+                vec![],
+            );
+        }
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Create mode",
+        );
+        dialog.queue_picker_files_for_test(Some(vec![a.clone(), b.clone(), remove.clone()]));
+        render_creation_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Add files…",
+        );
+        let first = settle_creation(&mut creation, &mut dialog);
+        assert_eq!(first.members.len(), 3);
+        dialog.queue_picker_for_test(Some(folder));
+        render_creation_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Add folder…",
+        );
+        let scan = settle_creation(&mut creation, &mut dialog);
+        assert_eq!(scan.members.len(), 5);
+        render_creation_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Validate ZIP layout",
+        );
+        assert!(
+            !settle_creation(&mut creation, &mut dialog)
+                .issues
+                .is_empty()
+        );
+        let b_id = scan
+            .members
+            .iter()
+            .find(|member| member.source_path == b)
+            .unwrap()
+            .id;
+        let remove_id = scan
+            .members
+            .iter()
+            .find(|member| member.source_path == remove)
+            .unwrap()
+            .id;
+        let host = dialog.host.identity();
+        let epoch = dialog.host_epoch;
+        dialog.apply_host_action(
+            UiAction::SetMemberDraft(b_id, "renamed.txt".into()),
+            &mut session,
+            &mut creation,
+            &ctx,
+            host,
+            epoch,
+            false,
+        );
+        dialog.apply_host_action(
+            UiAction::ApplyMember(b_id),
+            &mut session,
+            &mut creation,
+            &ctx,
+            host,
+            epoch,
+            false,
+        );
+        dialog.apply_host_action(
+            UiAction::RemoveMember(remove_id),
+            &mut session,
+            &mut creation,
+            &ctx,
+            host,
+            epoch,
+            false,
+        );
+        render_creation_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Validate ZIP layout",
+        );
+        let valid = settle_creation(&mut creation, &mut dialog);
+        assert_eq!(valid.validated_revision, Some(valid.revision));
+        assert!(valid.issues.is_empty());
+        let existing = temp.path().join("existing.zip");
+        fs::write(&existing, b"winner").unwrap();
+        dialog.queue_picker_for_test(Some(existing.clone()));
+        render_creation_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Choose output ZIP…",
+        );
+        render_creation_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Create ZIP",
+        );
+        assert_eq!(
+            settle_creation(&mut creation, &mut dialog).progress.phase,
+            crate::archive::CreationPhase::Failed
+        );
+        assert_eq!(fs::read(existing).unwrap(), b"winner");
+        let output = temp.path().join("created.zip");
+        dialog.queue_picker_for_test(Some(output.clone()));
+        render_creation_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Choose output ZIP…",
+        );
+        assert!(!output.exists(), "choosing an output does not create it");
+        render_creation_frame(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            vec![],
+        );
+        click_creation_target(
+            &ctx,
+            &mut dialog,
+            &mut session,
+            &mut creation,
+            &mut jump,
+            &mut frame,
+            "Create ZIP",
+        );
+        let result = settle_creation(&mut creation, &mut dialog);
+        assert_eq!(
+            result.progress.phase,
+            crate::archive::CreationPhase::Finished,
+            "{:?}",
+            result.progress.message
+        );
+        session.request_open(output).unwrap();
+        let opened = settle(&mut session, &mut dialog);
+        assert_eq!(opened.catalog.unwrap().entries().len(), 4);
+        assert_eq!(fs::read(a).unwrap(), b"first");
+        assert_eq!(fs::read(b).unwrap(), b"second");
     }
 
     #[test]

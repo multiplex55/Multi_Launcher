@@ -1318,6 +1318,8 @@ pub struct LauncherApp {
     pub(crate) zip_extractor_dialog: ZipExtractorDialog,
     #[cfg(windows)]
     pub(crate) archive_session: crate::archive::ArchiveSession,
+    #[cfg(windows)]
+    pub(crate) zip_creation_session: crate::archive::CreationSession,
     pub regex_tester_dialog: RegexTesterDialogState,
     pub(crate) calculation_pad_dialog: CalculationPadDialog,
     pub(crate) programmer_inspector_dialog: programmer_inspector_dialog::ProgrammerInspectorDialog,
@@ -3735,6 +3737,9 @@ impl LauncherApp {
         #[cfg(windows)]
         let archive_session =
             crate::archive::ArchiveSession::new(crate::archive::ArchiveLimits::default());
+        #[cfg(windows)]
+        let zip_creation_session =
+            crate::archive::CreationSession::new(crate::archive::ArchiveLimits::default());
         let mut app = Self {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
@@ -4015,6 +4020,8 @@ impl LauncherApp {
             zip_extractor_dialog: ZipExtractorDialog::default(),
             #[cfg(windows)]
             archive_session,
+            #[cfg(windows)]
+            zip_creation_session,
             regex_tester_dialog,
             calculation_pad_dialog,
             programmer_inspector_dialog,
@@ -5493,6 +5500,8 @@ impl LauncherApp {
         self.zip_extractor_dialog.clear_presentation();
         #[cfg(windows)]
         self.archive_session.close();
+        #[cfg(windows)]
+        self.zip_creation_session.close();
         self.panel_states.zip_extractor_dialog = false;
         self.panel_stack
             .retain(|panel| *panel != Panel::ZipExtractorDialog);
@@ -5872,8 +5881,20 @@ impl LauncherApp {
             Panel::ExplorerTabsDialog => self.explorer_tabs_dialog.open(),
             Panel::ZipExtractorDialog => {
                 #[cfg(windows)]
-                self.zip_extractor_dialog
-                    .open_with_snapshot(self.archive_session.snapshot());
+                {
+                    if !self.zip_extractor_dialog.open {
+                        if self.archive_session.has_active_worker()
+                            || self.zip_creation_session.reopen().is_err()
+                        {
+                            return;
+                        }
+                    }
+                    self.zip_extractor_dialog.open_with_snapshot(self.archive_session.snapshot());
+                    self.zip_extractor_dialog.update_creation_snapshot(
+                        self.zip_creation_session.snapshot(),
+                        self.zip_creation_session.has_active_worker(),
+                    );
+                }
                 #[cfg(not(windows))]
                 self.zip_extractor_dialog.open();
             }
@@ -5972,6 +5993,18 @@ impl LauncherApp {
     }
 
     pub(crate) fn focus_panel(&mut self, panel: Panel) {
+        #[cfg(windows)]
+        if panel == Panel::ZipExtractorDialog
+            && !self.zip_extractor_dialog.open
+            && (self.archive_session.has_active_worker()
+                || self.zip_creation_session.has_active_worker())
+        {
+            self.report_error_message(
+                "zip.busy",
+                "The previous ZIP operation is still retiring. Try again shortly.".to_owned(),
+            );
+            return;
+        }
         self.panel_stack.retain(|p| *p != panel);
         self.panel_stack.push(panel);
         if panel == Panel::CalculationPadDialog {

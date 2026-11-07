@@ -4250,12 +4250,18 @@ impl LauncherApp {
         {
             let completed = self.archive_session.poll();
             let worker_active = self.archive_session.has_active_worker();
+            let create_completed = self.zip_creation_session.poll();
+            let create_active = self.zip_creation_session.has_active_worker();
             let now = Instant::now();
-            if completed || self.zip_extractor_dialog.progress_refresh_due(now) {
+            let progress_due = self.zip_extractor_dialog.progress_refresh_due(now);
+            if completed || progress_due {
                 self.zip_extractor_dialog
                     .update_session_snapshot(self.archive_session.snapshot(), now);
             }
-            if worker_active || self.zip_extractor_dialog.session_needs_polling() {
+            if create_completed || (create_active && progress_due) {
+                self.zip_extractor_dialog.update_creation_snapshot(self.zip_creation_session.snapshot(), create_active);
+            }
+            if worker_active || create_active || self.zip_extractor_dialog.session_needs_polling() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
             }
         }
@@ -12749,7 +12755,7 @@ impl LauncherApp {
             ctx.request_repaint();
         }
         #[cfg(windows)] {
-            let zip = self.zip_extractor_dialog.on_hosted_frame_complete(ctx, &mut self.archive_session);
+            let zip = self.zip_extractor_dialog.on_hosted_frame_complete_with_creation(ctx, &mut self.archive_session, &mut self.zip_creation_session);
             for text in zip.copies { effects.push(RootDialogEffect::CopyText { owner: DialogCopyOwner::ZipExtractor, text }); }
             if zip.show_root { effects.push(RootDialogEffect::ShowRoot); }
             if zip.closed { self.panel_states.zip_extractor_dialog = false; self.panel_stack.retain(|panel| *panel != super::Panel::ZipExtractorDialog); }
@@ -13239,6 +13245,8 @@ impl eframe::App for LauncherApp {
         self.xml_toolkit_dialog.shutdown();
         #[cfg(windows)]
         self.archive_session.shutdown();
+        #[cfg(windows)]
+        self.zip_creation_session.shutdown();
         self.table_utility_dialog.shutdown();
         self.image_compare_dialog.shutdown();
         self.duplicate_finder_dialog.shutdown();
@@ -14899,6 +14907,40 @@ mod tests {
         app.archive_session.shutdown();
         drop(app);
         drop(workspace);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn zip_creation_workers_retire_with_root_hidden_and_reopen_after_close() {
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        prepare_tool_dialog_root(&ctx, &mut app);
+        app.focus_panel(super::Panel::ZipExtractorDialog);
+        app.zip_extractor_dialog.test_set_create_mode();
+        let source = workspace.root().join("hidden-create-source.txt");
+        std::fs::write(&source, b"source").unwrap();
+        app.zip_creation_session.add_sources(0, vec![source.clone()]).unwrap();
+        app.visible_flag.store(false, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.zip_creation_session.has_active_worker() {
+            run_host_viewport_frame(&ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline, "hidden scan must retire");
+            std::thread::yield_now();
+        }
+        let snapshot = app.zip_creation_session.snapshot();
+        assert_eq!(snapshot.members.len(), 1);
+        assert_eq!(app.zip_extractor_dialog.test_creation_revision(), Some(snapshot.revision));
+        app.zip_creation_session.add_sources(snapshot.revision, vec![source]).unwrap();
+        app.close_zip_extractor_dialog();
+        assert!(!app.zip_extractor_dialog.open);
+        while app.zip_creation_session.has_active_worker() {
+            run_host_viewport_frame(&ctx, &mut app, egui::ViewportId::ROOT, Vec::new(), false, false);
+            assert!(std::time::Instant::now() < deadline, "closed scan must retire");
+            std::thread::yield_now();
+        }
+        app.focus_panel(super::Panel::ZipExtractorDialog);
+        assert!(app.zip_extractor_dialog.open);
     }
 
     #[test]
@@ -20968,7 +21010,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         click_zip_host_target(&ctx, &mut app, root, "Choose destination folder");
-        click_zip_host_target(&ctx, &mut app, root, "Select archive entry only.txt");
+        assert_eq!(app.archive_session.snapshot().selection.len(), 1, "the loaded physical entry starts selected");
         click_zip_host_target(&ctx, &mut app, root, "Preview selected entries");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.archive_session.snapshot().preview.is_none() {
