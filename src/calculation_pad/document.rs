@@ -17,6 +17,7 @@ use super::programmer::{self, ProgrammerError, ProgrammerExpression};
 use super::quantity::{
     self, CalculatedQuantity, QuantityError, QuantityExpression, UnitParseEvidence, UnitProduct,
 };
+use super::vector::{self, VectorExpression};
 
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_LINES: usize = 256;
@@ -209,6 +210,7 @@ pub enum LineOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalculationValue {
     Scalar(f64),
+    Vector(vector::CalculationVector),
     /// An exact fixed-width integer result with explicit width and signedness.
     Integer(TypedInteger),
     /// A linearly dimensioned result with its units and approximation provenance.
@@ -230,6 +232,7 @@ impl CalculationValue {
     pub fn formatted_result(&self) -> Option<String> {
         match self {
             Self::Scalar(value) => format_number(*value),
+            Self::Vector(value) => value.formatted_result(),
             Self::Integer(value) => Some(value.formatted_decimal()),
             Self::DimensionalQuantity(value) => value.formatted_result(),
             Self::PhysicalQuantity { value, unit, .. } => {
@@ -243,7 +246,7 @@ impl CalculationValue {
         match self {
             Self::DimensionalQuantity(value) => value.is_approximate(),
             Self::PhysicalQuantity { approximations, .. } => !approximations.is_empty(),
-            Self::Scalar(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
+            Self::Scalar(_) | Self::Vector(_) | Self::Integer(_) | Self::ExactBase { .. } => false,
         }
     }
 }
@@ -302,6 +305,7 @@ pub enum DiagnosticKind {
     ExpectedExactBase(String),
     InvalidExpression,
     InvalidArithmetic,
+    Vector(String),
     InvalidBaseNumber,
     InvalidPrefixedInteger {
         radix: u32,
@@ -310,6 +314,9 @@ pub enum DiagnosticKind {
         radix: u32,
     },
     PrefixedIntegerTooLarge {
+        max_exact: u64,
+    },
+    ScalarIntegerTooLarge {
         max_exact: u64,
     },
     InvalidScientificLiteral,
@@ -374,6 +381,7 @@ impl fmt::Display for Diagnostic {
             Kind::InvalidExpression => formatter.write_str("invalid expression"),
             Kind::InvalidArithmetic => formatter
                 .write_str("division or remainder by zero, or non-finite arithmetic result"),
+            Kind::Vector(message) => write!(formatter, "{message}"),
             Kind::InvalidBaseNumber => formatter.write_str("invalid unsigned base value"),
             Kind::InvalidPrefixedInteger { radix } => {
                 write!(formatter, "invalid base-{radix} integer literal")
@@ -383,6 +391,10 @@ impl fmt::Display for Diagnostic {
                 "base-{radix} integer literal exceeds the unsigned 128-bit limit"
             ),
             Kind::PrefixedIntegerTooLarge { max_exact } => write!(
+                formatter,
+                "integer literal exceeds the exactly representable scalar limit of {max_exact}"
+            ),
+            Kind::ScalarIntegerTooLarge { max_exact } => write!(
                 formatter,
                 "integer literal exceeds the exactly representable scalar limit of {max_exact}"
             ),
@@ -450,6 +462,8 @@ enum PreparedStatement {
 
 #[derive(Debug)]
 struct PreparedExpression {
+    vector: Option<Result<VectorExpression, DiagnosticKind>>,
+    explicit_vector: bool,
     scalar: Option<PreparedScalar>,
     scalar_error: Option<DiagnosticKind>,
     programmer: Option<ProgrammerExpression>,
@@ -461,25 +475,64 @@ struct PreparedExpression {
 }
 
 #[derive(Debug)]
-enum PreparedScalar {
+pub(super) enum PreparedScalar {
     Checked(Box<CheckedExpression>),
     Modulo(Box<ModuloExpression>),
 }
 
 impl PreparedScalar {
-    fn var_names(&self) -> &[String] {
+    pub(super) fn var_names(&self) -> &[String] {
         match self {
             Self::Checked(expression) => expression.var_names(),
             Self::Modulo(expression) => expression.var_names(),
         }
     }
 
-    fn eval(&self, variables: &[f64]) -> exmex::ExResult<f64> {
+    pub(super) fn eval(&self, variables: &[f64]) -> exmex::ExResult<f64> {
         match self {
             Self::Checked(expression) => expression.eval(variables),
             Self::Modulo(expression) => expression.eval(variables),
         }
     }
+}
+
+fn scalar_from_scan(
+    expression: &str,
+    scan: &ExpressionScan,
+) -> Result<PreparedScalar, DiagnosticKind> {
+    if let Some(error) = &scan.decimal_error {
+        return Err(error.clone());
+    }
+    let lowered_numbers = lower_numeric_literals(expression, &scan.numeric_literals)?;
+    let lowered = if scan.uses_mod_function {
+        Cow::Owned(lower_mod_function_calls(lowered_numbers.as_ref()))
+    } else {
+        lowered_numbers
+    };
+    if lowered.len() > MAX_PREPARED_EXPRESSION_BYTES {
+        return Err(DiagnosticKind::PreparedExpressionTooLong {
+            max_bytes: MAX_PREPARED_EXPRESSION_BYTES,
+        });
+    }
+    if scan.uses_remainder || scan.uses_mod_function {
+        ModuloExpression::parse_wo_compile(lowered.as_ref())
+            .map(Box::new)
+            .map(PreparedScalar::Modulo)
+    } else {
+        CheckedExpression::parse_wo_compile(lowered.as_ref())
+            .map(Box::new)
+            .map(PreparedScalar::Checked)
+    }
+    .map_err(|_| DiagnosticKind::InvalidExpression)
+}
+
+pub(super) fn prepare_vector_scalar(
+    expression: &str,
+    declared_names: &HashSet<String>,
+) -> Result<PreparedScalar, DiagnosticKind> {
+    let (normalized, _) = normalize_scalar_tokens(expression, declared_names);
+    let scan = scan_expression(&normalized)?;
+    scalar_from_scan(&normalized, &scan)
 }
 
 #[derive(Debug, Clone)]
@@ -506,6 +559,7 @@ struct AssignmentName {
 struct ExpressionScan {
     identifiers: usize,
     numeric_literals: Vec<NumericLiteralRewrite>,
+    decimal_error: Option<DiagnosticKind>,
     uses_remainder: bool,
     uses_mod_function: bool,
 }
@@ -607,6 +661,7 @@ fn prepare_line(
         };
     }
 
+    let explicit_vector = vector::has_explicit_syntax(expression);
     let (normalized, programmer_input) = normalize_scalar_tokens(expression, declared_names);
     let programmer_parse = programmer::parse(&programmer_input);
     if let Some(ProgrammerError::NameTooLong { max_bytes }) = &programmer_parse.error {
@@ -660,6 +715,38 @@ fn prepare_line(
         );
     }
     *total_identifiers += identifier_count;
+
+    if explicit_vector {
+        return match vector::prepare(&normalized, declared_names) {
+            Ok(expression) => {
+                let references = expression
+                    .references()
+                    .iter()
+                    .map(|name| prepared_reference(name))
+                    .collect();
+                PreparedLine {
+                    source_range,
+                    assignment_name,
+                    statement: PreparedStatement::Expression(PreparedExpression {
+                        vector: Some(Ok(expression)),
+                        explicit_vector: true,
+                        scalar: None,
+                        scalar_error: None,
+                        programmer: None,
+                        programmer_error: None,
+                        uses_programmer_syntax: false,
+                        quantity: None,
+                        quantity_error: None,
+                        quantity_unit_evidence: UnitParseEvidence::None,
+                    }),
+                    references,
+                    dependencies: Vec::new(),
+                    diagnostic: None,
+                }
+            }
+            Err(kind) => PreparedLine::invalid(source_range, assignment_name, kind),
+        };
+    }
 
     // Feed the quantity parser the same validated numeric tokens as the
     // scalar parser. This permits a prefixed value next to a real unit while
@@ -828,6 +915,8 @@ fn prepare_line(
             source_range,
             assignment_name,
             statement: PreparedStatement::Expression(PreparedExpression {
+                vector: None,
+                explicit_vector: false,
                 scalar: None,
                 scalar_error: None,
                 programmer: None,
@@ -843,40 +932,11 @@ fn prepare_line(
         };
     }
 
-    let mut scalar = None;
-    let mut scalar_error = None;
-    match scan {
-        Err(kind) => scalar_error = Some(kind),
-        Ok(scan) => match lower_numeric_literals(&normalized, &scan.numeric_literals) {
-            Err(kind) => scalar_error = Some(kind),
-            Ok(lowered_numbers) => {
-                let lowered_expression = if scan.uses_mod_function {
-                    Cow::Owned(lower_mod_function_calls(lowered_numbers.as_ref()))
-                } else {
-                    lowered_numbers
-                };
-                if lowered_expression.len() > MAX_PREPARED_EXPRESSION_BYTES {
-                    scalar_error = Some(DiagnosticKind::PreparedExpressionTooLong {
-                        max_bytes: MAX_PREPARED_EXPRESSION_BYTES,
-                    });
-                } else {
-                    let parsed = if scan.uses_remainder || scan.uses_mod_function {
-                        ModuloExpression::parse_wo_compile(lowered_expression.as_ref())
-                            .map(Box::new)
-                            .map(PreparedScalar::Modulo)
-                    } else {
-                        CheckedExpression::parse_wo_compile(lowered_expression.as_ref())
-                            .map(Box::new)
-                            .map(PreparedScalar::Checked)
-                    };
-                    match parsed {
-                        Ok(parsed) => scalar = Some(parsed),
-                        Err(_) => scalar_error = Some(DiagnosticKind::InvalidExpression),
-                    }
-                }
-            }
-        },
-    }
+    let scalar_result = scan.and_then(|scan| scalar_from_scan(&normalized, &scan));
+    let (scalar, scalar_error) = match scalar_result {
+        Ok(value) => (Some(value), None),
+        Err(error) => (None, Some(error)),
+    };
 
     let programmer = programmer_parse.expression;
     let uses_programmer_syntax = programmer_parse.uses_programmer_syntax;
@@ -895,6 +955,8 @@ fn prepare_line(
                 source_range,
                 assignment_name,
                 statement: PreparedStatement::Expression(PreparedExpression {
+                    vector: None,
+                    explicit_vector: false,
                     scalar: None,
                     scalar_error: None,
                     programmer: None,
@@ -924,6 +986,18 @@ fn prepare_line(
         return PreparedLine::invalid(source_range, assignment_name, diagnostic);
     }
 
+    // Only reference-bearing expressions can dynamically acquire vector
+    // operands. Avoid building a second tree for ordinary numeric results.
+    let has_candidate_reference = scalar
+        .as_ref()
+        .is_some_and(|value| !value.var_names().is_empty())
+        || programmer.as_ref().is_some_and(|value| {
+            value.references().iter().any(|(name, braced)| {
+                *braced || (!is_reserved_name(name) && !is_unbound_pi_alias(name, declared_names))
+            })
+        });
+    let vector = has_candidate_reference.then(|| vector::prepare(&normalized, declared_names));
+
     let mut references = Vec::new();
     if let Some(programmer) = &programmer {
         references.extend(
@@ -945,6 +1019,13 @@ fn prepare_line(
                 .map(|name| prepared_reference(name)),
         );
     }
+    if let Some(Ok(vector)) = &vector {
+        for name in vector.references() {
+            if !references.iter().any(|reference| reference.name == *name) {
+                references.push(prepared_reference(name));
+            }
+        }
+    }
     if quantity_unit_evidence == UnitParseEvidence::PlainMinuteAlias {
         for name in &quantity_parse.references {
             if !references.iter().any(|reference| reference.name == *name) {
@@ -956,6 +1037,8 @@ fn prepare_line(
         source_range,
         assignment_name,
         statement: PreparedStatement::Expression(PreparedExpression {
+            vector,
+            explicit_vector: false,
             scalar,
             scalar_error,
             programmer,
@@ -1328,6 +1411,11 @@ fn scan_expression(expression: &str) -> Result<ExpressionScan, DiagnosticKind> {
                         characters.next();
                     }
                     scan.numeric_literals.push(literal);
+                } else if character.is_ascii_digit()
+                    && let Err(error) = validate_decimal_integer(expression, index)
+                    && scan.decimal_error.is_none()
+                {
+                    scan.decimal_error = Some(error);
                 }
             }
             character if is_identifier_start(character) => {
@@ -1365,6 +1453,37 @@ fn scan_expression(expression: &str) -> Result<ExpressionScan, DiagnosticKind> {
         return Err(DiagnosticKind::InvalidExpression);
     }
     Ok(scan)
+}
+
+fn validate_decimal_integer(expression: &str, start: usize) -> Result<(), DiagnosticKind> {
+    if expression[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|previous| is_identifier_continue(previous) || previous == '.')
+    {
+        return Ok(());
+    }
+    let bytes = expression.as_bytes();
+    let mut end = start;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    // Decimal points and scientific exponents deliberately select floating
+    // syntax. Identifier/unit suffixes remain owned by their existing parser.
+    if expression[end..]
+        .chars()
+        .next()
+        .is_some_and(|next| next == '.' || is_identifier_continue(next))
+    {
+        return Ok(());
+    }
+    let value = expression[start..end].parse::<u128>();
+    if value.is_err() || value.is_ok_and(|value| value > u128::from(MAX_EXACT_SCALAR_INTEGER)) {
+        return Err(DiagnosticKind::ScalarIntegerTooLarge {
+            max_exact: MAX_EXACT_SCALAR_INTEGER,
+        });
+    }
+    Ok(())
 }
 
 fn parse_prefixed_integer(
@@ -1982,11 +2101,32 @@ fn evaluate_line(
                     .is_some_and(|value| {
                         matches!(
                             value,
-                            CalculationValue::Integer(_) | CalculationValue::ExactBase { .. }
+                            CalculationValue::Integer(_)
+                                | CalculationValue::ExactBase { .. }
+                                | CalculationValue::Vector(_)
                         )
                     })
             });
-        if !typed_route_can_win && let Some(error) = &expression.scalar_error {
+        let quantity_route_can_win = matches!(
+            expression.scalar_error,
+            Some(DiagnosticKind::ScalarIntegerTooLarge { .. })
+        ) && line.references.iter().any(|reference| {
+            reference
+                .target_line
+                .and_then(|index| values.get(index))
+                .and_then(Option::as_ref)
+                .is_some_and(|value| {
+                    matches!(
+                        value,
+                        CalculationValue::PhysicalQuantity { .. }
+                            | CalculationValue::DimensionalQuantity(_)
+                    )
+                })
+        });
+        if !typed_route_can_win
+            && !quantity_route_can_win
+            && let Some(error) = &expression.scalar_error
+        {
             return LineOutcome::Error(Diagnostic::new(error.clone()));
         }
     }
@@ -2159,6 +2299,21 @@ fn evaluate_prepared_expression(
     line: &PreparedLine,
     values: &[Option<CalculationValue>],
 ) -> Result<CalculationValue, DiagnosticKind> {
+    let has_vector_reference = line.references.iter().any(|reference| {
+        reference
+            .target_line
+            .and_then(|index| values.get(index))
+            .and_then(Option::as_ref)
+            .is_some_and(|value| matches!(value, CalculationValue::Vector(_)))
+    });
+    if expression.explicit_vector || has_vector_reference {
+        let vector = expression
+            .vector
+            .as_ref()
+            .ok_or_else(|| DiagnosticKind::Vector("unsupported vector expression".into()))?;
+        let vector = vector.as_ref().map_err(Clone::clone)?;
+        return vector.evaluate(&quantity_bindings(line, values));
+    }
     let has_quantity_reference = line.references.iter().any(|reference| {
         reference
             .target_line
@@ -2871,6 +3026,166 @@ mod tests {
         let evaluation = document.evaluate();
         assert_eq!(integer(&evaluation, 0), integer(&evaluation, 1));
         assert_eq!(error(&evaluation, 2), error(&evaluation, 3));
+    }
+
+    #[test]
+    fn vector_arithmetic_products_and_dependencies_use_scalar_components() {
+        let source = concat!(
+            "a = [1, 2, 3]\n",
+            "a * 3\n3 * a\na + [1, 1, 1]\na * [4, 5, 6]\n",
+            "dot(a, [4, 5, 6])\na · [4, 5, 6]\n",
+            "cross([1, 0, 0], [0, 1, 0])\n[1, 0, 0] × [0, 1, 0]\n",
+            "x = 5\n[Floor(2.9), x + 1, sqrt(0b10000)]\n",
+            "r1 + a\n(a * (2 + 3)) / 5\n[12] / 2 / 3\n",
+            "DOT([1,2], [3,4])\n{x[0]} = 7\n[{x[0]}]\n{x[0]} + 1\n",
+            "[dot([1], [2]), 3]\n[dot(a, a)]\na * (6 mod 4)\n"
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for (line, expected) in [
+            (0, "[1, 2, 3]"),
+            (1, "[3, 6, 9]"),
+            (2, "[3, 6, 9]"),
+            (3, "[2, 3, 4]"),
+            (4, "[4, 10, 18]"),
+            (7, "[0, 0, 1]"),
+            (8, "[0, 0, 1]"),
+            (10, "[2, 6, 4]"),
+            (11, "[2, 4, 6]"),
+            (12, "[1, 2, 3]"),
+            (13, "[2]"),
+            (16, "[7]"),
+            (18, "[2, 3]"),
+            (19, "[14]"),
+            (20, "[2, 4, 6]"),
+        ] {
+            assert_eq!(formatted(&evaluation, line), expected, "line {}", line + 1);
+        }
+        assert_eq!(scalar(&evaluation, 5), 32.0);
+        assert_eq!(scalar(&evaluation, 6), 32.0);
+        assert_eq!(scalar(&evaluation, 14), 11.0);
+        assert_eq!(scalar(&evaluation, 17), 8.0);
+        assert_eq!(evaluation.lines[11].dependency_indices, vec![0]);
+        assert_eq!(evaluation.source, source);
+    }
+
+    #[test]
+    fn vector_invalid_shapes_types_and_nonfinite_work_are_local() {
+        let source = concat!(
+            "[]\n[[1]]\n[1,]\n[1] + [1, 2]\n[1] + 2\n",
+            "[1] / 0\n[1] / [0]\ncross([1, 2], [3, 4])\n",
+            "dot([1e308], [1e308])\n[1e308] * 1e308\n",
+            "u8(2)\n[1] * r11\n1 m\n[1] * r13\n7\n",
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        for line in 0..14 {
+            if line == 10 || line == 12 {
+                continue;
+            }
+            assert!(
+                matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)),
+                "line {}",
+                line + 1
+            );
+        }
+        assert_eq!(scalar(&evaluation, 14), 7.0);
+        let too_long = format!("[{}]", vec!["1"; 129].join(","));
+        let document = CalculationDocument::new(too_long);
+        assert!(matches!(
+            document.evaluate().lines[0].outcome,
+            LineOutcome::Error(_)
+        ));
+        let source = format!(
+            "v = [{}]\n{}",
+            vec!["1"; 128].join(","),
+            vec!["v"; 10].join(" * ")
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        assert!(
+            matches!(&evaluation.lines[0].outcome, LineOutcome::Value(CalculationValue::Vector(vector)) if vector.components().len() == 128)
+        );
+        assert!(matches!(evaluation.lines[1].outcome, LineOutcome::Error(_)));
+
+        let document =
+            CalculationDocument::new("v = [1, 2]\nv * 6 % 4\nv * 6 mod 4\nv * 6 min 4\n");
+        let evaluation = document.evaluate();
+        for line in 1..4 {
+            assert!(
+                matches!(evaluation.lines[line].outcome, LineOutcome::Error(_)),
+                "line {}",
+                line + 1
+            );
+        }
+    }
+
+    #[test]
+    fn vector_formatted_output_is_pasteable_with_display_precision() {
+        let document = CalculationDocument::new("[1/3, 1.23456789e20, -2.5]\n[1, 2, 3]");
+        let evaluation = document.evaluate();
+        let displayed = formatted(&evaluation, 0);
+        assert_eq!(formatted(&evaluation, 1), "[1, 2, 3]");
+        let reparsed = CalculationDocument::new(displayed.clone());
+        let result = reparsed.evaluate();
+        let CalculationValue::Vector(values) = value(&result, 0) else {
+            panic!("copy must be a vector")
+        };
+        assert!((values.components()[0] - 1.0 / 3.0).abs() < 0.000001);
+        assert!((values.components()[1] / 1.23456789e20 - 1.0).abs() < 0.00001);
+        assert_eq!(values.components()[2], -2.5);
+        assert_eq!(formatted(&result, 0), displayed);
+    }
+
+    #[test]
+    fn decimal_integer_precision_is_bounded_without_changing_exact_or_quantity_routes() {
+        let document = CalculationDocument::new(concat!(
+            "9007199254740992\n9007199254740993\n9007199254740993 + 1\n",
+            "[9007199254740993]\nu64(9007199254740993)\n",
+            "9007199254740993 dec to hex\n1e20\n9007199254740993 m\n",
+            "wide = u64(1)\nwide + 9007199254740993\n",
+            "distance = 1 m\nscale = 2\ndistance * scale * 9007199254740993\n",
+        ));
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 0), 9007199254740992.0);
+        for line in [1, 2, 3] {
+            assert!(
+                matches!(
+                    error(&evaluation, line),
+                    DiagnosticKind::ScalarIntegerTooLarge { .. }
+                ),
+                "line {}",
+                line + 1
+            );
+        }
+        assert_eq!(integer(&evaluation, 4).bit_pattern(), 9007199254740993);
+        assert!(matches!(
+            value(&evaluation, 5),
+            CalculationValue::ExactBase {
+                value: 9007199254740993,
+                ..
+            }
+        ));
+        assert_eq!(scalar(&evaluation, 6), 1e20);
+        assert!(matches!(
+            value(&evaluation, 7),
+            CalculationValue::DimensionalQuantity(_)
+        ));
+        assert_eq!(integer(&evaluation, 9).bit_pattern(), 9007199254740994);
+        assert!(matches!(
+            value(&evaluation, 12),
+            CalculationValue::DimensionalQuantity(_)
+        ));
+
+        let expression = format!(
+            "9007199254740993 m + {}",
+            vec!["x"; MAX_DEPENDENCIES_PER_LINE + 1].join(" + ")
+        );
+        let document = CalculationDocument::new(expression);
+        assert!(matches!(
+            error(&document.evaluate(), 0),
+            DiagnosticKind::TooManyIdentifiers { .. }
+        ));
     }
 
     #[test]

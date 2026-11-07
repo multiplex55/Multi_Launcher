@@ -879,6 +879,7 @@ fn evaluate_as(
                 }
             }
             Some(CalculationValue::Scalar(_))
+            | Some(CalculationValue::Vector(_))
             | Some(CalculationValue::PhysicalQuantity { .. })
             | Some(CalculationValue::DimensionalQuantity(_)) => {
                 Err(ProgrammerError::ExpectedInteger)
@@ -1000,6 +1001,7 @@ fn evaluate_constructor(
             }
             Some(CalculationValue::Scalar(value)) => return scalar_to_integer(*value, target_mode),
             Some(CalculationValue::PhysicalQuantity { .. })
+            | Some(CalculationValue::Vector(_))
             | Some(CalculationValue::DimensionalQuantity(_)) => {
                 return Err(ProgrammerError::ExpectedInteger);
             }

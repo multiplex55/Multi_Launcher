@@ -34,9 +34,10 @@ cyclic references are diagnosed.
 
 Scalar expressions use the `exmex` expression grammar with finite `f64`
 results. Scientific notation is supported, for example `1.25e-2` and
-`6.02E23`. Scalar integer literals may use `0x`, `0b`, or `0o` prefixes;
-their values are deliberately bounded to 2^53, the exactly representable
-integer range endpoint (larger even integers are also rejected). The engine
+`6.02E23`. Scalar integer literals may use decimal, `0x`, `0b`, or `0o`
+notation; their values are deliberately bounded to 2^53, the exactly representable
+integer range endpoint (larger even integers are also rejected). Decimal-point
+and scientific-notation literals retain floating-point semantics. The engine
 supports `+`, `-`, `*`, `/`, `^`, and `%`; unary `+` and `-`; the functions
 `abs`, `signum`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
 `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`, `floor`, `round`, `ceil`,
@@ -52,11 +53,27 @@ PI * radius ^ 2
 Non-finite operands and intermediate results remain invalid even when a later
 operation could otherwise hide them, as in `min(sqrt(-1), 1)`.
 
-`a % b` returns the remainder with the dividend's sign (`-7 % 3` is `-1`).
+`a % b` and infix `a mod b` return the remainder with the dividend's sign
+(`-7 mod 3` is `-1`). Built-in function names are case-insensitive in call
+position. Unbound `pi` and `pie` (case-insensitively) mean `PI`; declared names
+and braced references retain their ordinary meaning.
 `mod(a, b)` returns the non-negative Euclidean remainder (`mod(-7, 3)` is
 `2`). Both forms reject a zero divisor. When `%` or contextual `mod(a, b)` is
 used, `*`, `/`, and `%` group left to right; expressions without these forms
 keep the original operator precedence.
+
+## Vectors
+
+Vectors contain one to 128 finite dimensionless scalar components, for example
+`v = [1, 2, sqrt(16)]`. Components may use scalar expressions and earlier named
+or physical-line references. Equal-length vectors support element-wise `+`,
+`-`, `*`, and `/`; either order of scalar multiplication and vector divided by
+a scalar are also supported. Scalar addition is not broadcast. `dot(v, w)` or
+`v · w` gives a scalar; `cross(v, w)` or `v × w` gives a three-component vector
+and requires three components on each side. Vector `*` remains element-wise.
+Dimension mismatch, zero divisors, typed integers, quantities and non-finite
+intermediate values produce line-local errors. Results use the shared scalar
+display precision and can be pasted back as vector expressions.
 
 ## Exact integer expressions
 

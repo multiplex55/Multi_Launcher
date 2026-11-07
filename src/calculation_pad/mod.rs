@@ -13,6 +13,7 @@ mod persistence;
 mod programmer;
 mod quantity;
 mod session;
+mod vector;
 
 pub use comparison::{
     ComparisonContext, ComparisonRelation, ComparisonRequest, ComparisonResult,
@@ -32,6 +33,7 @@ pub use inspector::{
 pub use integer::{IntegerError, IntegerMode, IntegerSignedness, IntegerWidth, TypedInteger};
 pub use programmer::ProgrammerError;
 pub use quantity::{CalculatedQuantity, QuantityError};
+pub use vector::CalculationVector;
 
 pub use persistence::{
     CURRENT_DOCUMENT_FORMAT_VERSION, CURRENT_RECOVERY_FORMAT_VERSION, DocumentId, LineId,

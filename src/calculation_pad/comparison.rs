@@ -50,6 +50,7 @@ impl ComparisonSide {
             Ok(CalculationValue::Integer(value)) => value.mode().type_name(),
             Ok(CalculationValue::ExactBase { .. }) => "exact base",
             Ok(CalculationValue::Scalar(_)) => "scalar",
+            Ok(CalculationValue::Vector(_)) => "vector",
             Ok(CalculationValue::DimensionalQuantity(_)) => "quantity",
             Ok(CalculationValue::PhysicalQuantity { .. }) => "quantity",
             Err(_) => "error",
@@ -59,6 +60,7 @@ impl ComparisonSide {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ComparisonRelation {
     SideError,
+    UnsupportedVector,
     TypeMismatch {
         left: &'static str,
         right: &'static str,
@@ -104,6 +106,7 @@ impl ComparisonRelation {
         }
         match self {
             Self::SideError => "A side could not be evaluated.".into(),
+            Self::UnsupportedVector => "Vector ordering is not supported.".into(),
             Self::TypeMismatch { left, right } => format!("Type mismatch: {left} and {right}."),
             Self::IntegerModeMismatch { left, right } => format!(
                 "Integer mode mismatch: {} and {}.",
@@ -198,6 +201,9 @@ impl ComparisonContext {
         let left = side(self, &request.left);
         let right = side(self, &request.right);
         let relation = match (&left.value, &right.value) {
+            (Ok(CalculationValue::Vector(_)), Ok(CalculationValue::Vector(_))) => {
+                ComparisonRelation::UnsupportedVector
+            }
             (Ok(CalculationValue::Integer(a)), Ok(CalculationValue::Integer(b))) => {
                 if a.mode() != b.mode() {
                     ComparisonRelation::IntegerModeMismatch {
@@ -328,6 +334,16 @@ mod tests {
             "9007199254740993"
         );
         assert!(session.comparison_context().is_none());
+    }
+
+    #[test]
+    fn vector_comparison_reports_unsupported_ordering() {
+        let (_temp, _session, context) = frozen("v = [1, 2]\n[3, 4]");
+        let result = compare(&context, "v", "r2");
+        assert_eq!(result.left.type_label(), "vector");
+        assert_eq!(result.left.formatted(), "[1, 2]");
+        assert_eq!(result.relation, ComparisonRelation::UnsupportedVector);
+        assert!(result.relation.description().contains("not supported"));
     }
 
     #[test]

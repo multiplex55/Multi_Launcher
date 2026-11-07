@@ -24,7 +24,7 @@ The detailed objective, ownership, scope, invariants, tests and done criteria in
 | --- | --- | --- |
 | M0-A | Verified direct-parent branch, own baseline, push receipt | complete |
 | M1-A | Numeric dispatch, contextual aliases and infix remainder | complete |
-| M1-B | Typed bounded vectors and result/reference consumers | pending |
+| M1-B | Typed bounded vectors and result/reference consumers | complete |
 | M1-C | Executable searchable catalogue and independent reference host | pending |
 | M2-A | Checked working modes, grid groups, named bit spans | pending |
 | M3-A | Bounded Deflate extraction | pending |
@@ -56,7 +56,7 @@ Implemented in document.rs and quantity.rs: declaration-aware aliases, one token
 
 Initial `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E 'test(calculation_pad::document::tests::) | test(calculation_pad::operators::tests::) | test(calculation_pad::quantity::tests::)'`: 38/39 passed, execution 0.421s after 3m27s compilation. Sole failure was a new quantity expectation with seven instead of existing six significant digits; actual `3.14159 m` was correct. Final affected rerun: 8/8 passed, 7605 skipped, execution 0.100s after 1m37s compilation. Initial inventory compilation took 7m41s. Full selection was not redundantly repeated. Exact final selector follows in checkpoint receipts. No application fixtures/native tests run.
 
-Diff inspected by parent; git diff --check passed. Accidental cargo-fmt changes outside scope were proved identical to formatting HEAD and restored after automatic review initially rejected insufficiently demonstrated restoration safety; second evidence-backed restoration succeeded. Only intended two source files and this ledger remain changed. No user work discarded. Checkpoint commit/push pending parent action; native acceptance pending M8.
+Diff inspected by parent; git diff --check passed. Accidental cargo-fmt changes outside scope were proved identical to formatting HEAD and restored after automatic review initially rejected insufficiently demonstrated restoration safety; second evidence-backed restoration succeeded. No user work discarded. Checkpoint `f1ccc2f18303713d1c14d3def77234bd88ecc379` committed and normal `git push` succeeded; tree clean at commit completion. Native acceptance pending M8.
 
 Final Nextest run ID: `3a287696-4626-493d-8a3e-f38748508010`. Command prefix: `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E`; exact selector:
 
@@ -69,6 +69,31 @@ test(calculation_pad::document::tests::binary_first_and_contextual_scalar_aliase
 Add a private validated 1–128 finite-component vector type and a bounded structured expression owner under calculation_pad. Reuse the common scalar preparation/evaluation seam for components; do not recurse through whole document evaluation or substitute result strings. Ordinary scalar/quantity/programmer expressions retain their routes. Prepare vector candidates for explicit syntax and vector-valued references, preserving source spans and collecting dependencies; early scalar-error paths must not reject valid vector candidates. Reject quantity/Integer/ExactBase operands without coercion. Check intermediate arithmetic finiteness, dimension, zero division, nesting/node/work bounds; dot/cross are explicit products. Format each component through existing format_number.
 
 Migrate exhaustive consumers in document/programmer/comparison; vector ordering is explicitly unsupported. Session persistence is source/line identities, requiring no schema change. Preserve Integer and LegacyExactBase Inspector actions while excluding vectors. Focus tests on required arithmetic/symbolic examples, invalid dimensions/types/work, dependency edits, one undo/redo/save/reopen fixture, rounded/exact formatted copy roundtrip, comparisons and Inspector exclusion. Necessary consumers include session and GUI copy tests. Run one scoped fast-dev Nextest selection with directly affected compatibility cases; native remains pending.
+
+### M1-B result
+
+Added validated private vector storage and bounded expression nodes in vector.rs. Components reuse scalar preparation/evaluation; scalar-producing product components are accepted, vector-valued nesting rejected. Runtime selects the vector owner for explicit syntax or resolved vector inputs; numeric-only expressions do not prepare a vector candidate. Scalar spans retain original evaluation/precedence. Unsupported vector operators form boundaries rather than accidentally associating inside multiplication. Named/braced/physical-row references, products, finite intermediates, formatting, history/save/reopen, comparison diagnostics, Inspector exclusion and line/all-copy are covered. Exhaustive programmer/comparison consumers migrated; no persistence schema change.
+
+Concrete additional invariant found: plain decimal integer tokens previously bypassed the 2^53 scalar precision bound. Shared scanning now retains a scalar-only precision diagnostic while completing lexical counts; scalar preparation rejects it, while existing typed/base, explicit floating/scientific and dimensioned routes retain ownership. Mixed scalar/quantity references and dependency-limit admission after a large decimal are tested. This is the reason for the additional targeted numeric-boundary checks.
+
+Focused runs (all fast-dev, lib only, serial):
+
+- Initial `b65164b4-95bf-4f87-9860-29978e2fd01b`: 11/11 passed, execution 0.178s after 3m36s compile; new document/session/comparison/GUI copy plus directly affected existing compatibility cases.
+- Operator/component correction `76565b3f-3775-462e-ad47-80680af081fc`: 3/3 vector document tests passed.
+- Decimal/vector selection passed 8/8 before the final lexical-metadata refinement.
+- Final affected `e93d672f-e279-4098-90ba-ca71385d9dbe`: 8/8 passed, 7612 skipped, execution 0.088s after 1m41s compile. Command prefix `cargo nextest run -p multi_launcher --cargo-profile fast-dev --lib --no-fail-fast -E`, selector:
+
+```text
+test(calculation_pad::document::tests::vector_) | test(calculation_pad::document::tests::decimal_integer_precision_is_bounded_without_changing_exact_or_quantity_routes) | test(calculation_pad::document::tests::accepts_the_exact_scalar_integer_limit_and_rejects_the_next_integer) | test(calculation_pad::document::tests::typed_references_can_adopt_large_exact_literals_without_changing_scalar_errors) | test(calculation_pad::document::tests::scientific_literals_are_normalized_only_on_the_scalar_path) | test(calculation_pad::document::tests::evaluates_dimensional_arithmetic_references_and_unit_targets)
+```
+
+Parent inspected resulting source/consumer/test/README diffs; git diff --check passes. Only intended files plus ledger modified. Checkpoint commit/push pending parent action; native acceptance remains pending M8.
+
+Initial command used the same Cargo prefix above with selector:
+
+```text
+test(calculation_pad::document::tests::vector_) | test(calculation_pad::document::tests::binary_first_and_contextual_scalar_aliases_preserve_source_and_bindings) | test(calculation_pad::document::tests::evaluates_dimensional_arithmetic_references_and_unit_targets) | test(calculation_pad::session::tests::vector_) | test(calculation_pad::session::tests::exact_integer_modes_survive_session_cache_edit_undo_and_redo) | test(calculation_pad::session::tests::inspector_observes_exact_values_and_preserves_dirty_binding) | test(calculation_pad::comparison::tests::vector_) | test(gui::calculation_pad_dialog::tests::vector_copy_) | test(gui::calculation_pad_dialog::tests::explicit_copy_buttons_return_single_result_and_source_order_summary)
+```
 
 ## M1-C prepared handoff (dependency: accepted M1-B)
 
@@ -89,3 +114,9 @@ Dependency rationale from local ZIP 9.1.2 inspection: raw decompressor is privat
 Creation-specific draft/frozen-manifest/validation/job/session types belong under archive; do not overload ExtractionPlan. Reuse SafeRelativePath/ValidatedRelativePath, windows_component_cmp/windows_relative_cmp, NativeArchiveDestination held-parent/probe, create_stage, OwnedStage write_chunk/flush_final/publish/abort, ScanCancellation/ArchiveIoControl and joined worker patterns. Narrowly factor ordinary-file held/no-follow admission from NativeArchiveSource (ancestor/reparse/type/volume/identity/length checks), without archive-specific catalog state. Existing bounded metadata scan seam may help; do not expose another subsystem wholesale.
 
 Pinned ZIP exposes ZipWriter::new_stream<W: Write>: use a narrow bounded cancellable Write facade over stage, not Seek. Keep writer lifetime/finalization separate from publication because Drop attempts metadata completion. Explicit finish, release writer, cancellation check, flush_final, one no-clobber publication. Output/input byte limits are creation-specific. Draft rows have stable IDs/revisions and editable relative destinations; files default basename, folders own name, empties preserved. Bound recursive entry/depth/path/work/metadata collection during scan. Freeze identity/size/change evidence, revalidate held sources before/after reads, reject changes/reparse/device/unsafe aliases. Detect Windows-equivalent names, file/directory and file-as-ancestor conflicts with source-row feedback, no renaming. Reject pre-existing output and output/stage inside selected source tree before stage creation, revalidate ancestry/publication. Abort owned stages only; report cleanup failures; join retirement before next admission. Test multi-root/Unicode/empty folder, conflict editing, unsafe inputs/limits, competitor/recursion/alias safety, changed sources, streaming/finalization cancellation, and created-ZIP catalogue/extraction byte roundtrip with unchanged sources. Depends M3-A; focused tests only.
+
+## Platform references checked for later checkpoints
+
+Microsoft's [UI Automation object reference](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-entry-objects) distinguishes CUIAutomation from CUIAutomation8; the latter implements IUIAutomation2. Its [interface reference](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nn-uiautomationclient-iuiautomation2) documents connection and transaction timeouts. Preserve them in M5-A. Documentation is not native provider acceptance.
+
+Microsoft's [IsBorderRequired reference](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.graphicscapturesession.isborderrequired) requires Borderless consent and the graphicsCaptureWithoutBorder package capability for suppression. A denied request may leave the border visible even if setting the property succeeds; another capturing app can also require a border. M6-B must check this deployment's capability, preserve truthful OS-border limitations and still provide the precise app-owned region outline. No consent/capability/runtime capture check has yet been executed.

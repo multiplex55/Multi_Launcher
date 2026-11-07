@@ -2715,6 +2715,36 @@ mod tests {
     }
 
     #[test]
+    fn vector_copy_buttons_return_pasteable_line_and_summary() {
+        let (_directory, _root, mut dialog) = fixture();
+        dialog.open();
+        dialog.test_replace_source("v = [1, 2, 3]\nv * 2");
+        let ctx = egui::Context::default();
+        let size = egui::vec2(960.0, 720.0);
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx, size, Vec::new());
+        }
+        let line_copy = dialog
+            .test_line_copy_rects
+            .iter()
+            .find(|(line, _)| *line == 1)
+            .map(|(_, rect)| *rect)
+            .expect("vector row exposes copy");
+        assert_eq!(
+            click(&mut dialog, &ctx, size, line_copy.center()),
+            Some(CalculationPadDialogEffect::CopyText("[2, 4, 6]".into()))
+        );
+        let all_copy = dialog.test_copy_all_rect.expect("copy all is available");
+        let Some(CalculationPadDialogEffect::CopyText(summary)) =
+            click(&mut dialog, &ctx, size, all_copy.center())
+        else {
+            panic!("copy all effect")
+        };
+        assert!(summary.contains("r1 v = [1, 2, 3]"));
+        assert!(summary.contains("r2 = [2, 4, 6]"));
+    }
+
+    #[test]
     fn accepted_copy_resolves_after_same_frame_source_edit() {
         let (_directory, _root, mut dialog) = fixture();
         dialog.open();
