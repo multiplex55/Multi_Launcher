@@ -553,6 +553,18 @@ struct Camera {
     fit_next: bool,
 }
 
+#[derive(Clone)]
+struct MinimapDrag {
+    layout: CanvasMinimap,
+    offset: ScenePoint,
+    host: HostIdentity,
+    generation: u64,
+    start_pass: ViewportPassProvenance,
+    accepted: bool,
+    released: bool,
+    last_camera: Camera,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CanvasInteraction {
     Editor,
@@ -1177,6 +1189,10 @@ pub(crate) struct DiagramStudioDialog {
     renderer: Option<RendererService>,
     camera: Camera,
     viewer_camera: Camera,
+    visual_viewer_fit_follow: bool,
+    visual_viewer_fit_size: Option<egui::Vec2>,
+    visual_viewer_minimap_drag: Option<MinimapDrag>,
+    visual_editor_minimap_drag: Option<MinimapDrag>,
     render_document: RenderDocumentIdentity,
     render_options: RenderOptions,
     generic_preview: GenericPreviewStatus,
@@ -1270,6 +1286,8 @@ pub(crate) struct DiagramStudioDialog {
     test_visual_items_omitted: usize,
     #[cfg(test)]
     test_visual_canvas_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_marquee_order: Option<(usize, usize, egui::Rect)>,
     #[cfg(test)]
     test_visual_canvas_id: Option<egui::Id>,
     #[cfg(test)]
@@ -1379,6 +1397,10 @@ impl DiagramStudioDialog {
             renderer: None,
             camera: Camera::default(),
             viewer_camera: Camera::default(),
+            visual_viewer_fit_follow: true,
+            visual_viewer_fit_size: None,
+            visual_viewer_minimap_drag: None,
+            visual_editor_minimap_drag: None,
             render_document: RenderDocumentIdentity::fresh(),
             render_options: RenderOptions::default(),
             generic_preview: GenericPreviewStatus::Idle,
@@ -1472,6 +1494,8 @@ impl DiagramStudioDialog {
             test_visual_items_omitted: 0,
             #[cfg(test)]
             test_visual_canvas_rect: None,
+            #[cfg(test)]
+            test_marquee_order: None,
             #[cfg(test)]
             test_visual_canvas_id: None,
             #[cfg(test)]
@@ -1685,6 +1709,10 @@ impl DiagramStudioDialog {
         self.active_menu_scope = None;
         self.pending_viewer_effects = None;
         self.viewer_camera = Camera::default();
+        self.visual_viewer_fit_follow = true;
+        self.visual_viewer_fit_size = None;
+        self.visual_viewer_minimap_drag = None;
+        self.visual_editor_minimap_drag = None;
         self.reset_document_presentation();
     }
 
@@ -2708,6 +2736,7 @@ impl DiagramStudioDialog {
                 camera.zoom = (camera.zoom / CAMERA_KEYBOARD_ZOOM_FACTOR)
                     .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
                 camera.fit_next = false;
+                self.visual_viewer_fit_follow = false;
             }
             ui.label(format!("{:.0}%", camera.zoom * 100.0));
             let zoom_in = ui.add_enabled(actions_allowed, egui::Button::new("+"));
@@ -2721,6 +2750,7 @@ impl DiagramStudioDialog {
                 camera.zoom = (camera.zoom * CAMERA_KEYBOARD_ZOOM_FACTOR)
                     .clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
                 camera.fit_next = false;
+                self.visual_viewer_fit_follow = false;
             }
             let fit = ui.add_enabled(actions_allowed, egui::Button::new("Fit"));
             #[cfg(test)]
@@ -2728,6 +2758,7 @@ impl DiagramStudioDialog {
                 .push(("visual_viewer_fit".into(), fit.rect, ui.clip_rect()));
             if fit.clicked() {
                 camera.fit_next = true;
+                self.visual_viewer_fit_follow = true;
             }
             let zoom_100 = ui.add_enabled(actions_allowed, egui::Button::new("100%"));
             #[cfg(test)]
@@ -2739,6 +2770,7 @@ impl DiagramStudioDialog {
             if zoom_100.clicked() {
                 camera.zoom = 1.0;
                 camera.fit_next = false;
+                self.visual_viewer_fit_follow = false;
             }
             close_requested = ui
                 .add_enabled(actions_allowed, egui::Button::new("Close viewer"))
@@ -2756,7 +2788,20 @@ impl DiagramStudioDialog {
                 format!("Image {} is unavailable: {error}", &id.as_str()[..8]),
             );
         }
-        let desired = egui::vec2(ui.available_width().max(240.0), 300.0);
+        let width = ui.available_width();
+        let height = ui.available_height();
+        let desired = egui::vec2(
+            if width.is_finite() {
+                width.clamp(1.0, 1_000_000.0)
+            } else {
+                240.0
+            },
+            if height.is_finite() {
+                height.clamp(1.0, 1_000_000.0)
+            } else {
+                300.0
+            },
+        );
         let (canvas_response, painter) =
             ui.allocate_painter(desired, egui::Sense::click_and_drag());
         let canvas = canvas_response.rect;
@@ -2765,17 +2810,21 @@ impl DiagramStudioDialog {
             .as_ref()
             .and_then(|result| result.as_ref().ok())
             .and_then(|projection| projection.bounds);
-        if camera.fit_next
+        if (camera.fit_next
+            || (self.visual_viewer_fit_follow
+                && self.visual_viewer_minimap_drag.is_none()
+                && self.visual_viewer_fit_size != Some(canvas.size())))
             && let Some(bounds) = canvas_bounds
         {
             fit_camera(&mut camera, bounds, canvas);
+            self.visual_viewer_fit_size = Some(canvas.size());
         }
         let minimap_rect = visual_minimap_screen_rect(canvas, painter.clip_rect());
         let minimap_response = minimap_rect.map(|rect| {
             ui.interact(
                 rect,
                 ui.make_persistent_id(("diagram-visual-viewer-minimap", canvas_response.id)),
-                egui::Sense::click(),
+                egui::Sense::click_and_drag(),
             )
         });
         #[cfg(test)]
@@ -2783,37 +2832,56 @@ impl DiagramStudioDialog {
             self.test_action_rects
                 .push(("visual_viewer_minimap".into(), rect, ui.clip_rect()));
         }
-        let minimap_clicked = minimap_response
-            .as_ref()
-            .is_some_and(egui::Response::clicked);
-        if actions_allowed
-            && minimap_clicked
-            && let (Some(rect), Some(response), Some(Ok(projection))) =
-                (minimap_rect, minimap_response.as_ref(), projection.as_ref())
-            && let Some(layout) =
-                minimap_layout_for_camera(projection, canvas, painter.clip_rect(), rect, camera)
-            && let Some(pointer) = response.interact_pointer_pos()
-            && let Some(center) = layout.screen_to_world(scene_point_from_screen(pointer))
-        {
-            camera.center = center;
-            camera.fit_next = false;
-        }
-        handle_visual_canvas_camera_input(
+        let before_minimap = camera;
+        let minimap_interacting = handle_visual_minimap_drag(
+            ui,
+            minimap_rect,
+            &mut camera,
+            &mut self.visual_viewer_minimap_drag,
+            actions_allowed,
+            self.viewer_host.identity(),
+            self.viewer_generation,
+            || {
+                let (rect, projection) = (minimap_rect?, projection.as_ref()?.as_ref().ok()?);
+                minimap_layout_for_camera(
+                    projection,
+                    canvas,
+                    painter.clip_rect(),
+                    rect,
+                    before_minimap,
+                )
+            },
+        );
+        let pointer_navigation = handle_visual_canvas_camera_input(
             ui,
             &canvas_response,
             painter.clip_rect(),
             minimap_rect,
             &mut camera,
-            actions_allowed,
+            actions_allowed && !minimap_interacting,
         );
-        if actions_allowed
+        let keyboard_navigation = if actions_allowed
+            && !minimap_interacting
             && !minimap_response
                 .as_ref()
                 .is_some_and(egui::Response::hovered)
         {
-            viewer_canvas_shortcuts(ui, canvas_response.id, &mut camera);
+            viewer_canvas_shortcuts(ui, canvas_response.id, &mut camera)
+        } else {
+            false
+        };
+        if pointer_navigation || keyboard_navigation {
+            self.visual_viewer_fit_follow = false;
         }
-        if actions_allowed && canvas_response.clicked() && !minimap_clicked {
+        if actions_allowed
+            && canvas_response.clicked()
+            && !minimap_interacting
+            && !minimap_rect.is_some_and(|rect| {
+                ui.ctx()
+                    .input(|input| input.pointer.interact_pos())
+                    .is_some_and(|p| rect.contains(p))
+            })
+        {
             *canvas_focus_requested = Some(canvas_response.id);
         }
         let mut paint_report = VisualPaintReport::default();
@@ -2902,6 +2970,11 @@ impl DiagramStudioDialog {
     pub(crate) fn on_ui_frame_complete(&mut self, ctx: &egui::Context) -> bool {
         let viewer_effects = self.pending_viewer_effects.take();
         let Some(effects) = self.pending_root_effects.take() else {
+            cancel_minimap_drag(&mut self.visual_editor_minimap_drag, &mut self.camera);
+            cancel_minimap_drag(
+                &mut self.visual_viewer_minimap_drag,
+                &mut self.viewer_camera,
+            );
             if viewer_effects
                 .as_ref()
                 .is_some_and(|effects| effects.native_close_requested)
@@ -2912,6 +2985,11 @@ impl DiagramStudioDialog {
         };
         let retained_pass = effects.root_pass.was_retained(ctx);
         if !retained_pass {
+            cancel_minimap_drag(&mut self.visual_editor_minimap_drag, &mut self.camera);
+            cancel_minimap_drag(
+                &mut self.visual_viewer_minimap_drag,
+                &mut self.viewer_camera,
+            );
             if let Some(export) = self.completed_visual_export.as_ref() {
                 ctx.request_repaint_of(export.fence.owner_viewport_id);
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -2944,6 +3022,53 @@ impl DiagramStudioDialog {
             return false;
         }
         let owner_pass_current = self.owner_pass_is_current(&effects, ctx);
+        finish_minimap_drag(
+            &mut self.visual_editor_minimap_drag,
+            &mut self.camera,
+            owner_pass_current
+                && !effects.change_host
+                && !effects.close_dialog
+                && !effects.close_viewport
+                && !effects.os_close_requested
+                && effects.document_intent.is_none(),
+            self.owner_host.identity(),
+            self.owner_generation,
+            ctx,
+        );
+        let viewer_current = viewer_effects.as_ref().is_some_and(|viewer| {
+            viewer.root_pass == effects.root_pass
+                && viewer.owner_generation == self.owner_generation
+                && viewer.viewer_generation == self.viewer_generation
+                && viewer.host == self.viewer_host.identity()
+                && self.open
+                && self.viewer_open
+                && viewer.callback_pass_accepted
+                && !viewer.close_requested
+                && !viewer.change_host
+                && if viewer.callback_viewport_id == viewer_viewport_id() {
+                    viewer.callback_pass.is_some_and(|pass| {
+                        pass.viewport_id == viewer_viewport_id() && pass.was_retained(ctx)
+                    })
+                } else {
+                    viewer.callback_viewport_id == egui::ViewportId::ROOT
+                        && viewer.embedded_root_layer.is_some()
+                        && viewer.callback_pass.is_none()
+                }
+        });
+        if finish_minimap_drag(
+            &mut self.visual_viewer_minimap_drag,
+            &mut self.viewer_camera,
+            viewer_current
+                && !effects.change_host
+                && !effects.close_dialog
+                && !effects.close_viewport
+                && effects.document_intent.is_none(),
+            self.viewer_host.identity(),
+            self.viewer_generation,
+            ctx,
+        ) {
+            self.visual_viewer_fit_follow = false;
+        }
         let completion_pass = RootOwnerPassProvenance::from_effects(&effects);
         if owner_pass_current
             && let Some(cancel) = effects.visual_export_cancel_requested.as_ref()
@@ -3245,6 +3370,9 @@ impl DiagramStudioDialog {
                 self.viewer_generation = self.viewer_generation.wrapping_add(1);
                 self.viewer_embedded_root_focused_id = None;
                 self.viewer_open = true;
+                self.visual_viewer_fit_follow = true;
+                self.visual_viewer_fit_size = None;
+                self.visual_viewer_minimap_drag = None;
             }
             self.viewer_focus_pending = true;
             self.viewer_bootstrap_pending = true;
@@ -6359,6 +6487,10 @@ impl DiagramStudioDialog {
         self.drag = None;
         self.camera = Camera::default();
         self.viewer_camera = Camera::default();
+        self.visual_viewer_fit_follow = true;
+        self.visual_viewer_fit_size = None;
+        self.visual_viewer_minimap_drag = None;
+        self.visual_editor_minimap_drag = None;
         self.message = None;
         self.deferred_canvas_focus = None;
         self.deferred_source_focus = None;
@@ -8180,7 +8312,7 @@ impl DiagramStudioDialog {
                     ui.interact(
                         rect,
                         ui.make_persistent_id(("diagram-visual-minimap", canvas_response.id)),
-                        egui::Sense::click(),
+                        egui::Sense::click_and_drag(),
                     )
                 });
                 #[cfg(test)]
@@ -8188,25 +8320,11 @@ impl DiagramStudioDialog {
                     self.test_action_rects
                         .push(("visual_minimap".into(), rect, ui.clip_rect()));
                 }
-                let minimap_clicked =
-                    minimap_response.as_ref().is_some_and(egui::Response::clicked);
-                if navigation_controls_allowed
-                    && minimap_clicked
-                    && let (Some(rect), Some(response), Some(projected)) =
-                        (minimap_rect, minimap_response.as_ref(), base_projection)
-                    && let Some(layout) = minimap_layout_for_camera(
-                        projected,
-                        canvas_rect.shrink(12.0),
-                        canvas_painter.clip_rect(),
-                        rect,
-                        camera,
-                    )
-                    && let Some(pointer) = response.interact_pointer_pos()
-                    && let Some(center) = layout.screen_to_world(scene_point_from_screen(pointer))
-                {
-                    camera.center = center;
-                    camera.fit_next = false;
-                }
+                let minimap_camera = camera;
+                let minimap_interacting = handle_visual_minimap_drag(ui, minimap_rect, &mut camera, &mut self.visual_editor_minimap_drag, navigation_controls_allowed, self.owner_host.identity(), self.owner_generation, || {
+                    let (rect, projected) = (minimap_rect?, base_projection?);
+                    minimap_layout_for_camera(projected, canvas_rect.shrink(12.0), canvas_painter.clip_rect(), rect, minimap_camera)
+                });
                 let mut gesture = self.visual_gesture.clone();
                 handle_visual_canvas_camera_input(
                     ui,
@@ -8214,9 +8332,9 @@ impl DiagramStudioDialog {
                     canvas_painter.clip_rect(),
                     minimap_rect,
                     &mut camera,
-                    navigation_controls_allowed,
+                    navigation_controls_allowed && !minimap_interacting,
                 );
-                if navigation_controls_allowed
+                if navigation_controls_allowed && !minimap_interacting
                     && !minimap_response.as_ref().is_some_and(egui::Response::hovered)
                 {
                     viewer_canvas_shortcuts(ui, canvas_response.id, &mut camera);
@@ -8555,22 +8673,6 @@ impl DiagramStudioDialog {
                 }) {
                     self.visual_canvas_press_authorized = None;
                 }
-                if let Some(active) = gesture.as_ref()
-                    && matches!(active.mode, VisualGestureMode::Marquee { .. })
-                    && active.did_move
-                {
-                    let pointer = clamp_canvas_screen_point(
-                        active.mapping,
-                        ui.ctx().input(|input| input.pointer.interact_pos()).unwrap_or(active.last_pointer),
-                    );
-                    let marquee = egui::Rect::from_two_pos(active.pointer_start, pointer);
-                    canvas_painter.rect_stroke(
-                        marquee.intersect(canvas_mapping_rect(active.mapping)),
-                        0.0,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 112, 201)),
-                        egui::StrokeKind::Inside,
-                    );
-                }
 
                 let active_scene = gesture
                     .as_ref()
@@ -8622,6 +8724,33 @@ impl DiagramStudioDialog {
                         }
                     }
                 }
+                if let Some(active) = gesture.as_ref()
+                    && matches!(active.mode, VisualGestureMode::Marquee { .. })
+                    && active.did_move
+                {
+                    let pointer = clamp_canvas_screen_point(
+                        active.mapping,
+                        ui.ctx().input(|input| input.pointer.interact_pos()).unwrap_or(active.last_pointer),
+                    );
+                    let marquee = egui::Rect::from_two_pos(active.pointer_start, pointer);
+                    canvas_painter.rect_stroke(
+                        marquee.intersect(canvas_mapping_rect(active.mapping)),
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 112, 201)),
+                        egui::StrokeKind::Inside,
+                    );
+                    #[cfg(test)]
+                    {
+                        self.test_marquee_order = ui.ctx().graphics(|graphics| {
+                            let list = graphics.get(canvas_painter.layer_id())?;
+                            let entries: Vec<_> = list.all_entries().collect();
+                            let background = entries.iter().rposition(|entry| matches!(&entry.shape, egui::Shape::Rect(rect) if rect.fill == egui::Color32::from_gray(249) && rect.rect == canvas_rect))?;
+                            let outline = entries.iter().rposition(|entry| matches!(&entry.shape, egui::Shape::Rect(rect) if rect.stroke.color == egui::Color32::from_rgb(36, 112, 201)))?;
+                            Some((background, outline, entries[outline].clip_rect))
+                        });
+                    }
+                }
+
                 if let Some(active) = gesture.as_ref() {
                     paint_visual_canvas_guides(&canvas_painter, &active.preview_guides, mapping);
                 }
@@ -9367,7 +9496,7 @@ impl DiagramStudioDialog {
                                     edit_visual_color(ui, &mut object.style.border);
                                     ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
                                     ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Font ").speed(0.5));
-                                    ui.text_edit_singleline(&mut object.style.font_family);
+                                    visual_font_family_picker(ui, &mut object.style.font_family);
                                 });
                                 ui.label("Text");
                                 ui.add(egui::TextEdit::multiline(text).desired_rows(2));
@@ -9486,7 +9615,7 @@ impl DiagramStudioDialog {
                                     ui.add(egui::DragValue::new(&mut object.style.border_width).prefix("Stroke ").speed(0.25));
                                     ui.add(egui::DragValue::new(&mut object.style.opacity).prefix("Opacity ").speed(0.02));
                                     ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Font ").speed(0.5));
-                                    ui.text_edit_singleline(&mut object.style.font_family);
+                                    visual_font_family_picker(ui, &mut object.style.font_family);
                                     egui::ComboBox::from_id_salt("diagram-visual-image-line-style")
                                         .selected_text(visual_line_style_label(object.style.line_style))
                                         .show_ui(ui, |ui| {
@@ -9641,7 +9770,7 @@ impl DiagramStudioDialog {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("Label font");
                                     ui.add(egui::DragValue::new(&mut object.style.font_size).prefix("Size ").speed(0.5));
-                                    ui.text_edit_singleline(&mut object.style.font_family);
+                                    visual_font_family_picker(ui, &mut object.style.font_family);
                                 });
                                 ui.label("Connector label");
                                 let _label_edit = ui.add(
@@ -10276,6 +10405,120 @@ fn minimap_layout_for_camera(
     visual_canvas_minimap_layout(projection, visible_world, canvas_rect_to_scene_rect(frame))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn handle_visual_minimap_drag(
+    ui: &egui::Ui,
+    frame: Option<egui::Rect>,
+    camera: &mut Camera,
+    state: &mut Option<MinimapDrag>,
+    actions_allowed: bool,
+    host: HostIdentity,
+    generation: u64,
+    layout: impl FnOnce() -> Option<CanvasMinimap>,
+) -> bool {
+    if !actions_allowed {
+        if !ui.ctx().will_discard() && !ui.is_sizing_pass() {
+            cancel_minimap_drag(state, camera);
+        }
+        return false;
+    }
+    let (pointer, pressed, down, released, escape) = ui.ctx().input(|input| {
+        (
+            input.pointer.interact_pos(),
+            input.pointer.button_pressed(egui::PointerButton::Primary),
+            input.pointer.button_down(egui::PointerButton::Primary),
+            input.pointer.button_released(egui::PointerButton::Primary),
+            input.key_pressed(egui::Key::Escape),
+        )
+    });
+    if escape {
+        cancel_minimap_drag(state, camera);
+        return false;
+    }
+    if pressed
+        && pointer.is_some_and(|p| frame.is_some_and(|rect| rect.contains(p)))
+        && let (Some(pointer), Some(layout)) = (pointer, layout())
+        && let Some(world) = layout.screen_to_world(scene_point_from_screen(pointer))
+    {
+        let offset = if layout
+            .viewport
+            .contains_point(scene_point_from_screen(pointer))
+        {
+            ScenePoint {
+                x: camera.center.x - world.x,
+                y: camera.center.y - world.y,
+            }
+        } else {
+            ScenePoint::default()
+        };
+        *state = Some(MinimapDrag {
+            layout,
+            offset,
+            host,
+            generation,
+            start_pass: ViewportPassProvenance::current(ui.ctx(), ui.ctx().viewport_id()),
+            accepted: false,
+            released: false,
+            last_camera: *camera,
+        });
+    }
+    let active = state.is_some();
+    if let Some(drag) = state.as_ref()
+        && (down || released)
+        && let Some(pointer) = pointer
+    {
+        let frame = drag.layout.frame;
+        let point = ScenePoint {
+            x: f64::from(pointer.x).clamp(frame.min.x, frame.max.x),
+            y: f64::from(pointer.y).clamp(frame.min.y, frame.max.y),
+        };
+        if let Some(world) = drag.layout.screen_to_world(point) {
+            camera.center = ScenePoint {
+                x: world.x + drag.offset.x,
+                y: world.y + drag.offset.y,
+            };
+            camera.fit_next = false;
+        }
+    }
+    if let Some(drag) = state.as_mut() {
+        drag.released = released || !down;
+    }
+    active
+}
+
+fn cancel_minimap_drag(state: &mut Option<MinimapDrag>, camera: &mut Camera) {
+    if let Some(drag) = state.take() {
+        *camera = drag.last_camera;
+    }
+}
+
+fn finish_minimap_drag(
+    state: &mut Option<MinimapDrag>,
+    camera: &mut Camera,
+    valid: bool,
+    host: HostIdentity,
+    generation: u64,
+    ctx: &egui::Context,
+) -> bool {
+    let Some(drag) = state.as_mut() else {
+        return false;
+    };
+    if !valid
+        || drag.host != host
+        || drag.generation != generation
+        || (!drag.accepted && !drag.start_pass.was_retained(ctx))
+    {
+        cancel_minimap_drag(state, camera);
+        return false;
+    }
+    drag.accepted = true;
+    drag.last_camera = *camera;
+    if drag.released {
+        *state = None;
+    }
+    true
+}
+
 fn paint_visual_minimap(painter: &egui::Painter, frame: egui::Rect, minimap: &CanvasMinimap) {
     let frame_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(105));
     painter.rect_filled(frame, 3.0, egui::Color32::from_gray(250));
@@ -10533,6 +10776,38 @@ fn visual_painted_item_prefix(projection: &VisualSceneProjection) -> usize {
     visible_prefix
 }
 
+fn visual_font_family_label(family: &str) -> String {
+    if family.eq_ignore_ascii_case("sans-serif") {
+        "Sans serif".to_owned()
+    } else if family.eq_ignore_ascii_case("monospace") {
+        "Monospace".to_owned()
+    } else {
+        format!("{family} (sans-serif fallback)")
+    }
+}
+
+fn visual_font_family_picker(ui: &mut egui::Ui, family: &mut String) -> egui::Response {
+    egui::ComboBox::from_id_salt(ui.next_auto_id())
+        .selected_text(visual_font_family_label(family))
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(family.eq_ignore_ascii_case("sans-serif"), "Sans serif")
+                .clicked()
+            {
+                *family = "sans-serif".to_owned();
+            }
+            let mono = ui.selectable_label(family.eq_ignore_ascii_case("monospace"), "Monospace");
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::new("test-visual-font-monospace"), mono.rect)
+            });
+            if mono.clicked() {
+                *family = "monospace".to_owned();
+            }
+        })
+        .response
+}
+
 fn handle_visual_canvas_camera_input(
     ui: &mut egui::Ui,
     response: &egui::Response,
@@ -10540,7 +10815,8 @@ fn handle_visual_canvas_camera_input(
     excluded_rect: Option<egui::Rect>,
     camera: &mut Camera,
     actions_allowed: bool,
-) {
+) -> bool {
+    let mut navigated = false;
     let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
     if actions_allowed
         && pointer.is_some_and(|pointer| {
@@ -10556,6 +10832,7 @@ fn handle_visual_canvas_camera_input(
             scroll
         });
         if scroll.abs() > 0.01 {
+            navigated = true;
             camera.zoom =
                 (camera.zoom * (scroll * 0.001).exp()).clamp(CAMERA_MIN_ZOOM, CAMERA_MAX_ZOOM);
             camera.fit_next = false;
@@ -10571,11 +10848,13 @@ fn handle_visual_canvas_camera_input(
         && middle_press_started_visible
         && response.dragged_by(egui::PointerButton::Middle)
     {
+        navigated = true;
         let delta = response.drag_delta();
         camera.center.x -= f64::from(delta.x / camera.zoom);
         camera.center.y -= f64::from(delta.y / camera.zoom);
         camera.fit_next = false;
     }
+    navigated
 }
 
 fn paint_styled_path(
@@ -11559,9 +11838,9 @@ fn draw_generic_canvas(
     canvas_rect
 }
 
-fn viewer_canvas_shortcuts(ui: &mut egui::Ui, canvas_id: egui::Id, camera: &mut Camera) {
+fn viewer_canvas_shortcuts(ui: &mut egui::Ui, canvas_id: egui::Id, camera: &mut Camera) -> bool {
     if !ui.memory(|memory| memory.has_focus(canvas_id)) {
-        return;
+        return false;
     }
     enum Action {
         Pan(f64, f64),
@@ -11587,6 +11866,7 @@ fn viewer_canvas_shortcuts(ui: &mut egui::Ui, canvas_id: egui::Id, camera: &mut 
             None
         }
     });
+    let navigated = action.is_some();
     match action {
         Some(Action::Pan(x, y)) => {
             camera.center.x += x * CAMERA_KEYBOARD_PAN_SCREEN_POINTS / f64::from(camera.zoom);
@@ -11605,6 +11885,7 @@ fn viewer_canvas_shortcuts(ui: &mut egui::Ui, canvas_id: egui::Id, camera: &mut 
         }
         None => {}
     }
+    navigated
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14993,6 +15274,387 @@ mod tests {
     }
 
     #[test]
+    fn visual_marquee_replaces_then_command_adds_without_history() {
+        let mut dialog = initialized_visual_dialog();
+        let (first, second) = add_visual_snap_objects(&mut dialog);
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let revision = dialog.documents.visual_revision();
+        let drag = |dialog: &mut DiagramStudioDialog,
+                        from: ScenePoint,
+                        to: ScenePoint,
+                        modifiers: egui::Modifiers| {
+            let start = visual_canvas_world_point(dialog, from);
+            let end = visual_canvas_world_point(dialog, to);
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            frame_with_child_events(
+                dialog,
+                &ctx,
+                vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(start),
+                    button(start, true),
+                ],
+            );
+            frame_with_child_events(
+                dialog,
+                &ctx,
+                vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(end),
+                ],
+            );
+            frame_with_child_events(
+                dialog,
+                &ctx,
+                vec![egui::Event::ModifiersChanged(modifiers), button(end, false)],
+            );
+        };
+        drag(
+            &mut dialog,
+            ScenePoint { x: -20.0, y: -20.0 },
+            ScenePoint { x: 20.0, y: 20.0 },
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(
+            dialog.visual_selected_objects,
+            [first].into_iter().collect()
+        );
+        drag(
+            &mut dialog,
+            ScenePoint { x: 35.0, y: 85.0 },
+            ScenePoint { x: 65.0, y: 115.0 },
+            egui::Modifiers::COMMAND,
+        );
+        assert_eq!(
+            dialog.visual_selected_objects,
+            [first, second].into_iter().collect()
+        );
+        assert_eq!(dialog.documents.visual_revision(), revision);
+    }
+
+    #[test]
+    fn visual_marquee_is_painted_above_background_and_clipped() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let canvas = dialog.test_visual_canvas_rect.unwrap();
+        let start = canvas.left_top() + egui::vec2(20.0, 20.0);
+        let end = start + egui::vec2(70.0, 55.0);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let (background, marquee, clip) = dialog
+            .test_marquee_order
+            .expect("actual marquee and scene background were emitted");
+        assert!(marquee > background);
+        assert!(canvas.contains_rect(clip));
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+
+    #[test]
+    fn visual_minimap_drag_keeps_press_mapping_and_camera_independence() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        open_viewer(&mut dialog, &ctx);
+        frame(&mut dialog, &ctx);
+        let revision = dialog.documents.visual_revision();
+        let viewer_before = dialog.viewer_camera;
+        let frame_rect = dialog.test_action_rect("visual_minimap").unwrap().0;
+        let start = frame_rect.center();
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let drag = dialog
+            .visual_editor_minimap_drag
+            .as_ref()
+            .expect("minimap press captures mapping")
+            .clone();
+        let end = start + egui::vec2(12.0, 8.0);
+        frame_with_child_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let world = drag
+            .layout
+            .screen_to_world(scene_point_from_screen(end))
+            .unwrap();
+        assert!((dialog.camera.center.x - (world.x + drag.offset.x)).abs() < 1e-6);
+        assert!((dialog.camera.center.y - (world.y + drag.offset.y)).abs() < 1e-6);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(dialog.visual_editor_minimap_drag.is_none());
+        assert_eq!(dialog.viewer_camera.center, viewer_before.center);
+        assert_eq!(dialog.documents.visual_revision(), revision);
+
+        frame(&mut dialog, &ctx);
+        let editor_before = dialog.camera;
+        let frame_rect = dialog.test_action_rect("visual_viewer_minimap").unwrap().0;
+        let start = frame_rect.center();
+        frame_with_viewer_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let drag = dialog
+            .visual_viewer_minimap_drag
+            .as_ref()
+            .expect("viewer minimap captures mapping")
+            .clone();
+        let end = start + egui::vec2(9.0, 6.0);
+        frame_with_viewer_events(&mut dialog, &ctx, vec![egui::Event::PointerMoved(end)]);
+        let world = drag
+            .layout
+            .screen_to_world(scene_point_from_screen(end))
+            .unwrap();
+        assert!((dialog.viewer_camera.center.x - (world.x + drag.offset.x)).abs() < 1e-6);
+        frame_with_viewer_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(dialog.visual_viewer_minimap_drag.is_none());
+        assert_eq!(dialog.camera.center, editor_before.center);
+        assert_eq!(dialog.documents.visual_revision(), revision);
+    }
+
+    #[test]
+    fn visual_minimap_discarded_press_cannot_move_or_survive() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        let before = dialog.camera;
+        let point = dialog
+            .test_action_rect("visual_minimap")
+            .unwrap()
+            .0
+            .left_top()
+            + egui::vec2(8.0, 8.0);
+        dialog.test_request_child_discard();
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(dialog.visual_editor_minimap_drag.is_none());
+        assert_eq!(dialog.camera.center, before.center);
+        frame_with_child_events(
+            &mut dialog,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        open_viewer(&mut dialog, &ctx);
+        frame(&mut dialog, &ctx);
+        let before = dialog.viewer_camera;
+        let fit_follow = dialog.visual_viewer_fit_follow;
+        let point = dialog
+            .test_action_rect("visual_viewer_minimap")
+            .unwrap()
+            .0
+            .left_top()
+            + egui::vec2(8.0, 8.0);
+        dialog.test_request_viewer_child_discard();
+        frame_with_viewer_events(
+            &mut dialog,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(dialog.visual_viewer_minimap_drag.is_none());
+        assert_eq!(dialog.viewer_camera.center, before.center);
+        assert_eq!(dialog.visual_viewer_fit_follow, fit_follow);
+    }
+
+    #[test]
+    fn visual_viewer_fit_tracks_resize_until_manual_zoom() {
+        let mut dialog = initialized_visual_dialog();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut dialog, &ctx);
+        }
+        open_viewer(&mut dialog, &ctx);
+        for _ in 0..3 {
+            frame_with_viewer_size(&mut dialog, &ctx, egui::vec2(700.0, 450.0));
+        }
+        let small = dialog.test_viewer_canvas_rect.unwrap();
+        assert!(dialog.visual_viewer_fit_follow);
+        for _ in 0..3 {
+            frame_with_viewer_size(&mut dialog, &ctx, egui::vec2(950.0, 750.0));
+        }
+        let large = dialog.test_viewer_canvas_rect.unwrap();
+        assert!(large.width() > small.width() && large.height() > small.height());
+        assert_eq!(dialog.visual_viewer_fit_size, Some(large.size()));
+        for _ in 0..3 {
+            frame_with_viewer_size(&mut dialog, &ctx, egui::vec2(2_000.0, 2_000.0));
+        }
+        let expanded = dialog.test_viewer_canvas_rect.unwrap();
+        assert!(expanded.width() > 1_400.0 && expanded.height() > 1_600.0);
+        click_viewer_action(&mut dialog, &ctx, "visual_viewer_zoom_in");
+        assert!(!dialog.visual_viewer_fit_follow);
+        let manual = dialog.viewer_camera;
+        for _ in 0..3 {
+            frame_with_viewer_size(&mut dialog, &ctx, egui::vec2(750.0, 550.0));
+        }
+        assert_eq!(dialog.viewer_camera.center, manual.center);
+        assert_eq!(dialog.viewer_camera.zoom, manual.zoom);
+        click_viewer_action(&mut dialog, &ctx, "visual_viewer_fit");
+        assert!(dialog.visual_viewer_fit_follow);
+        click_viewer_canvas(&mut dialog, &ctx);
+        dialog.viewer_camera.zoom = CAMERA_MAX_ZOOM;
+        dialog.viewer_camera.fit_next = false;
+        dialog.visual_viewer_fit_follow = true;
+        send_viewer_key(
+            &mut dialog,
+            &ctx,
+            egui::Key::Plus,
+            egui::Modifiers::COMMAND,
+        );
+        assert_eq!(dialog.viewer_camera.zoom, CAMERA_MAX_ZOOM);
+        assert!(
+            !dialog.visual_viewer_fit_follow,
+            "manual zoom at the limit disables resize-follow"
+        );
+    }
+
+    #[test]
+    fn visual_font_picker_preserves_unknown_family() {
+        assert_eq!(visual_font_family_label("sans-serif"), "Sans serif");
+        assert_eq!(visual_font_family_label("MONOSPACE"), "Monospace");
+        let mut family = "Imported Font".to_owned();
+        assert_eq!(
+            visual_font_family_label(&family),
+            "Imported Font (sans-serif fallback)"
+        );
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let picker_rect = std::cell::Cell::new(egui::Rect::NOTHING);
+        let run = |events: Vec<egui::Event>, family: &mut String| {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 400.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    picker_rect.set(visual_font_family_picker(ui, family).rect);
+                },
+            );
+            output.drop_without_applying_deltas();
+        };
+        run(vec![], &mut family);
+        assert_eq!(family, "Imported Font");
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let pos = picker_rect.get().center();
+        run(
+            vec![egui::Event::PointerMoved(pos), button(pos, true)],
+            &mut family,
+        );
+        run(vec![button(pos, false)], &mut family);
+        run(vec![], &mut family);
+        let rect = ctx
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("test-visual-font-monospace")))
+            .expect("font menu is open");
+        let pos = rect.center();
+        run(
+            vec![egui::Event::PointerMoved(pos), button(pos, true)],
+            &mut family,
+        );
+        run(vec![button(pos, false)], &mut family);
+        assert_eq!(family, "monospace");
+    }
+
+    #[test]
     fn diagram_studio_visual_layout_minimap_recenters_only_its_own_camera() {
         let mut dialog = initialized_visual_dialog();
         let ctx = egui::Context::default();
@@ -15030,7 +15692,13 @@ mod tests {
         let viewer_before = dialog.viewer_camera;
         let root_before_viewer_click = dialog.camera;
         let viewer_minimap = dialog.test_action_rect("visual_viewer_minimap").unwrap().0;
-        let viewer_click = viewer_minimap.left_top() + egui::vec2(8.0, 8.0);
+        // Fit can make the viewport box cover the former 8px point. The
+        // frame's outer margin remains outside that box and recenters.
+        let viewer_click = viewer_minimap.left_top() + egui::vec2(2.0, 2.0);
+        let projection = project_visual_scene(dialog.documents.visual_scene().unwrap()).unwrap();
+        let canvas = dialog.test_viewer_canvas_rect.unwrap();
+        let layout = minimap_layout_for_camera(&projection, canvas, canvas, viewer_minimap, dialog.viewer_camera).unwrap();
+        assert!(!layout.viewport.contains_point(scene_point_from_screen(viewer_click)));
         for pressed in [true, false] {
             frame_with_viewer_events(
                 &mut dialog,
