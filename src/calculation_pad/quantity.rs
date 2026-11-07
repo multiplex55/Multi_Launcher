@@ -625,6 +625,16 @@ impl<'a> Parser<'a> {
             self.cursor += 1;
             expression
         } else if starts_number(character) {
+            // A radix prefix is one scalar token, not decimal zero followed by
+            // a unit such as `b`. Leave it to the scalar/programmer parser.
+            let bytes = self.source[self.cursor..].as_bytes();
+            if bytes.first() == Some(&b'0')
+                && bytes
+                    .get(1)
+                    .is_some_and(|byte| matches!(byte.to_ascii_lowercase(), b'b' | b'o' | b'x'))
+            {
+                return Err(QuantityError::InvalidSyntax);
+            }
             self.bump_token()?;
             let (value, consumed) =
                 unit_conversion::parse_quantity_number_prefix(&self.source[self.cursor..])

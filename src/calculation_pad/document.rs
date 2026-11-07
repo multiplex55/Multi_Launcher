@@ -7,7 +7,7 @@ use crate::unit_conversion::{
 };
 use exmex::{Express, FlatEx};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
@@ -89,6 +89,9 @@ impl CalculationDocument {
             };
         }
 
+        // Alias fallback must see forward and duplicate declarations too, so
+        // references keep the same diagnostics as ordinary named variables.
+        let declared_names = declared_names(source);
         let mut total_identifiers = 0;
         let mut prepared = Vec::with_capacity(source_line_count);
         let mut source_offset = 0;
@@ -104,6 +107,7 @@ impl CalculationDocument {
                 source_offset..content_end,
                 content,
                 &mut total_identifiers,
+                &declared_names,
             ));
             source_offset = raw_end.saturating_add(1);
         }
@@ -516,6 +520,7 @@ fn prepare_line(
     source_range: Range<usize>,
     source_line: &str,
     total_identifiers: &mut usize,
+    declared_names: &HashSet<String>,
 ) -> PreparedLine {
     let trimmed = source_line.trim();
     if trimmed.is_empty() {
@@ -602,7 +607,8 @@ fn prepare_line(
         };
     }
 
-    let programmer_parse = programmer::parse(expression);
+    let (normalized, programmer_input) = normalize_scalar_tokens(expression, declared_names);
+    let programmer_parse = programmer::parse(&programmer_input);
     if let Some(ProgrammerError::NameTooLong { max_bytes }) = &programmer_parse.error {
         return PreparedLine::invalid(
             source_range,
@@ -612,7 +618,7 @@ fn prepare_line(
             },
         );
     }
-    let scan = scan_expression(expression);
+    let scan = scan_expression(&normalized);
     if let Err(kind) = &scan {
         let typed_route_can_win = matches!(kind, DiagnosticKind::PrefixedIntegerTooLarge { .. })
             && programmer_parse
@@ -654,6 +660,15 @@ fn prepare_line(
         );
     }
     *total_identifiers += identifier_count;
+
+    // Feed the quantity parser the same validated numeric tokens as the
+    // scalar parser. This permits a prefixed value next to a real unit while
+    // keeping large exact/programmer expressions on their original path.
+    let quantity_input = scan
+        .as_ref()
+        .ok()
+        .and_then(|scan| lower_numeric_literals(&normalized, &scan.numeric_literals).ok())
+        .unwrap_or(Cow::Borrowed(&normalized));
 
     if let Some((source, destination)) = split_to_keyword(expression) {
         if let Some(reference) = parse_simple_reference(source) {
@@ -724,7 +739,7 @@ fn prepare_line(
             };
         }
 
-        let (quantity_source, _) = split_to_keyword(expression).expect("split matched above");
+        let (quantity_source, _) = split_to_keyword(&quantity_input).expect("split matched above");
         let attempt = quantity::parse_expression(quantity_source);
         if attempt.unit_evidence.has_unit() {
             let target = match quantity::parse_unit_target(destination) {
@@ -790,7 +805,7 @@ fn prepare_line(
         };
     }
 
-    let quantity_parse = quantity::parse_expression(expression);
+    let quantity_parse = quantity::parse_expression(&quantity_input);
     let quantity_unit_evidence = quantity_parse.unit_evidence;
     if quantity_unit_evidence == UnitParseEvidence::Definitive
         && !programmer_parse.uses_programmer_syntax
@@ -832,7 +847,7 @@ fn prepare_line(
     let mut scalar_error = None;
     match scan {
         Err(kind) => scalar_error = Some(kind),
-        Ok(scan) => match lower_numeric_literals(expression, &scan.numeric_literals) {
+        Ok(scan) => match lower_numeric_literals(&normalized, &scan.numeric_literals) {
             Err(kind) => scalar_error = Some(kind),
             Ok(lowered_numbers) => {
                 let lowered_expression = if scan.uses_mod_function {
@@ -915,7 +930,10 @@ fn prepare_line(
             programmer
                 .references()
                 .into_iter()
-                .filter(|(name, braced)| *braced || !is_reserved_name(name))
+                .filter(|(name, braced)| {
+                    *braced
+                        || (!is_reserved_name(name) && !is_unbound_pi_alias(name, declared_names))
+                })
                 .map(|(name, _)| prepared_reference(&name)),
         );
     }
@@ -1103,6 +1121,149 @@ fn is_row_reference_name(name: &str) -> bool {
     name.strip_prefix('r').is_some_and(|digits| {
         !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
     })
+}
+
+fn declared_names(source: &str) -> HashSet<String> {
+    source
+        .split('\n')
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            let index = find_assignment_delimiter(line)?;
+            if find_assignment_delimiter(&line[index + 1..]).is_some() {
+                return None;
+            }
+            let assignment = parse_assignment_name(line[..index].trim()).ok()?;
+            if is_row_reference_name(&assignment.canonical)
+                || (!assignment.braced && is_reserved_name(&assignment.canonical))
+            {
+                return None;
+            }
+            Some(assignment.canonical)
+        })
+        .collect()
+}
+
+fn is_unbound_pi_alias(name: &str, declared_names: &HashSet<String>) -> bool {
+    name != "PI"
+        && (name.eq_ignore_ascii_case("pi") || name.eq_ignore_ascii_case("pie"))
+        && !declared_names.contains(name)
+}
+
+/// Normalize only tokens whose syntactic position gives them a built-in meaning.
+/// The programmer form changes only infix `mod`; literals and other names
+/// remain byte-for-byte intact for the exact integer parser.
+fn normalize_scalar_tokens(expression: &str, declared_names: &HashSet<String>) -> (String, String) {
+    let mut output = String::with_capacity(expression.len());
+    let mut programmer_output = String::with_capacity(expression.len());
+    let mut chars = expression.char_indices().peekable();
+    let mut copied_until = 0;
+    let mut programmer_copied_until = 0;
+    let mut can_end_operand = false;
+    while let Some((start, character)) = chars.next() {
+        if character == '{' {
+            for (_, next) in chars.by_ref() {
+                if next == '}' {
+                    break;
+                }
+            }
+            can_end_operand = true;
+            continue;
+        }
+        if !is_identifier_start(character) {
+            if character.is_ascii_digit() || character == ')' {
+                can_end_operand = true;
+            } else if !character.is_whitespace() && character != '.' {
+                can_end_operand = false;
+            }
+            continue;
+        }
+        // A name cannot begin in the middle of a number or identifier.
+        if expression[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_identifier_continue)
+        {
+            continue;
+        }
+        let mut end = start + character.len_utf8();
+        while let Some((_, next)) = chars.peek().copied() {
+            if !is_identifier_continue(next) {
+                break;
+            }
+            end += next.len_utf8();
+            chars.next();
+        }
+        let name = &expression[start..end];
+        let next = expression[end..]
+            .chars()
+            .find(|character| !character.is_whitespace());
+        let infix_mod = name.eq_ignore_ascii_case("mod")
+            && can_end_operand
+            && next.is_some_and(|character| {
+                is_identifier_start(character)
+                    || character.is_ascii_digit()
+                    || matches!(character, '(' | '{' | '+' | '-' | '.')
+            });
+        let lowercase = name.to_ascii_lowercase();
+        let function = next == Some('(')
+            && matches!(
+                lowercase.as_str(),
+                "abs"
+                    | "signum"
+                    | "sin"
+                    | "cos"
+                    | "tan"
+                    | "asin"
+                    | "acos"
+                    | "atan"
+                    | "sinh"
+                    | "cosh"
+                    | "tanh"
+                    | "asinh"
+                    | "acosh"
+                    | "atanh"
+                    | "floor"
+                    | "round"
+                    | "ceil"
+                    | "trunc"
+                    | "fract"
+                    | "exp"
+                    | "sqrt"
+                    | "cbrt"
+                    | "ln"
+                    | "log2"
+                    | "log10"
+                    | "log"
+                    | "atan2"
+                    | "min"
+                    | "max"
+                    | "mod"
+            );
+        let replacement = if infix_mod {
+            programmer_output.push_str(&expression[programmer_copied_until..start]);
+            programmer_output.push('%');
+            programmer_copied_until = end;
+            Some("%")
+        } else if function {
+            Some(lowercase.as_str())
+        } else if is_unbound_pi_alias(name, declared_names) {
+            Some("PI")
+        } else {
+            None
+        };
+        if let Some(replacement) = replacement {
+            output.push_str(&expression[copied_until..start]);
+            output.push_str(replacement);
+            copied_until = end;
+        }
+        can_end_operand = !infix_mod;
+    }
+    output.push_str(&expression[copied_until..]);
+    programmer_output.push_str(&expression[programmer_copied_until..]);
+    (output, programmer_output)
 }
 
 fn scan_expression(expression: &str) -> Result<ExpressionScan, DiagnosticKind> {
@@ -1706,14 +1867,20 @@ pub(super) fn evaluate_comparison_expression(
     if expression.contains(['\n', '\r']) || find_assignment_delimiter(expression).is_some() {
         return LineOutcome::Error(Diagnostic::new(DiagnosticKind::InvalidExpression));
     }
-    let mut identifiers = 0;
-    let mut prepared = prepare_line(0..expression.len(), expression, &mut identifiers);
     let mut definitions = HashMap::<String, Vec<usize>>::new();
     for (index, row) in rows.iter().enumerate() {
         if let Some(name) = &row.assignment_name {
             definitions.entry(name.clone()).or_default().push(index);
         }
     }
+    let declared_names = definitions.keys().cloned().collect();
+    let mut identifiers = 0;
+    let mut prepared = prepare_line(
+        0..expression.len(),
+        expression,
+        &mut identifiers,
+        &declared_names,
+    );
     resolve_line_references(&mut prepared, &definitions, rows.len());
     let outcomes = rows
         .iter()
@@ -2588,6 +2755,122 @@ mod tests {
             &evaluation.source[evaluation.lines[5].source_range.clone()],
             "0x1235 + 0b0101010101"
         );
+    }
+
+    #[test]
+    fn binary_first_and_contextual_scalar_aliases_preserve_source_and_bindings() {
+        let source = concat!(
+            "# 0b1 Floor pie\r\n",
+            "0b10101\r\n0b0101 + 123\r\n0x10 + 0o10 + 0b10\r\n",
+            "sqrt(0b10000)\r\n-0B101\r\nFloor(2.9)\r\nFLOOR(2.9)\r\n",
+            "floor_price = 9\r\nfloor_price + 1\r\n",
+            "pi\r\npie\r\nPI\r\nPiE\r\n",
+            "α = 4\r\nα + 0B10\r\n0X10 + 0O10 + 0B10\r\n",
+        );
+        let document = CalculationDocument::new(source);
+        let evaluation = document.evaluate();
+        assert_eq!(evaluation.source, source);
+        for (line, expected) in [
+            (1, 21.0),
+            (2, 128.0),
+            (3, 26.0),
+            (4, 4.0),
+            (5, -5.0),
+            (6, 2.0),
+            (7, 2.0),
+            (9, 10.0),
+            (15, 6.0),
+            (16, 26.0),
+        ] {
+            assert_eq!(scalar(&evaluation, line), expected, "line {}", line + 1);
+        }
+        for line in 10..=13 {
+            assert_eq!(scalar(&evaluation, line), std::f64::consts::PI);
+        }
+        assert_eq!(
+            &source[evaluation.lines[2].source_range.clone()],
+            "0b0101 + 123"
+        );
+
+        let document = CalculationDocument::new("pi = 7\npie = 8\npi + pie\n{pi} + 1\n");
+        let evaluation = document.evaluate();
+        assert_eq!(scalar(&evaluation, 2), 15.0);
+        assert_eq!(scalar(&evaluation, 3), 8.0);
+        let document = CalculationDocument::new("pi\npi = 7\n");
+        let evaluation = document.evaluate();
+        assert!(matches!(
+            error(&evaluation, 0),
+            DiagnosticKind::ForwardReference { .. }
+        ));
+        let document = CalculationDocument::new("pie = 1\npie = 2\npie\n");
+        let evaluation = document.evaluate();
+        assert!(matches!(evaluation.lines[2].outcome, LineOutcome::Error(_)));
+    }
+
+    #[test]
+    fn infix_mod_matches_signed_remainder_and_keeps_mod_function_and_variable() {
+        let document = CalculationDocument::new(concat!(
+            "mod = 5\nmod + 1\n{mod} + 2\n7 mod 3\n-7 mod 3\n",
+            "7 mod -3\n20 mod 6 / 2\n2 * 5 mod 3\n",
+            "mod(-7, 3)\n7 mod (3)\n1 mod 0\n7 mod mod\n7 mod mod + 1\n",
+        ));
+        let evaluation = document.evaluate();
+        for (line, expected) in [
+            (1, 6.0),
+            (2, 7.0),
+            (3, 1.0),
+            (4, -1.0),
+            (5, 1.0),
+            (6, 1.0),
+            (7, 1.0),
+            (8, 2.0),
+            (9, 1.0),
+        ] {
+            assert_eq!(scalar(&evaluation, line), expected, "line {}", line + 1);
+        }
+        assert!(matches!(
+            error(&evaluation, 10),
+            DiagnosticKind::InvalidArithmetic
+        ));
+        assert_eq!(scalar(&evaluation, 11), 2.0);
+        assert_eq!(scalar(&evaluation, 12), 3.0);
+    }
+
+    #[test]
+    fn pi_aliases_are_resolved_in_quantities_and_comparison_contexts() {
+        use crate::calculation_pad::comparison::ComparisonRow;
+        let document = CalculationDocument::new("pi * 1 m\nPI * 1 m\n0b10 * 1 m\n");
+        let evaluation = document.evaluate();
+        assert_eq!(formatted(&evaluation, 0), formatted(&evaluation, 1));
+        assert_eq!(formatted(&evaluation, 0), "3.14159 m");
+        assert_eq!(formatted(&evaluation, 2), "2 m");
+
+        let document = CalculationDocument::new("pi = 7\npi * 1 m\n");
+        let evaluation = document.evaluate();
+        assert_eq!(formatted(&evaluation, 1), "7 m");
+        let rows = vec![ComparisonRow {
+            id: crate::calculation_pad::LineId(1),
+            assignment_name: Some("pi".into()),
+            outcome: LineOutcome::Value(CalculationValue::Scalar(7.0)),
+        }];
+        assert_eq!(
+            super::evaluate_comparison_expression("pi + 1", &rows),
+            LineOutcome::Value(CalculationValue::Scalar(8.0))
+        );
+        assert_eq!(
+            super::evaluate_comparison_expression("pie", &rows),
+            LineOutcome::Value(CalculationValue::Scalar(std::f64::consts::PI))
+        );
+    }
+
+    #[test]
+    fn infix_mod_matches_typed_remainder_including_zero_error() {
+        let document = CalculationDocument::new(
+            "u8(7) % u8(3)\nu8(7) mod u8(3)\nu8(7) % u8(0)\nu8(7) mod u8(0)\n",
+        );
+        let evaluation = document.evaluate();
+        assert_eq!(integer(&evaluation, 0), integer(&evaluation, 1));
+        assert_eq!(error(&evaluation, 2), error(&evaluation, 3));
     }
 
     #[test]
