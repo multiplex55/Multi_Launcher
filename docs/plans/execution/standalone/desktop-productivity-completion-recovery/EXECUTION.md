@@ -759,3 +759,25 @@ Evidence SHA-256 (ignored target/desktop-productivity-completion-recovery; origi
 | r03-m3-c-run-2.log | 8B3B549773C945F4696490200757044908C733ACFC97D6BD22808A746D92E4F1 |
 | r03-m3-c-run-3.log | 4CF3A73E48E0B2FF5EEB527C69EF20794F27489205DC77F48B3EF5DB588BF023 |
 | r03-m3-c-run-4.log | 4B4A0AEB79CD0D1D1662EDAA86098DAA1EBCB02297F328011999280EA826BC8D |
+
+
+## R03 final category disposition
+
+Prepared 2026-11-07 09:24:30 UTC on feat/productivity-programmer-inspector. Accepted source and configured upstream both equal 103e8b17cae696e7676885a83fb703765a5e53c6. This reporting commit follows that source checkpoint. R04 must start from the actual HEAD read after this report is committed, not from 103e8b17 or an earlier source checkpoint.
+
+The category M0-A 91ae5aa0eeb3b5f93f457a03f632f10d310c1945 has direct parent 7912a9f591c301d7a161a0675eea650d07d9148e, the exact R02 final reporting tip. M3-A 4ff5350d64c42141ea1171c268a5cbc9e0b45d62, M3-B b15579575b7317186e378838d2cb12b580f86f93 and M3-C 103e8b17cae696e7676885a83fb703765a5e53c6 are accepted/pushed checkpoints in this linear branch. The new range contains no merge commits. No branch reset/rebase/merge/cherry-pick, auxiliary checkout or discarded work was used. Both tracked Recovery Goal/Kickstart blobs still exactly match 05153ac1 (Goal 4cade0dd04454b016f0f2ad913af33ee271eb779; Kickstart 2db89c9f35efa91afaea8e3e6c3bb89c09730dcf). Agent model settings were read and preserved; implementation uses configured Terra/medium.
+
+The following disposition supersedes the baseline C02 implementation gaps while preserving their historical evidence. IMPLEMENTED_VERIFIED_LOCALLY describes scoped code/automated evidence; full native N1/N5 remain IMPLEMENTED_USER_VALIDATION_PENDING and no user pass is presumed.
+
+| Original IDs / milestone | Current implementation and evidence | Remaining acceptance |
+| --- | --- | --- |
+| 1–4,7,10 / M5-A,M5-B | Accepted exact engine/grammar preserved; current programmer, modulo, min/minute and reference baselines pass. Existing 128 support and legacy u128 exact-base remain intact. No global scalar-mode change. | Full user N5; final R06 cumulative union |
+| 5–6,8,11 / M6-A | M3-A/B independent exact working owner, required modes/representations, numbered bits and labels, bounded Copy formatting, stale/Refresh behavior and checked one-undo Insert. Separate shared ordinary host with real docked/native CPU control flows, hidden ROOT and receipt rejection. | Full real-system N5 and N1; no native HWND proof from CPU fixtures |
+| 5–6,8,11 / M6-B | M3-C two visible expression/selected-source slots evaluate independently against immutable current cached rows. Exact differences, mode/type/unit mismatch and per-side errors; no source/history/working-bit mutation. Installed-document-qualified result slots and stale actions are tested. | Full real-system N5 |
+| 9 / M7-A | Accepted dimensional arithmetic preserved, current unit/reference baseline passes. Comparison reuses owner semantics including approximation/category and canonical nonlinear normalization. | Final R06 cumulative union; user unit smoke inside N5 |
+| 12 / M7-B | Executable 31-example catalog, in-app selection/Inspector/comparison help, grammar README and exact calc pad discovery updated and tested. Bounded format preference default/validation/save/rollback/queue/stale-editor cases pass. | User discovery/flow inside N5 |
+| C.2 Programmer Inspector host carryforward | Now implemented with one retained owner and shared geometry/focus/Reset/Dock/Pop Out/close/hidden-root integration. R02's historical future-surface row is closed by M3-B/C. | Real-system host/N5 check pending |
+
+M3-A has 11 distinct passing affected cases; M3-B has 10 and M3-C 19, with overlaps. These are checkpoint evidence, not an additive 40-test unique total or an uninterrupted full-suite run. Exact commands, original failures/corrections, counts, hashes, source/version rechecks and reviewer dispositions are in their sections above. Latest production lib/main-bin check succeeds with classified existing warnings; final relevant Clippy/cumulative affected union remain R06. Native gates N1–N12 remain pending as complete user flows. No known unaccepted R03 source increment or current implementation blocker remains. Scalar/quantity result GUI clicks and failed-save Retry GUI were not claimed from owner tests; final packet retains practical user coverage.
+
+R04 next: create a fresh feat/productivity-diagram-completion category branch directly from the actual committed reporting tip, commit M0-A with verified direct parent and attempt normal push before product edits. M4-A recovers containers/groups/swimlanes and the original genuine canvas group-drag failure, with bounded renewed correction budget; M4-B starters, M4-C actual export controls and M4-D grouped supported draw.io remain sequential. Read-only planning may inspect accepted source and preserved patch hashes, but failed historical patches are not automatically accepted. R05 Explorer/utilities and R06 final acceptance remain pending. Goal active; no intermediate native user request or completion/cancellation is implied.
